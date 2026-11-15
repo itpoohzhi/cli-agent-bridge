@@ -13,6 +13,7 @@ from typing import cast
 import pytest
 
 from core import gateway_execution_policy as policy
+from core import judge_role_policy as judge_policy
 from tests.bridge_testlib import make_receipt
 from tools import droid_image, droid_probe_config, receipt_schema
 
@@ -135,12 +136,35 @@ def test_mutating_prefixes_reject_empty_and_wildcard(
 def test_deny_prefixes_fall_back_to_namespace_default(
     monkeypatch: pytest.MonkeyPatch, value: str
 ) -> None:
-    """F-018/F-012: пустой или дикий deny-список откатывается на дефолт namespace."""
+    """F-018/F-012/AD-001: пустой или дикий deny-список откатывается на пустой дефолт."""
+    assert policy.DENY_SUBAGENT_DEFAULT == ""
     monkeypatch.setenv("DROID_DENY_SUBAGENT_PREFIXES", value)
-    assert policy.denied_subagent("DROID", "panel-judge-k1") is True
-    assert policy.denied_subagent("DROID", None, "JUDGE-1") is True
+    assert policy.denied_subagent("DROID", "panel-judge-k1") is False
+    assert policy.denied_subagent("DROID", None, "JUDGE-1") is False
+    assert policy.denied_subagent("DROID", "seat-2") is False
     assert policy.denied_subagent("DROID", None, "") is False
     assert policy.denied_subagent("DROID", "coder-c25") is False
+
+
+def test_judges_are_not_denied_without_explicit_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AD-001: без env судейские роли не блокируются глобальным deny-списком."""
+    monkeypatch.delenv("DROID_DENY_SUBAGENT_PREFIXES", raising=False)
+    for identity in ("panel-judge-k1", "judge-1", "seat-3"):
+        assert policy.denied_subagent("DROID", identity) is False
+
+
+def test_explicit_deny_prefixes_still_block_roles(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AD-001: явный DROID_DENY_SUBAGENT_PREFIXES остаётся аварийным стопом по ролям."""
+    monkeypatch.setenv("DROID_DENY_SUBAGENT_PREFIXES", "panel-judge-, JUDGE- ,seat-")
+    assert policy.denied_subagent("DROID", "panel-judge-k1") is True
+    assert policy.denied_subagent("DROID", None, "judge-1") is True
+    assert policy.denied_subagent("DROID", "raw-ok", "seat-3") is True
+    assert policy.denied_subagent("DROID", "coder-c25") is False
+    assert policy.denied_subagent("DROID", None, "") is False
 
 
 def test_deny_prefixes_are_read_per_namespace(
@@ -174,6 +198,135 @@ def test_format_only_validation_rejects_invalid_autonomy(bad: object) -> None:
 )
 def test_format_only_validation_keeps_valid_levels(raw: object, want: str) -> None:
     assert policy.validate_autonomy_request(raw) == want
+
+
+# --- AD-001: политика судейской роли ----------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "identity",
+    ["panel-judge-k1", "judge-1", "seat-3", " Judge-7 ", "PANEL-JUDGE-X", "seat-"],
+)
+def test_is_judge_subagent_accepts_all_judge_prefixes(identity: str) -> None:
+    assert judge_policy.is_judge_subagent(identity) is True
+
+
+@pytest.mark.parametrize(
+    "identity",
+    [None, "", "  ", "coder-1", "explorer-1", "judgement-1", "my-judge-1", "seats-1"],
+)
+def test_is_judge_subagent_rejects_other_roles(identity: str | None) -> None:
+    assert judge_policy.is_judge_subagent(identity) is False
+
+
+def test_judge_prefixes_default_and_env_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv(judge_policy.JUDGE_PREFIXES_ENV, raising=False)
+    assert judge_policy.judge_subagent_prefixes() == ("panel-judge-", "judge-", "seat-")
+    monkeypatch.setenv(judge_policy.JUDGE_PREFIXES_ENV, " Referee- , ,")
+    assert judge_policy.is_judge_subagent("referee-1") is True
+    assert judge_policy.is_judge_subagent("judge-1") is False
+
+
+@pytest.mark.parametrize("value", ["", ",", "*", " , * "])
+def test_judge_prefixes_reject_empty_and_wildcard(
+    monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    """Пустой или дикий env не превращается в «любая роль судья» и не снимает дефолт."""
+    monkeypatch.setenv(judge_policy.JUDGE_PREFIXES_ENV, value)
+    assert (
+        judge_policy.judge_subagent_prefixes() == judge_policy.JUDGE_SUBAGENT_PREFIXES
+    )
+    assert judge_policy.is_judge_subagent("coder-1") is False
+    assert judge_policy.is_judge_subagent("judge-1") is True
+
+
+@pytest.mark.parametrize("autonomy", ["", "off", " OFF "])
+def test_validate_judge_autonomy_allows_off(autonomy: str) -> None:
+    judge_policy.validate_judge_autonomy("judge-1", autonomy)
+
+
+@pytest.mark.parametrize("autonomy", ["low", "medium", "high", " Low "])
+@pytest.mark.parametrize("identity", ["panel-judge-k1", "judge-1", "seat-3"])
+def test_validate_judge_autonomy_rejects_mutation(identity: str, autonomy: str) -> None:
+    with pytest.raises(judge_policy.AutonomyViolation) as excinfo:
+        judge_policy.validate_judge_autonomy(identity, autonomy)
+    assert excinfo.value.reason == "autonomy_role_forbidden"
+
+
+@pytest.mark.parametrize("identity", [None, "", "coder-1", "explorer-1"])
+def test_validate_judge_autonomy_ignores_non_judge_roles(identity: str | None) -> None:
+    for autonomy in ("off", "low", "medium", "high"):
+        judge_policy.validate_judge_autonomy(identity, autonomy)
+
+
+def test_autonomy_violation_is_shared_between_policy_modules() -> None:
+    """Реэкспорт без дубля класса: `except policy.AutonomyViolation` ловит ошибку судьи."""
+    assert policy.AutonomyViolation is judge_policy.AutonomyViolation
+    with pytest.raises(policy.AutonomyViolation):
+        policy.resolve_autonomy("low", "DROID", subagent_id="judge-1")
+
+
+@pytest.mark.parametrize("default", ["off", "low", "medium", "high"])
+@pytest.mark.parametrize("raw", [None, "", "  "])
+def test_judge_without_autonomy_resolves_to_off_despite_namespace_default(
+    monkeypatch: pytest.MonkeyPatch, default: str, raw: object
+) -> None:
+    """AD-001: у судьи отсутствие autonomy — строго off, мутирующий дефолт не наследуется."""
+    monkeypatch.setenv("DROID_DEFAULT_AUTONOMY", default)
+    monkeypatch.setenv("DROID_ALLOW_HIGH_AUTONOMY", "1")
+    for identity in ("panel-judge-k1", "judge-1", "seat-3"):
+        decision = policy.resolve_autonomy_decision(
+            raw, "DROID", subagent_id=identity, require_subagent=True
+        )
+        assert (decision.value, decision.source) == ("off", "default")
+
+
+def test_non_judge_keeps_mutating_namespace_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Кламп касается только судей: прочие роли наследуют дефолт namespace как раньше."""
+    monkeypatch.setenv("DROID_DEFAULT_AUTONOMY", "medium")
+    decision = policy.resolve_autonomy_decision("", "DROID", subagent_id="coder-1")
+    assert (decision.value, decision.source) == ("medium", "default")
+
+
+def test_judge_explicit_off_is_request_source() -> None:
+    decision = policy.resolve_autonomy_decision(
+        "off", "DROID", subagent_id="judge-1", require_subagent=True
+    )
+    assert (decision.value, decision.source) == ("off", "request")
+
+
+@pytest.mark.parametrize("autonomy", ["low", "medium", "high"])
+def test_judge_mutating_request_is_role_forbidden(
+    monkeypatch: pytest.MonkeyPatch, autonomy: str
+) -> None:
+    """AD-001: мутирующий запрос судьи — `autonomy_role_forbidden`, а не молчаливый off."""
+    monkeypatch.setenv("DROID_ALLOW_HIGH_AUTONOMY", "1")
+    monkeypatch.setenv("DROID_MUTATING_SUBAGENT_PREFIXES", "judge-,coder-")
+    with pytest.raises(policy.AutonomyViolation) as excinfo:
+        policy.resolve_autonomy_decision(
+            autonomy, "DROID", subagent_id="judge-1", require_subagent=True
+        )
+    assert excinfo.value.reason == "autonomy_role_forbidden"
+
+
+def test_judge_high_without_opt_in_is_still_role_forbidden(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Кламп роли стоит раньше проверки opt-in на high: причина — роль, не отсутствие флага."""
+    monkeypatch.delenv("DROID_ALLOW_HIGH_AUTONOMY", raising=False)
+    with pytest.raises(policy.AutonomyViolation) as excinfo:
+        policy.resolve_autonomy_decision("high", "DROID", subagent_id="seat-1")
+    assert excinfo.value.reason == "autonomy_role_forbidden"
+
+
+def test_judge_unsupported_autonomy_keeps_format_reason() -> None:
+    with pytest.raises(policy.AutonomyViolation) as excinfo:
+        policy.resolve_autonomy_decision("ultra", "DROID", subagent_id="judge-1")
+    assert excinfo.value.reason == "unsupported_autonomy"
 
 
 class _FakePopen:
