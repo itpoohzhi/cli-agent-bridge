@@ -72,13 +72,19 @@ _QUOTED_STOP_RE: Final[dict[str, re.Pattern[str]]] = {
     "'": re.compile(r"[\\']"),
 }
 # Префикс секрета, которым заканчивается содержимое пары кавычек (`" truncated api_key="`): закрывающая
-# кавычка пары на деле открывает значение этого префикса. `\Z` учитывает `endpos` поиска.
+# кавычка пары на деле открывает значение этого префикса. `\Z` учитывает `endpos` поиска. Префикс вместе с
+# кавычкой другого типа (`password='`) тоже хвостовой: кавычка уже открыла значение следующего секрета.
 _TAIL_PREFIX_RE: Final[re.Pattern[str]] = re.compile(
-    r"(?:\b(?:bearer|basic)\s+|" + _CREDENTIAL_KEY_PREFIX_RE.pattern + r")\Z",
+    r"(?:\b(?:bearer|basic)\s+|"
+    + _CREDENTIAL_KEY_PREFIX_RE.pattern
+    + r")(?:\\{0,%d}[\"'])?\Z" % _MAX_ESCAPE_LEVEL,
     re.IGNORECASE,
 )
 # Длина самого длинного префикса секрета в `_TAIL_PREFIX_RE` с запасом на пробелы вокруг разделителя.
-_TAIL_PREFIX_SPAN: Final[int] = 64 + 16 + 2 * (_MAX_ESCAPE_LEVEL + 1) + 64
+_TAIL_PREFIX_SPAN: Final[int] = 64 + 16 + 3 * (_MAX_ESCAPE_LEVEL + 1) + 64
+# Граница поля или строки: значение не начинается с неё.
+_VALUE_BOUNDARY: Final[str] = ",;&}])"
+_SPACES_RE: Final[re.Pattern[str]] = re.compile(r"\s*")
 # Первый символ значения: не пробел и не граница поля/строки (`,;&}])` и кавычки).
 _VALUE_START_RE: Final[re.Pattern[str]] = re.compile(r"[^\s,;&}\])\"']")
 _SCHEME_VALUE_RE: Final[re.Pattern[str]] = re.compile(r"[^\s,;\"']*")
@@ -266,6 +272,13 @@ def _closing_quote(
     return None if level is None else (slashes_end, level)
 
 
+def _unwinds_inner_frames(text: str, pos: int, stack: list[_QuoteFrame]) -> bool:
+    """Кавычка в `pos` закрывает объемлющую строку поверх незакрытых вложенных кадров (`'tis x=" y api_key='`)."""
+    slashes_end, quote = _quote_run(text, pos)
+    index = _closing_index(stack, quote, slashes_end - pos)
+    return index is not None and index < len(stack) - 1
+
+
 def _apply_double_quote(stack: list[_QuoteFrame], slashes: int) -> None:
     """`"` с серией `slashes`: закрывает объемлющую строку, открывает вложенную либо остаётся содержимым."""
     index = _closing_index(stack, '"', slashes)
@@ -391,6 +404,14 @@ def _enclosing_close(text: str, start: int, frames: list[_QuoteFrame]) -> int:
     return len(text) if close is None else close
 
 
+def _content_end(pos: int, open_end: int, end: int) -> int:
+    """Начало закрывающей кавычки пары `text[pos:end]` с открывающей кавычкой до `open_end`.
+
+    Открывающая и закрывающая серии (`\\`×L + кавычка) имеют одну длину, поэтому содержимое кончается там же.
+    """
+    return end - (open_end - pos)
+
+
 def _trim_tail_prefix(
     text: str, open_end: int, content_end: int, failed_until: _FailedUntil
 ) -> int | None:
@@ -398,20 +419,23 @@ def _trim_tail_prefix(
 
     Строка `password=" truncated api_key="` образована кавычкой соседнего поля: её закрытие открывает значение
     `api_key=`, поэтому маска не должна его поглощать (иначе `hunter2` после неё остаётся открытым). Префикс
-    разбирают заново только если следом честное значение; цепочка пар с префиксами внутри
-    (`api_key="api_key="api_key="`) неоднозначна и маскируется целиком. Поиск ограничен хвостом длины префикса.
+    разбирают заново, если кавычка за ним открывает значение; префиксы внутри этого значения и кавычка другого
+    типа отсечению не мешают. Поиск ограничен хвостом длины префикса.
     """
     tail = _TAIL_PREFIX_RE.search(
         text, max(open_end, content_end - _TAIL_PREFIX_SPAN), content_end
     )
-    if tail is None or not _is_plain_value_pair(text, content_end, failed_until):
+    if tail is None:
+        return None
+    # Без кавычки (конец текста) разбирать нечего: префикс остаётся без значения, а не поглощается маской.
+    if content_end < len(text) and not _opens_value(text, content_end, failed_until):
         return None
     return tail.start()
 
 
-def _is_empty_pair(text: str, pos: int, open_end: int, end: int) -> bool:
+def _is_empty_pair(pos: int, open_end: int, end: int) -> bool:
     """Пара кавычек без содержимого (`""` или экранированная): прятать нечего."""
-    return end - 1 - (open_end - 1 - pos) == open_end
+    return _content_end(pos, open_end, end) == open_end
 
 
 def _scan_credential_value(
@@ -435,16 +459,34 @@ def _scan_credential_value(
         # нашлась бы у следующего ключа (`password=\"..."` в логе уровня 2), поэтому маскируется весь остаток.
         return len(text)
     frames = _enclosing_frames(stack)
+    start = pos
     end = _scan_quoted_value(text, pos, failed_until)
     open_quote_end = _open_quote_end(text, pos)
-    if end is not None:
-        if _is_empty_pair(text, pos, open_quote_end, end):
-            # `api_key=""hunter2`: значение продолжается сразу за парой; иначе прятать нечего.
-            if _VALUE_START_RE.match(text, end) is None:
-                return pos
-            return _skip(_SCHEME_VALUE_RE if is_scheme else _KEY_VALUE_RE, text, end)
-    elif 0 < open_quote_end < len(text):
+    while end is not None and _is_empty_pair(pos, open_quote_end, end):
+        # `api_key=""hunter2`, `api_key="""hunter2"""`: значение продолжается сразу за пустой парой (в том числе
+        # новой парой кавычек любого типа); иначе прятать нечего.
+        if _quote_run(text, end)[1] in ('"', "'"):
+            pos = end
+            end = _scan_quoted_value(text, pos, failed_until)
+            open_quote_end = _open_quote_end(text, pos)
+            continue
+        # Следом префикс другого секрета (`password=""api_key=`): он не значение, его разберёт основной цикл.
+        if (
+            _VALUE_START_RE.match(text, end) is None
+            or _CREDENTIAL_PREFIX_RE.match(text, end) is not None
+        ):
+            return start
+        value_end = _skip(_SCHEME_VALUE_RE if is_scheme else _KEY_VALUE_RE, text, end)
+        if value_end < len(text) and text[value_end] in ('"', "'"):
+            # В JSON-строке `\` перед закрывающей кавычкой — экранирование, а не часть значения.
+            while value_end > end and text[value_end - 1] == "\\":
+                value_end -= 1
+        return value_end
+    if end is None and 0 < open_quote_end < len(text):
         close = _enclosing_close(text, open_quote_end, frames)
+        while close < len(text) and (after := _attached_value_start(text, close)):
+            # Кавычка слитно со значением (`password='"hunter2"`) закрытием не бывает: значение идёт дальше.
+            close = _enclosing_close(text, after, frames)
         cut = _trim_tail_prefix(text, open_quote_end, close, failed_until)
         return close if cut is None else cut
     paired = end is not None
@@ -456,27 +498,51 @@ def _scan_credential_value(
         # Без префикса в поглощённой части границу не сужаем: хвост пары не разберёт никто, и он утёк бы.
         close = _nearest_close(text, open_quote_end or pos, frames, end)
         if close is not None and _CREDENTIAL_PREFIX_RE.search(text, close, end):
-            return close
+            cut = _trim_tail_prefix(text, open_quote_end or pos, close, failed_until)
+            return close if cut is None else cut
     if paired:
-        content_end = end - 1 - (open_quote_end - 1 - pos)
+        content_end = _content_end(pos, open_quote_end, end)
         cut = _trim_tail_prefix(text, open_quote_end, content_end, failed_until)
         return end if cut is None else cut
     return end
 
 
-def _is_plain_value_pair(text: str, pos: int, failed_until: _FailedUntil) -> bool:
-    """Кавычка в `pos` вместе с парной образует значение, внутри которого нет чужих префиксов секретов.
+def _attached_value_start(text: str, pos: int) -> int:
+    """Позиция значения, слитного с кавычкой в `pos` (без пробела и границы поля), иначе 0."""
+    after = _open_quote_end(text, pos)
+    if (
+        0 < after < len(text)
+        and not text[after].isspace()
+        and text[after] not in _VALUE_BOUNDARY
+    ):
+        return after
+    return 0
 
-    Такая кавычка не закрывает объемлющую строку: её несбалансированный предшественник (`'tis`) не должен
-    оставлять значение открытым. Если внутри пары есть префикс (`msg='api_key=' password='x'`), кавычка — закрытие.
+
+def _opens_value(
+    text: str, pos: int, failed_until: _FailedUntil, spaced: bool = True
+) -> bool:
+    """Кавычка в `pos` открывает значение секрета, а не закрывает объемлющую строку.
+
+    Закрытие не бывает слитно со значением: непарная кавычка, за которой идёт что угодно кроме границы поля,
+    открывает значение (`api_key="'hunter2'`); с пробелом перед значением (`api_key=' hunter2`) — только при
+    `spaced` (иначе `\\"api_key=\\" invalid` из JSON-строки превратилось бы в секрет). Пара, внутри
+    которой есть чужой префикс, — закрытие, только если содержимое начинается с пробела или границы поля
+    (`msg='api_key=' password='x'`); при значении без отступа префикс внутри значения не мешает
+    (`api_key="hunter2 password=x"`). Пара без префиксов открывает значение всегда.
     """
+    open_end = _open_quote_end(text, pos)
     paired = _scan_quoted_value(text, pos, failed_until)
     if paired is None:
-        # Закрытие не бывает слитно с текстом: `password='hunter2` без парной кавычки — значение, а не конец строки.
-        return _VALUE_START_RE.match(text, _open_quote_end(text, pos)) is not None
-    return (
-        _CREDENTIAL_PREFIX_RE.search(text, _open_quote_end(text, pos), paired) is None
-    )
+        after = _skip(_SPACES_RE, text, open_end)
+        if open_end == 0 or after >= len(text) or text[after] in _VALUE_BOUNDARY:
+            return False
+        # Кавычка после пробела — скорее граница соседней строки, чем начало значения (`Bearer \\" Bearer \\" "`).
+        return after == open_end or (spaced and text[after] not in "\"'\\")
+    if _CREDENTIAL_PREFIX_RE.search(text, open_end, paired) is None:
+        return True
+    first = text[open_end : open_end + 1]
+    return not (first.isspace() or first in _VALUE_BOUNDARY)
 
 
 def _opens_enclosing_string(m: re.Match[str]) -> bool:
@@ -513,7 +579,9 @@ def mask_credential_context(text: str) -> str:
         _track_quotes(text, scanned, pos, stack)
         scanned = pos
         closing = _closing_quote(text, pos, stack)
-        if closing is not None and _is_plain_value_pair(text, pos, failed_until):
+        if closing is not None and _opens_value(
+            text, pos, failed_until, _unwinds_inner_frames(text, pos, stack)
+        ):
             closing = None
         if closing is None:
             end = _scan_credential_value(

@@ -10,7 +10,11 @@ from typing import Any
 
 import pytest
 
-from core.log_redaction import mask_credential_context, mask_long_tokens, safe_log_tokens
+from core.log_redaction import (
+    mask_credential_context,
+    mask_long_tokens,
+    safe_log_tokens,
+)
 from core.stream_framing import build_stream_error_chunk
 from core.stream_interruption_recovery import (
     InterruptionTailState,
@@ -73,7 +77,9 @@ def test_self_healed_after_malformed_function_call_resolves_done() -> None:
 
 def test_result_error_without_transcript_error_record_still_heals() -> None:
     # OPEN-01: result ERROR есть, ERROR_MESSAGE в транскрипте нет (last_error_seq == -1).
-    res = resolve_done_turn_outcome(**_facts(last_error_seq=-1, had_transient_error=False))
+    res = resolve_done_turn_outcome(
+        **_facts(last_error_seq=-1, had_transient_error=False)
+    )
     assert res.state == "done" and res.self_healed
 
 
@@ -95,7 +101,9 @@ def test_unrecovered_function_call_error_fails_closed(over: dict[str, object]) -
 
 
 def test_unrelated_non_transient_error_is_not_healed() -> None:
-    res = resolve_done_turn_outcome(**_facts(result_error="quota exceeded for project", had_transient_error=False))
+    res = resolve_done_turn_outcome(
+        **_facts(result_error="quota exceeded for project", had_transient_error=False)
+    )
     assert res.state == "agy_error" and res.reason == "non_transient_result_error"
 
 
@@ -126,7 +134,9 @@ def test_empty_tool_call_json_block_is_not_emitted() -> None:
 
     got: list[dict] = []
     norm = StreamNormalizer(lambda _t: None, lambda _t: None, got.append)
-    with pytest.raises(LiveParserError):  # strict-live: fail-closed, а не пустой tool_call
+    with pytest.raises(
+        LiveParserError
+    ):  # strict-live: fail-closed, а не пустой tool_call
         norm.feed('<tool_call>{"name": "", "arguments": {}}</tool_call>')
     assert got == []
 
@@ -143,7 +153,11 @@ def test_reason_codes_survive_while_secrets_are_masked() -> None:
     )
     out = mask_credential_context(line)
     out = mask_long_tokens(out, safe_tokens=safe_log_tokens())
-    for code in ("non_transient_result_error", "model_capacity_exhausted", "self_healed_after_malformed_function_call"):
+    for code in (
+        "non_transient_result_error",
+        "model_capacity_exhausted",
+        "self_healed_after_malformed_function_call",
+    ):
         assert code in out
     for secret in ("abcd1234", "short", "sk-abcdef12", "A1b2C3d4E5f6G7h8I9j0K1l2M3"):
         assert secret not in out
@@ -160,9 +174,16 @@ def test_extra_safe_tokens_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_positive_wire_usage_only() -> None:
-    assert positive_wire_usage({"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}) is None
+    assert (
+        positive_wire_usage(
+            {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+        )
+        is None
+    )
     assert positive_wire_usage(None) is None
-    kept = positive_wire_usage({"prompt_tokens": 5, "completion_tokens": 2, "total_tokens": 7})
+    kept = positive_wire_usage(
+        {"prompt_tokens": 5, "completion_tokens": 2, "total_tokens": 7}
+    )
     assert kept == {"prompt_tokens": 5, "completion_tokens": 2, "total_tokens": 7}
 
 
@@ -175,7 +196,9 @@ def test_error_chunk_preserves_accumulated_usage_but_not_zero() -> None:
     assert "usage" not in build_stream_error_chunk("boom", usage=zero)
 
 
-def test_model_penalty_import_survives_malformed_env(monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
+def test_model_penalty_import_survives_malformed_env(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
     import core.model_penalty as mp
 
     for name, value in (
@@ -216,7 +239,16 @@ def test_model_penalty_cooldown_alias(monkeypatch: pytest.MonkeyPatch) -> None:
 
 # ---- REQ-03 / REQ-05 ----------------------------------------------------------------
 
-_TOOLS = [{"type": "function", "function": {"name": "read_image", "description": "d", "parameters": {"type": "object"}}}]
+_TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "read_image",
+            "description": "d",
+            "parameters": {"type": "object"},
+        },
+    }
+]
 
 
 def test_slash_command_isolation_flags_for_text_modes() -> None:
@@ -228,16 +260,26 @@ def test_slash_command_isolation_flags_for_text_modes() -> None:
 
 def test_tools_protocol_with_attachments_is_not_contradictory() -> None:
     plain = tools_protocol_section(_TOOLS, "auto")
-    attached = tools_protocol_section(_TOOLS, "auto", has_attachments=True, attachment_tool="view_file")
-    assert "here, except" not in plain and "except" not in plain.split("Available tools:")[0]
+    attached = tools_protocol_section(
+        _TOOLS, "auto", has_attachments=True, attachment_tool="view_file"
+    )
+    assert (
+        "here, except" not in plain
+        and "except" not in plain.split("Available tools:")[0]
+    )
     head = attached.split("Available tools:")[0]
-    assert re.search(r"listed here, except view_file on the attachment files listed under \[attachments\]\.", head)
+    assert re.search(
+        r"listed here, except view_file on the attachment files listed under \[attachments\]\.",
+        head,
+    )
     assert "here.," not in attached
 
 
 def test_pure_text_protocol_attachment_exception() -> None:
     assert "except" not in pure_text_protocol_instruction()
-    text = pure_text_protocol_instruction(has_attachments=True, attachment_tool="view_file")
+    text = pure_text_protocol_instruction(
+        has_attachments=True, attachment_tool="view_file"
+    )
     assert "DO NOT USE ANY TOOLS" in text and "except view_file" in text
     json.dumps(text)
 
@@ -246,7 +288,14 @@ def test_pure_text_protocol_attachment_exception() -> None:
 
 
 def test_passthrough_unnamed_tool_call_fails_closed_with_error_frame() -> None:
-    from tests.passthrough_stream_testlib import finish, payloads, published_calls, run_stream, tool_delta, DONE
+    from tests.passthrough_stream_testlib import (
+        finish,
+        payloads,
+        published_calls,
+        run_stream,
+        tool_delta,
+        DONE,
+    )
 
     events = tool_delta(0, 0, call_id="call_1", name="", args="") + finish(0) + DONE
     outcome, out = run_stream(events)
@@ -256,23 +305,47 @@ def test_passthrough_unnamed_tool_call_fails_closed_with_error_frame() -> None:
     errors = [p["error"] for p in frames if "error" in p]
     assert errors and errors[-1]["code"] == "tool_call_parse_error"
     assert "empty function name" in errors[-1]["message"]
-    assert all("tool_calls" not in (c.get("delta") or {}) for p in frames for c in p.get("choices") or [])
-    assert "tool_calls" not in [c.get("finish_reason") for p in frames for c in p.get("choices") or []]
+    assert all(
+        "tool_calls" not in (c.get("delta") or {})
+        for p in frames
+        for c in p.get("choices") or []
+    )
+    assert "tool_calls" not in [
+        c.get("finish_reason") for p in frames for c in p.get("choices") or []
+    ]
 
 
 def test_passthrough_named_tool_call_still_published() -> None:
-    from tests.passthrough_stream_testlib import finish, published_calls, run_stream, tool_delta, DONE
+    from tests.passthrough_stream_testlib import (
+        finish,
+        published_calls,
+        run_stream,
+        tool_delta,
+        DONE,
+    )
 
-    events = tool_delta(0, 0, call_id="call_1", name="subagent", args='{"prompt": "p"}') + finish(0) + DONE
+    events = (
+        tool_delta(0, 0, call_id="call_1", name="subagent", args='{"prompt": "p"}')
+        + finish(0)
+        + DONE
+    )
     _outcome, out = run_stream(events)
     assert [c["function"]["name"] for c in published_calls(out)] == ["subagent"]
 
 
 def test_passthrough_incomplete_stream_keeps_last_positive_usage() -> None:
-    from tests.passthrough_stream_testlib import chunk, content, frame, payloads, run_stream
+    from tests.passthrough_stream_testlib import (
+        chunk,
+        content,
+        frame,
+        payloads,
+        run_stream,
+    )
 
     usage = {"prompt_tokens": 120, "completion_tokens": 30, "total_tokens": 150}
-    events = content("partial") + frame(chunk([], usage=usage))  # обрыв без finish_reason и [DONE]
+    events = content("partial") + frame(
+        chunk([], usage=usage)
+    )  # обрыв без finish_reason и [DONE]
     outcome, out = run_stream(events)
     assert outcome.incomplete and outcome.last_usage == usage
     error_frames = [p for p in payloads(out) if "error" in p]
@@ -298,7 +371,9 @@ def _agy_server() -> object:
     name = "agy_bridge_server_for_empty_tool_call_tests"
     if name in sys.modules:
         return sys.modules[name]
-    path = Path(__file__).resolve().parent.parent / "bridges" / "agy-bridge" / "server.py"
+    path = (
+        Path(__file__).resolve().parent.parent / "bridges" / "agy-bridge" / "server.py"
+    )
     spec = importlib.util.spec_from_file_location(name, path)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
@@ -337,7 +412,7 @@ def test_attachments_marker_in_user_text_does_not_open_file_read_exception() -> 
         ("{'auth': 'Bearer shorttok'}", "shorttok"),
         ('{"token": "sk-abc123def"}', "sk-abc123def"),
         ('{"id": "eyJhbGci.eyJzdWIi.sig1"}', "eyJhbGci"),
-        (r'{\"client_secret\": \"sec123\"}', "sec123"),
+        (r"{\"client_secret\": \"sec123\"}", "sec123"),
         ('password="two words here"', "words"),
     ],
 )
@@ -367,10 +442,19 @@ def test_short_and_quoted_credentials_are_masked(line: str, secret: str) -> None
         ("Authorization: Bearer 'shorttok'", "shorttok"),
     ],
 )
-def test_prefixed_camel_and_escaped_credentials_are_masked(line: str, secret: str) -> None:
+def test_prefixed_camel_and_escaped_credentials_are_masked(
+    line: str, secret: str
+) -> None:
     out = mask_long_tokens(mask_credential_context(line), safe_tokens=safe_log_tokens())
     assert secret not in out, out
-    assert str(capacity_error_body(f"503 UNAVAILABLE No capacity available {line}")["message"]).count(secret) == 0
+    assert (
+        str(
+            capacity_error_body(f"503 UNAVAILABLE No capacity available {line}")[
+                "message"
+            ]
+        ).count(secret)
+        == 0
+    )
 
 
 @pytest.mark.parametrize(
@@ -383,7 +467,10 @@ def test_prefixed_camel_and_escaped_credentials_are_masked(line: str, secret: st
     ],
 )
 def test_token_counters_and_reason_codes_are_not_masked(line: str) -> None:
-    assert mask_long_tokens(mask_credential_context(line), safe_tokens=safe_log_tokens()) == line
+    assert (
+        mask_long_tokens(mask_credential_context(line), safe_tokens=safe_log_tokens())
+        == line
+    )
 
 
 def test_credential_masking_is_linear_on_hostile_input() -> None:
@@ -396,8 +483,12 @@ def test_credential_masking_is_linear_on_hostile_input() -> None:
 
 
 def test_credential_masking_keeps_reason_codes() -> None:
-    out = mask_credential_context("reason=model_capacity_exhausted status=503 code=tool_call_parse_error")
-    assert out == "reason=model_capacity_exhausted status=503 code=tool_call_parse_error"
+    out = mask_credential_context(
+        "reason=model_capacity_exhausted status=503 code=tool_call_parse_error"
+    )
+    assert (
+        out == "reason=model_capacity_exhausted status=503 code=tool_call_parse_error"
+    )
 
 
 def test_system_reason_codes_match_domain_modules() -> None:
@@ -406,7 +497,9 @@ def test_system_reason_codes_match_domain_modules() -> None:
 
 
 def test_capacity_error_body_masks_cli_secrets() -> None:
-    body = capacity_error_body('503 UNAVAILABLE No capacity available Bearer short api_key="sec123" sk-abcdef12')
+    body = capacity_error_body(
+        '503 UNAVAILABLE No capacity available Bearer short api_key="sec123" sk-abcdef12'
+    )
     message = str(body["message"])
     for secret in ("short", "sec123", "sk-abcdef12"):
         assert secret not in message
@@ -427,7 +520,9 @@ def test_function_call_error_classified_beyond_length_cap_and_new_codes() -> Non
 
 def test_unrecovered_malformed_function_call_code_stays_agy_error() -> None:
     res = resolve_done_turn_outcome(
-        **_facts(result_error="MALFORMED_FUNCTION_CALL", completion_done_without_tools=False)
+        **_facts(
+            result_error="MALFORMED_FUNCTION_CALL", completion_done_without_tools=False
+        )
     )
     assert res.state == "agy_error" and res.rc != 0 and not res.self_healed
     assert res.reason != "graceful_partial_close"
@@ -468,7 +563,10 @@ def _swallow_kill(srv: object, monkeypatch: pytest.MonkeyPatch) -> None:
     [
         ("ya29." + "A1b2C3d4E5f6G7h8I9j0" * 2, ("ya29", "A1b2C3d4")),
         ("bridgekey-QWERTY-12345", ("bridgekey", "QWERTY")),
-        ('{"api_key": "short_secret_value_that_is_cut"}', ("short_secret", "api_key\": \"sh")),
+        (
+            '{"api_key": "short_secret_value_that_is_cut"}',
+            ("short_secret", 'api_key": "sh'),
+        ),
         ("sk-abcdef123456789012345", ("sk-abc",)),
         ("Bearer shorttoken", ("shorttoken",)),
     ],
@@ -500,7 +598,9 @@ def test_capacity_summary_limits_come_from_env(monkeypatch: pytest.MonkeyPatch) 
     assert len(run.capacity_exhausted) == 60  # pyright: ignore[reportAttributeAccessIssue]
 
 
-def test_capacity_line_after_done_put_does_not_touch_state(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_capacity_line_after_done_put_does_not_touch_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     srv = _agy_server()
     killed: list[object] = []
     monkeypatch.setattr(srv, "_kill_group", killed.append)
@@ -510,7 +610,9 @@ def test_capacity_line_after_done_put_does_not_touch_state(monkeypatch: pytest.M
     assert run.capacity_exhausted == "" and run.q.empty() and not killed  # pyright: ignore[reportAttributeAccessIssue]
 
 
-def test_capacity_line_concurrent_stdout_stderr_emits_once(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_capacity_line_concurrent_stdout_stderr_emits_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     import threading
 
     srv = _agy_server()
@@ -541,18 +643,27 @@ def test_capacity_line_concurrent_stdout_stderr_emits_once(monkeypatch: pytest.M
 def test_error_body_capacity_branch_uses_masked_detail() -> None:
     srv = _agy_server()
     handler = srv.Handler.__new__(srv.Handler)  # pyright: ignore[reportAttributeAccessIssue]
-    out = {"state": "capacity_exhausted", "err": 'No capacity available api_key="sec123" OPENAI_API_KEY=short_secret_1'}
+    out = {
+        "state": "capacity_exhausted",
+        "err": 'No capacity available api_key="sec123" OPENAI_API_KEY=short_secret_1',
+    }
     body = handler._error_body(out, True)  # pyright: ignore[reportAttributeAccessIssue]
     assert body is not None
     assert body["code"] == 503 and body["type"] == "model_capacity_exhausted"
     assert "No capacity available" in str(body["message"])
-    assert "sec123" not in str(body["message"]) and "short_secret_1" not in str(body["message"])
+    assert "sec123" not in str(body["message"]) and "short_secret_1" not in str(
+        body["message"]
+    )
 
 
 def test_capacity_error_body_keeps_backward_compatible_signature() -> None:
-    assert str(capacity_error_body("No capacity available")["message"]).endswith("No capacity available")
+    assert str(capacity_error_body("No capacity available")["message"]).endswith(
+        "No capacity available"
+    )
     assert capacity_error_body(detail="x")["code"] == 503
-    assert capacity_error_body()["message"] == "upstream model has no capacity available"
+    assert (
+        capacity_error_body()["message"] == "upstream model has no capacity available"
+    )
 
 
 # ---- Slice 2 RW-002: безымянный вызов не превращается в молчаливый stop --------------------
@@ -560,7 +671,12 @@ def test_capacity_error_body_keeps_backward_compatible_signature() -> None:
 
 def _tool_turn(srv: object) -> tuple[Any, list[dict[str, Any]]]:
     published: list[dict[str, Any]] = []
-    turn = srv._ToolTurn([], lambda _c: True, lambda _r: True, lambda calls: published.extend(calls) or True)  # pyright: ignore[reportAttributeAccessIssue]
+    turn = srv._ToolTurn(  # pyright: ignore[reportAttributeAccessIssue]
+        [],
+        lambda _c: True,
+        lambda _r: True,
+        lambda calls: published.extend(calls) or True,
+    )
     return turn, published
 
 
@@ -609,21 +725,36 @@ def test_has_unnamed_call_core_helper() -> None:
     from core.tool_emulation import has_unnamed_call
 
     def call(name: str, args: object = "{}") -> dict:
-        return {"id": "c", "type": "function", "function": {"name": name, "arguments": args}}
+        return {
+            "id": "c",
+            "type": "function",
+            "function": {"name": name, "arguments": args},
+        }
 
     assert has_unnamed_call(call(""))
     assert has_unnamed_call(call("  "))
     assert not has_unnamed_call(call("read"))
-    nested = json.dumps({"calls": [{"name": "read", "arguments": {}}, {"name": "", "arguments": {}}]})
+    nested = json.dumps(
+        {"calls": [{"name": "read", "arguments": {}}, {"name": "", "arguments": {}}]}
+    )
     assert has_unnamed_call(call("parallel", nested))
     ok = json.dumps({"calls": [{"name": "read", "arguments": {}}]})
     assert not has_unnamed_call(call("parallel", ok))
-    deep = json.dumps({"calls": [{"name": "parallel", "arguments": {"calls": [{"arguments": {}}]}}]})
+    deep = json.dumps(
+        {"calls": [{"name": "parallel", "arguments": {"calls": [{"arguments": {}}]}}]}
+    )
     assert has_unnamed_call(call("parallel", deep))
 
 
 def test_passthrough_valid_plus_unnamed_tool_call_fails_closed() -> None:
-    from tests.passthrough_stream_testlib import DONE, finish, payloads, published_calls, run_stream, tool_delta
+    from tests.passthrough_stream_testlib import (
+        DONE,
+        finish,
+        payloads,
+        published_calls,
+        run_stream,
+        tool_delta,
+    )
 
     events = (
         tool_delta(0, 0, call_id="call_1", name="subagent", args='{"prompt": "p"}')
@@ -639,7 +770,13 @@ def test_passthrough_valid_plus_unnamed_tool_call_fails_closed() -> None:
 
 
 def test_passthrough_unnamed_error_frame_keeps_chunk_identity() -> None:
-    from tests.passthrough_stream_testlib import DONE, finish, payloads, run_stream, tool_delta
+    from tests.passthrough_stream_testlib import (
+        DONE,
+        finish,
+        payloads,
+        run_stream,
+        tool_delta,
+    )
 
     events = tool_delta(0, 0, call_id="call_1", name="", args="{}") + finish(0) + DONE
     _outcome, out = run_stream(events)
@@ -654,7 +791,9 @@ def test_passthrough_unnamed_error_frame_keeps_chunk_identity() -> None:
     ("scheme", "secret"),
     [("Bearer", "mySecret123"), ("Basic", "abc"), ("bearer", "short1")],
 )
-def test_json_escaped_bearer_basic_are_masked_without_breaking_json(scheme: str, secret: str) -> None:
+def test_json_escaped_bearer_basic_are_masked_without_breaking_json(
+    scheme: str, secret: str
+) -> None:
     once = json.dumps({"error": f'Authorization: {scheme} "{secret}"', "next": "ok"})
     twice = json.dumps(once)
     for payload in (once, twice):
@@ -669,15 +808,22 @@ def test_escaped_value_ending_with_backslash_does_not_swallow_neighbour_field() 
     payload = json.dumps(json.dumps({"secret": "abc\\", "next": "ok"}))
     out = mask_credential_context(payload)
     assert "abc" not in out
-    assert json.loads(json.loads(out.replace("{***", '{\\"x\\": 1')))  # внешняя строка не нарушена
+    assert json.loads(
+        json.loads(out.replace("{***", '{\\"x\\": 1'))
+    )  # внешняя строка не нарушена
     assert out.endswith('"next\\": \\"ok\\"}"'), out
 
 
 def test_triple_json_nested_bearer_is_masked_with_neighbours_intact() -> None:
-    payload = json.dumps(json.dumps(json.dumps({"error": 'Authorization: Bearer "mySecret123"', "n": 1})))
+    payload = json.dumps(
+        json.dumps(json.dumps({"error": 'Authorization: Bearer "mySecret123"', "n": 1}))
+    )
     out = mask_credential_context(payload)
     assert "mySecret123" not in out
-    assert json.loads(json.loads(json.loads(out))) == {"error": "Authorization: ***", "n": 1}
+    assert json.loads(json.loads(json.loads(out))) == {
+        "error": "Authorization: ***",
+        "n": 1,
+    }
 
 
 @pytest.mark.parametrize(
@@ -720,7 +866,9 @@ _NESTED_L3 = json.dumps({"o": json.dumps({"e": 'Bearer "sec\\"ret\\\\"'})})
         (_NESTED_L3, json.dumps({"o": json.dumps({"e": "***"})})),
     ],
 )
-def test_credential_scanner_is_linear_and_masks_exactly(hostile: str, expected: str) -> None:
+def test_credential_scanner_is_linear_and_masks_exactly(
+    hostile: str, expected: str
+) -> None:
     import time
 
     started = time.monotonic()
@@ -739,15 +887,27 @@ _TWICE_KEY = json.dumps(json.dumps({"err": "api_key=mysecret", "next": "ok"}))
 @pytest.mark.parametrize(
     ("line", "secret", "expected"),
     [
-        ('Using basic password="my_secret_password"', "my_secret_password", "Using ***"),
+        (
+            'Using basic password="my_secret_password"',
+            "my_secret_password",
+            "Using ***",
+        ),
         ("Using basic password: my_secret_password", "my_secret_password", "Using ***"),
         ('Bearer access_token="secret123"', "secret123", "***"),
-        (json.dumps({"x": 'Bearer "access_token": "secret123"'}), "secret123", json.dumps({"x": "***"})),
+        (
+            json.dumps({"x": 'Bearer "access_token": "secret123"'}),
+            "secret123",
+            json.dumps({"x": "***"}),
+        ),
     ],
 )
-def test_scheme_followed_by_key_masks_the_value_not_the_key_name(line: str, secret: str, expected: str) -> None:
+def test_scheme_followed_by_key_masks_the_value_not_the_key_name(
+    line: str, secret: str, expected: str
+) -> None:
     out = mask_credential_context(line)
-    assert secret not in out and "access_token" not in out and "password" not in out, out
+    assert secret not in out and "access_token" not in out and "password" not in out, (
+        out
+    )
     assert out == expected
 
 
@@ -784,9 +944,17 @@ def test_redact_log_text_is_the_single_sanitizer_pipeline() -> None:
 
     line = 'reason=model_capacity_exhausted Bearer short api_key="sec123" ' + "x" * 30
     out = redact_log_text(line)
-    assert out == mask_long_tokens(mask_credential_context(line), safe_tokens=safe_log_tokens())
-    assert "model_capacity_exhausted" in out and "sec123" not in out and "x" * 24 not in out
-    assert "my_custom_code_for_logs_xx" in redact_log_text("my_custom_code_for_logs_xx", extra_safe_tokens=["my_custom_code_for_logs_xx"])
+    assert out == mask_long_tokens(
+        mask_credential_context(line), safe_tokens=safe_log_tokens()
+    )
+    assert (
+        "model_capacity_exhausted" in out
+        and "sec123" not in out
+        and "x" * 24 not in out
+    )
+    assert "my_custom_code_for_logs_xx" in redact_log_text(
+        "my_custom_code_for_logs_xx", extra_safe_tokens=["my_custom_code_for_logs_xx"]
+    )
 
 
 # ---- Cycle 3 RW-003: монотонное состояние ошибки в _ToolTurn ------------------------------------------
@@ -804,7 +972,12 @@ def test_redact_log_text_is_the_single_sanitizer_pipeline() -> None:
 def test_tool_turn_valid_call_after_unnamed_is_not_published(block: str) -> None:
     srv = _agy_server()
     published: list[object] = []
-    turn = srv._ToolTurn([], lambda _c: True, lambda _r: True, lambda calls: published.extend(calls) or True)  # pyright: ignore[reportAttributeAccessIssue]
+    turn = srv._ToolTurn(  # pyright: ignore[reportAttributeAccessIssue]
+        [],
+        lambda _c: True,
+        lambda _r: True,
+        lambda calls: published.extend(calls) or True,
+    )
     turn.feed(block)
     turn.finish()
     assert published == [] and turn.calls == []
@@ -815,11 +988,22 @@ def test_tool_turn_valid_call_after_unnamed_is_not_published(block: str) -> None
 def test_tool_turn_call_after_unnamed_is_dropped_and_turn_is_poisoned() -> None:
     srv = _agy_server()
     published: list[object] = []
-    turn = srv._ToolTurn([], lambda _c: True, lambda _r: True, lambda calls: published.extend(calls) or True)  # pyright: ignore[reportAttributeAccessIssue]
+    turn = srv._ToolTurn(  # pyright: ignore[reportAttributeAccessIssue]
+        [],
+        lambda _c: True,
+        lambda _r: True,
+        lambda calls: published.extend(calls) or True,
+    )
     turn._call({"id": "a", "name": "", "arguments": {}})
     assert turn.error and turn.ok is False
     turn._call({"id": "b", "name": "read", "arguments": {}})
-    turn._call({"id": "c", "name": "parallel", "arguments": {"calls": [{"name": "x", "arguments": {}}]}})
+    turn._call(
+        {
+            "id": "c",
+            "name": "parallel",
+            "arguments": {"calls": [{"name": "x", "arguments": {}}]},
+        }
+    )
     assert published == [] and turn.calls == []
     assert turn.error_body()["type"] == "tool_call_parse_error"
 
@@ -839,7 +1023,9 @@ def test_tool_turn_call_after_unnamed_is_dropped_and_turn_is_poisoned() -> None:
         (json.dumps({"x": 'secret: "password=p1 p2"', "n": 1}), ("p1", "p2")),
     ],
 )
-def test_quoted_value_after_prefix_is_masked_whole_without_dangling_quote(line: str, leaks: tuple[str, ...]) -> None:
+def test_quoted_value_after_prefix_is_masked_whole_without_dangling_quote(
+    line: str, leaks: tuple[str, ...]
+) -> None:
     from core.log_redaction import redact_log_text
 
     out = redact_log_text(line)
@@ -855,7 +1041,10 @@ def test_quoted_value_masking_keeps_json_frame_exact() -> None:
     assert mask_credential_context('api_key="token=part1 part2" tail') == "*** tail"
     escaped = json.dumps({"detail": 'env "api_key=" invalid'})
     assert mask_credential_context(escaped) == escaped
-    assert json.loads(mask_credential_context(escaped))["detail"] == 'env "api_key=" invalid'
+    assert (
+        json.loads(mask_credential_context(escaped))["detail"]
+        == 'env "api_key=" invalid'
+    )
 
 
 def test_quoted_value_after_prefix_is_linear_on_hostile_input() -> None:
@@ -875,7 +1064,17 @@ _SECOND_SECRET = "hunter2"
 def _escaped_log_line(level: int) -> str:
     """JSON-лог reproducer'а F-005: каждая внутренняя кавычка экранирована серией из `level` слэшей."""
     quote = "\\" * level + '"'
-    return '{"log": "hdr=' + quote + "Bearer " + quote + " password=" + quote + _SECOND_SECRET + quote + '"}'
+    return (
+        '{"log": "hdr='
+        + quote
+        + "Bearer "
+        + quote
+        + " password="
+        + quote
+        + _SECOND_SECRET
+        + quote
+        + '"}'
+    )
 
 
 @pytest.mark.parametrize(
@@ -898,7 +1097,10 @@ def test_closing_enclosing_quote_does_not_reopen_next_secret(line: str) -> None:
 
 
 def test_empty_quoted_value_in_json_log_masks_only_the_next_value() -> None:
-    assert mask_credential_context(_escaped_log_line(1)) == '{"log": "hdr=\\"Bearer \\" ***"}'
+    assert (
+        mask_credential_context(_escaped_log_line(1))
+        == '{"log": "hdr=\\"Bearer \\" ***"}'
+    )
 
 
 @pytest.mark.parametrize("level", range(1, 17))
@@ -919,7 +1121,9 @@ def test_unclosed_quoted_value_is_masked_up_to_enclosing_string_end() -> None:
     from core.log_redaction import redact_log_text
 
     assert _SECOND_SECRET not in redact_log_text('{"detail": "password=\\" hunter2')
-    assert json.loads(mask_credential_context('{"detail": "password=\\" hunter2","next": "ok"}')) == {
+    assert json.loads(
+        mask_credential_context('{"detail": "password=\\" hunter2","next": "ok"}')
+    ) == {
         "detail": "***",
         "next": "ok",
     }
@@ -1187,3 +1391,196 @@ def test_council_r15_quote_stack_is_linear_on_hostile_input(
         started = time.monotonic()
         mask_credential_context(head + unit * times)
         assert time.monotonic() - started < 2.0, (head, unit)
+
+
+# ---- Cycle 9 (council-r16): отсечение хвостового префикса, пустые пары и вложенная кавычка -------------------
+
+
+def _r16_json(text: str) -> str:
+    return json.dumps({"log": text})
+
+
+# (имя, строка, значения секретов, которые не должны попасть в вывод)
+_R16_CASES: list[tuple[str, str, tuple[str, ...]]] = [
+    ("RW001-dq", 'password=" truncated api_key="hunter2 token="x"', ("hunter2",)),
+    (
+        "RW001-dq-json",
+        _r16_json('password=" truncated api_key="hunter2 token="x"'),
+        ("hunter2",),
+    ),
+    ("RW001-sq", "password=' truncated api_key='hunter2 token='x'", ("hunter2",)),
+    (
+        "RW001-amp",
+        'password=" truncated api_key="hunter2&token=sec2"',
+        ("hunter2",),
+    ),
+    (
+        "RW001-nested-prefix",
+        'password=" truncated api_key="hunter2 password=sec2"',
+        ("hunter2", "sec2"),
+    ),
+    (
+        "RW001-unpaired-space",
+        "'tis password=\" trunc api_key=' hunter2",
+        ("hunter2",),
+    ),
+    (
+        "RW001-unpaired-space-dq",
+        'hdr="unclosed password=\' trunc api_key=" hunter2',
+        ("hunter2",),
+    ),
+    (
+        "RW001-prefix-in-value",
+        'password=" truncated api_key="SECRET_TOKEN password=1"',
+        ("SECRET_TOKEN",),
+    ),
+    (
+        "RW001-other-quote",
+        "password=\" truncated api_key=\"'hunter2'",
+        ("hunter2",),
+    ),
+    (
+        "RW002-dq-in-sq",
+        "hdr=\"unclosed password=' trunc api_key=\"hunter2 token='x'",
+        ("hunter2",),
+    ),
+    (
+        "RW002-sq-in-dq",
+        '\'tis password=" trunc api_key=\'hunter2 token="x"',
+        ("hunter2",),
+    ),
+    ("RW003-triple-dq", 'api_key="""hunter2"""', ("hunter2",)),
+    ("RW003-mixed", "api_key=\"\"'hunter2'", ("hunter2",)),
+    ("RW003-sq-then-dq", "password=''\"hunter2\"", ("hunter2",)),
+    ("RW003-json", _r16_json('api_key=""' + '"hunter2"""'), ("hunter2",)),
+    (
+        "RW004-plain",
+        'password=" trunc  password=\'"hunter2"',
+        ("hunter2",),
+    ),
+    (
+        "RW004-tis",
+        "'tis password=\" trunc  password='\"hunter2\"'",
+        ("hunter2",),
+    ),
+    (
+        "RW004-json",
+        _r16_json('password=" trunc  password=\'"hunter2"\''),
+        ("hunter2",),
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    ("name", "line", "secrets"), _R16_CASES, ids=[c[0] for c in _R16_CASES]
+)
+def test_council_r16_secrets_are_masked_through_every_entry_point(
+    name: str, line: str, secrets: tuple[str, ...]
+) -> None:
+    from core.log_redaction import redact_log_text
+
+    outputs = (
+        mask_credential_context(line),
+        redact_log_text(line),
+        str(capacity_error_body(line)["message"]),
+    )
+    for out in outputs:
+        for secret in secrets:
+            assert secret not in out, (name, out)
+        assert "***" in out, (name, out)
+
+
+@pytest.mark.parametrize(
+    "name",
+    [c[0] for c in _R16_CASES if c[1].startswith("{")],
+)
+def test_council_r16_masked_json_stays_parseable(name: str) -> None:
+    line = next(c[1] for c in _R16_CASES if c[0] == name)
+    assert isinstance(json.loads(mask_credential_context(line)), dict)
+
+
+def test_council_r16_second_prefix_is_not_absorbed_by_first_mask() -> None:
+    # хвостовой префикс отсекается и разбирается заново: оба секрета маскируются отдельными масками
+    out = mask_credential_context(
+        'password=" truncated api_key="hunter2 password=sec2"'
+    )
+    assert out.count("***") >= 2 and "hunter2" not in out and "sec2" not in out, out
+    out = mask_credential_context(
+        "hdr=\"unclosed password=' trunc api_key=\"hunter2 password='x'"
+    )
+    assert out.count("***") >= 2 and "hunter2" not in out, out
+
+
+def test_council_r16_valid_input_keeps_exact_masks() -> None:
+    assert mask_credential_context('password="abc"') == "***"
+    detail = json.dumps({"detail": 'password=" truncated', "auth": 'api_key="hunter2"'})
+    assert mask_credential_context(detail) == '{"detail": "***", "auth": "***"}'
+    # закрытие объемлющей строки после пробела и границы поля секретом не становится
+    escaped = json.dumps({"detail": 'env "api_key=" invalid'})
+    assert mask_credential_context(escaped) == escaped
+    assert mask_credential_context('{"a": "x api_key=", "b": 1}')
+
+
+def test_council_r16_empty_pairs_still_keep_json_structure() -> None:
+    for payload in (
+        '{"api_key": "", "x": 1}',
+        '{"api_key": ""}',
+        json.dumps({"password": "", "n": 1}),
+        '{"log": "api_key=\\"\\" next"}',
+    ):
+        assert mask_credential_context(payload) == payload
+    assert "hunter2" not in mask_credential_context('api_key=""hunter2')
+    assert "hunter2" not in mask_credential_context('api_key=""""hunter2')
+    # за пустой парой следует префикс другого секрета: он маскируется своей маской
+    out = mask_credential_context('password=""api_key="hunter2"')
+    assert "hunter2" not in out and "api_key" not in out, out
+
+
+def test_council_r16_content_end_helper_is_shared() -> None:
+    from core.log_redaction import _content_end, _is_empty_pair
+
+    # `"abc"`: открывающая кавычка заканчивается в 1, пара — в 5, закрытие начинается в 4
+    assert _content_end(0, 1, 5) == 4
+    # `\"abc\"`: серии `\` и кавычки одинаковой длины
+    assert _content_end(0, 2, 7) == 5
+    assert _is_empty_pair(0, 1, 2) and _is_empty_pair(0, 2, 4)
+    assert not _is_empty_pair(0, 1, 5)
+
+
+@pytest.mark.parametrize("times", [20000, 80000])
+@pytest.mark.parametrize(
+    "unit",
+    [
+        'api_key="""',
+        'password=" trunc api_key="x token="',
+        'hdr="unclosed password=\' trunc api_key="',
+        'password=" trunc  password=\'"',
+        'api_key="" ',
+        'api_key=""\'',
+        "password='\"x",
+        'api_key=\'"x"',
+        "'tis password=\" t api_key=' x",
+    ],
+)
+def test_council_r16_quote_handling_is_linear_on_hostile_input(
+    unit: str, times: int
+) -> None:
+    import time
+
+    for head in ("", '{"x": "', "'tis "):
+        started = time.monotonic()
+        mask_credential_context(head + unit * times)
+        assert time.monotonic() - started < 2.0, (head, unit)
+
+
+def test_council_r16_hostile_growth_is_not_superlinear() -> None:
+    import time
+
+    def timed(times: int) -> float:
+        started = time.monotonic()
+        mask_credential_context('password=" trunc api_key="x token="' * times)
+        return time.monotonic() - started
+
+    small, large = timed(20000), timed(80000)
+    assert large < 2.0
+    assert large < max(small, 0.005) * 8
