@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.transport_test_support import semantic_equal
+from tests.transport_test_support import semantic_equal, require_base, require_wave_artifacts
 
 ROOT = Path(__file__).resolve().parents[1]
 BASE = "cc741edcb9e59d77e02a36790bd3c6e406dbdebb"
@@ -99,6 +99,7 @@ class Snapshot:
 
 @pytest.fixture(scope="session")
 def snapshot() -> Iterator[Snapshot]:
+    require_base(ROOT, BASE)
     before, after = base_blobs(), current_blobs()
     old, new = dict(before), dict(after)
     changed = {p for p in old.keys() | new.keys() if old.get(p) != new.get(p)}
@@ -182,6 +183,7 @@ def violations(path: str, before: bytes, after: bytes) -> list[tuple[str, str]]:
     return errors
 
 def test_complete_baseline_inventory_and_exact_hash(snapshot: Snapshot) -> None:
+    require_wave_artifacts(RUN)
     raw = (RUN / "architecture/baseline-monoliths.json").read_bytes()
     assert hashlib.sha256(raw).hexdigest() == BASELINE_SHA
     baseline = json.loads(raw)
@@ -238,9 +240,9 @@ def test_bounds_reject_301st_no_lf_and_changed_legacy_body() -> None:
     assert ("old.py.f", "function_bound") in violations("old.py", before, before.replace(b"1", b"2"))
     assert violations("old.py", before, before) == []
 
-def test_w0_e_itself_obeys_every_bound(snapshot: Snapshot) -> None:
+def test_w0_e_itself_obeys_every_bound() -> None:
     for path in ("tests/test_transport_modularity.py", "tests/test_transport_isolation.py"):
-        assert violations(path, b"", dict(snapshot.after)[path]) == []
+        assert violations(path, b"", (ROOT / path).read_bytes()) == []
 
 def _check_stage_entry(card: str, entry: dict[str, object], w12: set[str], sources: dict[str, bytes]) -> None:
     assert entry["must_select_at_least_one"] is True
@@ -255,6 +257,7 @@ def _check_stage_entry(card: str, entry: dict[str, object], w12: set[str], sourc
     assert any(name.startswith("test_" if whole else prefix) for name in names), card
 
 def test_stage_registry_has_fixed_names_and_nonempty_selection(snapshot: Snapshot) -> None:
+    require_wave_artifacts(RUN)
     packet = json.loads((RUN / "architecture/architecture-packet.json").read_bytes())
     registry = packet["wave_execution_contract"]["stage_test_registry"]
     plans = [c["wave_id"] for c in packet["wave_plan"]]

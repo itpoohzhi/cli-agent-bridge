@@ -79,20 +79,14 @@ def _admit_drain(context: PostRequestContext) -> bool:
 
 
 def _serve_control_endpoint(context: PostRequestContext) -> bool:
-    handler, host = context.handler, context.host
+    handler = context.handler
     path = urlparse(handler.path).path
     if path in ("/v1/models/refresh", "/models/refresh") or re.match(
         r"^/v1/providers/[^/]+/v1/models/refresh$", path,
     ):
         handler._handle_models_refresh()
         return True
-    if context.path != "/v1/quarantine":
-        return False
-    if not host._auth_ok(handler):
-        context.send_error(401, "auth_error", "unauthorized", close=False)
-    else:
-        handler._handle_quarantine_post()
-    return True
+    return False
 
 
 def begin_post(handler: PostHandler, host: PostHost) -> PostRequestContext | None:
@@ -102,6 +96,9 @@ def begin_post(handler: PostHandler, host: PostHost) -> PostRequestContext | Non
     handler._response_status = 0
     handler._telemetry_begin()
     context = PostRequestContext(handler, host)
+    if context.path == "/v1/quarantine":
+        handler._handle_quarantine_post()
+        return None
     match = re.fullmatch(r"/v1/turns/([^/]+)/cancel", context.path) if (
         host._is_detached_enabled()
     ) else None

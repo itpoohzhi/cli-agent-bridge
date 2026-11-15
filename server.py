@@ -6846,9 +6846,6 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
         self._send(200, snap)
 
     def do_POST(self) -> None:  # noqa: N802
-        path = self.path.split("?", 1)[0]
-        if path == "/v1/quarantine":
-            return self._handle_quarantine_post()
         return _transport_facade.handle_post(self, sys.modules[__name__])
 
     def _forwarded_env(

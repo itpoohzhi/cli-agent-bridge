@@ -5,16 +5,14 @@ from __future__ import annotations
 import ast
 import hashlib
 import json
-import re
 from pathlib import Path, PurePosixPath
 
 import pytest
 
 from tests.test_transport_modularity import BASE, RUN, Snapshot, snapshot as snapshot
-from tests.transport_test_support import semantic_equal
+from tests.transport_test_support import categories, require_wave_artifacts, semantic_equal, wave_changes
 
 pytestmark = pytest.mark.strict_leak_check
-CANON = Path.home() / "Мой диск/skils/ai-sdlc/python/aisdlc-gcge/agents/architecture.md"
 PURE = frozenset({"core.routing_contract", "core.transport_routing", "core.catalog_routes"})
 APPLICATION = frozenset({"core.route_eligibility", "core.route_attempts", "core.routing_schema"})
 HOSTS = frozenset({"server", "core.provider_manifest", "core.fleet_compiler"})
@@ -44,7 +42,7 @@ def imports(source: bytes, module: str) -> frozenset[str]:
         elif isinstance(node, ast.ImportFrom):
             prefix = module.split(".")[:-node.level] if node.level else []
             target = ".".join([*prefix, node.module or ""]).strip(".")
-            result.update(target + "." + alias.name for alias in node.names)
+            result.update((target + "." + alias.name).lstrip(".") for alias in node.names)
         elif dyn := dynamic_target(node):
             result.add(dyn)
     return frozenset(result)
@@ -179,6 +177,7 @@ def file_budget_valid(budget: object, targets: list[str], baseline: dict[str, in
         type(cap) is int and cap <= max(300, baseline.get(path, 0)) for path, cap in budget.items())
 
 def test_wave_dag_scope_bounds_and_baseline_frozen(snapshot: Snapshot) -> None:
+    require_wave_artifacts(RUN)
     packet = json.loads((RUN / "architecture/architecture-packet.json").read_bytes())
     baseline = json.loads((RUN / "architecture/baseline-monoliths.json").read_bytes())
     base_locs = {entry["path"]: entry["line_count"] for entry in baseline["files"]}
@@ -194,7 +193,8 @@ def test_wave_dag_scope_bounds_and_baseline_frozen(snapshot: Snapshot) -> None:
         assert file_budget_valid(card["file_line_budget"], targets, base_locs) and card["context_line_budget"] <= 400
         assert card["expected"] and card["wave_oracle_cmd"]
         declared.update(targets)
-    assert snapshot.changed <= declared, sorted(snapshot.changed - declared)
+    changed = wave_changes(RUN.parents[2], RUN, BASE, snapshot.changed)
+    assert changed <= declared, sorted(changed - declared)
     assert sorted(p["path"] for p in packet["modularity"]["product_files"]) == sorted(declared)
 
 @pytest.mark.parametrize(("path", "expected"), [
@@ -226,19 +226,10 @@ def test_import_graph_local_relative_and_cycle_canaries() -> None:
     assert reaches(edges, "a", "a")
     assert not reaches({"a": frozenset({"b"})}, "b", "a")
 
-def categories(targets: frozenset[str]) -> frozenset[str]:
-    """Longest-prefix из внешнего канона, без локальной копии его множеств."""
-    source = CANON.read_text()
-    groups = re.findall(r"`((?:TRANSPORT|PERSISTENCE|NET_PROC_IO)_IMPORTS) = (\{[^`]+\})`", source)
-    assert len(groups) == 3
-    prefixes = [(prefix, name) for name, literal in groups for prefix in ast.literal_eval(literal)]
-    found = set()
-    for target in targets:
-        matches = [(prefix, name) for prefix, name in prefixes
-                   if target == prefix or target.startswith(prefix + ".")]
-        if matches:
-            found.add(max(matches, key=lambda pair: len(pair[0]))[1])
-    return frozenset(found)
+def test_core_has_zero_forbidden_imports() -> None:
+    for module in PURE:
+        path = RUN.parents[2] / (module.replace(".", "/") + ".py")
+        assert not categories(imports(path.read_bytes(), module)), module
 
 def test_single_infrastructure_category_and_longest_prefix(snapshot: Snapshot) -> None:
     assert categories(frozenset({"aiohttp.web"})) == {"TRANSPORT_IMPORTS"}

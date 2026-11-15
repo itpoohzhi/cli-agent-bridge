@@ -100,6 +100,8 @@ def _collect(state: CompileState) -> None:
         pid = manifest.provider_id
         found = discovery.get(pid)
         state.fingerprints[pid] = getattr(found, "fingerprint_sha256", "")
+        if pid in state.bad_providers:
+            continue
         if manifest.transport.bridge is not None:
             entry = records.backend_entry(manifest)
             reason = _check(state, {pid: dict(entry, enabled=True)}, [])
@@ -107,8 +109,6 @@ def _collect(state: CompileState) -> None:
                 state.bad_providers[pid] = (reason,)
                 continue
             state.backends[pid] = entry
-        if pid in state.bad_providers:
-            continue
         _collect_models(state, manifest, found)
 
 
@@ -149,8 +149,8 @@ def _select(
 ) -> tuple[records.ManifestLike, Candidate | None, RoutingDocument | None]:
     bridged = [item for item in providers if item[0].transport.bridge is not None]
     primary = next((p for p, _ in providers if p.enabled), providers[0][0])
-    fleet_source = next(iter(bridged), None)
     enabled = [item for item in bridged if item[0].enabled]
+    fleet_source = next(iter(enabled), next(iter(bridged), None))
     weighted = _weighted_source(enabled)
     routing = None
     if weighted is not None:
