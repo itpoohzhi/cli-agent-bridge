@@ -9,9 +9,9 @@ from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from tests.unit.test_architecture_modularity import (
+from tests.test_architecture_modularity import (
     CHANGED_MODULES,
     ROOT,
     _base_tree,

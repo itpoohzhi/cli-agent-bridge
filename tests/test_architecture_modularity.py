@@ -12,7 +12,7 @@ from typing import Any
 
 import pytest
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))  # pytest console entry point, как в соседних тестах.
 BASE_REVISION = "6160a9c3e25c8dba3042f7710089a5c1820f041d"
 CHANGED_MODULES = (
