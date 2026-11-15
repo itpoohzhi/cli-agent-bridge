@@ -16,7 +16,7 @@ TRANSIENT_STREAM_INTERRUPTION_RE = re.compile(
     "|".join(re.escape(p) for p in _TRANSIENT_PHRASES), re.IGNORECASE
 )
 _FATAL_STATUS_RE = re.compile(
-    r"(?i)(?:\bhttp(?:[/\s]*\d(?:\.\d)?)?\s*(?!429\b)4\d\d\b|(?:\\*[\"'])?\bstatus(?:[_ -]?code)?\b(?:\\*[\"'])?\s*[:=]\s*(?!429\b)4\d\d\b|\b(?:bad\s+request|unauthorized|forbidden|not\s+found|method\s+not\s+allowed|conflict|unprocessable)\b)"  # noqa: E501
+    r"(?i)(?:\bhttp(?:[/\s]*\d(?:\.\d)?)?\s*(?!429\b)4\d\d\b|(?:\\*[\"'])?\b(?:http[_ -]|response[_ -])?status(?:[_ -]?code)?\b(?:\\*[\"'])?\s*[:=]\s*(?:\\*[\"'])?(?!429\b)4\d\d\b|\b(?:bad\s+request|unauthorized|forbidden|not\s+found|method\s+not\s+allowed|conflict|unprocessable)\b)"  # noqa: E501
 )
 
 DEFAULT_INTERRUPTION_NOTICE = "\n\n[⚠️ Поток прерван транзиентным сбоем транспорта; показан частичный ответ.]"  # fmt: skip  # noqa: E501
@@ -174,9 +174,8 @@ class _TurnFacts:
     has_unclosed_tool_call: bool = False; self_heal_enabled: bool = True  # fmt: skip  # noqa: E702
     causal_input: causal.CausalOutcomeInput | None = None
 
-_DONE_REASONS: Final[frozenset[str]] = frozenset(
-    ("clean_done", "self_healed_after_transient_interruption")
-)
+_DONE_REASONS: Final[frozenset[str]] = frozenset(("clean_done", "self_healed_after_transient_interruption"))
+_DEFAULT_RETRY_ATTEMPTS: Final = 2
 
 def _heal_blocker(f: _TurnFacts, transient_error: bool) -> str:
     """Первая причина, запрещающая самоисцеление (пусто — разрешено)."""
@@ -235,18 +234,18 @@ class RetryDecision:
 @dataclass(frozen=True)
 class _RetryFacts:
     error_text: str; delivered: bool; had_tool_side_effects: bool = False  # fmt: skip  # noqa: E702
-    attempt: int = 1; max_attempts: int = 2; source: str = "cli_error"  # fmt: skip  # noqa: E702
+    attempt: int = 1; max_attempts: int | None = None; source: str = "cli_error"  # fmt: skip  # noqa: E702
     elapsed_s: float = 0.0
     budget_config: RetryBudgetConfig | None = None
 
 def _resolve_retry_cfg(f: _RetryFacts) -> RetryBudgetConfig | None:
-    """Проверить и ограничить конфигурацию повтора без исключений наружу."""
-    base = f.budget_config or RetryBudgetConfig(max_attempts=f.max_attempts)
+    """Проверить конфигурацию повтора; явный legacy-лимит только сужает типизированный бюджет."""
+    base = f.budget_config or RetryBudgetConfig(max_attempts=f.max_attempts or _DEFAULT_RETRY_ATTEMPTS)
     try:
         valid = validate_retry_config(base)
     except ValueError:
         return None
-    return replace(valid, max_attempts=min(f.max_attempts, valid.max_attempts))
+    return valid if f.max_attempts is None else replace(valid, max_attempts=min(f.max_attempts, valid.max_attempts))
 
 def evaluate_stream_retry_eligibility(**kw: Any) -> RetryDecision:  # pyright: ignore[reportAny, reportExplicitAny]
     """Оценить допустимость повтора стрима."""
@@ -254,10 +253,10 @@ def evaluate_stream_retry_eligibility(**kw: Any) -> RetryDecision:  # pyright: i
         f = _RetryFacts(**kw)  # pyright: ignore[reportAny]  # Неизменяемый legacy-контракт kwargs.
     except TypeError:
         return RetryDecision(False, False, "retry_blocked", 0.0)
-    valid_types = all((isinstance(f.error_text, str), isinstance(f.source, str), type(f.delivered) is bool, type(f.had_tool_side_effects) is bool, type(f.attempt) is int, type(f.max_attempts) is int, type(f.elapsed_s) in (int, float), f.budget_config is None or isinstance(f.budget_config, RetryBudgetConfig)))  # pyright: ignore[reportUnnecessaryIsInstance]  # fmt: skip  # noqa: E501
+    valid_types = all((isinstance(f.error_text, str), isinstance(f.source, str), type(f.delivered) is bool, type(f.had_tool_side_effects) is bool, type(f.attempt) is int, type(f.max_attempts) in (int, type(None)), type(f.elapsed_s) in (int, float), f.budget_config is None or isinstance(f.budget_config, RetryBudgetConfig)))  # pyright: ignore[reportUnnecessaryIsInstance]  # fmt: skip  # noqa: E501
     if not valid_types:
         return RetryDecision(False, False, "retry_blocked", 0.0)
-    valid = all((0.0 <= f.elapsed_s <= 1e308, 0 <= f.attempt, f.max_attempts > 0))  # fmt: skip  # noqa: E501
+    valid = all((0.0 <= f.elapsed_s <= 1e308, 0 <= f.attempt, f.max_attempts is None or f.max_attempts > 0))  # fmt: skip  # noqa: E501
     if not valid:
         return RetryDecision(False, False, "retry_blocked", 0.0)
     cfg = _resolve_retry_cfg(f)

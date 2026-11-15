@@ -107,8 +107,7 @@ def test_tail_causal_facade_agrees_on_text_and_error(case: str) -> None:
         tail.note_error_record(371, text=_LONG_ERROR)
     snapshot, facts = facade.tail_causal_facts(tail), _tail_facts(tail)
     error = _LONG_ERROR + (" suffix" if case == "suffix" else "")
-    result = facade.resolve_done_turn_outcome(rc=1, result_error=error, result_status="ERROR",
-        final_text="Финал", emitted_text="", causal_input=facts, **facade.tail_turn_facts(tail))
+    result = facade.resolve_done_turn_outcome(rc=1, result_error=error, result_status="ERROR", final_text="Финал", emitted_text="", causal_input=facts, **facade.tail_turn_facts(tail))
     trusted = facade.trusted_final_text("Финал", error, tail, causal_input=facts)
     assert result.self_healed is (case == "exact")
     assert result.rc == (0 if case == "exact" else 1)
@@ -125,7 +124,7 @@ def test_tail_causal_facade_agrees_on_text_and_error(case: str) -> None:
         assert not facade.tail_causal_facts(tail).has_late_error_or_open_step
         assert snapshot.has_late_error_or_open_step
 def test_tail_legacy_calls_and_unproven_text() -> None:
-    assert facade.is_transient_stream_interruption("connection reset; code: 401") is False
+    assert not any(facade.is_transient_stream_interruption("connection reset " + t) for t in ("; code: 401", '{"status": "400"}', "status_code='404'", "http_status=400", "response_status: 422")) and facade.is_transient_stream_interruption("connection reset status: 429")
     fresh = facade.InterruptionTailState()
     assert (fresh.last_planner_step_index, fresh.last_error_step_index, fresh.last_error_attempt, fresh.last_completion_attempt) == (-1, -1, -1, -1)
     assert (fresh.final_planner, fresh.had_transient_error, fresh.error_from_structured_record, fresh.last_error_length) == (False, False, False, 0)
@@ -159,10 +158,17 @@ def test_legacy_turn_defaults_and_retry_guards() -> None:
     assert facade.evaluate_stream_retry_eligibility(error_text="connection reset", delivered=False, attempt=-1, max_attempts=1) == blocked
     assert facade.evaluate_stream_retry_eligibility(error_text="connection reset", delivered=False, attempt=0, max_attempts=0) == blocked
     assert facade.evaluate_stream_retry_eligibility(error_text="connection reset", delivered=False, budget_config=RetryBudgetConfig(max_attempts=0)) == blocked
+@pytest.mark.parametrize("dto,legacy,limit", ((3, "absent", 3), (4, "absent", 4), (4, 2, 2), (2, 4, 2), (None, "absent", 2), (None, None, 2), (4, None, 4)))
+def test_retry_limit_sources(dto: int | None, legacy: int | str | None, limit: int) -> None:
+    kw: dict[str, object] = {} if dto is None else {"budget_config": RetryBudgetConfig(max_attempts=dto)}
+    kw |= {} if legacy == "absent" else {"max_attempts": legacy}
+    def decide(attempt: int) -> facade.RetryDecision:
+        return facade.evaluate_stream_retry_eligibility(error_text="connection reset", delivered=False, attempt=attempt, **kw)
+    assert decide(limit - 1).can_retry and decide(limit - 1).attempt_budget_s > 0
+    assert not decide(limit).can_retry
 def _tail_facts(tail: facade.InterruptionTailState) -> CausalOutcomeInput:
     snapshot, facts = facade.tail_causal_facts(tail), _facts()
-    return replace(facts, error=replace(facts.error, identity=snapshot.error, error_from_structured_record=snapshot.error_from_structured_record), completion=snapshot.completion,
-        terminal=replace(facts.terminal, has_late_error_or_open_step=snapshot.has_late_error_or_open_step))
+    return replace(facts, error=replace(facts.error, identity=snapshot.error, error_from_structured_record=snapshot.error_from_structured_record), completion=snapshot.completion, terminal=replace(facts.terminal, has_late_error_or_open_step=snapshot.has_late_error_or_open_step))
 def test_zero_indices_strict_order_and_drain() -> None:
     tail = facade.InterruptionTailState()
     tail.note_planner_record({"content": "Начало", "status": "DONE"}, 0)
@@ -257,8 +263,7 @@ def test_finalize_done_orders_and_redacts(tmp_path: Path, monkeypatch: pytest.Mo
             done.DoneRecoveryFacts(True, tail, done.DoneDrainFacts(case if case in ("timeout", "window_complete") else "complete", case != "live"),
                 {"tools": "open", "unknown": "unknown"}.get(case, "closed")))
     ports = done.DonePorts(lambda *args: args, events.append, events.append, lambda: False)
-    result = done.finalize_done(done.DoneRequest((1, "Финал", None), {}, (error[:500], "")), ports,
-        done.DoneRuntimePorts(snapshot, drain), done.DoneConfig(path, 256, case != "usage", case == "usage"), events.append)
+    result = done.finalize_done(done.DoneRequest((1, "Финал", None), {}, (error[:500], "")), ports, done.DoneRuntimePorts(snapshot, drain), done.DoneConfig(path, 256, case != "usage", case == "usage"), events.append)
     recovered = case in ("exact", "tail_only", "cleared", "zero_rc", "usage", "non_stream")
     assert result == (("done", 0, "") if recovered else ("agy_error", 2 if case == "rc2" else 1, error))
     assert ("reconcile" in events) is (recovered and case not in ("usage", "non_stream"))
@@ -276,15 +281,10 @@ def test_finalize_done_legacy(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, c
     tail = facade.InterruptionTailState()
     tail.note_planner_record({"content": "Старый финал"}, 1)
     final = "" if case == "empty_final" else "Финал"
-    snapshot = done.DoneSnapshot(done.DoneTextFacts(final, emitted, "", ""), done.DoneResultFacts("ERROR" if case == "error" else "DONE", rc, True, 0),
-        done.DoneDeliveryFacts(case == "fallback", not emitted, lambda _text: "", lambda: True),
-        done.DoneRecoveryFacts(True, tail, done.DoneDrainFacts(), "closed"))
+    snapshot = done.DoneSnapshot(done.DoneTextFacts(final, emitted, "", ""), done.DoneResultFacts("ERROR" if case == "error" else "DONE", rc, True, 0), done.DoneDeliveryFacts(case == "fallback", not emitted, lambda _text: "", lambda: True), done.DoneRecoveryFacts(True, tail, done.DoneDrainFacts(), "closed"))
     ports = done.DonePorts(lambda *args: args, content.append, lambda _events: None, lambda: case == "gone")
-    result = done.finalize_done(done.DoneRequest((7 if case in ("payload_rc", "result_rc") else int(rc or 0), final, {"error": _LONG_ERROR}), {}, ("", "")),
-        ports, done.DoneRuntimePorts(lambda: snapshot, stderr=lambda: " stderr "),
-        done.DoneConfig(None, 256), lambda _line: pytest.fail("unexpected recovery"))
-    expected = {"gone": ("client_gone", 1), "error": ("agy_error", 1, _LONG_ERROR[:500]),
-        "payload_rc": ("agy_error", 7, _LONG_ERROR[:500]), "result_rc": ("agy_error", 2, _LONG_ERROR[:500])}
+    result = done.finalize_done(done.DoneRequest((7 if case in ("payload_rc", "result_rc") else int(rc or 0), final, {"error": _LONG_ERROR}), {}, ("", "")), ports, done.DoneRuntimePorts(lambda: snapshot, stderr=lambda: " stderr "), done.DoneConfig(None, 256), lambda _line: pytest.fail("unexpected recovery"))
+    expected = {"gone": ("client_gone", 1), "error": ("agy_error", 1, _LONG_ERROR[:500]), "payload_rc": ("agy_error", 7, _LONG_ERROR[:500]), "result_rc": ("agy_error", 2, _LONG_ERROR[:500])}
     assert result == expected.get(case, ("done", rc, "stderr"))
     assert content == ([] if case in ("error", "nonzero", "empty_final", "payload_rc", "result_rc") else ["\n\nФинал" if case == "fallback" else "Финал"])
 @pytest.mark.parametrize("outcome", ("timeout", "ok"))
