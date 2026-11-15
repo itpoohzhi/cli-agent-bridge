@@ -77,9 +77,9 @@ def test_error_body_is_deterministic_503() -> None:
 
 
 def _default_redact(text: str) -> str:
-    from core.log_redaction import mask_credential_context, mask_long_tokens, safe_log_tokens
+    from core.log_redaction import redact_log_text
 
-    return mask_long_tokens(mask_credential_context(text), safe_tokens=safe_log_tokens())
+    return redact_log_text(text)
 
 
 @pytest.mark.parametrize(
@@ -144,3 +144,41 @@ def test_raw_cap_never_bisects_secret_token() -> None:
     assert "ghp_" not in summary and summary.startswith("***"), summary
     message = str(capacity_error_body(text)["message"])
     assert "ghp_" not in message and "***" in message, message
+
+
+@pytest.mark.parametrize(
+    ("text", "secret"),
+    [
+        (("x" * 4072) + " S3cr3tT0k3nV4lu3_23char4567890", "S3cr3tT0k3nV4lu3"),
+        (("x" * 4085) + " ghp_1234567890abcdef", "ghp_"),
+        (("x " * 2040) + "ghp_1234567890abcdef", "ghp_"),
+    ],
+)
+def test_window_cut_never_bisects_secret_token(text: str, secret: str) -> None:
+    from core.agy_capacity_guard import summarize_capacity_text
+
+    assert secret not in summarize_capacity_text(text, _default_redact, {})
+    assert secret not in str(capacity_error_body(text)["message"])
+    # сводка шире окна: секрет на границе окна виден в выводе, если бы он был обрублен, а не замаскирован
+    env = {"AGY_CAPACITY_SUMMARY_MAX_CHARS": "100000"}
+    full = summarize_capacity_text(text, _default_redact, env)
+    assert secret not in full and full.endswith("***"), full[-40:]
+
+
+def test_window_cut_drops_long_tail_token_instead_of_bisecting_it() -> None:
+    from core.agy_capacity_guard import summarize_capacity_text
+
+    env = {
+        "AGY_CAPACITY_REDACT_WINDOW_CHARS": "20",
+        "AGY_CAPACITY_REDACT_MARGIN_CHARS": "5",
+        "AGY_CAPACITY_SUMMARY_MAX_CHARS": "30",
+    }
+    # токен начинается до окна (35) и длиннее запаса: он отбрасывается целиком, а не обрубается
+    assert summarize_capacity_text("a " * 9 + "y" * 2000, lambda s: s, env) == "a a a a a a a a a"
+
+
+def test_capacity_error_body_respects_explicit_env() -> None:
+    env = {"AGY_CAPACITY_SUMMARY_MAX_CHARS": "12"}
+    message = str(capacity_error_body("No capacity available " + "word " * 50, env=env)["message"])
+    assert message == "upstream model has no capacity available: No capacity "
+    assert len(str(capacity_error_body("No capacity available " + "word " * 50)["message"])) > len(message) + 100

@@ -6,6 +6,7 @@ from __future__ import annotations
 import importlib
 import json
 import re
+from typing import Any
 
 import pytest
 
@@ -369,7 +370,7 @@ def test_short_and_quoted_credentials_are_masked(line: str, secret: str) -> None
 def test_prefixed_camel_and_escaped_credentials_are_masked(line: str, secret: str) -> None:
     out = mask_long_tokens(mask_credential_context(line), safe_tokens=safe_log_tokens())
     assert secret not in out, out
-    assert capacity_error_body(f"503 UNAVAILABLE No capacity available {line}")["message"].count(secret) == 0
+    assert str(capacity_error_body(f"503 UNAVAILABLE No capacity available {line}")["message"]).count(secret) == 0
 
 
 @pytest.mark.parametrize(
@@ -549,7 +550,7 @@ def test_error_body_capacity_branch_uses_masked_detail() -> None:
 
 
 def test_capacity_error_body_keeps_backward_compatible_signature() -> None:
-    assert capacity_error_body("No capacity available")["message"].endswith("No capacity available")
+    assert str(capacity_error_body("No capacity available")["message"]).endswith("No capacity available")
     assert capacity_error_body(detail="x")["code"] == 503
     assert capacity_error_body()["message"] == "upstream model has no capacity available"
 
@@ -557,8 +558,8 @@ def test_capacity_error_body_keeps_backward_compatible_signature() -> None:
 # ---- Slice 2 RW-002: безымянный вызов не превращается в молчаливый stop --------------------
 
 
-def _tool_turn(srv: object) -> tuple[object, list[object]]:
-    published: list[object] = []
+def _tool_turn(srv: object) -> tuple[Any, list[dict[str, Any]]]:
+    published: list[dict[str, Any]] = []
     turn = srv._ToolTurn([], lambda _c: True, lambda _r: True, lambda calls: published.extend(calls) or True)  # pyright: ignore[reportAttributeAccessIssue]
     return turn, published
 
@@ -601,7 +602,7 @@ def test_tool_turn_named_parallel_batch_is_unaffected() -> None:
     )
     turn.finish()  # pyright: ignore[reportAttributeAccessIssue]
     assert not turn.error  # pyright: ignore[reportAttributeAccessIssue]
-    assert [c["function"]["name"] for c in published] == ["a", "b"]  # pyright: ignore[reportAttributeAccessIssue, reportCallIssue, reportArgumentType]
+    assert [c["function"]["name"] for c in published] == ["a", "b"]
 
 
 def test_has_unnamed_call_core_helper() -> None:
@@ -727,6 +728,65 @@ def test_credential_scanner_is_linear_and_masks_exactly(hostile: str, expected: 
     assert time.monotonic() - started < 0.1
     assert out == expected
     assert "secret" not in out and "ret" not in out.replace("***", "")
+
+
+# ---- Cycle 5: связка scheme+key и экранированные кавычки закрывающей строки JSON ----------------------------
+
+_TWICE_BEARER = json.dumps(json.dumps({"auth": "Bearer mysecret", "next": "ok"}))
+_TWICE_KEY = json.dumps(json.dumps({"err": "api_key=mysecret", "next": "ok"}))
+
+
+@pytest.mark.parametrize(
+    ("line", "secret", "expected"),
+    [
+        ('Using basic password="my_secret_password"', "my_secret_password", "Using ***"),
+        ("Using basic password: my_secret_password", "my_secret_password", "Using ***"),
+        ('Bearer access_token="secret123"', "secret123", "***"),
+        (json.dumps({"x": 'Bearer "access_token": "secret123"'}), "secret123", json.dumps({"x": "***"})),
+    ],
+)
+def test_scheme_followed_by_key_masks_the_value_not_the_key_name(line: str, secret: str, expected: str) -> None:
+    out = mask_credential_context(line)
+    assert secret not in out and "access_token" not in out and "password" not in out, out
+    assert out == expected
+
+
+@pytest.mark.parametrize("payload", [_TWICE_BEARER, _TWICE_KEY])
+def test_double_serialized_json_keeps_escape_before_closing_quote(payload: str) -> None:
+    out = mask_credential_context(payload)
+    assert "mysecret" not in out, out
+    decoded = json.loads(json.loads(out))
+    assert decoded["next"] == "ok"
+    assert set(decoded) == {"auth" if "auth" in payload else "err", "next"}
+    assert "***" in decoded.values()
+
+
+@pytest.mark.parametrize(
+    ("hostile", "expected"),
+    [
+        ("password: " * 20000, "***"),
+        ("Bearer api_key=" * 3000, "***"),
+        ("secret: " * 3000 + "\\\\" * 20000, "***"),
+        ("Basic secret: password: tail_secret", "***"),
+    ],
+)
+def test_prefix_chains_are_masked_in_linear_time(hostile: str, expected: str) -> None:
+    import time
+
+    started = time.monotonic()
+    out = mask_credential_context(hostile)
+    assert time.monotonic() - started < 0.5
+    assert out == expected
+
+
+def test_redact_log_text_is_the_single_sanitizer_pipeline() -> None:
+    from core.log_redaction import redact_log_text
+
+    line = 'reason=model_capacity_exhausted Bearer short api_key="sec123" ' + "x" * 30
+    out = redact_log_text(line)
+    assert out == mask_long_tokens(mask_credential_context(line), safe_tokens=safe_log_tokens())
+    assert "model_capacity_exhausted" in out and "sec123" not in out and "x" * 24 not in out
+    assert "my_custom_code_for_logs_xx" in redact_log_text("my_custom_code_for_logs_xx", extra_safe_tokens=["my_custom_code_for_logs_xx"])
 
 
 # ---- Cycle 3 RW-003: монотонное состояние ошибки в _ToolTurn ------------------------------------------

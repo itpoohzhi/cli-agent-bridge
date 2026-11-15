@@ -52,11 +52,16 @@ _MAX_ESCAPE_LEVEL: Final[int] = 16
 # в кавычках с откатом (backtracking) на незакрытых `\\<char>` даёт экспоненту. Ключ может иметь префикс
 # (`OPENAI_API_KEY`, `openaiApiKey`): `_` входит в `\w`, поэтому `\b` перед именем ключа не подходит.
 # `(?<!\\)`: матч начинается только с начала серии `\`, иначе серия из n слэшей даёт O(n^2) на старте с каждой позиции.
-_CREDENTIAL_PREFIX_RE: Final[re.Pattern[str]] = re.compile(
-    r"(?i)\b(?P<scheme>bearer|basic)\s+"
-    r"|(?<!\\)\\*[\"']?[A-Za-z0-9_\-]{0,64}"
+# `lead`/`trail` — кавычки вокруг имени ключа: если закрывающей кавычки нет, ведущая открывает значение
+# объемлющей строки (`"api_key=x"`) и не входит в маску.
+_CREDENTIAL_KEY_PREFIX_RE: Final[re.Pattern[str]] = re.compile(
+    r"(?<!\\)(?P<lead>\\*[\"']?)[A-Za-z0-9_\-]{0,64}"
     + _CREDENTIAL_KEYS
-    + r"\b\\{0,%d}[\"']?\s*[=:]\s*" % _MAX_ESCAPE_LEVEL
+    + r"\b(?P<trail>\\{0,%d}[\"']?)\s*[=:]\s*" % _MAX_ESCAPE_LEVEL,
+    re.IGNORECASE,
+)
+_CREDENTIAL_PREFIX_RE: Final[re.Pattern[str]] = re.compile(
+    r"\b(?P<scheme>bearer|basic)\s+|" + _CREDENTIAL_KEY_PREFIX_RE.pattern, re.IGNORECASE
 )
 _BACKSLASHES_RE: Final[re.Pattern[str]] = re.compile(r"\\*")
 _ESCAPE_OR_DQ_RE: Final[re.Pattern[str]] = re.compile(r"[\\\"]")
@@ -171,6 +176,10 @@ def _scan_unquoted(text: str, pos: int, is_scheme: bool) -> int:
         else slashes_end
     )
     end = _skip(_SCHEME_VALUE_RE if is_scheme else _KEY_VALUE_RE, text, u)
+    if u == pos and end < len(text) and text[end] in ('"', "'"):
+        # В JSON-строке `\` перед закрывающей кавычкой — экранирование, а не часть значения.
+        while end > u and text[end - 1] == "\\":
+            end -= 1
     return end if end > u else slashes_end
 
 
@@ -192,6 +201,12 @@ def _scan_credential_value(
     return _scan_unquoted(text, pos, is_scheme)
 
 
+def _opens_enclosing_string(m: re.Match[str]) -> bool:
+    """Ключ без закрывающей кавычки после имени: ведущая кавычка принадлежит объемлющей строке."""
+    quotes = ('"', "'")
+    return m.group("lead").endswith(quotes) and not m.group("trail").endswith(quotes)
+
+
 def mask_credential_context(text: str) -> str:
     """Маска секретов по контексту (`Bearer x`, `api_key=x`, `sk-…`) любой длины; разбор линейный."""
     parts: list[str] = []
@@ -199,15 +214,31 @@ def mask_credential_context(text: str) -> str:
     failed_until: _FailedUntil = {}
     # Поиск идёт от `cursor`, как у `re.sub`: значение уже разобрано, и префиксы внутри него не ищутся.
     while (m := _CREDENTIAL_PREFIX_RE.search(text, cursor)) is not None:
-        end = _scan_credential_value(
-            text, m.end(), m.group("scheme") is not None, failed_until
-        )
+        is_scheme = m.group("scheme") is not None
+        # `Bearer password=x`, `secret: api_key=x`: значение секрета — после последнего префикса цепочки,
+        # а не имя ключа. Каждый шаг цепочки сдвигает позицию вперёд, поэтому разбор остаётся линейным.
+        pos, value_is_scheme = m.end(), is_scheme
+        while (nxt := _CREDENTIAL_PREFIX_RE.match(text, pos)) is not None:
+            pos, value_is_scheme = nxt.end(), nxt.group("scheme") is not None
+        # Цепочка без значения маскируется целиком: повторный разбор с каждого её звена был бы O(n^2).
+        end = max(_scan_credential_value(text, pos, value_is_scheme, failed_until), pos)
         if end <= m.end():
             parts.append(text[cursor : m.end()])
             cursor = m.end()
             continue
-        parts.append(text[cursor : m.start()])
+        start = (
+            m.end("lead") if not is_scheme and _opens_enclosing_string(m) else m.start()
+        )
+        parts.append(text[cursor:start])
         parts.append(MASK)
         cursor = end
     parts.append(text[cursor:])
     return _PREFIXED_TOKEN_RE.sub(MASK, "".join(parts))
+
+
+def redact_log_text(
+    text: str, *, extra_safe_tokens: Iterable[str] | None = None
+) -> str:
+    """Единый конвейер редактирования логов: секреты по контексту, затем длинные токены (кроме кодов причин)."""
+    safe = safe_log_tokens(extra_safe_tokens or ())
+    return mask_long_tokens(mask_credential_context(text), safe_tokens=safe)

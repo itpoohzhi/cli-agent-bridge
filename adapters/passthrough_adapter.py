@@ -1135,10 +1135,11 @@ class PassthroughAdapter(BackendAdapter):
     @property
     def _upstream_key(self) -> str:
         """Актуальный ключ upstream (`api_key_env` из горячего `.env`)."""
-        override = getattr(self, "_upstream_key_override", None)
+        if (override := getattr(self, "_upstream_key_override", None)) is not None:
+            return override
         env_name = self.config.get("api_key_env")
         live = get_hot_env_value(env_name) if isinstance(env_name, str) and env_name else ""
-        return override if override is not None else live or self._static_upstream_key
+        return live or self._static_upstream_key
 
     @_upstream_key.setter
     def _upstream_key(self, value: Optional[str]) -> None:
