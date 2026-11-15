@@ -71,6 +71,16 @@ _QUOTED_STOP_RE: Final[dict[str, re.Pattern[str]]] = {
     '"': re.compile(r"[\\\"]"),
     "'": re.compile(r"[\\']"),
 }
+# Префикс секрета, которым заканчивается содержимое пары кавычек (`" truncated api_key="`): закрывающая
+# кавычка пары на деле открывает значение этого префикса. `\Z` учитывает `endpos` поиска.
+_TAIL_PREFIX_RE: Final[re.Pattern[str]] = re.compile(
+    r"(?:\b(?:bearer|basic)\s+|" + _CREDENTIAL_KEY_PREFIX_RE.pattern + r")\Z",
+    re.IGNORECASE,
+)
+# Длина самого длинного префикса секрета в `_TAIL_PREFIX_RE` с запасом на пробелы вокруг разделителя.
+_TAIL_PREFIX_SPAN: Final[int] = 64 + 16 + 2 * (_MAX_ESCAPE_LEVEL + 1) + 64
+# Первый символ значения: не пробел и не граница поля/строки (`,;&}])` и кавычки).
+_VALUE_START_RE: Final[re.Pattern[str]] = re.compile(r"[^\s,;&}\])\"']")
 _SCHEME_VALUE_RE: Final[re.Pattern[str]] = re.compile(r"[^\s,;\"']*")
 _KEY_VALUE_RE: Final[re.Pattern[str]] = re.compile(r"[^\s,;&\"']*")
 _PREFIXED_TOKEN_RE: Final[re.Pattern[str]] = re.compile(
@@ -210,6 +220,11 @@ def _quote_run(text: str, pos: int) -> tuple[int, str]:
     return end, text[end : end + 1]
 
 
+def _is_escaped_single(slashes: int) -> bool:
+    """`'` после серии из `slashes` слэшей экранирован (нечётная серия) и строк не открывает и не закрывает."""
+    return slashes % 2 != 0
+
+
 def _closes_frame(level: int, slashes: int) -> bool:
     """Серия из `slashes` слэшей перед `"` закрывает строку уровня `level`.
 
@@ -225,7 +240,7 @@ def _closing_index(stack: list[_QuoteFrame], quote: str, slashes: int) -> int | 
     Кавычка ищет закрываемый кадр во всём стеке, а не только на вершине: серия может закрыть нижнюю строку
     поверх непарной вложенной (`\\"` внутри `"`), а непарная `"` внутри `'…'` не блокирует закрытие `'`.
     """
-    if quote not in ('"', "'") or (quote == "'" and slashes % 2 != 0):
+    if quote not in ('"', "'") or (quote == "'" and _is_escaped_single(slashes)):
         return None
     for index in range(len(stack) - 1, -1, -1):
         frame_quote, level = stack[index]
@@ -269,8 +284,11 @@ def _apply_double_quote(stack: list[_QuoteFrame], slashes: int) -> None:
         stack.append(('"', slashes))
 
 
-def _apply_single_quote(stack: list[_QuoteFrame], prev: str) -> None:
+def _apply_single_quote(stack: list[_QuoteFrame], prev: str, slashes: int = 0) -> None:
     """`'` закрывает открытую одиночную строку; вне слова открывает новую (апострофы `don't` — не кавычки)."""
+    if _is_escaped_single(slashes):
+        # Экранированный апостроф (`\'`) — содержимое строки, а не её граница.
+        return
     index = _closing_index(stack, "'", 0)
     if index is not None:
         del stack[index:]
@@ -294,9 +312,7 @@ def _track_quotes(text: str, start: int, end: int, stack: list[_QuoteFrame]) -> 
                 _apply_double_quote(stack, j - i)
                 i = j + 1
             elif text[j] == "'":
-                # Экранированный апостроф (`\'`) — содержимое строки, а не её граница.
-                if (j - i) % 2 == 0:
-                    _apply_single_quote(stack, text[j - 1 : j])
+                _apply_single_quote(stack, text[j - 1 : j], j - i)
                 i = j + 1
             else:
                 i = j
@@ -347,19 +363,55 @@ def _find_enclosing_close(
     return None
 
 
-def _enclosing_close(text: str, start: int, frame: _QuoteFrame | None) -> int:
+def _enclosing_frames(stack: list[_QuoteFrame]) -> list[_QuoteFrame]:
+    """Строки, границей которых ограничено значение: одиночная строка внутри двойной их не заменяет."""
+    return [frame for frame in stack if frame != ("'", 0)] or stack[-1:]
+
+
+def _nearest_close(
+    text: str, start: int, frames: list[_QuoteFrame], limit: int
+) -> int | None:
+    """Ближайшая граница любой из объемлющих строк в `text[start:limit]`; None — ни одна не закрывается.
+
+    Вложенный кадр не переживёт внешний: незакрытая вложенная кавычка (`\"` без пары) не должна прятать
+    закрытие внешней строки. Каждый следующий поиск ограничен уже найденной границей.
+    """
+    best: int | None = None
+    for frame in frames:
+        close = _find_enclosing_close(text, start, frame, limit)
+        if close is not None:
+            best = close if best is None else min(best, close)
+            limit = min(limit, close + frame[1] + 1)
+    return best
+
+
+def _enclosing_close(text: str, start: int, frames: list[_QuoteFrame]) -> int:
     """Граница консервативной маски незакрытого значения: объемлющая кавычка (не включая) либо конец текста."""
-    if frame is None:
-        return len(text)
-    close = _find_enclosing_close(text, start, frame, len(text))
+    close = _nearest_close(text, start, frames, len(text)) if frames else None
     return len(text) if close is None else close
 
 
-def _enclosing_frame(stack: list[_QuoteFrame]) -> _QuoteFrame | None:
-    """Строка, границей которой ограничено значение: одиночная строка внутри двойной не заменяет её."""
-    if len(stack) > 1 and stack[-1] == ("'", 0):
-        return stack[-2]
-    return stack[-1] if stack else None
+def _trim_tail_prefix(
+    text: str, open_end: int, content_end: int, failed_until: _FailedUntil
+) -> int | None:
+    """Начало префикса секрета, которым заканчивается `text[open_end:content_end]`, иначе None.
+
+    Строка `password=" truncated api_key="` образована кавычкой соседнего поля: её закрытие открывает значение
+    `api_key=`, поэтому маска не должна его поглощать (иначе `hunter2` после неё остаётся открытым). Префикс
+    разбирают заново только если следом честное значение; цепочка пар с префиксами внутри
+    (`api_key="api_key="api_key="`) неоднозначна и маскируется целиком. Поиск ограничен хвостом длины префикса.
+    """
+    tail = _TAIL_PREFIX_RE.search(
+        text, max(open_end, content_end - _TAIL_PREFIX_SPAN), content_end
+    )
+    if tail is None or not _is_plain_value_pair(text, content_end, failed_until):
+        return None
+    return tail.start()
+
+
+def _is_empty_pair(text: str, pos: int, open_end: int, end: int) -> bool:
+    """Пара кавычек без содержимого (`""` или экранированная): прятать нечего."""
+    return end - 1 - (open_end - 1 - pos) == open_end
 
 
 def _scan_credential_value(
@@ -382,20 +434,33 @@ def _scan_credential_value(
         # Вне объемлющей строки серия из двух и более `\` не даёт достоверной пары кавычек: парная кавычка
         # нашлась бы у следующего ключа (`password=\"..."` в логе уровня 2), поэтому маскируется весь остаток.
         return len(text)
-    frame = _enclosing_frame(stack)
+    frames = _enclosing_frames(stack)
     end = _scan_quoted_value(text, pos, failed_until)
     open_quote_end = _open_quote_end(text, pos)
-    if end is None and 0 < open_quote_end < len(text):
-        return _enclosing_close(text, open_quote_end, frame)
+    if end is not None:
+        if _is_empty_pair(text, pos, open_quote_end, end):
+            # `api_key=""hunter2`: значение продолжается сразу за парой; иначе прятать нечего.
+            if _VALUE_START_RE.match(text, end) is None:
+                return pos
+            return _skip(_SCHEME_VALUE_RE if is_scheme else _KEY_VALUE_RE, text, end)
+    elif 0 < open_quote_end < len(text):
+        close = _enclosing_close(text, open_quote_end, frames)
+        cut = _trim_tail_prefix(text, open_quote_end, close, failed_until)
+        return close if cut is None else cut
+    paired = end is not None
     if end is None:
         end = _scan_unquoted(text, pos, is_scheme)
-    if frame is not None:
+    if frames:
         # Значение не выходит за объемлющую строку: пара кавычек соседнего поля не поглощает его префикс.
         # Поиск ограничен `end`, поэтому суммарно читается не больше значения, которое уже разобрано.
         # Без префикса в поглощённой части границу не сужаем: хвост пары не разберёт никто, и он утёк бы.
-        close = _find_enclosing_close(text, open_quote_end or pos, frame, end)
+        close = _nearest_close(text, open_quote_end or pos, frames, end)
         if close is not None and _CREDENTIAL_PREFIX_RE.search(text, close, end):
             return close
+    if paired:
+        content_end = end - 1 - (open_quote_end - 1 - pos)
+        cut = _trim_tail_prefix(text, open_quote_end, content_end, failed_until)
+        return end if cut is None else cut
     return end
 
 
@@ -408,12 +473,9 @@ def _is_plain_value_pair(text: str, pos: int, failed_until: _FailedUntil) -> boo
     paired = _scan_quoted_value(text, pos, failed_until)
     if paired is None:
         # Закрытие не бывает слитно с текстом: `password='hunter2` без парной кавычки — значение, а не конец строки.
-        after = _open_quote_end(text, pos)
-        return text[after : after + 1].isalnum()
+        return _VALUE_START_RE.match(text, _open_quote_end(text, pos)) is not None
     return (
-        paired is not None
-        and _CREDENTIAL_PREFIX_RE.search(text, _open_quote_end(text, pos), paired)
-        is None
+        _CREDENTIAL_PREFIX_RE.search(text, _open_quote_end(text, pos), paired) is None
     )
 
 

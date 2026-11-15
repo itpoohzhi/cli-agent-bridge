@@ -1047,3 +1047,143 @@ def test_council_r14_quote_tracking_is_linear_on_hostile_input(
     started = time.monotonic()
     mask_credential_context('{"x": "' + unit * times)
     assert time.monotonic() - started < 2.0
+
+
+# ---- Cycle 8 (council-r15): стек кавычек, разделители полей и инверсия фазы после непарной кавычки -----------
+
+_R15_LINES = {
+    "RW001-dq": '{"detail": "password=\\" truncated", "auth": "api_key=\\"hunter2\\""}',
+    "RW001-sq": '{"detail": "password=\' truncated", "auth": "api_key=\'hunter2\'"}',
+    "RW001-F006": '{"log": "hdr=\\" api_key=\\\\"} password="hunter2"',
+    "RW001-nested-dq-in-sq": '{"detail": "password=\' a \\" b", "auth": "api_key=\'hunter2\'"}',
+    "RW001-nested-sq-in-dq": '{"detail": "password=\\" x \'y", "auth": "api_key=\\"hunter2\\""}',
+    "RW001-three-frames": json.dumps(
+        {"o": "x=\" it's password=' t", "p": "z", "auth": 'api_key="hunter2"'}
+    ),
+    "RW002-nonalnum-sq": "password='!hunter2'",
+    "RW002-nonalnum-dq": 'api_key="#hunter2"',
+    "RW002-unpaired-nonalnum": "msg='x password='!hunter2",
+    "RW002-neighbour": '{"detail": "api_key=\\" x", "auth": "password=\\"hunter2\\""}',
+    "RW002-json-nonalnum": json.dumps({"a": "password='!hunter2'", "b": 1}),
+    "RW003-sq": "'tis msg='api_key=' password='hunter2'",
+    "RW003-dq-unclosed": "hdr=\"unclosed msg='api_key=' password='hunter2'",
+    "RW003-json": "{\"log\": \"'tis msg='api_key=' password='hunter2'\"}",
+    "RW003-tight": "'tis msg='api_key='password='hunter2'",
+    "RW003-tail-dq": 'password=" truncated api_key="hunter2"',
+    "RW003-tail-json": json.dumps(
+        {"x": 1, "log": 'password=" truncated api_key="hunter2"', "n": 2}
+    ),
+    "RW003-unterminated-in-sq": "'tis password=\" trunc  password='hunter2'",
+}
+
+
+@pytest.mark.parametrize("name", sorted(_R15_LINES))
+def test_council_r15_second_secret_is_masked_through_every_entry_point(
+    name: str,
+) -> None:
+    from core.log_redaction import redact_log_text
+
+    line = _R15_LINES[name]
+    outputs = (
+        mask_credential_context(line),
+        redact_log_text(line),
+        str(capacity_error_body(line)["message"]),
+    )
+    for out in outputs:
+        assert _SECOND_SECRET not in out, (name, out)
+        assert "***" in out, (name, out)
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "RW001-dq",
+        "RW001-sq",
+        "RW001-nested-dq-in-sq",
+        "RW001-nested-sq-in-dq",
+        "RW001-three-frames",
+        "RW002-neighbour",
+        "RW002-json-nonalnum",
+        "RW003-json",
+        "RW003-tail-json",
+    ],
+)
+def test_council_r15_masked_json_stays_parseable(name: str) -> None:
+    out = mask_credential_context(_R15_LINES[name])
+    assert isinstance(json.loads(out), dict), out
+
+
+def test_council_r15_json_frame_and_neighbour_fields_stay_intact() -> None:
+    assert (
+        mask_credential_context(_R15_LINES["RW001-nested-dq-in-sq"])
+        == '{"detail": "***", "auth": "***"}'
+    )
+    assert (
+        mask_credential_context(_R15_LINES["RW002-neighbour"])
+        == '{"detail": "***", "auth": "***"}'
+    )
+    out = mask_credential_context(_R15_LINES["RW003-tail-json"])
+    parsed = json.loads(out)
+    assert (parsed["x"], parsed["n"]) == (1, 2) and set(parsed["log"]) == {"*"}, out
+
+
+def test_council_r15_empty_values_keep_json_structure() -> None:
+    # FU-001: пустое значение прятать нечего, рамка JSON не рвётся
+    for payload in (
+        '{"api_key": "", "x": 1}',
+        json.dumps({"password": "", "n": 1}),
+        '{"log": "api_key=\\"\\" next"}',
+    ):
+        assert mask_credential_context(payload) == payload
+    assert json.loads(mask_credential_context('{"api_key": "", "x": 1}')) == {
+        "api_key": "",
+        "x": 1,
+    }
+    # значение, продолжающееся сразу за пустой парой, пустым не считается
+    assert "hunter2" not in mask_credential_context('api_key=""hunter2')
+
+
+def test_council_r15_plain_apostrophes_are_not_masked() -> None:
+    assert mask_credential_context("it's fine, don't mask") == "it's fine, don't mask"
+
+
+def test_council_r15_escaped_single_quote_helper_is_shared() -> None:
+    from core.log_redaction import (
+        _apply_single_quote,
+        _closing_index,
+        _is_escaped_single,
+    )
+
+    assert _is_escaped_single(1) and _is_escaped_single(3)
+    assert not _is_escaped_single(0) and not _is_escaped_single(2)
+    stack: list[tuple[str, int]] = []
+    _apply_single_quote(stack, " ", 1)
+    assert stack == []
+    _apply_single_quote(stack, " ")
+    assert stack == [("'", 0)]
+    assert _closing_index(stack, "'", 1) is None
+    assert _closing_index(stack, "'", 0) == 0
+
+
+@pytest.mark.parametrize("times", [20000, 80000])
+@pytest.mark.parametrize(
+    "unit",
+    [
+        "'tis msg='api_key=' ",
+        "msg='api_key=' password='",
+        'password=" trunc api_key="',
+        "password='!",
+        'api_key="" ',
+        "x=' \" api_key=' ",
+        'api_key="api_key=" ',
+    ],
+)
+def test_council_r15_quote_stack_is_linear_on_hostile_input(
+    unit: str, times: int
+) -> None:
+    import time
+
+    for head in ("", '{"x": "', "'tis "):
+        started = time.monotonic()
+        mask_credential_context(head + unit * times)
+        assert time.monotonic() - started < 2.0, (head, unit)
