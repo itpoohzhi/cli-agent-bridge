@@ -61,13 +61,10 @@ from core.tool_emulation import (
     sanitize_tool_call,
 )
 from core.cli_runtime_config import NonstreamConfig
-from core.env_hot_reload import get_hot_env_value
-from core.liveness_signals import SIGNAL_S, LivenessWindow, SseProgress
-from core.liveness_signals import passthrough_window
-from core.nonstream_aggregator import NonstreamError, aggregate_events, choice_index
-from core.nonstream_aggregator import internal_stream_body, request_deadlines
-from core.nonstream_resilience import NonstreamRetryBulkhead, NonstreamRetryPolicy
-from core.nonstream_resilience import should_retry_incomplete_nonstream
+from core.env_hot_reload import resolve_upstream_key
+from core.liveness_signals import SIGNAL_S, LivenessWindow, SseProgress, passthrough_window
+from core.nonstream_aggregator import NonstreamError, aggregate_events, choice_index, internal_stream_body, request_deadlines
+from core.nonstream_resilience import NonstreamRetryBulkhead, NonstreamRetryPolicy, should_retry_incomplete_nonstream
 from core.nonstream_retry_runtime import RetryRuntime, retry_incomplete_once
 from core.passthrough_sliding_window import (
     FLAG_PASSTHROUGH_SLIDING_WINDOW,
@@ -75,14 +72,9 @@ from core.passthrough_sliding_window import (
     open_sliding_deadline,
 )
 from core.presend_retry_policy import resolve_presend_response
-from core.runtime_env import DynamicFlagSource, bounded_int as _bounded_int
-from core.runtime_env import env_bool, positive_int as _positive_int
-from core.stream_framing import build_stream_error_chunk, format_sse_event
+from core.runtime_env import DynamicFlagSource, bounded_int as _bounded_int, env_bool, positive_int as _positive_int
+from core.stream_framing import build_stream_error_chunk, format_sse_event, format_stream_error_sse, is_graceful_error_framing_enabled
 from core.usage_wire import positive_wire_usage
-from core.stream_framing import (
-    format_stream_error_sse,
-    is_graceful_error_framing_enabled,
-)
 
 _SLIDING_WIN_FLAG = DynamicFlagSource(FLAG_PASSTHROUGH_SLIDING_WINDOW)
 
@@ -1141,9 +1133,7 @@ class PassthroughAdapter(BackendAdapter):
     @property
     def _upstream_key(self) -> str:
         """Актуальный ключ upstream (`api_key_env` из горячего `.env`)."""
-        env, override = self.config.get("api_key_env"), getattr(self, "_upstream_key_override", None)
-        live = get_hot_env_value(env) if isinstance(env, str) and env else ""
-        return override if override is not None else live or self._static_upstream_key
+        return resolve_upstream_key(self.config, getattr(self, "_upstream_key_override", None), self._static_upstream_key)
 
     @_upstream_key.setter
     def _upstream_key(self, value: Optional[str]) -> None:

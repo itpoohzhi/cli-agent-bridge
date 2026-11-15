@@ -204,3 +204,10 @@ def get_env_cache() -> EnvHotReloadCache:
 def get_hot_env_value(name: str, default: str = "") -> str:
     """Значение переменной из общего кэша `.env` (fallback на окружение)."""
     return get_env_cache().get(name, default)
+
+
+def resolve_upstream_key(config: Mapping[str, object], override: str | None, static_key: str) -> str:
+    """Ключ upstream: явный `override`, иначе живое значение `config["api_key_env"]` из `.env`, иначе `static_key`."""
+    env = config.get("api_key_env")
+    live = get_hot_env_value(env) if isinstance(env, str) and env else ""
+    return override if override is not None else live or static_key
