@@ -88,8 +88,8 @@ def test_decision_flags_are_derived_and_immutable() -> None:
     assert decision.allow_reconcile and decision.clear_error
     with pytest.raises(FrozenInstanceError):
         setattr(decision, "clear_error", False)
-@pytest.mark.parametrize("case", ("exact", "suffix", "attempt", "unstructured", "missing", "open", "tools", "late_error"))
-def test_tail_causal_facade_agrees_on_text_and_error(case: str) -> None:
+@pytest.mark.parametrize("case,returncode", [(case, rc) for case in ("exact", "suffix", "attempt", "unstructured", "missing", "open", "tools", "late_error") for rc in (0, 1)])
+def test_tail_causal_facade_agrees_on_text_and_error(case: str, returncode: int) -> None:
     tail = facade.InterruptionTailState()
     if case != "missing":
         tail.note_error_record("ERROR_MESSAGE", {"content": _LONG_ERROR}, 321)
@@ -102,9 +102,9 @@ def test_tail_causal_facade_agrees_on_text_and_error(case: str) -> None:
         tail.note_planner_record({"content": "Продолжаю", "status": "RUNNING", "tool_calls": ["call"] if case == "tools" else []}, 371)
     if case == "late_error":
         tail.note_error_record(371, text=_LONG_ERROR)
-    snapshot, facts = facade.tail_causal_facts(tail), _tail_facts(tail)
+    snapshot, facts = facade.tail_causal_facts(tail), _tail_facts(tail, returncode)
     error = _LONG_ERROR + (" suffix" if case == "suffix" else "")
-    result = facade.resolve_done_turn_outcome(rc=1, result_error=error, result_status="ERROR", final_text="Финал", emitted_text="", causal_input=facts, **facade.tail_turn_facts(tail))
+    result = facade.resolve_done_turn_outcome(rc=returncode, result_error=error, result_status="ERROR", final_text="Финал", emitted_text="", causal_input=facts, **facade.tail_turn_facts(tail))
     trusted = facade.trusted_final_text("Финал", error, tail, causal_input=facts)
     assert result.self_healed is (case == "exact")
     assert result.rc == (0 if case == "exact" else 1)
@@ -166,8 +166,8 @@ def test_retry_limit_sources(dto: int | None, legacy: int | str | None, limit: i
         return facade.evaluate_stream_retry_eligibility(error_text="connection reset", delivered=False, attempt=attempt, **kw)
     assert decide(limit - 1).can_retry and decide(limit - 1).attempt_budget_s > 0
     assert not decide(limit).can_retry
-def _tail_facts(tail: facade.InterruptionTailState) -> CausalOutcomeInput:
-    snapshot, facts = facade.tail_causal_facts(tail), _facts()
+def _tail_facts(tail: facade.InterruptionTailState, returncode: int = 1) -> CausalOutcomeInput:
+    snapshot, facts = facade.tail_causal_facts(tail), _facts(returncode=returncode)
     return replace(facts, error=replace(facts.error, identity=snapshot.error, error_from_structured_record=snapshot.error_from_structured_record), completion=snapshot.completion, terminal=replace(facts.terminal, has_late_error_or_open_step=snapshot.has_late_error_or_open_step))
 def test_zero_indices_strict_order_and_drain() -> None:
     tail = facade.InterruptionTailState()
