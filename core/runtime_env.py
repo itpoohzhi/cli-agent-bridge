@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import math
 import os
 import threading
@@ -10,6 +11,8 @@ import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
+
+from core.tool_mode import ToollessTagPolicy
 
 _Env = Mapping[str, str]
 
@@ -37,6 +40,22 @@ def env_first(environ: _Env, names: tuple[str, ...]) -> tuple[str, str] | None:
         if value:
             return name, value
     return None
+
+
+def resolve_toolless_tag_policy(
+    environ: _Env, default: ToollessTagPolicy = ToollessTagPolicy.TEXT
+) -> ToollessTagPolicy:
+    """Читает явное окружение; неизвестная политика запрещает служебные теги."""
+    found = env_first(environ, ("BRIDGE_TOOLLESS_TOOL_TAG_POLICY",))
+    if found is None:
+        return default
+    try:
+        return ToollessTagPolicy(found[1].lower())
+    except ValueError:
+        logging.getLogger(__name__).warning(
+            "Invalid BRIDGE_TOOLLESS_TOOL_TAG_POLICY; using error policy"
+        )
+        return ToollessTagPolicy.ERROR
 
 
 def parse_number(environ: _Env, spec: NumSpec) -> Any:
