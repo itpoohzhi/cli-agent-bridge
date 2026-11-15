@@ -17,7 +17,9 @@ import pytest
 from tests.transport_test_support import semantic_equal, require_base, require_wave_artifacts
 
 ROOT = Path(__file__).resolve().parents[1]
+# BASE фиксирует инвентарь; UPSTREAM_DEV отделяет изменения целевой ветки от волны.
 BASE = "cc741edcb9e59d77e02a36790bd3c6e406dbdebb"
+UPSTREAM_DEV = "2c4b3e4cbf6358f7507a14ba9c6cd539844112e6"
 RUN = ROOT / ".ai-team/runs/weighted-transport-dev"
 BASELINE_SHA = "e18dc96bba91c204fd578af943a12fcae988b40641ccf93c9b1289c6b6cb662d"
 BASE_TREE_SHA = "d7f72a3f001dfba242b0178b7cef6d1e8edd0e36d0727e2b0baffb95d50887a1"
@@ -47,8 +49,8 @@ def fingerprint(blobs: BlobSet) -> str:
         digest.update(path.encode() + b"\0" + hashlib.sha256(data).digest())
     return digest.hexdigest()
 
-def base_blobs() -> BlobSet:
-    records = git(("ls-tree", "-rz", "--full-tree", BASE)).split(b"\0")
+def base_blobs(revision: str = BASE) -> BlobSet:
+    records = git(("ls-tree", "-rz", "--full-tree", revision)).split(b"\0")
     entries = [record.split(b"\t", 1) for record in records if record]
     entries = [(meta, path) for meta, path in entries if ".ai-team" not in Path(os.fsdecode(path)).parts]
     ids = [meta.split()[2] for meta, _ in entries]
@@ -196,10 +198,11 @@ def test_complete_baseline_inventory_and_exact_hash(snapshot: Snapshot) -> None:
     assert fingerprint(snapshot.before) == BASE_TREE_SHA
 
 def test_all_changed_tracked_untracked_and_ignored_bounds(snapshot: Snapshot) -> None:
-    before, after = dict(snapshot.before), dict(snapshot.after)
+    before, after = dict(base_blobs(UPSTREAM_DEV)), dict(snapshot.after)
     errors = []
-    for path in sorted(snapshot.changed & after.keys()):
-        errors.extend(violations(path, before.get(path, b""), after[path]))
+    for path in sorted(after):
+        if before.get(path) != after[path]:
+            errors.extend(violations(path, before.get(path, b""), after[path]))
     assert not errors, (snapshot.sha256, errors)
 
 @pytest.mark.semantic_red("legacy_transport_facades_not_extracted")
