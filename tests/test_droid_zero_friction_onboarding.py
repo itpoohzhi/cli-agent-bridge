@@ -86,14 +86,6 @@ SUFFIX_ALIASES = {
         for effort in (*LMH, "max")
     },
     **{
-        f"gemini-4-carbon-{effort}": {
-            "backend_id": "gemini-4-carbon",
-            "backend": "agy",
-            "effort": effort,
-        }
-        for effort in LMH
-    },
-    **{
         f"gemini-4-hydrogen-{effort}": {
             "backend_id": "gemini-4-hydrogen",
             "backend": "agy",
