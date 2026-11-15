@@ -6636,7 +6636,7 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
                 "type": "proxy_error",
                 "code": 502,
             }
-        if out.get("rc") != 0 or not (out.get("text") or out.get("tool_calls")):
+        if out.get("rc") != 0:
             return {
                 "message": f"{label} exec exited rc={out.get('rc')}",
                 "detail": str(out.get("err"))[:500],
