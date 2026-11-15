@@ -180,7 +180,19 @@ def _scan_unquoted(text: str, pos: int, is_scheme: bool) -> int:
         # В JSON-строке `\` перед закрывающей кавычкой — экранирование, а не часть значения.
         while end > u and text[end - 1] == "\\":
             end -= 1
-    return end if end > u else slashes_end
+    if end > u:
+        return end
+    # Серия `\` перед кавычкой без значения экранирует эту кавычку, а не является значением.
+    return slashes_end if u == slashes_end else pos
+
+
+def _scan_quoted_value(text: str, pos: int, failed_until: _FailedUntil) -> int | None:
+    """Конец значения в парных кавычках (обычных или `\\"`-экранированных); None — значение не закавычено."""
+    if pos >= len(text):
+        return None
+    if text[pos] in "\"'":
+        return _scan_plain_quoted(text, pos, failed_until)
+    return _scan_escaped_dq(text, pos, failed_until)
 
 
 def _scan_credential_value(
@@ -191,14 +203,8 @@ def _scan_credential_value(
     `failed_until` запоминает, до какой позиции разбор данного типа кавычек уже провалился: следующая
     кавычка того же типа внутри этой зоны не перечитывается, поэтому суммарно разбор линеен по входу.
     """
-    if pos < len(text):
-        if text[pos] in "\"'":
-            end = _scan_plain_quoted(text, pos, failed_until)
-        else:
-            end = _scan_escaped_dq(text, pos, failed_until)
-        if end is not None:
-            return end
-    return _scan_unquoted(text, pos, is_scheme)
+    end = _scan_quoted_value(text, pos, failed_until)
+    return end if end is not None else _scan_unquoted(text, pos, is_scheme)
 
 
 def _opens_enclosing_string(m: re.Match[str]) -> bool:
@@ -219,6 +225,10 @@ def mask_credential_context(text: str) -> str:
         # а не имя ключа. Каждый шаг цепочки сдвигает позицию вперёд, поэтому разбор остаётся линейным.
         pos, value_is_scheme = m.end(), is_scheme
         while (nxt := _CREDENTIAL_PREFIX_RE.match(text, pos)) is not None:
+            # Префикс целиком внутри парных кавычек (`"password=a b"`) — часть значения: его не вскрываем.
+            quoted_end = _scan_quoted_value(text, pos, failed_until)
+            if quoted_end is not None and nxt.end() < quoted_end:
+                break
             pos, value_is_scheme = nxt.end(), nxt.group("scheme") is not None
         # Цепочка без значения маскируется целиком: повторный разбор с каждого её звена был бы O(n^2).
         end = max(_scan_credential_value(text, pos, value_is_scheme, failed_until), pos)

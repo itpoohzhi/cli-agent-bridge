@@ -182,3 +182,54 @@ def test_capacity_error_body_respects_explicit_env() -> None:
     message = str(capacity_error_body("No capacity available " + "word " * 50, env=env)["message"])
     assert message == "upstream model has no capacity available: No capacity "
     assert len(str(capacity_error_body("No capacity available " + "word " * 50)["message"])) > len(message) + 100
+
+
+# ---- Cycle 5 RW-002/RW-003: срез окна не оставляет обрубок секрета ------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("detail", "stub"),
+    [
+        ("\t" * 32764 + "S3cr" + "x" * 4100, "S3cr"),
+        ("Error:\r" + "\t" * 32753 + "eyJhbGci" + "A" * 4200, "eyJhbGci"),
+        ("\t" * 32760 + "S3crK3y" * 800, "S3cr"),
+        ("\xa0" * 4092 + "S3cr" + "B" * 600, "S3cr"),
+        ("\v" * 4092 + "S3cr" + "B" * 600, "S3cr"),
+        ('{"pad":"' + "A" * 4077 + '","x":"' + "S3cr" + "B" * 600 + '"}', "S3cr"),
+        ("Error:" + "k=" * 3000 + "S3cr" + "B" * 600, "S3cr"),
+    ],
+)
+def test_cut_never_leaves_secret_stub_for_any_whitespace_or_compact_input(detail: str, stub: str) -> None:
+    from core.agy_capacity_guard import summarize_capacity_text
+    from core.log_redaction import redact_log_text
+
+    message = str(capacity_error_body(detail)["message"])
+    assert stub not in message, message
+    assert stub not in summarize_capacity_text(detail, redact_log_text, {})
+
+
+def test_cut_at_space_guards_non_positive_target_and_any_unicode_whitespace() -> None:
+    from core.agy_capacity_guard import _cut_at_space
+
+    assert _cut_at_space("abc", 0, 5) == 0 and _cut_at_space("", 0, 5) == 0
+    for sep in ("\t", "\r", "\v", "\f", "\xa0"):
+        text = "ab" + sep + "S3cr" + "x" * 50
+        assert _cut_at_space(text, 6, 4) == 2, repr(sep)
+
+
+def test_cut_drops_boundary_token_in_compact_text_but_keeps_single_run() -> None:
+    from core.agy_capacity_guard import _cut_at_space, summarize_capacity_text
+
+    assert _cut_at_space('{"a":"S3cr' + "B" * 50, 10, 4) == 6
+    assert len(summarize_capacity_text("x" * 100000, lambda s: s, {})) == 200
+
+
+def test_cut_is_linear_on_long_inputs() -> None:
+    import time
+
+    from core.agy_capacity_guard import summarize_capacity_text
+
+    started = time.monotonic()
+    for text in ("\t" * 200000 + "x" * 200000, '{"a":"' * 60000, "k=" * 200000):
+        summarize_capacity_text(text, lambda s: s, {})
+    assert time.monotonic() - started < 1.0

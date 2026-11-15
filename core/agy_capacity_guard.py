@@ -41,6 +41,8 @@ DEFAULT_RAW_MAX_CHARS: Final[int] = 32768
 _RAW_WINDOW_FACTOR: Final[int] = 4
 SUMMARY_MAX_CHARS_ENV: Final[str] = "AGY_CAPACITY_SUMMARY_MAX_CHARS"
 DEFAULT_SUMMARY_MAX_CHARS: Final[int] = 200
+# Разделители токенов в тексте без пробелов (компактный JSON, `k=v;k=v`): секрет не содержит их.
+_TOKEN_DELIMITERS: Final[frozenset[str]] = frozenset("\"'`:,=;&|[]{}()<>")
 _FALSE: Final[frozenset[str]] = frozenset(("0", "false", "no", "off"))
 # Встроенные маркеры ёмкости требуют признак статуса/ошибки: голая проза с кодом причины
 # в stdout не должна убивать процесс. Явный `AGY_CAPACITY_MARKERS` признак не требует.
@@ -122,9 +124,12 @@ def raw_max_chars(env: Mapping[str, str] | None = None) -> int:
 def _cut_at_space(text: str, target: int, span: int) -> int:
     """Позиция среза не по середине слова: `target`, иначе ближайший пробел вперёд (не дальше `span`).
 
-    Слово длиннее `span` отбрасывается целиком (срез назад к предыдущему пробелу): обрубок секрета,
-    не опознанный маскированием, утёк бы в сводку. Без пробела в префиксе слово — единственное, срез на `target`.
+    Слово длиннее `span` отбрасывается целиком (срез назад к предыдущему пробелу, любому `isspace()`):
+    обрубок секрета, не опознанный маскированием, утёк бы в сводку. Без пробела в префиксе (компактный JSON)
+    срез уходит к разделителю перед пересекающим границу токеном; сплошной токен без разделителей — `target`.
     """
+    if target <= 0:
+        return 0
     if target >= len(text) or text[target].isspace() or text[target - 1].isspace():
         return min(target, len(text))
     limit = min(len(text), target + span)
@@ -133,8 +138,17 @@ def _cut_at_space(text: str, target: int, span: int) -> int:
         cut += 1
     if cut < limit or cut == len(text):
         return cut
-    back = max((i for i in (text.rfind(" ", 0, target), text.rfind("\n", 0, target)) if i >= 0), default=-1)
-    return back if back >= 0 else target
+    back = target - 1
+    while back >= 0 and not text[back].isspace():
+        back -= 1
+    if back >= 0:
+        return back
+    if text[target] in _TOKEN_DELIMITERS:
+        return target
+    start = target
+    while start > 0 and text[start - 1] not in _TOKEN_DELIMITERS:
+        start -= 1
+    return start or target
 
 
 def summarize_capacity_text(text: object, redact: Callable[[str], str], env: Mapping[str, str] | None = None) -> str:

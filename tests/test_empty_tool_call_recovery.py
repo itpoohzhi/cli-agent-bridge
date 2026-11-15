@@ -822,3 +822,46 @@ def test_tool_turn_call_after_unnamed_is_dropped_and_turn_is_poisoned() -> None:
     turn._call({"id": "c", "name": "parallel", "arguments": {"calls": [{"name": "x", "arguments": {}}]}})
     assert published == [] and turn.calls == []
     assert turn.error_body()["type"] == "tool_call_parse_error"
+
+
+# ---- Cycle 5 RW-001: закавыченное значение не вскрывается цепочкой префиксов ------------------------------
+
+
+@pytest.mark.parametrize(
+    ("line", "leaks"),
+    [
+        ('api_key="token=part1 part2"', ("part1", "part2")),
+        ('{"api_key": "password=part1 part2"}', ("part1", "part2")),
+        ('{"secret": "password=my MyPass2!"}', ("my MyPass2", "MyPass2")),
+        ('{"secret": "api_key=xyz"}', ("xyz",)),
+        ('secret="token=abc; code=MyPass2!"', ("abc", "MyPass2")),
+        ('{"secret": "key=a,b"}', ("a,b", "key=")),
+        (json.dumps({"x": 'secret: "password=p1 p2"', "n": 1}), ("p1", "p2")),
+    ],
+)
+def test_quoted_value_after_prefix_is_masked_whole_without_dangling_quote(line: str, leaks: tuple[str, ...]) -> None:
+    from core.log_redaction import redact_log_text
+
+    out = redact_log_text(line)
+    assert not any(leak in out for leak in leaks), out
+    assert out.count('"') % 2 == 0 and out.count("'") % 2 == 0, out
+    assert out.count("{") == out.count("}"), out
+    assert "***" in out or "[REDACTED]" in out, out
+
+
+def test_quoted_value_masking_keeps_json_frame_exact() -> None:
+    assert mask_credential_context('{"secret": "password=my MyPass2!"}') == "{***}"
+    assert mask_credential_context('{"secret": "api_key=xyz"}') == "{***}"
+    assert mask_credential_context('api_key="token=part1 part2" tail') == "*** tail"
+    escaped = json.dumps({"detail": 'env "api_key=" invalid'})
+    assert mask_credential_context(escaped) == escaped
+    assert json.loads(mask_credential_context(escaped))["detail"] == 'env "api_key=" invalid'
+
+
+def test_quoted_value_after_prefix_is_linear_on_hostile_input() -> None:
+    import time
+
+    started = time.monotonic()
+    out = mask_credential_context('api_key="' * 20000 + "x")
+    assert time.monotonic() - started < 0.5
+    assert "api_key" not in out.replace("***", "")
