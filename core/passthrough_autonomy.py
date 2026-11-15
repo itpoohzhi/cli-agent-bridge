@@ -40,20 +40,35 @@ def resolve_target_model(model_entry: dict, requested_model_id: str) -> str:
     return requested_model_id
 
 
+def _unpack_passthrough_options(
+    positional: tuple[object, ...], options: dict[str, object]
+) -> tuple[object, object, bool]:
+    """Разобрать alias, alias_effort и effort_on из позиционных или именованных аргументов."""
+    if len(positional) > 3:
+        raise TypeError("prepare_passthrough_request accepts at most six arguments")
+    names = ("alias", "alias_effort", "effort_on")
+    alias, alias_effort, effort_on = (
+        positional[index] if len(positional) > index else options.get(name)
+        for index, name in enumerate(names)
+    )
+    return alias, alias_effort, bool(effort_on)
+
+
+def _catalog_effort_spec(model: dict, effort_on: bool) -> ModelEffortSpec:
+    """Построить спеку effort каталога; при выключенном флаге — только для effortless."""
+    declared = model.get("efforts") if isinstance(model, dict) else None
+    if effort_on or is_effortless(declared):
+        return ModelEffortSpec.from_catalog_entry(model)
+    return ModelEffortSpec()
+
+
 def prepare_passthrough_request(
     req: dict, model: dict, model_id: str, *positional: object, **options: object
 ) -> tuple[dict, Any]:
     """Подготовить модель и effort без зависимости ядра от HTTP-фасада."""
-    if len(positional) > 3:
-        raise TypeError("prepare_passthrough_request accepts at most six arguments")
-    alias = positional[0] if positional else options.get("alias")
-    alias_effort = positional[1] if len(positional) > 1 else options.get("alias_effort")
-    effort_on = bool(positional[2] if len(positional) > 2 else options.get("effort_on", False))
+    alias, alias_effort, effort_on = _unpack_passthrough_options(positional, options)
     has_upstream = bool(resolve_target_model(model, ""))
-    declared = model.get("efforts") if isinstance(model, dict) else None
-    # При выключенном флаге спека нужна только модели без оси effort.
-    build_spec = effort_on or is_effortless(declared)
-    catalog_spec = ModelEffortSpec.from_catalog_entry(model) if build_spec else ModelEffortSpec()
+    catalog_spec = _catalog_effort_spec(model, effort_on)
     pt_effort = resolve_passthrough_effort(
         req.get("reasoning_effort"),
         alias_effort if isinstance(alias_effort, str) else None,
