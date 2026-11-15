@@ -205,6 +205,7 @@ from core.catalog_flags import (  # noqa: E402
     sidecar_allowlist,
 )
 from core.passthrough_autonomy import (  # noqa: E402
+    PassthroughOptions,
     passthrough_autonomy_validation_enabled,
     prepare_passthrough_request,
     resolve_target_model,
@@ -217,6 +218,7 @@ from core.effort_policy import (  # noqa: E402
     catalog_effort_specs, clamp_effort_downward, describe_clamp, resolve_alias_effort,
     resolve_model_effort_fields,
 )
+from core.effortless_policy import EffortValidationError, card_effort_fields, effortless_specs  # noqa: E402
 CLI_CFG = CliRuntimeConfig.from_env()
 REQUEST_TELEMETRY = RequestTelemetryStore()  # DuckDB/sqlite3, неблокирующая запись, BRIDGE_TELEMETRY_* (core/defaults.py)
 
@@ -717,15 +719,14 @@ def _effort_specs() -> dict[str, ModelEffortSpec]:
 
 def _advertise_efforts(card: dict[str, Any], mid: str, specs: dict[str, ModelEffortSpec]) -> None:
     if fields := resolve_model_effort_fields(mid, specs):
-        card["supported_reasoning_efforts"] = list(fields.supported_efforts)
-        card["default_reasoning_effort"] = fields.default_effort
+        card.update(card_effort_fields(fields))
 
 
 def _build_models_list(
     owner_tuple: tuple[str, ...] | None = None,
 ) -> list[dict[str, Any]]:
     published = _get_published_models()
-    specs = _effort_specs() if flag_enabled(FLAG_EFFORT_CATALOG) else {}
+    specs = _effort_specs() if flag_enabled(FLAG_EFFORT_CATALOG) else effortless_specs(_effort_specs())
     order = []
     if MODEL_ID in published:
         order.append(MODEL_ID)
@@ -5447,7 +5448,7 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
             owner = PROVIDER_SCOPES[provider_id]
             owner_tuple = (owner,) if isinstance(owner, str) else owner
 
-        payload = {"object": "list", "data": _build_models_list(owner_tuple)}
+        payload = {"object": "list", "data": __import__("core.fallback_http_hook", fromlist=["append_models"]).append_models(_build_models_list(owner_tuple), owner_tuple)}
         etag = _etag(payload)
         if _etag_matches(self.headers.get("If-None-Match"), etag):
             self.send_response(304)
@@ -7188,7 +7189,7 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
                     },
                 )
                 return
-            # (8) модель.
+            if __import__("core.fallback_http_hook", fromlist=["dispatch"]).dispatch(self, req, sys.modules[__name__], lambda a, r, s: a.handle(path=self.path, raw_body=json.dumps(r).encode("utf-8"), request=r, headers=dict(self.headers.items()), sink=s), provider_id): return
             raw_model = req.get("model")
             model_len = len(raw_model) if isinstance(raw_model, str) else 0
             if raw_model is None:
@@ -7397,24 +7398,21 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
                     return
             if isinstance(passthrough, PassthroughAdapter):
                 if raw_model != model_id and alias is None:
-                    self._reject(
-                        400,
-                        "model_not_allowed",
-                        "passthrough requires an exact model id",
-                    )
+                    self._reject(400, "model_not_allowed", "passthrough requires an exact model id")
                     return
                 effort_on = flag_enabled(FLAG_EFFORT_CATALOG)
-                req, pt_effort = prepare_passthrough_request(
-                    req, model, model_id, alias, alias_effort, effort_on
-                )
+                try:
+                    opts = PassthroughOptions(alias=alias, alias_effort=alias_effort, effort_on=effort_on)
+                    req, pt_effort = prepare_passthrough_request(req, model, model_id, opts)
+                except EffortValidationError as exc:
+                    self._reject(400, "unsupported_reasoning_effort", str(exc), model_id, model_len)
+                    return
                 target_model = resolve_target_model(model, model_id)
                 if pt_effort.apply or target_model != model_id or alias:
                     if pt_effort.clamped_from is not None:
                         _log(describe_clamp("passthrough reasoning_effort", pt_effort.clamped_from, pt_effort.value, model_id, _LOG_EFFORT_MAX))
                     raw = json.dumps(req, ensure_ascii=False).encode("utf-8")
-                _log(
-                    f"chat route=passthrough model={model_id} alias={model_id + '-' + alias[1] if alias else '-'} {self._trace_log_fields()}"
-                )
+                _log(f"chat route=passthrough model={model_id} alias={model_id + '-' + alias[1] if alias else '-'} {self._trace_log_fields()}")
                 self._serve_resilient(
                     model["backend"],
                     lambda _h=hub_auth_ok: self._serve_passthrough(

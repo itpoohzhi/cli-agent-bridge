@@ -29,15 +29,15 @@ _LMH = ("low", "medium", "high")
 # обслуживается мостом opencode-go независимо от гейта (онбординг 2b7431f).
 BASE_MODELS = (
     ("claude-sonnet-5-5", "claude-p", ("high",), "high"),
-    ("gemini-3.8-flash", "agy", _LMH, "high"), ("gemini-4-carbon", "agy", _LMH, "high"), ("muse-ember-1.0", "muse", (*_ALL[:-1], "xhigh", "max"), "high"),
+    ("gemini-3.8-flash", "agy", _LMH, "high"), ("gemini-4-carbon", "agy", ("off",), "off"), ("muse-ember-1.0", "muse", (*_ALL[:-1], "xhigh", "max"), "high"),
     ("muse-spark-1.3", "muse", ("max",), "max"),
     ("muse-spark-1.3-contributor", "muse", ("max",), "max"),
     ("muse-wonder-1.0", "muse", _ALL, "high"),
     ("muse-wonder-full-1.0", "muse", _ALL, "high"),
     ("gpt-6.1-terra", "codex", _LMH, "high"),
     ("claude-opus-5-5", "claude-p", ("high",), "high"),
-    ("claude-haiku-5-5", "opencode-go-claude", ("high",), "high"),
-    ("gemini-4-argon", "agy", _LMH, "high"),
+    ("claude-haiku-5-5", "claude-p", ("high",), "high"),
+    ("gemini-4-argon", "agy", _LMH, "high"), ("gemini-4-hydrogen", "agy", (*_LMH, "xhigh"), "high"),
     ("deepseek-v4.1-flash", "opencode-go", ("off", "low", "high", "max"), "off"),
     ("deepseek-v4.1-flash-free", "opencode-zen", _ZEN, "high"),
     ("flint-40b-free", "opencode-zen", _ZEN, "high"),
@@ -52,7 +52,7 @@ BASE_NAMES = {
     "claude-sonnet-5-5": "Claude Sonnet 5.5 (Claude-p bridge)",
     "gemini-3.8-flash": "Gemini 3.8 Flash (AGY bridge)",
 }
-BASE_DROID_BACKEND = dict(kind="droid", enabled=False, required=False, owned_by="factory-droid", max_concurrent=32)
+BASE_DROID_BACKEND = dict(kind="droid", enabled=False, required=False, owned_by="factory-droid", max_concurrent=64)
 BASE_ALIAS: dict[str, Any] = {}
 
 
@@ -173,7 +173,7 @@ class DroidCatalogFlagTest(unittest.TestCase):
         self.assertEqual(gated, raw)
         self.assertTrue(gated["backends"]["droid"]["enabled"])
         self.assertEqual(list(routes(gated).values()).count("droid"), 3)
-        self.assertEqual(len(gated["aliases"]), 35)
+        self.assertEqual(len(gated["aliases"]), 32)
 
     def test_gate_off_tolerates_malformed_entries(self) -> None:
         raw: dict[str, Any] = {"schema_version": 3, "backends": {"droid": "broken"}, "models": ["broken", {"id": "x"}], "technical_ref": {"droid_off": {"models": {"x": {"backend": "agy"}}}}}
@@ -293,7 +293,7 @@ class DroidCatalogFlagTest(unittest.TestCase):
                 self.assertTrue(catalog["backends"]["droid"]["enabled"])
                 self.assertEqual((catalog["models"]["gpt-6.1-sol"]["backend"], catalog["models"]["gpt-6.1-sol-droid"]["backend"]), ("codex", "droid"))
                 self.assertIn("gpt-6.1-sol", catalog["models"])
-                self.assertEqual(len(catalog["aliases"]), 35)
+                self.assertEqual(len(catalog["aliases"]), 32)
 
 
 if __name__ == "__main__":
