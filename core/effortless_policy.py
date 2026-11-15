@@ -62,6 +62,21 @@ def card_effort_fields(fields: ModelEffortCardFields) -> dict[str, object]:
     return result
 
 
+def _resolve_clamped_from(raw: object, clamp_enabled: bool | None) -> str | None:
+    """Проверить `reasoning_effort` для effortless-модели и вернуть исходный уровень при клампе."""
+    if not isinstance(raw, str):
+        raise EffortValidationError(_MSG_NOT_STRING)
+    candidate = raw.strip().lower()
+    if not candidate or candidate == OFF:
+        return None
+    if candidate not in _KNOWN_EFFORT_LEVELS:
+        raise EffortValidationError(_MSG_NOT_ALLOWED)
+    enabled = effortless_clamp_enabled() if clamp_enabled is None else clamp_enabled
+    if not enabled:
+        raise EffortValidationError(_MSG_NOT_ALLOWED)
+    return candidate
+
+
 def strip_effortless_effort(
     req: dict[str, object],
     spec: ModelEffortSpec,
@@ -73,19 +88,9 @@ def strip_effortless_effort(
         return req, res
     if "reasoning_effort" not in req:
         return req, replace(res, apply=False) if res.apply else res
-    raw = req["reasoning_effort"]
-    if not isinstance(raw, str):
-        raise EffortValidationError(_MSG_NOT_STRING)
-    candidate = raw.strip().lower()
-    clamped_from: str | None = None
-    if candidate and candidate != OFF:
-        if candidate not in _KNOWN_EFFORT_LEVELS:
-            raise EffortValidationError(_MSG_NOT_ALLOWED)
-        enabled = effortless_clamp_enabled() if clamp_enabled is None else clamp_enabled
-        if not enabled:
-            raise EffortValidationError(_MSG_NOT_ALLOWED)
-        clamped_from = candidate
-    clean = {key: value for key, value in req.items() if key != "reasoning_effort"}
+    clamped_from = _resolve_clamped_from(req["reasoning_effort"], clamp_enabled)
+    clean = dict(req)
+    _ = clean.pop("reasoning_effort", None)
     return clean, EffortResolution(OFF, True, clamped_from)
 
 

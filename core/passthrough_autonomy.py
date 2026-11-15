@@ -73,9 +73,9 @@ def _prepare_effortless_passthrough(
     model_id: str,
     opts: PassthroughOptions,
     catalog_spec: ModelEffortSpec,
-    has_upstream: bool,
 ) -> tuple[dict[str, object], EffortResolution]:
     """Подготовить passthrough-запрос для effortless-модели без лишнего копирования."""
+    has_upstream = bool(resolve_target_model(model, ""))
     needs_rewrite = has_upstream or bool(opts.alias)
     target_model = resolve_target_model(model, model_id) if needs_rewrite else model_id
     alias_effort = (
@@ -106,12 +106,10 @@ def prepare_passthrough_request(
 ) -> tuple[dict[str, object], EffortResolution]:
     """Подготовить модель и effort без зависимости ядра от HTTP-фасада."""
     opts = PassthroughOptions() if options is None else options
-    has_upstream = bool(resolve_target_model(model, ""))
     catalog_spec = _catalog_effort_spec(model, opts.effort_on)
     if is_effortless(catalog_spec.efforts):
-        return _prepare_effortless_passthrough(
-            req, model, model_id, opts, catalog_spec, has_upstream
-        )
+        return _prepare_effortless_passthrough(req, model, model_id, opts, catalog_spec)
+    has_upstream = bool(resolve_target_model(model, ""))
     pt_effort = resolve_passthrough_effort(
         req.get("reasoning_effort"),
         opts.alias_effort if isinstance(opts.alias_effort, str) else None,

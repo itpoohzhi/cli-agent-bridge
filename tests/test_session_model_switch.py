@@ -89,7 +89,7 @@ def test_passthrough_strips_reasoning_effort_for_effortless_model(effort_on: boo
     assert res_off.value == "off" and res_off.apply is True and res_off.clamped_from is None
 
 
-def test_passthrough_effortless_absent_blank_and_validation_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_passthrough_effortless_absent_blank_and_invalid_values() -> None:
     absent_req: dict[str, object] = {"model": CARBON, "messages": []}
     clean_absent, res_absent = prepare_passthrough_request(absent_req, OFF_MODEL, CARBON)
     assert clean_absent is absent_req and res_absent == EffortResolution()
@@ -108,6 +108,8 @@ def test_passthrough_effortless_absent_blank_and_validation_errors(monkeypatch: 
         with pytest.raises(EffortValidationError, match="must be a string"):
             prepare_passthrough_request({"model": CARBON, "reasoning_effort": non_str}, OFF_MODEL, CARBON)
 
+
+def test_passthrough_effortless_clamp_disabled_and_alias_effort(monkeypatch: pytest.MonkeyPatch) -> None:
     with pytest.raises(EffortValidationError):
         prepare_passthrough_request(
             {"model": CARBON, "reasoning_effort": "high"},
