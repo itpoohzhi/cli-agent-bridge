@@ -36,8 +36,8 @@ BASE_MODELS = (
     ("muse-wonder-full-1.0", "muse", _ALL, "high"),
     ("gpt-6.1-terra", "codex", _LMH, "high"),
     ("claude-opus-5-5", "claude-p", ("high",), "high"),
-    ("claude-haiku-5-5", "opencode-go-claude", ("high",), "high"),
-    ("gemini-4-argon", "agy", _LMH, "high"),
+    ("claude-haiku-5-5", "claude-p", ("high",), "high"),
+    ("gemini-4-argon", "agy", _LMH, "high"), ("gemini-4-hydrogen", "agy", (*_LMH, "xhigh"), "high"),
     ("deepseek-v4.1-flash", "opencode-go", ("off", "low", "high", "max"), "off"),
     ("deepseek-v4.1-flash-free", "opencode-zen", _ZEN, "high"),
     ("flint-40b-free", "opencode-zen", _ZEN, "high"),
@@ -52,7 +52,7 @@ BASE_NAMES = {
     "claude-sonnet-5-5": "Claude Sonnet 5.5 (Claude-p bridge)",
     "gemini-3.8-flash": "Gemini 3.8 Flash (AGY bridge)",
 }
-BASE_DROID_BACKEND = dict(kind="droid", enabled=False, required=False, owned_by="factory-droid", max_concurrent=32)
+BASE_DROID_BACKEND = dict(kind="droid", enabled=False, required=False, owned_by="factory-droid", max_concurrent=64)
 BASE_ALIAS: dict[str, Any] = {}
 
 
