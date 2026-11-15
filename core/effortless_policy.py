@@ -72,7 +72,13 @@ def card_effort_fields(fields: ModelEffortCardFields) -> dict[str, object]:
 
 
 def _resolve_clamped_from(raw: object, clamp_enabled: bool | None) -> str | None:
-    """Проверить `reasoning_effort` для effortless-модели и вернуть исходный уровень при клампе."""
+    """Проверить `reasoning_effort` для effortless-модели и вернуть исходный уровень при клампе.
+
+    JSON `null` (его шлют стандартные OpenAI SDK для незаданного поля) равнозначен
+    отсутствию параметра: уровня нет, клампа нет.
+    """
+    if raw is None:
+        return None
     if not isinstance(raw, str):
         raise EffortValidationError(_MSG_NOT_STRING)
     candidate = raw.strip().lower()

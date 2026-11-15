@@ -157,7 +157,7 @@ def test_hub_four_turn_model_switch_isolates_effort(hub: SimpleNamespace) -> Non
     assert len(hub.seen) == len(TURNS)
 
 
-@pytest.mark.parametrize("bad_effort", ["ultra_turbo", 123, None])
+@pytest.mark.parametrize("bad_effort", ["ultra_turbo", 123])
 def test_hub_rejects_invalid_and_non_string_effort_for_carbon(
     hub: SimpleNamespace, bad_effort: object
 ) -> None:
@@ -166,6 +166,19 @@ def test_hub_rejects_invalid_and_non_string_effort_for_carbon(
     assert status == 400
     assert payload["error"]["type"] == "unsupported_reasoning_effort"
     assert not hub.seen
+
+
+@pytest.mark.parametrize("flag", ["false", "true"])
+def test_hub_treats_json_null_reasoning_effort_as_unset(
+    hub: SimpleNamespace, monkeypatch: pytest.MonkeyPatch, flag: str
+) -> None:
+    """RW-001: `"reasoning_effort": null` от стандартных SDK не даёт 400 на effortless-модели."""
+    monkeypatch.setenv(FLAG, flag)
+    body = {"model": CARBON, "reasoning_effort": None, "messages": [{"role": "user", "content": "hi"}]}
+    status, payload = _call(hub.port, "/v1/chat/completions", body, {"x-dsh-chat-id": "switch-chat"})
+    assert status == 200, payload
+    assert payload["choices"][0]["message"]["content"] == "ok"
+    assert hub.seen[-1]["model"] == CARBON and "reasoning_effort" not in hub.seen[-1]
 
 
 def test_hub_rejects_effort_on_carbon_when_clamp_disabled(

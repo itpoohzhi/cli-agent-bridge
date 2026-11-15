@@ -104,9 +104,32 @@ def test_passthrough_effortless_absent_blank_and_invalid_values() -> None:
         with pytest.raises(EffortValidationError):
             prepare_passthrough_request({"model": CARBON, "reasoning_effort": bad}, OFF_MODEL, CARBON)
 
-    for non_str in (123, True, None):
+    for non_str in (123, True):
         with pytest.raises(EffortValidationError, match="must be a string"):
             prepare_passthrough_request({"model": CARBON, "reasoning_effort": non_str}, OFF_MODEL, CARBON)
+
+
+@pytest.mark.parametrize("effort_on", [False, True])
+def test_passthrough_effortless_json_null_effort_is_unset(effort_on: bool) -> None:
+    """JSON `null` (так стандартные OpenAI SDK шлют незаданное поле) равен отсутствию параметра."""
+    req: dict[str, object] = {"model": CARBON, "reasoning_effort": None, "messages": []}
+    clean, resolution = prepare_passthrough_request(
+        req, OFF_MODEL, CARBON, PassthroughOptions(effort_on=effort_on)
+    )
+    assert "reasoning_effort" not in clean and clean["messages"] == []
+    assert resolution == EffortResolution("off", True, None)
+    assert req["reasoning_effort"] is None  # исходный запрос не мутируется
+
+    spec = ModelEffortSpec(("off",), "off")
+    stripped, direct = strip_effortless_effort(req, spec, EffortResolution())
+    assert stripped == {"model": CARBON, "messages": []}
+    assert direct == EffortResolution("off", True, None)
+    assert "reasoning_effort" in req
+
+    clamped, res_clamped = strip_effortless_effort(
+        {"reasoning_effort": None}, spec, EffortResolution("off", True), clamp_enabled=False
+    )
+    assert clamped == {} and res_clamped == EffortResolution("off", True, None)
 
 
 def test_passthrough_effortless_clamp_disabled_and_alias_effort(monkeypatch: pytest.MonkeyPatch) -> None:
