@@ -228,9 +228,9 @@ class _RetryFacts:
 
 def _valid_retry_facts(f: _RetryFacts) -> bool:
     """Проверить типы аргументов legacy-контракта; границы проверяет бюджетный контроллер."""
-    exact = (isinstance(f.attempt, int) and isinstance(f.elapsed_s, (int, float)) and isinstance(f.delivered, bool)  # pyright: ignore[reportUnnecessaryIsInstance]
-             and isinstance(f.had_tool_side_effects, bool) and isinstance(f.max_attempts, int | None)  # pyright: ignore[reportUnnecessaryIsInstance]
-             and isinstance(f.budget_config, RetryBudgetConfig | None) and isinstance(f.error_text, str) and isinstance(f.source, str))  # pyright: ignore[reportUnnecessaryIsInstance]
+    typed = ((f.attempt, int), (f.elapsed_s, (int, float)), (f.delivered, bool), (f.had_tool_side_effects, bool),
+             (f.max_attempts, int | None), (f.budget_config, RetryBudgetConfig | None), (f.error_text, str), (f.source, str))
+    exact = all(isinstance(value, expected) for value, expected in typed)
     checks = (0.0 <= f.elapsed_s <= MAX_ELAPSED_S, 0 <= f.attempt, not isinstance(f.attempt, bool), not isinstance(f.elapsed_s, bool), not isinstance(f.max_attempts, bool))
     return exact and all(checks)
 
@@ -246,15 +246,15 @@ def _resolve_retry_cfg(f: _RetryFacts) -> RetryBudgetConfig | None:
 def _retry_with_budget(f: _RetryFacts) -> RetryDecision:
     """Повтор разрешён только в пределах бюджета, суженного legacy-лимитом."""
     cfg = _resolve_retry_cfg(f)
-    if cfg is None:
-        return replace(RETRY_BLOCKED, keep_hot_session=True)
-    try:
-        decision = compute_attempt_decision(cfg, f.attempt, float(f.elapsed_s))
-    except (ValueError, TypeError, OverflowError):
-        return RETRY_BLOCKED
-    if not decision.allow_retry:
-        return replace(RETRY_BLOCKED, keep_hot_session=True)
-    return RetryDecision(True, True, TRANSIENT_RETRY_REASON, decision.attempt_budget_s)
+    result = replace(RETRY_BLOCKED, keep_hot_session=True)
+    if cfg is not None:
+        try:
+            decision = compute_attempt_decision(cfg, f.attempt, float(f.elapsed_s))
+        except (ValueError, TypeError, OverflowError):
+            result = RETRY_BLOCKED
+        else:
+            result = RetryDecision(True, True, TRANSIENT_RETRY_REASON, decision.attempt_budget_s) if decision.allow_retry else result
+    return result
 
 def evaluate_stream_retry_eligibility(**kw: object) -> RetryDecision:
     """Оценить допустимость повтора стрима; горячая сессия живёт при тихом транзиентном обрыве."""
@@ -263,9 +263,10 @@ def evaluate_stream_retry_eligibility(**kw: object) -> RetryDecision:
     except TypeError:
         return RETRY_BLOCKED
     quiet = _valid_retry_facts(f) and is_transient_stream_interruption(f.error_text, source=f.source) and not f.had_tool_side_effects
-    if f.delivered or not quiet:
-        return replace(RETRY_BLOCKED, keep_hot_session=quiet)
-    return _retry_with_budget(f)
+    result = replace(RETRY_BLOCKED, keep_hot_session=quiet)
+    if quiet and not f.delivered:
+        result = _retry_with_budget(f)
+    return result
 
 @dataclass(frozen=True)
 class GracefulInterruptionDecision:

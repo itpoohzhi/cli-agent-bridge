@@ -84,8 +84,7 @@ def _reject_oversize(fail_closed: bool, text: str, limit: int) -> bool:
 def _has_residual_encoding(safe: str) -> bool:
     entities = re.search(rf"(?i)(?:{_K_PLAIN})&+=", safe)
     escapes = re.search(r"(?:\\+|%)[uU][0-9a-fA-F]{4,8}|\\+(?:x[0-9a-fA-F]{2}|[0-7]{1,3})|%[0-9a-fA-F]{2}|&#[xX]?[0-9a-fA-F]+|[\x1b\x90\x98\x9b-\x9f]", safe)
-    residual = (html.unescape(safe) != safe, entities, escapes)
-    return any(residual)
+    return any((html.unescape(safe) != safe, entities, escapes))
 def _decode_pct(match: re.Match[str]) -> str:
     decoded = bytes.fromhex(match.group(0).replace("%", "")).decode("utf-8", "replace")
     return "".join(" " if ch in "\t\r\n\x0b\x0c\x85\u2028\u2029\ufffd" else ch if ch in "\x07\x1b\x9b\x9c" else "" if ord(ch) <= 0x1F or 0x7F <= ord(ch) <= 0x9F or _INVISIBLE_RE.fullmatch(ch) else ch for ch in decoded)
@@ -169,13 +168,14 @@ def is_diagnostic_source(source: object) -> bool:
     return isinstance(source, str) and bool(source.strip()) and source.strip().lower() != MODEL_CONTENT_SOURCE
 def is_transient_stream_interruption(text: str | None, *, source: str = "cli_error") -> bool:
     """Транзиентен ли транспортный обрыв: фатальный статус или категория закрывают повтор."""
-    if not (isinstance(text, str) and is_diagnostic_source(source) and not OBFUSCATED_ENCODING_RE.search(text)):
-        return False
-    normalized = normalize_diagnostic_text(text, max_len=1048576, fail_closed=False)
-    statuses = extract_failure_statuses(normalized)
-    if statuses - TRANSIENT_STATUS_CODES or FATAL_REQUEST_PHRASE_RE.search(normalized) or not TRANSIENT_STREAM_INTERRUPTION_RE.search(normalized):
-        return False
-    return RETRY_ELIGIBLE_CATEGORIES.issuperset((classify_provider_failure(max(statuses, default=0), normalized).category,))
+    transient = False
+    if isinstance(text, str) and is_diagnostic_source(source) and not OBFUSCATED_ENCODING_RE.search(text):
+        normalized = normalize_diagnostic_text(text, max_len=1048576, fail_closed=False)
+        statuses = extract_failure_statuses(normalized)
+        transient = not (statuses - TRANSIENT_STATUS_CODES or FATAL_REQUEST_PHRASE_RE.search(normalized)
+                         or not TRANSIENT_STREAM_INTERRUPTION_RE.search(normalized)
+                         or not RETRY_ELIGIBLE_CATEGORIES.issuperset((classify_provider_failure(max(statuses, default=0), normalized).category,)))
+    return transient
 @dataclass(frozen=True)
 class RouteHealthStatus:
     model_id: str; available: bool

@@ -15,6 +15,7 @@ from core.activity_window import ActivityWindow as W
 from core.effort_policy import resolve_alias_effort as e
 from core.route_health_policy import AttemptDecision as A, CanonDigestResult as D, FailureCategory as F, HealthReason as H, NormalizedModelRoute as M, RetryBudgetConfig as C, RetryReason as R, RouteHealthStatus as S, advance_sliding_deadline as d, classify_provider_failure as c, compute_attempt_decision as a, detect_effective_env_drift as v, evaluate_route_health as h, inspect_canon_payload as k, normalize_model_route as n, redact_diagnostic_text as x, validate_retry_config as y
 from core.stream_interruption_recovery import evaluate_stream_retry_eligibility as r, is_transient_stream_interruption as t
+import core.stream_interruption_recovery as recovery
 
 U = "403 OAuth refresh rejected: token refresh failed"
 T = "per_attempt_upper duration_s=18.288681"
@@ -137,6 +138,39 @@ def test_retry_filter() -> None:
 def test_retry_narrowing_and_hot_session(kw: dict[str, object], can: bool, hot: bool) -> None:
     decision = r(**kw)
     assert (decision.can_retry, decision.keep_hot_session, decision.reason) == (can, hot, "transient_pre_delivery_retry" if can else "retry_blocked")
+
+@pytest.mark.parametrize("mode,hot", (("deny", True), ("value", False), ("type", False), ("overflow", False)))
+def test_retry_budget_denial_and_exception(monkeypatch: pytest.MonkeyPatch, mode: str, hot: bool) -> None:
+    def compute(config: C, attempt_index: int, elapsed_s: float) -> A:
+        if mode == "deny":
+            return A(False, 0.0, R.BUDGET_EXHAUSTED)
+        raise {"value": ValueError, "type": TypeError, "overflow": OverflowError}[mode]("Некорректный бюджет")
+    monkeypatch.setattr(recovery, "compute_attempt_decision", compute)
+    assert r(error_text=P, delivered=False) == recovery.RetryDecision(False, hot, "retry_blocked", 0.0)
+
+@pytest.mark.parametrize("changes,hot", (
+    ({"delivered": True}, True), ({"had_tool_side_effects": True}, False),
+    ({"source": "model_content"}, False), ({"budget_config": C(max_attempts=0)}, True),
+    ({"max_attempts": 0}, True), ({"max_attempts": True}, False),
+    ({"error_text": 123}, False), ({"delivered": 1}, False),
+))
+def test_blocked_retry_does_not_consult_budget(monkeypatch: pytest.MonkeyPatch, changes: dict[str, object], hot: bool) -> None:
+    def unexpected(config: C, attempt_index: int, elapsed_s: float) -> A:
+        raise AssertionError("Заблокированный повтор не должен запрашивать бюджет")
+    monkeypatch.setattr(recovery, "compute_attempt_decision", unexpected)
+    facts: dict[str, object] = {"error_text": P, "delivered": False}
+    facts.update(changes)
+    assert r(**facts) == recovery.RetryDecision(False, hot, "retry_blocked", 0.0)
+
+def test_resolved_falsey_budget_is_not_absent(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FalseyBudget(C):
+        def __bool__(self) -> bool:
+            return False
+    def resolve(facts: object) -> C:
+        return FalseyBudget(max_attempts=1)
+    monkeypatch.setattr(recovery, "_resolve_retry_cfg", resolve)
+    decision = r(error_text=P, delivered=False, attempt=0)
+    assert decision.can_retry is True and decision.keep_hot_session is True and decision.attempt_budget_s > 0.0
 
 @pytest.mark.parametrize("text,expected", (
     (P + "; HTTP 408 Request Timeout", True),
