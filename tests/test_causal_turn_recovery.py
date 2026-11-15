@@ -5,11 +5,13 @@ import json
 import os
 import stat
 from pathlib import Path
+from types import SimpleNamespace
 from typing import cast
 import pytest
 from core import stream_interruption_recovery as facade
 from core import turn_finalization as done
 from core.route_health_policy import RetryBudgetConfig
+from core.stream_interruption_recovery import tail_turn_facts as extract_tail_facts
 from core.turn_outcome_policy import CausalCompletionFacts, CausalDrainFacts, CausalErrorFacts, CausalErrorIdentity, CausalOutcomeDecision, CausalOutcomeInput, CausalProcessFacts, CausalRecoveryConfig, CausalTerminalFacts, error_identity_digest, evaluate_causal_turn_recovery, normalize_error_identity
 _LONG_ERROR = "PT_AT_ERROR " + "x" * 600
 _FLAG = "BRIDGE_CAUSAL_TURN_RECOVERY_ENABLED"
@@ -41,14 +43,9 @@ def test_content_safety_echo(returncode: int, mode: str) -> None:
     decision = evaluate_causal_turn_recovery(_facts(returncode=returncode, text="Content safety: request rejected"))
     assert decision.recovered and decision.allow_reconcile and decision.clear_error
     assert decision.outcome_mode == mode
-@pytest.mark.parametrize("group,field,value,reason", (
-    ("config", "master_self_heal", False, "self_heal_disabled"), ("config", "causal_recovery_enabled", False, "causal_recovery_disabled"), ("identity", "seq", -1, "missing_structured_error"), ("error", "error_from_structured_record", False, "unstructured_error"), ("identity", "sha256", "", "missing_error_identity"),
-    ("completion", "last_completion_seq", 321, "completion_not_after_error"), ("completion", "last_completion_seq", 320, "completion_not_after_error"),
-    ("identity", "attempt", 1, "attempt_mismatch"), ("completion", "completion_attempt", -1, "attempt_mismatch"), ("error", "result_error_sha256", "", "error_identity_mismatch"), ("error", "result_error_sha256", "other", "error_identity_mismatch"),
-    ("completion", "completion_done_without_tools", False, "completion_has_tools"), ("completion", "has_final_text", False, "missing_final_text"),
-    ("terminal", "has_late_error_or_open_step", True, "late_error_or_open_step"), ("process", "has_fatal_error", True, "fatal_error"), ("drain", "explicit_drain_complete", False, "drain_not_explicit"), ("drain", "drain_complete", False, "drain_incomplete"),
-    ("drain", "producer_stopped", False, "producer_not_stopped"), ("terminal", "tool_status", "open", "tools_not_closed"), ("terminal", "tool_status", "unknown", "tools_not_closed"), ("terminal", "tool_status", "malformed", "tools_not_closed"), ("process", "process_exited", False, "process_not_exited"), *(("process", "returncode", rc, "unsupported_returncode") for rc in (None, -11, 139, 128, 2)),
-))
+@pytest.mark.parametrize("group,field,value,reason", (("config", "master_self_heal", False, "self_heal_disabled"), ("config", "causal_recovery_enabled", False, "causal_recovery_disabled"), ("identity", "seq", -1, "missing_structured_error"), ("error", "error_from_structured_record", False, "unstructured_error"), ("identity", "sha256", "", "missing_error_identity"), ("completion", "last_completion_seq", 321, "completion_not_after_error"), ("completion", "last_completion_seq", 320, "completion_not_after_error"),
+    ("identity", "attempt", 1, "attempt_mismatch"), ("completion", "completion_attempt", -1, "attempt_mismatch"), ("error", "result_error_sha256", "", "error_identity_mismatch"), ("error", "result_error_sha256", "other", "error_identity_mismatch"), ("completion", "completion_done_without_tools", False, "completion_has_tools"), ("completion", "has_final_text", False, "missing_final_text"), ("terminal", "has_late_error_or_open_step", True, "late_error_or_open_step"), ("process", "has_fatal_error", True, "fatal_error"), ("drain", "explicit_drain_complete", False, "drain_not_explicit"), ("drain", "drain_complete", False, "drain_incomplete"),
+    ("drain", "producer_stopped", False, "producer_not_stopped"), ("terminal", "tool_status", "open", "tools_not_closed"), ("terminal", "tool_status", "unknown", "tools_not_closed"), ("terminal", "tool_status", "malformed", "tools_not_closed"), ("process", "process_exited", False, "process_not_exited"), *(("process", "returncode", rc, "unsupported_returncode") for rc in (None, -11, 139, 128, 2)),))
 def test_fail_closed(group: str, field: str, value: object, reason: str) -> None:
     decision = evaluate_causal_turn_recovery(_changed(group, **{field: value}))
     assert (decision.recovered, decision.allow_reconcile, decision.clear_error) == (False,) * 3
@@ -123,6 +120,9 @@ def test_tail_causal_facade_agrees_on_text_and_error(case: str) -> None:
         tail.note_planner_record({"content": "Новый финал", "status": "DONE"}, 372)
         assert not facade.tail_causal_facts(tail).has_late_error_or_open_step
         assert snapshot.has_late_error_or_open_step
+def test_tail_facts_missing_transient_error_defaults_false() -> None:
+    tail = SimpleNamespace(final_planner=False, last_planner_step_index=-1, last_error_step_index=-1, drain_outcome="done")
+    assert extract_tail_facts(tail, "")["had_transient_error"] is False
 def test_tail_legacy_calls_and_unproven_text() -> None:
     assert not any(facade.is_transient_stream_interruption("connection reset " + t) for t in ("; code: 401", '{"status": "400"}', "status_code='404'", "http_status=400", "response_status: 422")) and facade.is_transient_stream_interruption("connection reset status: 429")
     fresh = facade.InterruptionTailState()
