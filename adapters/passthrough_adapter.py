@@ -57,11 +57,11 @@ from core.tool_emulation import (
     RepetitionGuard,
     ToolCallParser,
     build_tool_schemas,
-    has_unnamed_call,
+    has_any_unnamed_call,
     sanitize_tool_call,
 )
 from core.cli_runtime_config import NonstreamConfig
-from core.env_hot_reload import resolve_upstream_key
+from core.env_hot_reload import get_hot_env_value
 from core.liveness_signals import SIGNAL_S, LivenessWindow, SseProgress, passthrough_window
 from core.nonstream_aggregator import NonstreamError, aggregate_events, choice_index, internal_stream_body, request_deadlines
 from core.nonstream_resilience import NonstreamRetryBulkhead, NonstreamRetryPolicy, should_retry_incomplete_nonstream
@@ -996,7 +996,9 @@ def relay_sse(
                 calls = sanitize_choice_calls(raw_calls, tool_schemas, limits)
                 # Безымянный вызов отброшен (в т.ч. рядом с валидным): fail-closed, неполный пакет не публикуется;
                 # дельты tool_calls уже сняты, чанк не ретранслируется.
-                if not calls or any(has_unnamed_call(c, max_parallel_depth=limits.max_parallel_depth) for c in raw_calls):
+                if not calls or has_any_unnamed_call(
+                    raw_calls, max_parallel_depth=limits.max_parallel_depth
+                ):
                     outcome.error_emitted = True
                     write(_error_frame(last_chunk or chunk, "tool_call_parse_error", "Upstream emitted tool_calls with empty function name", outcome.last_usage))
                     return outcome
@@ -1133,7 +1135,10 @@ class PassthroughAdapter(BackendAdapter):
     @property
     def _upstream_key(self) -> str:
         """Актуальный ключ upstream (`api_key_env` из горячего `.env`)."""
-        return resolve_upstream_key(self.config, getattr(self, "_upstream_key_override", None), self._static_upstream_key)
+        override = getattr(self, "_upstream_key_override", None)
+        env_name = self.config.get("api_key_env")
+        live = get_hot_env_value(env_name) if isinstance(env_name, str) and env_name else ""
+        return override if override is not None else live or self._static_upstream_key
 
     @_upstream_key.setter
     def _upstream_key(self, value: Optional[str]) -> None:

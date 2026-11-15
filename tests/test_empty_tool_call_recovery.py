@@ -700,6 +700,35 @@ def test_credential_masking_is_linear_on_backslash_quote_input(hostile: str) -> 
     assert time.monotonic() - started < 1.0
 
 
+# ---- Cycle 4: детерминированный O(N) сканер значений секретов (без ReDoS) ----------------------------------
+
+_NESTED_L1 = json.dumps({"e": 'Bearer "sec\\"ret\\\\"'})
+_NESTED_L3 = json.dumps({"o": json.dumps({"e": 'Bearer "sec\\"ret\\\\"'})})
+
+
+@pytest.mark.parametrize(
+    ("hostile", "expected"),
+    [
+        ('Bearer \\"' + "\\\\a" * 5000, "***"),
+        ('api_key=\\"' + "\\\\a" * 5000, "***"),
+        ('Bearer \\"' + "\\\\\\\\a" * 3000, "***"),
+        ('api_key=\\"' + "\\\\\\\\a" * 3000, "***"),
+        ('Bearer \\" ' * 3000 + '"', "*** " * 1500 + '"'),
+        ("\\" * 10000 + "api_key=secret", "***"),
+        (_NESTED_L1, json.dumps({"e": "***"})),
+        (_NESTED_L3, json.dumps({"o": json.dumps({"e": "***"})})),
+    ],
+)
+def test_credential_scanner_is_linear_and_masks_exactly(hostile: str, expected: str) -> None:
+    import time
+
+    started = time.monotonic()
+    out = mask_credential_context(hostile)
+    assert time.monotonic() - started < 0.1
+    assert out == expected
+    assert "secret" not in out and "ret" not in out.replace("***", "")
+
+
 # ---- Cycle 3 RW-003: монотонное состояние ошибки в _ToolTurn ------------------------------------------
 
 

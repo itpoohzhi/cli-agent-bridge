@@ -132,3 +132,15 @@ def test_summarize_normalizes_whitespace_before_window_and_bounds_raw_input() ->
     # хвост за потолком сырого входа отбрасывается ДО нормализации
     env = {"AGY_CAPACITY_RAW_MAX_CHARS": "40000"}
     assert summarize_capacity_text(" " * 39990 + "ab" + " " * 20 + "TAIL", lambda s: s, env) == "ab"
+
+
+def test_raw_cap_never_bisects_secret_token() -> None:
+    from core.agy_capacity_guard import raw_max_chars, summarize_capacity_text
+
+    secret = "ghp_1234567890abcdef"
+    text = " " * 32762 + secret + " no capacity available 503"
+    assert raw_max_chars({}) == 32768 and len(text) - len(secret) - 26 == 32762
+    summary = summarize_capacity_text(text, _default_redact, {})
+    assert "ghp_" not in summary and summary.startswith("***"), summary
+    message = str(capacity_error_body(text)["message"])
+    assert "ghp_" not in message and "***" in message, message

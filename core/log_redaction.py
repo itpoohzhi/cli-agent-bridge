@@ -46,35 +46,26 @@ LONG_TOKEN_RE: Final[re.Pattern[str]] = re.compile(r"[A-Za-z0-9_\-]{24,}")
 _CREDENTIAL_KEYS: Final[str] = (
     r"(?:api[_-]?key|access[_-]?token|auth[_-]?token|refresh[_-]?token|client[_-]?secret|secret|password|passwd)"
 )
-# Значение в кавычках: символ, либо любая экранированная пара (`\"`, `\\`); JSON-строка внутри JSON
-# (`\"…\\\"…\"`) разбирается отдельной веткой, где `\\\"` и `\\` — часть значения, а `\"` закрывает его.
-# Та же ветка нужна и после `Bearer`/`Basic` (`json.dumps({"e": 'Bearer "tok"'})`).
-_DQ_VALUE: Final[str] = r"\"(?:[^\"\\]|\\.)*\""
-_SQ_VALUE: Final[str] = r"'(?:[^'\\]|\\.)*'"
-# Серия `\` у кавычек ограничена (вложенность JSON ≤ 16): неограниченный `\\+` на закрытии даёт O(n^2) на длинной серии слэшей.
-# Значение, экранированное L слэшами (`\"x\"` — L=1, JSON в JSON — L=3), закрывается ровно L слэшами; внутри него
-# кавычка — 2L+1 слэшей, буквальный слэш — 2L+2. Поэтому `\\\"…\\\"\"` закрывается на `\\\"`, а внешняя `\"` остаётся нетронутой.
-def _escaped_dq_value(group: str) -> str:
-    level = "(?P=" + group + ")"
-    return (
-        r"(?P<" + group + r">\\{1,16})\"(?:[^\"\\]|" + level + level + r"\\\"|" + level + level + r"\\\\|\\{1,16}[^\"\\])*" + level + r"\""
-    )
-
-
-# Ключ может иметь префикс (`OPENAI_API_KEY`, `app_secret`, `openaiApiKey`): `_` входит в `\w`,
-# поэтому `\b` перед именем ключа не подходит. Длина префикса ограничена: разбор линеен по входу.
-_CREDENTIAL_CONTEXT_RE: Final[re.Pattern[str]] = re.compile(
-    r"(?i)\b(?:bearer|basic)\s+(?:"
-    + _escaped_dq_value("bq")
-    + "|"
-    + _DQ_VALUE
-    + "|"
-    + _SQ_VALUE
-    + r"|\\*[\"']?[^\s,;\"']+)"
-    # `(?<!\\)`: матч начинается только с начала серии `\`, иначе серия из n слэшей даёт O(n^2) на старте с каждой позиции.
-    r"|(?<!\\)\\*[\"']?[A-Za-z0-9_\-]{0,64}" + _CREDENTIAL_KEYS + r"\b\\*[\"']?\s*[=:]\s*"
-    r"(?:" + _DQ_VALUE + "|" + _SQ_VALUE + "|" + _escaped_dq_value("kq") + r"|\\*[\"']?[^\s,;&\"']+)"
+# Серия `\` у кавычек ограничена (вложенность JSON ≤ 16): `L` слэшей открывают и закрывают значение.
+_MAX_ESCAPE_LEVEL: Final[int] = 16
+# Регулярка находит только ПРЕФИКС (`Bearer `, `api_key=`), значение разбирает линейный сканер: значение
+# в кавычках с откатом (backtracking) на незакрытых `\\<char>` даёт экспоненту. Ключ может иметь префикс
+# (`OPENAI_API_KEY`, `openaiApiKey`): `_` входит в `\w`, поэтому `\b` перед именем ключа не подходит.
+# `(?<!\\)`: матч начинается только с начала серии `\`, иначе серия из n слэшей даёт O(n^2) на старте с каждой позиции.
+_CREDENTIAL_PREFIX_RE: Final[re.Pattern[str]] = re.compile(
+    r"(?i)\b(?P<scheme>bearer|basic)\s+"
+    r"|(?<!\\)\\*[\"']?[A-Za-z0-9_\-]{0,64}"
+    + _CREDENTIAL_KEYS
+    + r"\b\\{0,%d}[\"']?\s*[=:]\s*" % _MAX_ESCAPE_LEVEL
 )
+_BACKSLASHES_RE: Final[re.Pattern[str]] = re.compile(r"\\*")
+_ESCAPE_OR_DQ_RE: Final[re.Pattern[str]] = re.compile(r"[\\\"]")
+_QUOTED_STOP_RE: Final[dict[str, re.Pattern[str]]] = {
+    '"': re.compile(r"[\\\"]"),
+    "'": re.compile(r"[\\']"),
+}
+_SCHEME_VALUE_RE: Final[re.Pattern[str]] = re.compile(r"[^\s,;\"']*")
+_KEY_VALUE_RE: Final[re.Pattern[str]] = re.compile(r"[^\s,;&\"']*")
 _PREFIXED_TOKEN_RE: Final[re.Pattern[str]] = re.compile(
     r"\b(?:sk|fk|rk|pk)-[A-Za-z0-9_\-]{6,}|\bgh[pousr]_[A-Za-z0-9]{8,}|\bAIza[A-Za-z0-9_\-]{8,}"
     r"|\bya29\.[A-Za-z0-9._\-]{8,}|\beyJ[A-Za-z0-9_\-]{4,}(?:\.[A-Za-z0-9_\-]+){1,2}"
@@ -83,7 +74,9 @@ _PREFIXED_TOKEN_RE: Final[re.Pattern[str]] = re.compile(
 
 def safe_log_tokens(extra: Iterable[str] = ()) -> frozenset[str]:
     """Коды причин + `BRIDGE_LOG_SAFE_TOKENS` + `extra`."""
-    configured = frozenset(i.strip() for i in os.environ.get(SAFE_TOKENS_ENV, "").split(",")) - {""}
+    configured = frozenset(
+        i.strip() for i in os.environ.get(SAFE_TOKENS_ENV, "").split(",")
+    ) - {""}
     return SYSTEM_REASON_CODES | configured | frozenset(extra)
 
 
@@ -102,7 +95,119 @@ def mask_long_tokens(
     return pattern.sub(_sub, text)
 
 
+_FailedUntil = dict[str | int, int]
+
+
+def _scan_plain_quoted(text: str, pos: int, failed_until: _FailedUntil) -> int | None:
+    """Значение в `"…"`/`'…'` с `\\x`-экранированием: позиция после закрывающей кавычки, None — не закрыто."""
+    quote = text[pos]
+    if pos + 1 <= failed_until.get(quote, -1):
+        return None
+    stop = _QUOTED_STOP_RE[quote]
+    n = len(text)
+    j = pos + 1
+    while (m := stop.search(text, j)) is not None:
+        j = m.start()
+        if text[j] == quote:
+            return j + 1
+        j += 2
+    failed_until[quote] = n
+    return None
+
+
+def _skip(pattern: re.Pattern[str], text: str, pos: int) -> int:
+    match = pattern.match(text, pos)
+    return match.end() if match else pos
+
+
+def _scan_escaped_dq(text: str, pos: int, failed_until: _FailedUntil) -> int | None:
+    """Значение, экранированное `L` слэшами (`\\"x\\"` — L=1, JSON в JSON — L=3).
+
+    Закрывается ровно `L` слэшами и кавычкой; внутри кавычка — `2L+1` слэшей, буквальный слэш — `2L+2`.
+    Поэтому серия слэшей перед кавычкой классифицируется по остатку от деления на `2L+2`.
+    """
+    n = len(text)
+    k = pos
+    stop = min(n, pos + _MAX_ESCAPE_LEVEL + 1)
+    while k < stop and text[k] == "\\":
+        k += 1
+    level = k - pos
+    if (
+        not 1 <= level <= _MAX_ESCAPE_LEVEL
+        or k >= n
+        or text[k] != '"'
+        or k + 1 <= failed_until.get(level, -1)
+    ):
+        return None
+    j = k + 1
+    while (m := _ESCAPE_OR_DQ_RE.search(text, j)) is not None:
+        j = m.start()
+        if text[j] == '"':
+            break
+        j = _skip(_BACKSLASHES_RE, text, j)
+        if j >= n or text[j] != '"':
+            continue
+        rem = (j - m.start()) % (2 * level + 2)
+        if rem == level:
+            return j + 1
+        if rem != 2 * level + 1:
+            break
+        j += 1
+    else:
+        j = n
+    failed_until[level] = j
+    return None
+
+
+def _scan_unquoted(text: str, pos: int, is_scheme: bool) -> int:
+    """Значение без парных кавычек: серия `\\`, необязательная кавычка и хотя бы один символ значения.
+
+    Нет символа значения — значением считается сама серия `\\` (как при откате прежнего regex).
+    """
+    slashes_end = _skip(_BACKSLASHES_RE, text, pos)
+    u = (
+        slashes_end + 1
+        if text[slashes_end : slashes_end + 1] in ('"', "'")
+        else slashes_end
+    )
+    end = _skip(_SCHEME_VALUE_RE if is_scheme else _KEY_VALUE_RE, text, u)
+    return end if end > u else slashes_end
+
+
+def _scan_credential_value(
+    text: str, pos: int, is_scheme: bool, failed_until: _FailedUntil
+) -> int:
+    """Конец значения секрета, начинающегося в `pos`; `pos` — значения нет. Каждый символ читается O(1) раз.
+
+    `failed_until` запоминает, до какой позиции разбор данного типа кавычек уже провалился: следующая
+    кавычка того же типа внутри этой зоны не перечитывается, поэтому суммарно разбор линеен по входу.
+    """
+    if pos < len(text):
+        if text[pos] in "\"'":
+            end = _scan_plain_quoted(text, pos, failed_until)
+        else:
+            end = _scan_escaped_dq(text, pos, failed_until)
+        if end is not None:
+            return end
+    return _scan_unquoted(text, pos, is_scheme)
+
+
 def mask_credential_context(text: str) -> str:
-    """Маска секретов по контексту (`Bearer x`, `api_key=x`, `sk-…`) любой длины."""
-    masked = _CREDENTIAL_CONTEXT_RE.sub(MASK, text)
-    return _PREFIXED_TOKEN_RE.sub(MASK, masked)
+    """Маска секретов по контексту (`Bearer x`, `api_key=x`, `sk-…`) любой длины; разбор линейный."""
+    parts: list[str] = []
+    cursor = 0
+    failed_until: _FailedUntil = {}
+    # Поиск идёт от `cursor`, как у `re.sub`: значение уже разобрано, и префиксы внутри него не ищутся.
+    while (m := _CREDENTIAL_PREFIX_RE.search(text, cursor)) is not None:
+        end = _scan_credential_value(
+            text, m.end(), m.group("scheme") is not None, failed_until
+        )
+        if end <= m.end():
+            parts.append(text[cursor : m.end()])
+            cursor = m.end()
+            continue
+        parts.append(text[cursor : m.start()])
+        parts.append(MASK)
+        cursor = end
+    parts.append(text[cursor:])
+    return _PREFIXED_TOKEN_RE.sub(MASK, "".join(parts))

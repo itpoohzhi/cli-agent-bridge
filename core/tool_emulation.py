@@ -15,6 +15,7 @@ import logging
 import re
 import unicodedata
 import uuid
+from collections.abc import Iterable
 from dataclasses import replace
 from typing import Any, Callable
 from core.backend_adapter import ToolCall, ToolFunction, TurnEvent, TurnResult
@@ -2079,6 +2080,15 @@ def has_unnamed_call(
     """
     name, arguments = _call_name_and_args(tool_call)
     return _has_unnamed(name, arguments, 0, max_parallel_depth)
+
+
+def has_any_unnamed_call(
+    tool_calls: Iterable[ToolCall | dict],
+    *,
+    max_parallel_depth: int = DEFAULT_MAX_PARALLEL_DEPTH,
+) -> bool:
+    """Хотя бы один вызов пакета (или вложенный в `parallel`) без имени функции."""
+    return any(has_unnamed_call(c, max_parallel_depth=max_parallel_depth) for c in tool_calls)
 
 
 def _has_unnamed(name: str, arguments: Any, depth: int, max_depth: int) -> bool:

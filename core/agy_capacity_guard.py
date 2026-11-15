@@ -118,9 +118,19 @@ def raw_max_chars(env: Mapping[str, str] | None = None) -> int:
 def summarize_capacity_text(text: object, redact: Callable[[str], str], env: Mapping[str, str] | None = None) -> str:
     """Конвейер bound -> normalize -> redact -> clamp: секрет на границе окна или сводки маскируется целиком."""
     source = os.environ if env is None else env
+    raw = str(text or "")
+    cap = raw_max_chars(source)
+    window = redact_window_chars(source)
+    if len(raw) > cap:
+        # Срез потолка сдвигается к ближайшему пробелу (не дальше окна): токен на границе не режется,
+        # иначе его префикс (`ghp_`) не опознаётся маскированием и утекает.
+        cut = cap
+        limit = min(len(raw), cap + window)
+        while cut < limit and not raw[cut].isspace():
+            cut += 1
+        raw = raw[:cut]
     # Пробелы схлопываются ДО среза окна: длинный пробельный префикс не должен резать токен на границе.
-    normalized = " ".join(str(text or "")[: raw_max_chars(source)].split())
-    return redact(normalized[: redact_window_chars(source)])[: summary_max_chars(source)]
+    return redact(" ".join(raw.split())[:window])[: summary_max_chars(source)]
 
 
 def capacity_error_body(detail: object = "") -> dict[str, object]:
