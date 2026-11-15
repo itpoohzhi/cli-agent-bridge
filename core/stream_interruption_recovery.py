@@ -26,10 +26,11 @@ def is_transient_stream_interruption(text: str | None, *, source: str = "cli_err
     if not isinstance(text, str) or source != "cli_error" or len(text) > 4096:
         return False
     haystack = _normalize_diagnostic_text(text, fail_closed=False)
-    if re.search(r"(?:\\+|%)[uU][0-9a-fA-F]{4,8}|\\+(?:x[0-9a-fA-F]{2}|[0-7]{1,3})|%[0-9a-fA-F]{2}|&#[xX]?[0-9a-fA-F]+", haystack) or re.search(r"(?:%25)+[0-9a-fA-F]{2}", text, re.IGNORECASE): return False  # fmt: skip  # noqa: E501,E701
-    if not TRANSIENT_STREAM_INTERRUPTION_RE.search(haystack):
-        return False
-    if _FATAL_STATUS_RE.search(haystack):
+    if (
+        re.search(r"(?:\\+|%)[uU][0-9a-fA-F]{4,8}|\\+(?:x[0-9a-fA-F]{2}|[0-7]{1,3})|%[0-9a-fA-F]{2}|&#[xX]?[0-9a-fA-F]+", haystack)
+        or re.search(r"(?:%25)+[0-9a-fA-F]{2}", text, re.IGNORECASE)
+        or not TRANSIENT_STREAM_INTERRUPTION_RE.search(haystack) or _FATAL_STATUS_RE.search(haystack)
+    ):
         return False
     category = classify_provider_failure(0, haystack).category
     blocked = (
@@ -249,26 +250,26 @@ def _resolve_retry_cfg(f: _RetryFacts) -> RetryBudgetConfig | None:
 
 def evaluate_stream_retry_eligibility(**kw: Any) -> RetryDecision:  # pyright: ignore[reportAny, reportExplicitAny]
     """Оценить допустимость повтора стрима."""
+    blocked = RetryDecision(False, False, "retry_blocked", 0.0)
     try:
         f = _RetryFacts(**kw)  # pyright: ignore[reportAny]  # Неизменяемый legacy-контракт kwargs.
     except TypeError:
-        return RetryDecision(False, False, "retry_blocked", 0.0)
+        return blocked
     valid_types = all((isinstance(f.error_text, str), isinstance(f.source, str), type(f.delivered) is bool, type(f.had_tool_side_effects) is bool, type(f.attempt) is int, type(f.max_attempts) in (int, type(None)), type(f.elapsed_s) in (int, float), f.budget_config is None or isinstance(f.budget_config, RetryBudgetConfig)))  # pyright: ignore[reportUnnecessaryIsInstance]  # fmt: skip  # noqa: E501
     if not valid_types:
-        return RetryDecision(False, False, "retry_blocked", 0.0)
-    valid = all((0.0 <= f.elapsed_s <= 1e308, 0 <= f.attempt, f.max_attempts is None or f.max_attempts > 0))  # fmt: skip  # noqa: E501
-    if not valid:
-        return RetryDecision(False, False, "retry_blocked", 0.0)
+        return blocked
+    if not all((0.0 <= f.elapsed_s <= 1e308, 0 <= f.attempt, f.max_attempts is None or f.max_attempts > 0)):  # fmt: skip  # noqa: E501
+        return blocked
     cfg = _resolve_retry_cfg(f)
     if cfg is None:
-        return RetryDecision(False, False, "retry_blocked", 0.0)
+        return blocked
     trans = is_transient_stream_interruption(f.error_text, source=f.source)
     quiet = all((trans, not f.had_tool_side_effects))
     if not quiet or f.delivered:
-        return RetryDecision(False, quiet, "retry_blocked", 0.0)
+        return replace(blocked, keep_hot_session=quiet)
     adm = compute_attempt_decision(cfg, f.attempt, float(f.elapsed_s))
     if not all((f.attempt < cfg.max_attempts, adm.allow_retry)):
-        return RetryDecision(False, quiet, "retry_blocked", 0.0)
+        return replace(blocked, keep_hot_session=quiet)
     return RetryDecision(True, quiet, "transient_pre_delivery_retry", adm.attempt_budget_s)  # fmt: skip  # noqa: E501
 
 @dataclass(frozen=True)
