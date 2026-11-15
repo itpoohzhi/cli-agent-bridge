@@ -14,7 +14,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))  # pytest console entry point, как в соседних тестах.
-BASE_REVISION = "6160a9c3e25c8dba3042f7710089a5c1820f041d"
+BASE_REVISION = "2c4b3e4cbf6358f7507a14ba9c6cd539844112e6"
 CHANGED_MODULES = (
     "core/tool_emulation.py",
     "core/runtime_env.py",

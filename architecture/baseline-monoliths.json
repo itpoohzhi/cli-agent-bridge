@@ -1,6 +1,6 @@
 {
   "schema_version": "1.0",
-  "base_revision": "6160a9c3e25c8dba3042f7710089a5c1820f041d",
+  "base_revision": "2c4b3e4cbf6358f7507a14ba9c6cd539844112e6",
   "files": [
     {
       "path": "core/tool_emulation.py",
@@ -24,8 +24,8 @@
     },
     {
       "path": "server.py",
-      "lines": 8932,
-      "sha256": "c62ffb92a23579b45d7a28e76f3469257dbc3c5c922713009e1db19cce5a3e6a"
+      "lines": 8930,
+      "sha256": "1da9a61d5fb7554e984b54787def3382795508ac2edb30c37aa66cc45da212ae"
     }
   ]
 }
