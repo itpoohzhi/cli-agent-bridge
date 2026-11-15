@@ -180,4 +180,110 @@ def selected_route_allowed(route: PostRoute) -> bool:
             return False
     return True
 
-__all__ = ('PostRoute', 'PreparedPostBody', 'prepare_post_body', 'prepare_route_request', '_notes_allow', '_internal_allowed', '_penalty_allowed', '_provider_allowed', 'selected_route_allowed')
+
+def _identify(context: PostRequestContext) -> PostRoute | None:
+    host: Any = context.host
+    handler: Any = context.handler
+    request = context.request
+    raw_model = request.get("model")
+    model_len = len(raw_model) if isinstance(raw_model, str) else 0
+    if raw_model is not None and not isinstance(raw_model, str):
+        handler._reject(400, "model_not_allowed",
+                        "model must be a string from the catalogue", "unknown", model_len)
+        return None
+    model_id = (raw_model or "").strip() or host.MODEL_ID
+    key = (handler.headers.get("X-Idempotency-Key") or "").strip()
+    if key:
+        request["step_job_id"] = key
+    return PostRoute(context, request, model_id, raw_model, model_len)
+
+
+def _resolve_alias(route: PostRoute, models: dict[str, Any]) -> None:
+    alias = route.host._resolve_model_alias(route.model_id, models)
+    route.alias = alias
+    if alias is None:
+        return
+    route.model_id = alias[0] if isinstance(alias, (tuple, list)) else alias
+    route.alias_effort = alias[1] if isinstance(alias, (tuple, list)) and len(alias) > 1 else None
+
+
+def _request_allowed(route: PostRoute, requested_id: str) -> bool:
+    return all(check() for check in (
+        lambda: _internal_allowed(route, requested_id),
+        lambda: _penalty_allowed(route, requested_id),
+        lambda: _provider_allowed(route),
+        lambda: requested_id == route.model_id or _notes_allow(route, route.model_id),
+    ))
+
+
+def resolve_post_route(context: PostRequestContext) -> PostRoute | None:
+    """Разрешает alias и каталог, не создавая попытку и не вызывая RNG."""
+    route = _identify(context)
+    if route is None or not _notes_allow(route, route.model_id):
+        return None
+    requested_id, host = route.model_id, route.host
+    models = host.FLEET.get("models", {}) if isinstance(host.FLEET, dict) else {}
+    _resolve_alias(route, models)
+    if not _request_allowed(route, requested_id):
+        return None
+    route.handler._telemetry_meta(model=route.model_id)
+    if route.model_id not in models:
+        route.handler._reject(404, "model_not_found",
+                              "model is not in the catalogue", "unknown", route.model_len)
+        return None
+    route.model = dict(models[route.model_id])
+    routing = route.model.get("routing")
+    if isinstance(routing, dict) and routing.get("legacy_backend") not in (
+        None, route.model.get("backend"),
+    ):
+        route.model.pop("routing", None)
+        routing = None
+    if isinstance(routing, dict) and not host.flag_enabled("BRIDGE_TRANSPORT_ROUTING_ENABLED"):
+        route.model["backend"] = routing["disabled_backend"]
+    return route
+
+
+def log_route(route: PostRoute, mode: str) -> None:
+    """Сохраняет прежнюю запись выбранного пути в существующем host logger."""
+    alias = route.model_id + "-" + route.alias[1] if route.alias else "-"
+    route.host._log(
+        f"chat route={mode} model={route.model_id} alias={alias} {route.handler._trace_log_fields()}"
+    )
+
+
+def native_effort(route: PostRoute) -> tuple[str, str] | None:
+    """Сохраняет строгий тип effort и прежний downward clamp CLI."""
+    value = route.request.get("reasoning_effort")
+    source = "alias" if value is None and route.alias_effort is not None else "request"
+    value = route.alias_effort if source == "alias" else value
+    if value is None or isinstance(value, str) and not value.strip():
+        return route.model["default_effort"], "default"
+    if not isinstance(value, str):
+        route.reject(400, "unsupported_reasoning_effort", "reasoning_effort must be a string")
+        return None
+    effort, clamped = route.host.clamp_effort_downward(
+        value.strip(), route.model["efforts"], route.model["default_effort"],
+    )
+    if clamped:
+        route.host._log(route.host.describe_clamp(
+            "reasoning_effort", value.strip(), effort, route.model_id, route.host._LOG_EFFORT_MAX,
+        ))
+    return effort, source
+
+
+def native_autonomy(route: PostRoute) -> tuple[Any, str] | None:
+    """Применяет существующую политику autonomy выбранного CLI."""
+    host = route.host
+    try:
+        if str(route.model.get("backend") or "").strip().lower() == "droid":
+            decision = host.resolve_autonomy_decision(
+                route.request.get("autonomy"), "DROID",
+                subagent_id=str(route.handler.headers.get("X-Subagent-Id") or "") or None,
+                require_subagent=True,
+            )
+            return decision.value, decision.source
+        host.validate_autonomy_request(route.request.get("autonomy"))
+    except host.AutonomyViolation as error:
+        route.reject(400, error.reason, str(error))
+        return None
+    return route.request.get("autonomy"), "request"
