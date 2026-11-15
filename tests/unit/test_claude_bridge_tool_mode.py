@@ -1,63 +1,26 @@
-"""W3: режимы инструментов и reasoning на настоящем HTTP-входе Claude-моста."""
+"""W3: режимы инструментов и reasoning на входе Handler Claude-моста (в памяти)."""
 
 from __future__ import annotations
 
 import json
-import sys
-from collections.abc import Iterator
-from inspect import unwrap
 from itertools import product
-from pathlib import Path
 from typing import Any
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-
-from tests import test_claude_bridge as legacy
-
-bridge = legacy.bridge
-_FakeRun = legacy.FakeRun
-TOOL_TAGS = (
-    '<tool_call>{"name":"x"}</tool_call>',
-    "<invoke>",
-    "<t",
-    "<tool_c",
-    "<i",
-    "</t",
+from tests.unit._claude_bridge_tool_fakes import done_script, text_script
+from tests.unit._claude_bridge_tool_http import (
+    TOOL_TAGS,
+    TOOLS,
+    Harness,
+    Reply,
+    bridge as bridge,  # noqa: F401
+    harness as harness,  # noqa: F401
+    set_toolless_policy,
+    sse_calls,
+    sse_delta_text,
+    sse_payloads,
 )
-
-
-@pytest.fixture
-def http_bridge(
-    bridge: Any, monkeypatch: pytest.MonkeyPatch
-) -> Iterator[tuple[Any, int]]:
-    """Повторяет существующий стенд, откатывая также состояние фейкового хода."""
-    monkeypatch.setattr(_FakeRun, "script", [])
-    monkeypatch.setattr(_FakeRun, "captured", {})
-    yield from unwrap(legacy.http_bridge)(bridge, monkeypatch)
-
-
-def _set_toolless_policy(monkeypatch: pytest.MonkeyPatch, policy: str | None) -> None:
-    if policy is None:
-        monkeypatch.delenv("BRIDGE_TOOLLESS_TOOL_TAG_POLICY", raising=False)
-    else:
-        monkeypatch.setenv("BRIDGE_TOOLLESS_TOOL_TAG_POLICY", policy)
-
-
-def _text_script(text: str, chunk_size: int) -> list:
-    return legacy._done_script(
-        *(("text", text[i : i + chunk_size]) for i in range(0, len(text), chunk_size))
-    )
-
-
-def _sse_calls(frames: list) -> list:
-    return [
-        call
-        for frame in frames
-        for choice in frame.get("choices", [])
-        for call in choice["delta"].get("tool_calls", [])
-    ]
 
 
 def _assert_sse_response(body: str, frames: list) -> None:
@@ -73,12 +36,12 @@ def _response_message(body: str, stream: bool) -> dict:
         assert payload["id"].startswith("chatcmpl-claudep-")
         assert payload["choices"][0]["finish_reason"] == "stop"
         return payload["choices"][0]["message"]
-    frames = legacy._sse_payloads(body)
+    frames = sse_payloads(body)
     _assert_sse_response(body, frames)
     return {
-        "content": legacy._sse_delta_text(body, "content"),
-        "reasoning_content": legacy._sse_delta_text(body, "reasoning_content"),
-        "tool_calls": _sse_calls(frames),
+        "content": sse_delta_text(body, "content"),
+        "reasoning_content": sse_delta_text(body, "reasoning_content"),
+        "tool_calls": sse_calls(frames),
     }
 
 
@@ -92,22 +55,22 @@ def _successful_sse_content(frames: list) -> str:
 
 
 def _assert_sse_protocol_error(body: str) -> None:
-    frames = legacy._sse_payloads(body)
+    frames = sse_payloads(body)
     assert frames[-1]["error"]["type"] == "stream_error"
     assert frames[-1]["choices"][0]["finish_reason"] == "stop"
     assert body.count("data: [DONE]\n\n") == 1
-    assert not _sse_calls(frames)
+    assert not sse_calls(frames)
     assert _successful_sse_content(frames) == "safe "
     assert frames[-1]["error"]["message"] == "malformed tool_call stream"
 
 
-def _assert_protocol_error(status: int, body: str, stream: bool) -> None:
-    assert status == (200 if stream else 502), body
-    assert "<" not in body
+def _assert_protocol_error(reply: Reply, stream: bool) -> None:
+    assert reply.status == (200 if stream else 502), reply.body
+    assert "<" not in reply.body
     if stream:
-        _assert_sse_protocol_error(body)
+        _assert_sse_protocol_error(reply.body)
     else:
-        assert json.loads(body)["error"]["type"] == "proxy_error"
+        assert json.loads(reply.body)["error"]["type"] == "proxy_error"
 
 
 def _assert_literal_log(log: str) -> None:
@@ -130,27 +93,26 @@ def _assert_literal_log(log: str) -> None:
     ),
 )
 def test_off_text_literal_http(
-    http_bridge: tuple,
+    harness: Harness,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture,
     case: tuple,
 ) -> None:
-    bridge, port = http_bridge
     stream, policy, chunk_size, tail = case
-    _set_toolless_policy(monkeypatch, policy)
+    set_toolless_policy(monkeypatch, policy)
     expected = (
         'P1: Привет\n<tool_call>{"name":"x"}</tool_call> <invoke> \nP2: мир' + tail
     )
-    _FakeRun.script = _text_script(expected, chunk_size)
-    status, body = legacy._post(
-        port, {"stream": stream, "messages": [{"role": "user", "content": "hi"}]}
+    runs = harness.play(text_script(expected, chunk_size))
+    reply = harness.post(
+        {"stream": stream, "messages": [{"role": "user", "content": "hi"}]}
     )
-    assert status == 200, body
-    message = _response_message(body, stream)
+    assert reply.status == 200, reply.body
+    message = _response_message(reply.body, stream)
     assert message["content"].encode() == expected.encode()
     assert message.get("tool_calls", []) == []
-    assert bridge.TOOLLESS_PURE_TEXT_HINT in _FakeRun.captured["prompt"]
-    assert _FakeRun.captured["closed"]
+    assert harness.module.TOOLLESS_PURE_TEXT_HINT in runs.prompt
+    assert runs.closed == [True]
     _assert_literal_log(capsys.readouterr().err)
 
 
@@ -158,72 +120,69 @@ def test_off_text_literal_http(
     "case", tuple(product((False, True), ("error", "unknown"), TOOL_TAGS))
 )
 def test_off_error_http_no_tag_bytes(
-    http_bridge: tuple,
+    harness: Harness,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture,
     case: tuple,
 ) -> None:
-    _bridge, port = http_bridge
     stream, policy, tag = case
-    _set_toolless_policy(monkeypatch, policy)
-    _FakeRun.script = _text_script("safe " + tag, 1)
-    status, body = legacy._post(port, {"stream": stream, "messages": []})
-    _assert_protocol_error(status, body, stream)
+    set_toolless_policy(monkeypatch, policy)
+    runs = harness.play(text_script("safe " + tag, 1))
+    reply = harness.post({"stream": stream, "messages": []})
+    _assert_protocol_error(reply, stream)
     assert "parser_error" in capsys.readouterr().err
-    assert _FakeRun.captured["closed"]
+    assert runs.closed == [True]
 
 
 @pytest.mark.parametrize(
     "case", tuple(product((False, True), ("none", {"type": "none"}), TOOL_TAGS))
 )
 def test_forbid_http_no_tag_bytes(
-    http_bridge: tuple,
+    harness: Harness,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture,
     case: tuple,
 ) -> None:
-    _bridge, port = http_bridge
     stream, tool_choice, tag = case
-    _set_toolless_policy(monkeypatch, "text")
-    _FakeRun.script = _text_script("safe " + tag, 1)
-    status, body = legacy._post(
-        port,
+    set_toolless_policy(monkeypatch, "text")
+    runs = harness.play(text_script("safe " + tag, 1))
+    reply = harness.post(
         {
             "stream": stream,
-            "tools": legacy.TOOLS,
+            "tools": TOOLS,
             "tool_choice": tool_choice,
             "messages": [],
-        },
+        }
     )
-    _assert_protocol_error(status, body, stream)
+    _assert_protocol_error(reply, stream)
     log = capsys.readouterr().err
     assert "mode=forbid" in log and "parser_error" in log
-    assert _FakeRun.captured["closed"]
+    assert runs.closed == [True]
 
 
 @pytest.mark.parametrize("stream", (False, True))
 @pytest.mark.parametrize(
-    "tools,tool_choice", (([], None), (legacy.TOOLS, "none"), (legacy.TOOLS, None))
+    "tools,tool_choice", (([], None), (TOOLS, "none"), (TOOLS, None))
 )
 def test_reasoning_always_on_in_each_mode(
-    http_bridge: tuple,
+    harness: Harness,
     monkeypatch: pytest.MonkeyPatch,
     stream: bool,
     tools: list,
     tool_choice: Any,
 ) -> None:
-    _bridge, port = http_bridge
-    _set_toolless_policy(monkeypatch, "text")
-    _FakeRun.script = legacy._done_script(
-        ("thinking", "native "),
-        *(("text", ch) for ch in "<think>tagged</think>answer"),
+    set_toolless_policy(monkeypatch, "text")
+    harness.play(
+        done_script(
+            ("thinking", "native "),
+            *(("text", ch) for ch in "<think>tagged</think>answer"),
+        )
     )
-    status, body = legacy._post(
-        port,
-        {"stream": stream, "tools": tools, "tool_choice": tool_choice, "messages": []},
+    reply = harness.post(
+        {"stream": stream, "tools": tools, "tool_choice": tool_choice, "messages": []}
     )
-    assert status == 200, body
-    message = _response_message(body, stream)
+    assert reply.status == 200, reply.body
+    message = _response_message(reply.body, stream)
     assert message["content"] == "answer"
     assert message["reasoning_content"] == "native tagged"
     assert message.get("tool_calls", []) == []
@@ -231,10 +190,10 @@ def test_reasoning_always_on_in_each_mode(
 
 def _emulated_calls(body: str, stream: bool) -> list:
     if stream:
-        frames = legacy._sse_payloads(body)
-        calls = _sse_calls(frames)
-        assert legacy._sse_delta_text(body, "reasoning_content") == "plan"
-        assert legacy._sse_delta_text(body, "content") == ""
+        frames = sse_payloads(body)
+        calls = sse_calls(frames)
+        assert sse_delta_text(body, "reasoning_content") == "plan"
+        assert sse_delta_text(body, "content") == ""
         assert frames[-1]["choices"][0]["finish_reason"] == "tool_calls"
     else:
         payload = json.loads(body)
@@ -247,14 +206,15 @@ def _emulated_calls(body: str, stream: bool) -> list:
 
 
 @pytest.mark.parametrize("stream", (False, True))
-def test_emulate_tool_call_and_reasoning_http(http_bridge: tuple, stream: bool) -> None:
-    _bridge, port = http_bridge
-    text = '<think>plan</think><tool_call>{"name":"get_weather","arguments":{"city":"Oslo","note":""}}</tool_call>'
-    _FakeRun.script = _text_script(text, 1)
-    status, body = legacy._post(
-        port, {"stream": stream, "tools": legacy.TOOLS, "messages": []}
+def test_emulate_tool_call_and_reasoning_http(harness: Harness, stream: bool) -> None:
+    text = (
+        '<think>plan</think><tool_call>{"name":"get_weather",'
+        '"arguments":{"city":"Oslo","note":""}}</tool_call>'
     )
-    assert status == 200, body
-    calls = _emulated_calls(body, stream)
+    harness.play(text_script(text, 1))
+    reply = harness.post({"stream": stream, "tools": TOOLS, "messages": []})
+    assert reply.status == 200, reply.body
+    calls = _emulated_calls(reply.body, stream)
     assert len(calls) == 1
+    assert calls[0]["function"]["name"] == "get_weather"
     assert json.loads(calls[0]["function"]["arguments"]) == {"city": "Oslo"}

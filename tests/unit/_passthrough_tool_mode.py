@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import http.client
-import io
 import json
 import sys
 from collections.abc import Callable, Iterator
@@ -14,16 +13,20 @@ from unittest.mock import Mock, patch
 import pytest
 import yaml
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
 import core.tool_emulation as emulation  # noqa: E402 - pytest console entry point.
-from adapters.passthrough_adapter import PassthroughAdapter, ResponseSink  # noqa: E402
+from adapters.passthrough_adapter import PassthroughAdapter  # noqa: E402
 from tests.passthrough_stream_testlib import (  # noqa: E402
     DONE,
     content,
     finish,
     tool_delta,
+)
+from tests.unit._passthrough_tool_sink import (  # noqa: E402
+    _CollectSink,
+    _MemorySocket,
 )
 
 BACKENDS = (
@@ -37,45 +40,6 @@ BACKENDS = (
 POLICY_ENV = "BRIDGE_TOOLLESS_TOOL_TAG_POLICY"
 LITERAL = '<tool_call>{"name":"x"}</tool_call> <invoke> </tool_call> пример'
 FORBIDDEN = '<tool_call>{"name":"secret_fn","arguments":{}}</tool_call>'
-
-
-class _CollectSink(ResponseSink):
-    """Настоящий интерфейс sink, без импорта HTTP-фасада и его синглтонов."""
-
-    def __init__(self) -> None:
-        self.status: int | None = None
-        self.headers: list[tuple[str, str]] = []
-        self.chunks: list[bytes] = []
-
-    def start(self, status: int, headers: list[tuple[str, str]]) -> None:
-        assert self.status is None, "Response must start exactly once"
-        self.status = status
-        self.headers = headers
-
-    def write(self, data: bytes) -> None:
-        self.chunks.append(data)
-
-    @property
-    def body(self) -> bytes:
-        return b"".join(self.chunks)
-
-
-class _MemorySocket:
-    """HTTPResponse разбирает реальные HTTP-заголовки, но сеть не открывается."""
-
-    def __init__(self, body: bytes, stream: bool) -> None:
-        media = "text/event-stream" if stream else "application/json"
-        head = (
-            "HTTP/1.1 200 OK\r\n"
-            f"Content-Type: {media}\r\n"
-            f"Content-Length: {len(body)}\r\n"
-            "Connection: close\r\n\r\n"
-        ).encode("ascii")
-        self.buffer = io.BytesIO(head + body)
-
-    def makefile(self, mode: str) -> io.BytesIO:
-        assert mode == "rb"
-        return self.buffer
 
 
 def _tools() -> list[dict[str, Any]]:

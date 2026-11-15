@@ -8,7 +8,7 @@ from unittest.mock import patch
 import pytest
 
 import core.tool_emulation as emulation
-from tests.test_tool_mode import MODE_CASES, VALID_CALL, _api
+from tests.unit.test_tool_mode import MODE_CASES, VALID_CALL, _api
 
 
 def _normalizer(mode: str, policy: str = "TEXT") -> tuple[Any, list, list, list]:

@@ -9,7 +9,7 @@ from unittest.mock import Mock
 import json
 import pytest
 
-from tests._passthrough_tool_mode import (
+from tests.unit._passthrough_tool_mode import (
     FORBIDDEN,
     LITERAL,
     POLICY_ENV,

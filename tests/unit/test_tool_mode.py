@@ -11,7 +11,7 @@ from typing import Any
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import core  # noqa: E402 - pytest console entry point не добавляет корень.
 import core.runtime_env as runtime_env  # noqa: E402

@@ -2,83 +2,62 @@
 
 from __future__ import annotations
 
-import http.client
-import json
-import sys
-from pathlib import Path
-from typing import Any
-
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-
-from tests.unit.test_claude_bridge_tool_mode import (
-    _FakeRun,
-    _set_toolless_policy,
-    bridge as bridge,
-    http_bridge as http_bridge,
-    legacy,
+from tests.unit._claude_bridge_tool_fakes import done_script
+from tests.unit._claude_bridge_tool_http import (
+    DummyConnection,
+    Harness,
+    bridge as bridge,  # noqa: F401
+    harness as harness,  # noqa: F401
+    set_toolless_policy,
+    split_raw,
+    sse_payloads,
 )
 
-
-def _read_literal_prefix(
-    response: http.client.HTTPResponse, expected: str
-) -> list[str]:
-    parts: list[str] = []
-    while "".join(parts) != expected:
-        line = response.readline().decode()
-        assert line
-        for frame in legacy._sse_payloads(line):
-            assert "error" not in frame
-            parts.extend(
-                choice["delta"].get("content", "") for choice in frame["choices"]
-            )
-    return parts
+EXPECTED = 'P1<tool_call>{"name":"x"}</tool_call> <invoke> P2'
 
 
-def _start_stream(conn: http.client.HTTPConnection) -> http.client.HTTPResponse:
-    conn.request(
-        "POST",
-        "/v1/chat/completions",
-        json.dumps({"stream": True, "messages": []}),
-        {"Content-Type": "application/json", "Authorization": "Bearer test-key"},
-    )
-    return conn.getresponse()
-
-
-def _assert_live_prefix(
-    response: http.client.HTTPResponse, expected: str, queues: list[Any]
-) -> None:
-    assert response.status == 200
-    parts = _read_literal_prefix(response, expected)
+def _assert_live_prefix(snapshot: bytes) -> None:
+    status_line, body = split_raw(snapshot)
+    frames = sse_payloads(body)
+    parts = [
+        choice["delta"].get("content", "")
+        for frame in frames
+        for choice in frame["choices"]
+    ]
+    assert status_line == "HTTP/1.1 200 OK"
+    assert "".join(parts) == EXPECTED
     assert len([part for part in parts if part]) > 2
-    assert queues[0].empty()
+    assert not any("error" in frame for frame in frames)
+    assert [c["finish_reason"] for f in frames for c in f["choices"]] == [None] * len(
+        frames
+    )
+    assert "[DONE]" not in body
 
 
 def test_off_text_sse_emits_literal_before_upstream_done(
-    http_bridge: tuple, monkeypatch: pytest.MonkeyPatch
+    harness: Harness, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    bridge, port = http_bridge
-    _set_toolless_policy(monkeypatch, None)
-    expected = 'P1<tool_call>{"name":"x"}</tool_call> <invoke> P2'
-    queues = []
+    set_toolless_policy(monkeypatch, None)
+    payload = {"stream": True, "messages": []}
+    conn = DummyConnection.for_post(payload)
+    snapshots: list[tuple[bytes, int]] = []
+    runs = harness.play([])
 
-    class DeferredRun(_FakeRun):
-        def __init__(self, *args: Any, **kwargs: Any) -> None:
-            super().__init__(*args, **kwargs)
-            queues.append(self.q)
+    def snapshot() -> None:
+        snapshots.append((conn.written(), runs.runs[0].q.pending))
 
-    monkeypatch.setattr(bridge, "Run", DeferredRun)
-    _FakeRun.script = [("text", ch) for ch in expected]
-    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
-    try:
-        response = _start_stream(conn)
-        try:
-            _assert_live_prefix(response, expected, queues)
-        finally:
-            for events in queues:
-                for event in legacy._done_script():
-                    events.put(event)
-        assert response.read().decode().endswith("data: [DONE]\n\n")
-    finally:
-        conn.close()
+    runs.script = (
+        *(("text", ch) for ch in EXPECTED),
+        snapshot,
+        *done_script(),
+    )
+    reply = harness.post(payload, conn)
+    assert len(snapshots) == 1
+    early_bytes, pending_upstream = snapshots[0]
+    assert pending_upstream == len(done_script())
+    _assert_live_prefix(early_bytes)
+    assert reply.status == 200
+    assert reply.body.endswith("data: [DONE]\n\n")
+    assert sse_payloads(reply.body)[-1]["choices"][0]["finish_reason"] == "stop"
