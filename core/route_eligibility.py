@@ -6,6 +6,8 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import Protocol, cast
 
+from core.gateway_execution_policy import denied_subagent
+from core.route_health_policy import NormalizedModelRoute, evaluate_route_health
 from core.routing_contract import RouteSpec
 
 _REQUIRED_FACTS = (
@@ -150,4 +152,96 @@ class EligibilityPort(Protocol):
 
     def facts(self, route: RouteSpec, request: EligibilityRequest) -> EligibilityFacts: ...
 
-__all__ = ('_mapping', '_strings', '_sources', '_role_ids', '_exclusions', '_requires_images', 'EligibilityRequest', 'request_snapshot', 'EligibilityFacts', 'EligibilityPort')
+
+def _field(route: RouteSpec | Mapping[str, object], name: str) -> object:
+    if isinstance(route, RouteSpec):
+        return getattr(route, name, None)
+    return route.get(name)
+
+
+def _policy_allows(
+    route: RouteSpec | Mapping[str, object],
+    facts: EligibilityFacts,
+    request: EligibilityRequest,
+) -> bool:
+    backend = _field(route, "backend")
+    if not isinstance(backend, str) or not backend:
+        return False
+    identities = frozenset((backend.lower(), facts.backend_kind))
+    if identities & request.excluded:
+        return False
+    return not (
+        "droid" in identities
+        and (
+            denied_subagent("DROID", *request.role_ids)
+            or any(role.startswith("panel-") for role in request.role_ids)
+        )
+    )
+
+
+def _healthy(facts: EligibilityFacts, request: EligibilityRequest) -> bool:
+    if facts.probe_age_s is None or facts.max_stale_age_s is None:
+        return False
+    status = evaluate_route_health(
+        NormalizedModelRoute(request.model_id, request.effort, False),
+        facts.blocked_models, facts.probe_age_s, facts.max_stale_age_s,
+        facts.env_drift_keys,
+    )
+    return status.available
+
+
+def _capable(
+    route: RouteSpec | Mapping[str, object], request: EligibilityRequest,
+) -> bool:
+    model_id = _field(route, "model_id")
+    if model_id is not None and model_id != request.model_id:
+        return False
+    efforts = _field(route, "efforts")
+    if request.effort is not None and efforts:
+        return request.effort in _strings(efforts)
+    return True
+
+
+def _eligible(
+    route: RouteSpec | Mapping[str, object],
+    facts: EligibilityFacts,
+    request: EligibilityRequest,
+) -> bool:
+    if facts.ready is not True or facts.circuit_open is not False:
+        return False
+    enabled = _field(route, "enabled")
+    if enabled is not None and enabled is not True:
+        return False
+    if request.requires_images and facts.supports_images is not True:
+        return False
+    if not _policy_allows(route, facts, request):
+        return False
+    return _capable(route, request) and _healthy(facts, request)
+
+
+def route_eligible(
+    route: RouteSpec | Mapping[str, object],
+    facts: EligibilityFacts | Mapping[str, object],
+    request: EligibilityRequest | Mapping[str, object],
+) -> bool:
+    """Проверяет hard gates, затем PR17 health; входы не меняет.
+
+    Нулевой вес не даёт исключений из политики. Неизвестный возраст probe,
+    некорректные факты и отозванный credential не превращаются в healthy.
+    """
+    try:
+        policy = request if isinstance(request, EligibilityRequest) else request_snapshot(request)
+        snapshot = facts if isinstance(facts, EligibilityFacts) else EligibilityFacts.from_mapping(facts)
+        return _eligible(route, snapshot, policy)
+    except (TypeError, ValueError, OverflowError):
+        return False
+
+
+def eligible_routes(
+    routes: Iterable[RouteSpec], port: EligibilityPort, request: Mapping[str, object],
+) -> tuple[RouteSpec, ...]:
+    """Фиксирует eligible set перед draw; перед send порт вызывается повторно."""
+    snapshot = request_snapshot(request)
+    return tuple(
+        route for route in routes if route_eligible(route, port.facts(route, snapshot), snapshot)
+    )
