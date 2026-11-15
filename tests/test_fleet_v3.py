@@ -69,10 +69,10 @@ def to_schema_2(data):
 
 
 class TestLiveFleetV3(unittest.TestCase):
-    def test_live_catalogue_is_schema_3_with_eight_backends(self):
+    def test_live_catalogue_is_schema_3_with_eleven_backends(self) -> None:
         catalog = server._build_catalog(raw_v3())
         self.assertEqual(catalog["schema_version"], 3)
-        self.assertEqual(catalog["backend_order"], ["agy", "claude-p", "codex", "muse", "opencode-go", "opencode-go-claude", "droid", "opencode-zen"])
+        self.assertEqual(catalog["backend_order"], ["agy", "claude-p", "codex", "muse", "opencode-go", "opencode-go-claude", "deepseek-direct", "openai-key-2", "openai-key-3", "droid", "opencode-zen"])
         self.assertEqual(catalog["backends"]["droid"]["kind"], "droid")
         self.assertTrue(catalog["backends"]["droid"]["enabled"])
         self.assertEqual(catalog["backends"]["droid"]["max_concurrent"], 64)
@@ -107,7 +107,7 @@ class TestLiveFleetV3(unittest.TestCase):
         self.assertEqual(catalog["models"]["muse-wonder-full-1.0"]["backend"], "muse")
         self.assertEqual(server.FLEET["default_model"], "muse-wonder-full-1.0")
 
-    def test_models_are_bound_to_backends(self):
+    def test_models_are_bound_to_backends(self) -> None:
         data = raw_v3()
         catalog = server._build_catalog(data)
         self.assertEqual(len(catalog["order"]), len(data["models"]))
@@ -116,10 +116,10 @@ class TestLiveFleetV3(unittest.TestCase):
         self.assertEqual(catalog["models"]["claude-haiku-5-5"]["backend"], "claude-p")
         self.assertEqual(catalog["models"]["gemini-3.8-flash"]["backend"], "agy")
         self.assertEqual(catalog["models"]["gemini-4-hydrogen"]["backend"], "agy")
-        self.assertEqual(catalog["models"]["gpt-6.1-sol"]["backend"], "codex")
+        self.assertEqual(catalog["models"]["gpt-6.1-sol"]["backend"], "openai-key-2")
         for model_id in ("claude-sonnet-5-5-droid", "gemini-3.8-flash-droid", "gpt-6.1-sol-droid"):
             self.assertEqual(catalog["models"][model_id]["backend"], "droid")
-        self.assertEqual(catalog["models"]["deepseek-v4.1-flash"]["backend"], "opencode-go")
+        self.assertEqual(catalog["models"]["deepseek-v4.1-flash"]["backend"], "deepseek-direct")
         self.assertNotIn("kimi-k3.1-pro", catalog["models"])
         for mid in MUSE_MODELS:
             model = catalog["models"][mid]

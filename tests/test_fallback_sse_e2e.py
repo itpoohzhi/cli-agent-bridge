@@ -25,6 +25,7 @@ import server  # noqa: E402
 from adapters import ADAPTER_KINDS  # noqa: E402
 from core.backend_adapter import AdapterRegistry  # noqa: E402
 from core.model_fallback_chain import FallbackChain, load_chains  # noqa: E402
+from core import fallback_http_hook  # noqa: E402
 
 ALIAS = "compaction-resilient"
 QUOTA = {"error": {"code": "GoUsageLimitError", "message": "resets in 2d 10h"}}
@@ -95,7 +96,7 @@ def _http_server(handler: type[BaseHTTPRequestHandler]) -> Iterator[int]:
 
 def _configure(monkeypatch: pytest.MonkeyPatch, scenario: _Scenario, port: int) -> Any:
     raw = json.loads((ROOT / "fleet.json").read_text())
-    template = next(model for model in raw["models"] if model["backend"] == "codex")
+    template = next({k: v for k, v in m.items() if k != "routing"} for m in raw["models"] if m.get("routing", {}).get("disabled_backend") == "codex")
     raw["models"] = [
         {**template, "id": c.model, "backend": "codex", "context_window": c.context_window}
         for c in scenario.chain.candidates
@@ -121,10 +122,8 @@ def gateway(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Generator[Callab
     monkeypatch.setenv("BRIDGE_NONSTREAM_VIA_STREAM_ENABLED", "false")
     monkeypatch.setattr(server, "_shutting_down", False)
     monkeypatch.setattr(server, "_is_drain_enabled", lambda: False)
-    monkeypatch.setattr(
-        server, "TOKEN_CACHE",
-        server.TokenCache(path=tmp_path / ".env", environ={"BRIDGE_KEY": "fallback-e2e-key"}),
-    )
+    monkeypatch.setattr(fallback_http_hook, "_CACHE", [])
+    monkeypatch.setattr(server, "TOKEN_CACHE", server.TokenCache(path=tmp_path / ".env", environ={"BRIDGE_KEY": "fallback-e2e-key"}))
     failures = Mock(wraps=server._PENALTY_TRACKER.record_start_failure)
     monkeypatch.setattr(server._PENALTY_TRACKER, "record_start_failure", failures)
 

@@ -18,8 +18,8 @@ def _load_fleet():
 @pytest.mark.parametrize("model_id,expected_provider", [
     ("gemini-3.8-flash", "agy"),
     ("claude-sonnet-5-5", "claude-p"),
-    ("deepseek-v4.1-flash", "opencode-go"),
-    ("gpt-6.1-sol", "codex"),
+    ("deepseek-v4.1-flash", "deepseek-direct"),
+    ("gpt-6.1-sol", "openai-key-2"),
 ])
 def test_native_provider_priority(model_id, expected_provider):
     cat = _load_catalog()
@@ -66,8 +66,8 @@ def test_droid_upstream_model(droid_model, upstream_model):
 EXPECTED_FAMILY_PROVIDER = {
     "Google": "agy",
     "Anthropic": "claude-p",
-    "OpenAI": "codex",
-    "DeepSeek": "opencode-go",
+    "OpenAI": "openai-key-2",
+    "DeepSeek": "deepseek-direct",
     "Meta": "muse",
 }
 
