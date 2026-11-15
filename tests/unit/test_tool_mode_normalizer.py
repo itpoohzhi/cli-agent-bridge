@@ -144,6 +144,25 @@ def test_emulate_rejects_open_tool_gate(use_factory: bool) -> None:
     assert norm.content == "" and not norm.tool_calls
 
 
+@pytest.mark.parametrize("use_factory", (False, True))
+def test_strict_live_rejects_unclosed_named_call_before_parser_recovery(
+    use_factory: bool,
+) -> None:
+    norm = (
+        _normalizer("EMULATE")[0]
+        if use_factory
+        else emulation.StreamNormalizer(strict_live=True)
+    )
+    norm.feed_text('<tool_call>{"name":"noop"')
+    with patch.object(norm._parser, "feed", wraps=norm._parser.feed) as feed:
+        with pytest.raises(emulation.LiveParserError, match="unclosed tool_call block"):
+            norm.finish()
+    feed.assert_not_called()
+    assert norm._state == "tool"
+    assert norm.content == ""
+    assert norm.tool_calls == []
+
+
 @pytest.mark.parametrize("mode,policy", MODE_CASES)
 @pytest.mark.parametrize("tag", emulation.REASONING_TAGS)
 def test_reasoning_is_incremental_and_isolates_tool_literals(
