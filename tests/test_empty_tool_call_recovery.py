@@ -1584,3 +1584,150 @@ def test_council_r16_hostile_growth_is_not_superlinear() -> None:
     small, large = timed(20000), timed(80000)
     assert large < 2.0
     assert large < max(small, 0.005) * 8
+
+
+# ---- Cycle 10 (council-r17): вложенные кавычки, склейки чередующихся кавычек, граница склейки ---------------
+
+
+def _r17_json(text: str) -> str:
+    return json.dumps({"log": text})
+
+
+# (имя, строка, значения секретов, которые не должны попасть в вывод)
+_R17_CASES: list[tuple[str, str, tuple[str, ...]]] = [
+    (
+        "RW001-nested-quotes",
+        "msg='api_key=\"'hunter2' token='secret'\"'",
+        ("hunter2", "secret"),
+    ),
+    (
+        "RW001-nested-quotes-json",
+        _r17_json("msg='api_key=\"'hunter2' token='secret'\"'"),
+        ("hunter2", "secret"),
+    ),
+    (
+        "RW001-truncated-nested-quotes",
+        "password=' truncated api_key=\"'hunter2' token='secret'\"",
+        ("hunter2", "secret"),
+    ),
+    ("RW002-glued-pair", 'password=" truncated api_key=" hunter2', ("hunter2",)),
+    (
+        "RW002-glued-pair-json",
+        _r17_json('password=" truncated api_key=" hunter2'),
+        ("hunter2",),
+    ),
+    (
+        "RW002-glued-other-quote",
+        'password=" truncated api_key=\'" hunter2',
+        ("hunter2",),
+    ),
+    (
+        "RW003-alternating-in-dq",
+        "password=\" truncated api_key='\"'hunter2'",
+        ("hunter2",),
+    ),
+    (
+        "RW003-alternating-in-dq-json",
+        _r17_json("password=\" truncated api_key='\"'hunter2'"),
+        ("hunter2",),
+    ),
+    (
+        "RW003-alternating-in-sq",
+        'password=\' truncated api_key="\'"hunter2"',
+        ("hunter2",),
+    ),
+    (
+        "RW003-alternating-in-sq-json",
+        _r17_json('password=\' truncated api_key="\'"hunter2"'),
+        ("hunter2",),
+    ),
+    (
+        "RW003-second-secret",
+        "msg='api_key=\"'hunter2' password='secret'\"'",
+        ("hunter2", "secret"),
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    ("name", "line", "secrets"), _R17_CASES, ids=[c[0] for c in _R17_CASES]
+)
+def test_council_r17_secrets_are_masked_through_every_entry_point(
+    name: str, line: str, secrets: tuple[str, ...]
+) -> None:
+    from core.log_redaction import redact_log_text
+
+    outputs = (
+        mask_credential_context(line),
+        redact_log_text(line),
+        str(capacity_error_body(line)["message"]),
+    )
+    for out in outputs:
+        for secret in secrets:
+            assert secret not in out, (name, out)
+        assert "***" in out, (name, out)
+
+
+@pytest.mark.parametrize(
+    "name",
+    [c[0] for c in _R17_CASES if c[1].startswith("{")],
+)
+def test_council_r17_masked_json_stays_parseable(name: str) -> None:
+    line = next(c[1] for c in _R17_CASES if c[0] == name)
+    assert isinstance(json.loads(mask_credential_context(line)), dict)
+
+
+def test_council_r17_truncated_prefix_approval_matches_opens_value() -> None:
+    from core.log_redaction import _opens_value, _scan_credential_value
+
+    for line in (
+        'password=" truncated api_key=" hunter2',
+        'password=" truncated api_key=\'" hunter2',
+    ):
+        end, approved = _scan_credential_value(line, 9, False, {}, [])
+        # отсечение возвращает начало хвостового префикса и кавычку, разобранную как открывающая значение
+        assert end == line.index("api_key="), (line, end)
+        assert approved != -1 and line[approved] in ('"', "'"), (line, approved)
+        # пробел перед значением не мешает только в семантике отсечения: без неё значение утекло бы
+        assert _opens_value(line, approved, {}, spaced=True), line
+        assert not _opens_value(line, approved, {}, spaced=False), line
+
+
+def test_council_r17_quote_glue_does_not_hide_second_secret() -> None:
+    out = mask_credential_context("msg='api_key=\"'hunter2' password='secret'\"'")
+    assert out.count("***") >= 2 and "hunter2" not in out and "secret" not in out, out
+
+
+@pytest.mark.parametrize("times", [20000, 80000])
+@pytest.mark.parametrize(
+    "unit",
+    [
+        "password=\" trunc api_key='\"'x",
+        "password=' trunc api_key=\"'\"x",
+        'password=" trunc api_key=" x',
+        "api_key=\"'x",
+        'pwd password=" trunc api_key=\'" x',
+    ],
+)
+def test_council_r17_quote_glue_is_linear_on_hostile_input(
+    unit: str, times: int
+) -> None:
+    import time
+
+    for head in ("", '{"log": "', "'tis "):
+        started = time.monotonic()
+        mask_credential_context(head + unit * times)
+        assert time.monotonic() - started < 2.0, (head, unit)
+
+
+def test_council_r17_glued_growth_is_not_superlinear() -> None:
+    import time
+
+    def timed(times: int) -> float:
+        started = time.monotonic()
+        mask_credential_context("password=\" trunc api_key='\"'x" * times)
+        return time.monotonic() - started
+
+    small, large = timed(20000), timed(80000)
+    assert large < 2.0
+    assert large < max(small, 0.005) * 8
