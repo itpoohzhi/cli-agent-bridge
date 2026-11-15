@@ -15,7 +15,7 @@ import xml.etree.ElementTree as ET
 
 Fn = ast.FunctionDef | ast.AsyncFunctionDef
 Result = dict[str, str | int]
-BASE = "100dc6b73449130ad9bdf5232d60a7e80d65416b"
+BASE = "cc741edcb9e59d77e02a36790bd3c6e406dbdebb"
 BRIDGE = "bridges/agy-bridge/server.py"
 CORE = ("core/turn_outcome_policy.py", "core/stream_interruption_recovery.py",
         "core/turn_finalization.py")
@@ -23,7 +23,7 @@ STAGES = (("W0", ("tests/test_causal_turn_recovery_flow.py",
                   "tests/test_causal_recovery_architecture.py")),
           ("W1-A", (CORE[0], "tests/test_causal_turn_recovery.py")),
           ("W1-B", (CORE[1],)), ("W1-C", (CORE[2],)), ("W2", (BRIDGE,)),
-          ("W3", ()))
+          ("W3", ("tests/test_route_health_policy.py",)))
 NEW = frozenset((CORE[0], CORE[2], "tests/test_causal_turn_recovery.py",
                  "tests/test_causal_turn_recovery_flow.py",
                  "tests/test_causal_recovery_architecture.py"))
@@ -147,7 +147,7 @@ def imports(rel: str, tree: ast.AST) -> set[str]:
             if rel in PURE:
                 assert name not in ("open", "read_text", "read_bytes", "getenv"), name
     if rel in PURE:
-        assert names <= LIBS | {"core.turn_outcome_policy"}, (rel, names)
+        assert names <= LIBS | {"core.turn_outcome_policy", "core.route_health_policy"}, (rel, names)
     else:
         allowed = LIBS | {"argparse", "json", "math", "os", "pathlib", "time",
                           "core.runtime_env", "core.stream_interruption_recovery",
