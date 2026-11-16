@@ -15,6 +15,8 @@ from core.model_notes_parse import (
     read_model_notes_file,
 )
 from core.model_notes_snapshot import ModelNotesSnapshotManager, select_source
+from core.route_eligibility import EdgeSnapshot
+from core.route_penalty_state import State
 
 _alias_warned = False
 _ALIAS_LOCK = threading.Lock()
@@ -101,6 +103,20 @@ class ModelNotesFilter:
         now = datetime.now(timezone.utc)
         return any(
             _rule_matches(rule, model, transport, effort, now) for rule in notes.rules
+        )
+
+    def edge_snapshot(
+        self, model_id: str, backend: str, penalty_state: State | None
+    ) -> EdgeSnapshot:
+        """Собирает доменный edge из памяти; bypass-заголовки не участвуют."""
+        return EdgeSnapshot(
+            model_id=model_id,
+            backend=backend,
+            enabled=True,
+            weight=100,
+            is_blocked=self.is_blocked(model_id),
+            notes_state=self.health_state(),
+            penalty_state=penalty_state,
         )
 
     def health_state(self) -> str:

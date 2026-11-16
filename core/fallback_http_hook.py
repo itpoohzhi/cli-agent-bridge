@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import hmac
 import io
 import json
 import logging
@@ -13,30 +14,26 @@ import threading
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from adapters.passthrough_adapter import ClientGone, iter_sse_events
 from core.model_fallback_chain import FallbackCatalog, empty_catalog, load_chains
 from core.quota_fallback_dispatch import DispatchPorts, DispatchResponse, FallbackDispatcher, Payload
+from core.route_eligibility import EdgeSnapshot, evaluate_edge_eligibility
+from core.route_penalty_state import LeaseFenced, State
 from core.stream_framing import format_stream_error_sse
-
 
 _LOG = logging.getLogger(__name__)
 _FLAG = "BRIDGE_MODEL_FALLBACK_ENABLED"
 _CACHE_LOCK = threading.Lock()
 _CACHE: list[Any] = []  # [ключ, каталог] — один элемент, заменяется целиком
 
-
 def _enabled() -> bool:
     """Kill-switch читается на каждый вызов; по умолчанию хук выключен."""
     return os.environ.get(_FLAG, "false").strip().lower() == "true"
 
-
 def _chains_path() -> str:
-    return os.environ.get(
-        "BRIDGE_FALLBACK_CHAINS_PATH", str(Path(__file__).resolve().parents[1] / "fallback_chains.d")
-    )
-
+    return os.environ.get("BRIDGE_FALLBACK_CHAINS_PATH", str(Path(__file__).resolve().parents[1] / "fallback_chains.d"))
 
 def _cache_key(path: str) -> tuple[Any, ...]:
     """Путь, mtime каталога/файлов и все BRIDGE_FALLBACK_* / BRIDGE_QUOTA_* переменные."""
@@ -47,10 +44,8 @@ def _cache_key(path: str) -> tuple[Any, ...]:
         for item in sorted((*directory.glob("*.yaml"), *directory.glob("*.yml"))):
             info = item.stat()
             stamps.append((item.name, info.st_mtime_ns, info.st_size))
-    env = tuple(sorted((k, v) for k, v in os.environ.items()
-                       if k.startswith(("BRIDGE_FALLBACK_", "BRIDGE_QUOTA_"))))
+    env = tuple(sorted((k, v) for k, v in os.environ.items() if k.startswith(("BRIDGE_FALLBACK_", "BRIDGE_QUOTA_"))))
     return (path, tuple(stamps), env)
-
 
 def _catalog() -> FallbackCatalog:
     """Кэшированный каталог; битый YAML/env даёт пустой каталог, а не исключение."""
@@ -72,13 +67,8 @@ def _catalog() -> FallbackCatalog:
         _LOG.warning("fallback chains catalog unavailable: %s", exc)
         return empty_catalog()
 
-
 def append_models(cards: list[dict[str, Any]], scope: tuple[str, ...] | None = None) -> list[dict[str, Any]]:
-    """Публикует алиасы только при BRIDGE_MODEL_FALLBACK_ENABLED=true.
-
-    Kill-switch выключен (по умолчанию) — ``cards`` возвращается без изменений и без
-    обращения к каталогу; провайдер-scoped каталог не расширяется никогда.
-    """
+    """Публикует алиасы только при флаге; scope не расширяется никогда."""
     if not _enabled() or scope is not None:
         return cards
     listed = {card["id"] for card in cards}
@@ -89,6 +79,24 @@ def append_models(cards: list[dict[str, Any]], scope: tuple[str, ...] | None = N
         for alias, chain in _catalog().chains.items() if alias not in listed
     ]
 
+class NotesUnavailable(RuntimeError):
+    """model-notes не разрешают dispatch: терминальный fail-closed."""
+
+def _eligible(host: Any, model: str) -> None:
+    """Fallback только по доменному edge из памяти: owner tuple, notes, штраф."""
+    notes = getattr(host, "_MODEL_NOTES_FILTER", None)
+    if notes is None or getattr(notes, "is_failed_closed", lambda: False)():
+        raise NotesUnavailable("model notes are unavailable")
+    doc = host.FLEET.get("models", {}).get(model)
+    doc = doc if isinstance(doc, Mapping) else {}
+    routing = cast(Mapping[str, object], doc.get("routing")) if isinstance(doc.get("routing"), Mapping) else {}
+    backend, legacy = doc.get("backend"), routing.get("legacy_backend")
+    if not isinstance(backend, str) or not backend or {backend, legacy, doc.get("canonical_owner")} - {None} != {backend}:
+        raise PermissionError("fallback candidate owner mismatch")
+    penalized = host._PENALTY_TRACKER.get_model_status(model).get("is_penalized")
+    edge = EdgeSnapshot(model, backend, True, 100, notes.is_blocked(model), getattr(notes, "health_state", lambda: "OK")(), None if penalized else State())
+    if not evaluate_edge_eligibility(edge).available:
+        raise PermissionError("fallback candidate is not eligible")
 
 @dataclass
 class _Pipe:
@@ -191,6 +199,11 @@ async def _response(pipe: _Pipe) -> DispatchResponse:
         return DispatchResponse(status_code=pipe.status, headers=pipe.headers,
                                 payload=payload if isinstance(payload, dict) else {}, body=bytes(body))
 
+def _internal_allowed(host: Any, handler: Any, model: str) -> None:
+    key = getattr(host, "_INTERNAL_SERVICE_KEY", "") or os.environ.get("INTERNAL_SERVICE_KEY", "")
+    supplied = handler.headers.get("X-Internal-Service-Key", "")
+    if key and model in host.INTERNAL_MODEL_IDS and not hmac.compare_digest(supplied, key):
+        raise PermissionError("fallback candidate is reserved")
 
 def _adapter(host: Any, handler: Any, request: Payload, scope: str | None) -> Any:
     model = str(request["model"])
@@ -200,14 +213,8 @@ def _adapter(host: Any, handler: Any, request: Payload, scope: str | None) -> An
     owner = host.PROVIDER_SCOPES.get(scope) if scope is not None else None
     if owner is not None and adapter.owned_by not in ((owner,) if isinstance(owner, str) else owner):
         raise PermissionError("fallback candidate is outside provider scope")
-    key = getattr(host, "_INTERNAL_SERVICE_KEY", "") or os.environ.get("INTERNAL_SERVICE_KEY", "")
-    if key and model in host.INTERNAL_MODEL_IDS:
-        import hmac
-        if not hmac.compare_digest(handler.headers.get("X-Internal-Service-Key", ""), key):
-            raise PermissionError("fallback candidate is reserved")
-    bypass = handler.headers.get("X-Bypass-Model-Filter") == "1"
-    if (not bypass and host._MODEL_NOTES_FILTER.is_blocked(model)) or host._PENALTY_TRACKER.get_model_status(model)["is_penalized"]:
-        raise OSError("fallback candidate is temporarily blocked")
+    _internal_allowed(host, handler, model)
+    _eligible(host, model)
     if host._quarantine_denial(model, handler.headers.get("X-Subagent-Id")) is not None:
         raise PermissionError("fallback candidate is quarantined")
     return adapter
@@ -264,6 +271,9 @@ async def _serve(handler: Any, request: Payload, host: Any, upstream: Callable[.
     finally:
         await response.stream.aclose()
 
+def _probe_spoof(handler: Any, request: Mapping[str, Any]) -> bool:
+    return "is_probe" in request or any(str(k).lower() in {"x-probe", "x-bridge-probe"} for k in (getattr(handler, "headers", {}) or {}))
+
 def dispatch(handler: Any, request: Mapping[str, Any], host: Any, upstream: Callable[..., None], scope: str | None = None) -> bool:
     """True означает полностью обработанный алиас; прямые модели не затрагиваются."""
     if not _enabled():
@@ -274,10 +284,15 @@ def dispatch(handler: Any, request: Mapping[str, Any], host: Any, upstream: Call
     if not host._auth_ok(handler):
         handler._reply_error(401, "Unauthorized", "authentication_error")
         return True
+    if _probe_spoof(handler, request):
+        handler._reply_error(400, "probe controls are reserved", "invalid_request_error")
+        return True
     try:
         asyncio.run(_serve(handler, {**request, "model": model.strip()}, host, upstream, scope))
     except ClientGone:
         pass
+    except (NotesUnavailable, LeaseFenced):
+        handler._reply_error(503, "Fallback dispatch is fail-closed", "notes_unavailable")
     except PermissionError:
         handler._reply_error(403, "Fallback candidate is not permitted", "permission_error")
     except (OSError, ValueError):
