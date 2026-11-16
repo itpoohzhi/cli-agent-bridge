@@ -54,13 +54,14 @@ def _render_tools_section(
     tools: list[object] | tuple[object, ...],
     tool_choice: object = None,
     has_attachments: bool = False,
+    attachment_tool: str = "Read",
 ) -> str:
     is_none, is_required, forced = _tool_choice_info(tool_choice)
     if not tools or is_none:
         return ""
     lines = list(_TOOLS_PROTOCOL_LINES)
     if has_attachments:
-        lines[-1] += ", except Read on the attachment files listed under [attachments]."
+        lines[-1] = lines[-1].rstrip(".") + f", except {attachment_tool} on the attachment files listed under [attachments]."
     if is_required:
         lines.append("You MUST call at least one tool now.")
     elif forced:

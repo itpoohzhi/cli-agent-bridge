@@ -14,6 +14,20 @@ import uuid
 from dataclasses import replace
 from typing import Any, Callable
 from core.backend_adapter import ToolCall, ToolFunction, TurnEvent, TurnResult
+from core.tool_call_shape import (
+    DEFAULT_MAX_PARALLEL_DEPTH as DEFAULT_MAX_PARALLEL_DEPTH,
+    _PARALLEL_NAME,
+    _SUBCALL_ARGS_KEYS,
+    _call_name_and_args as _call_name_and_args,
+    _has_unnamed as _has_unnamed,
+    _normalize_arguments as _normalize_arguments,
+    _normalize_tool_call as _normalize_tool_call,
+    _parallel_items as _parallel_items,
+    _subcall_name as _subcall_name,
+    _with_arguments as _with_arguments,
+    has_any_unnamed_call as has_any_unnamed_call,
+    has_unnamed_call as has_unnamed_call,
+)
 from core.prompt_prefix_stability import (
     PrefixStabilityConfig as PrefixStabilityConfig,
     _render_message as _render_stable_message,
@@ -24,8 +38,13 @@ from core.prompt_prefix_stability import (
 )
 from core.stream_fsm.repetition_guard import StreamRepetitionGuard
 from core.tool_mode import (
-    DEFAULT_EMULATE_SPEC, NormalizerModeSpec, NormalizerSinks,
-    ToollessTagPolicy, ToolMode, find_rejected_envelope, rejected_envelope_prefix_len,
+    DEFAULT_EMULATE_SPEC,
+    NormalizerModeSpec,
+    NormalizerSinks,
+    ToollessTagPolicy,
+    ToolMode,
+    find_rejected_envelope,
+    rejected_envelope_prefix_len,
     _tool_choice_none as _tool_choice_none,
 )
 
@@ -82,48 +101,6 @@ def _render_content(content: Any, counter: list) -> str:
     return str(content)
 
 
-def _normalize_arguments(value: Any) -> dict | None:
-    """arguments -> JSON-объект; None, если значение задано, но объектом не является.
-
-    None отличает невалидные аргументы (строку-не-JSON, список, число, null) от
-    отсутствия ключа: вызывающий код не вправе молча подменять их на пустой словарь
-    и запускать инструмент с пустыми аргументами.
-    """
-    if isinstance(value, dict):
-        return value
-    if isinstance(value, str):
-        text = value.strip()
-        if text:
-            try:
-                parsed = json.loads(text)
-            except ValueError:
-                return None
-            if isinstance(parsed, dict):
-                return parsed
-    return None
-
-
-def _normalize_tool_call(item: Any) -> dict:
-    """Один OpenAI tool_call -> {"id", "name", "arguments"}.
-
-    id сохраняется, чтобы результат [tool result <id>] однозначно сопоставлялся
-    с конкретным вызовом при нескольких одинаковых инструментах.
-    """
-    if not isinstance(item, dict):
-        return {"id": "", "name": "", "arguments": {}}
-    fn = item.get("function") if isinstance(item.get("function"), dict) else {}
-    name = fn.get("name") or item.get("name") or ""
-    args = fn.get("arguments")
-    if args is None:
-        args = item.get("arguments")
-    normalized = _normalize_arguments(args)
-    return {
-        "id": str(item.get("id") or ""),
-        "name": str(name),
-        "arguments": normalized if normalized is not None else {},
-    }
-
-
 def _render_tool_call(item: Any) -> str:
     """Историю вызова рендерим тем же блоком, что просим от модели."""
     payload = json.dumps(_normalize_tool_call(item), ensure_ascii=False)
@@ -148,6 +125,34 @@ def _tools_section(
 ) -> str:
     """Английская секция протокола и схем инструментов для промпта."""
     return _render_tools_section(tools, tool_choice, has_attachments)
+
+
+def tools_protocol_section(
+    tools: list,
+    tool_choice: Any = None,
+    *,
+    has_attachments: bool = False,
+    attachment_tool: str = "Read",
+) -> str:
+    """Секция протокола `<tool_call>`; при `has_attachments` запрет исключает чтение вложений `attachment_tool`."""
+    if not tools or _tool_choice_none(tool_choice):
+        return ""
+    return _render_tools_section(tools, tool_choice, has_attachments, attachment_tool)
+
+
+def pure_text_protocol_instruction(
+    *, has_attachments: bool = False, attachment_tool: str = "Read"
+) -> str:
+    """Инструкция текстового хода: нативные инструменты запрещены (кроме чтения вложений)."""
+    exception = (
+        f", except {attachment_tool} on the attachment files listed under [attachments]"
+        if has_attachments
+        else ""
+    )
+    return (
+        "[CRITICAL: DO NOT USE ANY TOOLS (no read_file, no grep, no bash, no agent tools)"
+        f"{exception}. Provide your analysis and answer directly as pure text.]"
+    )
 
 
 def _render_message(msg: Any, counter: list | None = None) -> str:
@@ -1449,7 +1454,13 @@ DEFAULT_MAX_IMAGES = 10
 DEFAULT_MAX_IMAGE_BYTES = 10 * 1024 * 1024
 DEFAULT_MAX_TOTAL_IMAGE_BYTES = 20 * 1024 * 1024
 # Служебные теги протокола <tool_call>, не имеющие смысла вне настоящего блока.
-_ORPHAN_SERVICE_TAGS = (TOOL_CALL_CLOSE, "<arg_key>", "</arg_key>", "<arg_value>", "</arg_value>")
+_ORPHAN_SERVICE_TAGS = (
+    TOOL_CALL_CLOSE,
+    "<arg_key>",
+    "</arg_key>",
+    "<arg_value>",
+    "</arg_value>",
+)
 # (MIME, магический префикс, расширение файла) — принимаемые форматы вложений.
 # Для GIF/WebP префикс — только ориентир таблицы расширений: точную сигнатуру
 # (GIF87a/GIF89a; RIFF+WEBP в [8:12]) проверяет `_sniff_image_mime`.
@@ -1700,6 +1711,8 @@ class StreamNormalizer:
             self._on_reasoning(text)
 
     def _emit_call(self, call: dict) -> None:
+        if not str(call.get("name") or "").strip():
+            return  # вызов без имени не tool_call
         self._calls.append(call)
         self._on_tool_call(call)
 
@@ -1846,42 +1859,14 @@ class StreamNormalizer:
         return True
 
 
-_PARALLEL_NAME = "parallel"
-_PARALLEL_LIST_KEYS = ("tool_uses", "calls", "tools")
-_SUBCALL_NAME_KEYS = ("recipient_name", "name")
-_SUBCALL_ARGS_KEYS = ("parameters", "arguments")
 # Умолчания `parallel`; конфигурацию лимитов передаёт владелец маршрута (BND-001).
 DEFAULT_MAX_PARALLEL_CALLS = 64
-DEFAULT_MAX_PARALLEL_DEPTH = 8
 # Семантические payload-поля: пустая строка там может быть осмысленной нагрузкой.
 PAYLOAD_FIELDS = frozenset({"prompt", "content", "command"})
 
 
 def _new_call_id() -> str:
     return "call_" + uuid.uuid4().hex[:24]
-
-
-def _call_name_and_args(tool_call: Any) -> tuple[str, Any]:
-    """(имя, arguments) вызова — ToolCall либо OpenAI-словаря; ("", None) для чужого типа."""
-    if isinstance(tool_call, ToolCall):
-        return tool_call.function.name, tool_call.function.arguments
-    if isinstance(tool_call, dict):
-        fn = tool_call.get("function")
-        if isinstance(fn, dict):
-            return str(fn.get("name") or ""), fn.get("arguments")
-        return str(tool_call.get("name") or ""), tool_call.get("arguments")
-    return "", None
-
-
-def _with_arguments(tool_call: Any, arguments: Any) -> Any:
-    """Копия вызова с новыми arguments (тип и остальные поля вызова сохраняются)."""
-    if isinstance(tool_call, ToolCall):
-        return replace(tool_call, function=replace(tool_call.function, arguments=arguments))
-    if isinstance(tool_call.get("function"), dict):
-        return dict(
-            tool_call, function=dict(tool_call["function"], arguments=arguments)
-        )
-    return dict(tool_call, arguments=arguments)
 
 
 def _make_call(template: Any, index: int, name: str, arguments: str) -> Any:
@@ -2029,25 +2014,16 @@ def _unpack_parallel(tool_call: Any, arguments: Any, limit: int) -> list[Any] | 
 
     Не более `limit` детей: превышение прекращает распаковку, накопленное сохраняется.
     """
-    parsed = _normalize_arguments(arguments)
-    if parsed is None:
+    items = _parallel_items(arguments)
+    if items is None:
         return None
-    items = next(
-        (
-            parsed[key]
-            for key in _PARALLEL_LIST_KEYS
-            if isinstance(parsed.get(key), list)
-        ),
-        None,
-    )
     calls: list[Any] = []
-    for item in items or ():
+    for item in items:
         if len(calls) >= limit:
             break
         if not isinstance(item, dict):
             continue
-        name = next((str(item[k]) for k in _SUBCALL_NAME_KEYS if item.get(k)), "")
-        name = name.removeprefix("functions.").strip()
+        name = _subcall_name(item)
         if not name:
             continue
         sub_args = next((item[k] for k in _SUBCALL_ARGS_KEYS if k in item), None)

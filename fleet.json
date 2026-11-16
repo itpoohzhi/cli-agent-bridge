@@ -114,16 +114,31 @@
     },
     "gemini-3.8-flash-low": {
       "backend_id": "gemini-3.8-flash",
+      "backend": "droid",
+      "effort": "low"
+    },
+    "gemini-3.8-flash-agy-low": {
+      "backend_id": "gemini-3.8-flash-agy",
       "backend": "agy",
       "effort": "low"
     },
     "gemini-3.8-flash-medium": {
       "backend_id": "gemini-3.8-flash",
+      "backend": "droid",
+      "effort": "medium"
+    },
+    "gemini-3.8-flash-agy-medium": {
+      "backend_id": "gemini-3.8-flash-agy",
       "backend": "agy",
       "effort": "medium"
     },
     "gemini-3.8-flash-high": {
       "backend_id": "gemini-3.8-flash",
+      "backend": "droid",
+      "effort": "high"
+    },
+    "gemini-3.8-flash-agy-high": {
+      "backend_id": "gemini-3.8-flash-agy",
       "backend": "agy",
       "effort": "high"
     },
@@ -376,7 +391,7 @@
   },
   "models": [
     {
-      "id": "gemini-3.8-flash",
+      "id": "gemini-3.8-flash-agy",
       "backend": "agy",
       "name": "Gemini 3.8 Flash (AGY bridge)",
       "efforts": [
@@ -387,30 +402,14 @@
       "default_effort": "high",
       "context_window": 1048576,
       "max_tokens": 65536,
+      "input": [
+        "text",
+        "tools"
+      ],
       "images": {
         "status": "unverified"
       },
-      "routing": {
-        "algorithm": "weighted-sha256-v1",
-        "enabled": true,
-        "catalog_hash": "acd043cd148c00556455eec24f42e55de524d7829906c3ed36e0c867e41cd6fd",
-        "legacy_backend": "agy",
-        "disabled_backend": "agy",
-        "routes": [
-          {
-            "route_id": "agy",
-            "backend": "agy",
-            "weight": 100,
-            "priority": 10
-          },
-          {
-            "route_id": "droid",
-            "backend": "droid",
-            "weight": 0,
-            "priority": 30
-          }
-        ]
-      }
+      "upstream_model": "gemini-3.8-flash"
     },
     {
       "id": "gemini-4-argon",
@@ -424,6 +423,10 @@
       "default_effort": "high",
       "context_window": 1048576,
       "max_tokens": 65536,
+      "input": [
+        "text",
+        "tools"
+      ],
       "images": {
         "status": "unverified"
       }
@@ -438,6 +441,10 @@
       "default_effort": "off",
       "context_window": 1048576,
       "max_tokens": 65536,
+      "input": [
+        "text",
+        "tools"
+      ],
       "images": {
         "status": "unverified"
       }
@@ -455,6 +462,10 @@
       "default_effort": "high",
       "context_window": 1048576,
       "max_tokens": 65536,
+      "input": [
+        "text",
+        "tools"
+      ],
       "images": {
         "status": "unverified"
       }
@@ -805,6 +816,29 @@
         435
       ],
       "upstream_model": "claude-sonnet-5-5"
+    },
+    {
+      "id": "gemini-3.8-flash",
+      "backend": "droid",
+      "name": "Gemini 3.8 Flash (Droid bridge)",
+      "efforts": [
+        "low",
+        "medium",
+        "high"
+      ],
+      "default_effort": "high",
+      "context_window": 1048576,
+      "max_tokens": 65536,
+      "images": {
+        "status": "unverified"
+      },
+      "policy_lines": [
+        100,
+        142,
+        174,
+        431
+      ],
+      "upstream_model": "gemini-3.8-flash"
     },
     {
       "id": "gemini-3.8-flash-droid",

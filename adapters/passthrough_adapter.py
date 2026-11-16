@@ -30,18 +30,35 @@ from adapters.passthrough_pool import (
 
 from core import passthrough_precommit
 from core.backend_adapter import (
-    SESSIONS_NONE, STREAMING_NATIVE, BackendAdapter, BackendModel,
-    BackendNotSupported, Capabilities, KindConstraints, Qualification,
-    PreSendTransientError, StreamSink, TurnContext, TurnResult,
+    SESSIONS_NONE,
+    STREAMING_NATIVE,
+    BackendAdapter,
+    BackendModel,
+    BackendNotSupported,
+    Capabilities,
+    KindConstraints,
+    Qualification,
+    PreSendTransientError,
+    StreamSink,
+    TurnContext,
+    TurnResult,
 )
 
 from core.tool_emulation import (
-    DEFAULT_MAX_PARALLEL_CALLS, DEFAULT_MAX_PARALLEL_DEPTH,
-    DEFAULT_MAX_REPETITION_REPEATS, DEFAULT_MAX_REPETITION_TOKEN_LEN,
-    LiveParserError, RepetitionGuard, StreamNormalizer, ToolCallParser,
-    build_tool_schemas, sanitize_tool_call,
+    DEFAULT_MAX_PARALLEL_CALLS,
+    DEFAULT_MAX_PARALLEL_DEPTH,
+    DEFAULT_MAX_REPETITION_REPEATS,
+    DEFAULT_MAX_REPETITION_TOKEN_LEN,
+    LiveParserError,
+    RepetitionGuard,
+    StreamNormalizer,
+    ToolCallParser,
+    build_tool_schemas,
+    has_any_unnamed_call,
+    sanitize_tool_call,
 )
 from core.cli_runtime_config import NonstreamConfig
+from core.transport_credentials import resolve_credential
 from core.liveness_signals import SIGNAL_S, LivenessWindow, SseProgress, parse_sse_json
 from core.liveness_signals import passthrough_window as passthrough_window
 from core.nonstream_aggregator import NonstreamError, aggregate_events, choice_index
@@ -64,14 +81,21 @@ from core.runtime_env import DynamicFlagSource, bounded_int as _bounded_int
 from core.runtime_env import env_bool, positive_int as _positive_int
 from core.runtime_env import resolve_toolless_tag_policy
 from core.tool_mode import (
-    DEFAULT_EMULATE_SPEC, NormalizerModeSpec, NormalizerSinks, ToolMode,
-    build_mode_spec, check_unexpected_tool_calls, format_tool_mode_log, resolve_tool_mode,
+    DEFAULT_EMULATE_SPEC,
+    NormalizerModeSpec,
+    NormalizerSinks,
+    ToolMode,
+    build_mode_spec,
+    check_unexpected_tool_calls,
+    format_tool_mode_log,
+    resolve_tool_mode,
 )
 from core.stream_framing import build_stream_error_chunk, format_sse_event
 from core.stream_framing import (
     format_stream_error_sse,
     is_graceful_error_framing_enabled,
 )
+from core.usage_wire import positive_wire_usage
 
 _SLIDING_WIN_FLAG = DynamicFlagSource(FLAG_PASSTHROUGH_SLIDING_WINDOW)
 
@@ -122,9 +146,11 @@ _HOP_BY_HOP = frozenset(
     "proxy-connection te trailer trailers transfer-encoding upgrade".split()
 )
 _TOOL_SANITIZED_HEADER = "x-bridge-tool-sanitized"
-_DROP_EXTRA = {"host", "content-length", "accept-encoding", "x-turn-owner-token"}
-_REQUEST_DROP = _HOP_BY_HOP | _DROP_EXTRA | {_TOOL_SANITIZED_HEADER}
+_REQUEST_DROP = _HOP_BY_HOP | {
+    "host", "content-length", "accept-encoding", "x-turn-owner-token", _TOOL_SANITIZED_HEADER
+}
 _RESPONSE_DROP = _HOP_BY_HOP | {"content-length", _TOOL_SANITIZED_HEADER}
+
 
 def _positive_float(environ: Mapping[str, str], name: str, default: float) -> float:
     try:
@@ -240,14 +266,18 @@ class PassthroughConnectionPool(_PassthroughConnectionPool):
     ) -> None:
         super().__init__(max_keepalive, keepalive_expiry_s, select_fn, monotonic_fn, connection_fn)
 
+
 class ClientGone(Exception):
     """Запись клиенту невозможна (отмена/обрыв): upstream закрывается, повторов нет."""
+
 
 class AccumulatorOverflow(Exception):
     """Бюджет аккумулятора `tool_calls` (запрос/ключи/процесс) исчерпан."""
 
+
 class UpstreamBodyTooLarge(Exception):
     """Тело или строка upstream превысили лимит."""
+
 
 class ProcessBudget:
     """Суммарный бюджет аккумуляторов процесса по параллельным passthrough-запросам."""
@@ -273,6 +303,7 @@ class ProcessBudget:
         with self._lock:
             self._used = max(0, self._used - size)
 
+
 class ResponseSink:
     """Куда шов пишет ответ клиенту; реализует хаб (`server.py`). Любая ошибка записи -> ClientGone."""
 
@@ -292,8 +323,10 @@ class ResponseSink:
         """Тип ошибки отданного ответа для классификации исхода lease ('' — ошибки нет)."""
         return ""
 
+
 def new_call_id() -> str:
     return "call_" + uuid.uuid4().hex[:24]
+
 
 @dataclass
 class _PartialCall:
@@ -303,6 +336,7 @@ class _PartialCall:
     type: str = "function"
     name: str = ""
     arguments: list[str] = field(default_factory=list)
+
 
 class ToolCallAccumulator:
     """Дельты `tool_calls` по составному ключу `(choice.index, tool_call.index)`.
@@ -425,6 +459,7 @@ class ToolCallAccumulator:
         for choice in self.pending_choices():
             self.drop_choice(choice)
 
+
 def sanitize_choice_calls(
     calls: list[dict[str, Any]],
     tool_schemas: Optional[dict[str, Any]],
@@ -445,11 +480,13 @@ def sanitize_choice_calls(
         return flat
     return [dict(item, index=i) if "index" in item else item for i, item in enumerate(flat)]
 
+
 def _check_native(spec: NormalizerModeSpec, calls: Any) -> None:
     try:
         check_unexpected_tool_calls(spec.mode, calls)
     except ValueError:
         raise LiveParserError("unexpected upstream tool calls") from None
+
 
 def _openai_call(call: Mapping[str, Any]) -> dict[str, Any]:
     args = call.get("arguments")
@@ -459,6 +496,7 @@ def _openai_call(call: Mapping[str, Any]) -> dict[str, Any]:
         "type": "function",
         "function": {"name": str(call.get("name") or ""), "arguments": arguments},
     }
+
 
 class _ResponseText:
     """Локальный текстовый шов choice; запрещённые режимы не создают ToolCallParser."""
@@ -508,6 +546,7 @@ class _ResponseText:
             self.parser.finish()
         return self._output()
 
+
 def _merge_parsed_calls(raw_calls: Any, parsed: list[dict[str, Any]]) -> list[dict[str, Any]]:
     valid = isinstance(raw_calls, list) and all(isinstance(call, dict) for call in raw_calls)
     calls = list(raw_calls) if valid else []
@@ -522,6 +561,7 @@ def _merge_parsed_calls(raw_calls: Any, parsed: list[dict[str, Any]]) -> list[di
         calls.append(entry)
     return calls
 
+
 def _normalize_message(
     message: dict[str, Any], schemas: Any, limits: PassthroughLimits,
     options: tuple[NormalizerModeSpec, bool],
@@ -535,6 +575,8 @@ def _normalize_message(
         updated[key] = (updated.get(key) or "") + tail
     calls = _merge_parsed_calls(raw_calls, text.calls)
     if sanitize and calls:
+        if has_any_unnamed_call(calls, max_parallel_depth=limits.max_parallel_depth):
+            raise LiveParserError("tool call has empty function name")
         updated["tool_calls"] = sanitize_choice_calls(calls, schemas, limits)
     if "content" in message:
         updated.setdefault("content", "")
@@ -543,6 +585,7 @@ def _normalize_message(
     message.clear()
     message.update(updated)
     return True
+
 
 def sanitize_completion_body(
     body: bytes,
@@ -569,11 +612,18 @@ def sanitize_completion_body(
             )
     return json.dumps(data, ensure_ascii=False).encode("utf-8") if changed else body
 
+
 def _data_frame(payload: Mapping[str, Any]) -> bytes:
     return b"data: " + json.dumps(payload, ensure_ascii=False).encode("utf-8") + b"\n\n"
 
-def _error_frame(chunk: Mapping[str, Any], code: str, message: str) -> bytes:
-    """Терминальный error-chunk в форме `chat.completion.chunk` (как fail-close кадр фасада)."""
+
+def _error_frame(
+    chunk: Mapping[str, Any],
+    code: str,
+    message: str,
+    usage: Optional[Mapping[str, Any]] = None,
+) -> bytes:
+    """Терминальный error-chunk `chat.completion.chunk`; `usage` потока не обнуляется ошибкой."""
     return (
         format_sse_event(
             build_stream_error_chunk(
@@ -588,10 +638,12 @@ def _error_frame(chunk: Mapping[str, Any], code: str, message: str) -> bytes:
                 ),
                 completion_id=str(chunk.get("id") or "chatcmpl-passthrough"),
                 created=chunk.get("created"),
+                usage=usage,
             )
         ).encode("utf-8")
         + b"data: [DONE]\n\n"
     )
+
 
 def iter_sse_events(
     readline: Callable[[int], bytes], max_line_bytes: int
@@ -620,6 +672,7 @@ def iter_sse_events(
             value = text[5:].decode("utf-8", errors="replace")
             data.append(value[1:] if value.startswith(" ") else value)
 
+
 @dataclass
 class StreamOutcome:
     """Итог пробрасывания SSE (для журнала и тестов)."""
@@ -630,9 +683,12 @@ class StreamOutcome:
     tool_calls_published: int = 0
     committed: bool = False
     repetition_loop: bool = False
+    error_emitted: bool = False
     last_chunk: Optional[dict[str, Any]] = None
+    last_usage: Optional[dict[str, Any]] = None
     unfinished_choices: Optional[set[int]] = None
     reader_stopped: bool = False
+
 
 class _TimedSseReader:
     """Один bounded reader; ожидание I/O не мешает heartbeat и дедлайну."""
@@ -720,8 +776,14 @@ class _TimedSseReader:
         self.request_read.release()
         self.thread.join(timeout=self.limits.reader_join_timeout_s)
 
+
 class _RepetitionLoop(Exception):
     """Guard обнаружил повтор уже нормализованного текста."""
+
+
+class _EmptyToolCall(Exception):
+    """Неполный пакет вызовов не должен публиковаться клиенту."""
+
 
 def _delta_frame(base: Mapping[str, Any], index: int, delta: dict[str, Any]) -> bytes:
     payload = {
@@ -734,15 +796,18 @@ def _delta_frame(base: Mapping[str, Any], index: int, delta: dict[str, Any]) -> 
     payload["choices"] = [{"index": index, "delta": delta, "finish_reason": None}]
     return _data_frame(payload)
 
+
 def _published_call_count(calls: Any) -> int:
     if not isinstance(calls, list):
         return 0
     return sum(isinstance(call, dict) and bool(call.get("id")) for call in calls)
 
+
 def _stream_error_info(error: Any) -> tuple[str, str]:
     info = error if isinstance(error, dict) else {}
     code = str(info.get("code") or info.get("type") or "upstream_stream_error")
     return code, str(info.get("message") or error)
+
 
 class _SseRelay:
     """Состояние одного relay; парсеры и буферы изолированы по choice.index."""
@@ -773,7 +838,9 @@ class _SseRelay:
     def error(self, code: str, message: str, flag: str) -> StreamOutcome:
         self.acc.close()
         setattr(self.outcome, flag, True)
-        self.write(_error_frame(self.last_chunk, code, message))
+        self.write(
+            _error_frame(self.last_chunk, code, message, self.outcome.last_usage)
+        )
         return self.outcome
 
     def _check_repetition(self, index: int, text: str) -> None:
@@ -854,14 +921,25 @@ class _SseRelay:
         modified = False
         if self.sanitize and isinstance(delta, dict) and delta.get("content"):
             self.write(_delta_frame(base, index, {"content": delta["content"]}))
-            choice["delta"] = {key: value for key, value in delta.items() if key != "content"}
+            choice["delta"] = {
+                key: value for key, value in delta.items() if key != "content"
+            }
             modified = True
         self._flush_text(index, base)
         if self.acc.has_choice(index):
-            calls = sanitize_choice_calls(self.acc.pop_choice(index), self.schemas, self.limits)
+            calls = self._validated_calls(index)
             self.outcome.tool_calls_published += len(calls)
             self.write(_delta_frame(base, index, {"tool_calls": calls}))
         return modified
+
+    def _validated_calls(self, index: int) -> list[dict[str, Any]]:
+        raw_calls = self.acc.pop_choice(index)
+        calls = sanitize_choice_calls(raw_calls, self.schemas, self.limits)
+        if not calls or has_any_unnamed_call(
+            raw_calls, max_parallel_depth=self.limits.max_parallel_depth
+        ):
+            raise _EmptyToolCall()
+        return calls
 
     def _consume_chunk(self, chunk: dict[str, Any], choices: list[Any]) -> bool:
         self.last_chunk = {key: chunk.get(key) for key in ("id", "created", "model")}
@@ -923,6 +1001,10 @@ class _SseRelay:
     def run(self, reader: _TimedSseReader) -> StreamOutcome:
         for raw, data in iter_sse_events(reader.readline, self.limits.max_body_bytes):
             chunk = reader.progress.note(data)
+            if isinstance(chunk, dict):
+                self.outcome.last_usage = (
+                    positive_wire_usage(chunk.get("usage")) or self.outcome.last_usage
+                )
             if data is not None and data.strip() == "[DONE]":
                 return self._end(raw)
             if chunk is None:
@@ -936,6 +1018,7 @@ class _SseRelay:
                 continue
             self._write_chunk(raw, chunk, self._consume_chunk(chunk, choices))
         return self._end()
+
 
 def relay_sse(
     readline: Callable[[int], bytes],
@@ -953,27 +1036,36 @@ def relay_sse(
     reader = _TimedSseReader(readline, relay.write, limits, deadline, kw.get("window"))
     try:
         return relay.run(reader)
-    except LiveParserError:
-        return relay.error(
-            "upstream_tool_mode_violation", "upstream tool mode violation", "incomplete"
-        )
-    except _RepetitionLoop:
-        return relay.error(
-            "upstream_repetition_loop",
-            "upstream repetition loop detected",
-            "repetition_loop",
-        )
-    except (AccumulatorOverflow, UpstreamBodyTooLarge) as exc:
-        what = "tool_calls exceed" if isinstance(exc, AccumulatorOverflow) else "event exceeds"
-        return relay.error(
-            "upstream_response_too_large",
-            f"upstream {what} the bridge limit",
-            "overflow",
-        )
+    except (_EmptyToolCall, LiveParserError, _RepetitionLoop,
+            AccumulatorOverflow, UpstreamBodyTooLarge) as exc:
+        return _relay_error(relay, exc)
     finally:
         relay.acc.close()
         reader.close()
         relay.outcome.reader_stopped = not reader.thread.is_alive()
+
+
+def _relay_error(relay: _SseRelay, error: Exception) -> StreamOutcome:
+    """Сохраняет классификацию терминальных ошибок обоих протокольных швов."""
+    if isinstance(error, _EmptyToolCall):
+        return relay.error(
+            "tool_call_parse_error",
+            "Upstream emitted tool_calls with empty function name",
+            "error_emitted",
+        )
+    if isinstance(error, LiveParserError):
+        return relay.error(
+            "upstream_tool_mode_violation", "upstream tool mode violation", "incomplete"
+        )
+    if isinstance(error, _RepetitionLoop):
+        return relay.error(
+            "upstream_repetition_loop", "upstream repetition loop detected", "repetition_loop"
+        )
+    what = "tool_calls exceed" if isinstance(error, AccumulatorOverflow) else "event exceeds"
+    return relay.error(
+        "upstream_response_too_large", f"upstream {what} the bridge limit", "overflow"
+    )
+
 
 def _checked_events(
     events: Iterator[tuple[bytes, str | None]],
@@ -997,6 +1089,7 @@ def _checked_events(
     finally:
         relay.acc.close()
 
+
 def _response_timed_out(error: Exception, options: Mapping[str, Any]) -> bool:
     deadline, window = options.get("deadline"), options.get("window")
     return (
@@ -1007,6 +1100,7 @@ def _response_timed_out(error: Exception, options: Mapping[str, Any]) -> bool:
         or (window is not None and window.expired())
     )
 
+
 def _json_error(status: int, error_type: str, message: str) -> tuple[list[tuple[str, str]], bytes]:
     body = json.dumps(
         {"error": {"message": message, "type": error_type, "code": status}},
@@ -1016,6 +1110,7 @@ def _json_error(status: int, error_type: str, message: str) -> tuple[list[tuple[
         ("Content-Type", "application/json; charset=utf-8"),
         ("Content-Length", str(len(body))),
     ], body
+
 
 def _read_bounded(resp: http.client.HTTPResponse, limit: int) -> bytes:
     """Тело upstream не больше `limit`: проверка заявленного размера и инкрементальное чтение."""
@@ -1048,7 +1143,9 @@ class PassthroughAdapter(BackendAdapter):
 
     kind = KIND
     CONSTRAINTS = KindConstraints(base_url_allowed=True, api_key_env_allowed=True)
-    capabilities = Capabilities(sessions=SESSIONS_NONE, streaming=STREAMING_NATIVE, usage="exact")
+    capabilities = Capabilities(
+        sessions=SESSIONS_NONE, streaming=STREAMING_NATIVE, usage="exact"
+    )
 
     def __init__(self, backend_id: str, config: Mapping[str, Any],
                  catalog_source: Callable[[], Mapping[str, Any]], host: Any = None, **kwargs: Unpack[PassthroughInitOptions]) -> None:
@@ -1065,11 +1162,6 @@ class PassthroughAdapter(BackendAdapter):
     ) -> None:
         """Инициализирует прежние ресурсы адаптера без дополнительного пула."""
         self._is_hub_key = is_hub_key
-        api_key_env = self.config.get("api_key_env")
-        api_key = self.config.get("api_key")
-        self._upstream_key = (
-            os.environ.get(api_key_env) if isinstance(api_key_env, str) else ""
-        ) or (api_key if isinstance(api_key, str) else "")
         self._limits = limits
         initial_limits = self.limits
         self._pool: PassthroughConnectionPool = PassthroughConnectionPool(
@@ -1106,6 +1198,17 @@ class PassthroughAdapter(BackendAdapter):
         self._base_path = parts.path.rstrip("/")
 
     @property
+    def _upstream_key(self) -> str:
+        """Единый живой credential: ref → env → literal без обхода отзыва."""
+        if (override := getattr(self, "_upstream_key_override", None)) is not None:
+            return override
+        return resolve_credential(self.config)
+
+    @_upstream_key.setter
+    def _upstream_key(self, value: Optional[str]) -> None:
+        self._upstream_key_override = value
+
+    @property
     def limits(self) -> PassthroughLimits:
         return self._limits if self._limits is not None else PassthroughLimits.from_env()
 
@@ -1116,9 +1219,16 @@ class PassthroughAdapter(BackendAdapter):
     # -- контракт BackendAdapter ---------------------------------------------------------
     def validate_client_token(self, token: str) -> bool:
         """Проверяет клиентский токен по собственному настроенному ключу upstream."""
-        if not self._upstream_key or not token:
+        key = self._upstream_key
+        # Локальная UTF-8 аутентификация не ограничена ASCII HTTP-заголовка.
+        if getattr(self, "_upstream_key_override", None) is None and all(
+            self.config.get(field) in (None, "") for field in ("api_key_ref", "api_key_env")
+        ):
+            literal = self.config.get("api_key")
+            key = literal if isinstance(literal, str) else ""
+        if not key or not token:
             return False
-        return hmac.compare_digest(token.encode("utf-8"), self._upstream_key.encode("utf-8"))
+        return hmac.compare_digest(token.encode("utf-8"), key.encode("utf-8"))
 
     def get_models(self) -> list[BackendModel]:
         return self._catalog_models()
@@ -1147,16 +1257,8 @@ class PassthroughAdapter(BackendAdapter):
 
     # -- upstream-параметры шва (api_key_ref / headers_from_json / per_request_headers) ----
     def _read_key_ref(self) -> str:
-        """Токен из `api_key_ref` (`file:<путь>`); читается на каждый запрос (ротация ключа)."""
-        ref = self.config.get("api_key_ref")
-        if not isinstance(ref, str) or not ref.startswith("file:"):
-            return ""
-        try:
-            with open(os.path.expanduser(ref[len("file:") :]), encoding="utf-8") as fh:
-                return fh.read().strip()
-        except OSError:
-            self._log("passthrough api_key_ref unreadable")
-            return ""
+        """Совместимый вход чтения ref через общий ограниченный resolver."""
+        return resolve_credential({"api_key_ref": self.config.get("api_key_ref")})
 
     def _read_json_headers(self) -> dict[str, str]:
         """Заголовки `headers_from_json`: узел `json_path` файла, ключи из `pick` (без регистра)."""
@@ -1520,8 +1622,10 @@ class PassthroughAdapter(BackendAdapter):
             "completion_id": last.get("id"),
             "created": last.get("created"),
             "choice_indices": sorted(unfinished) if unfinished is not None else [0],
+            "usage": outcome.last_usage,
         }
-        sink.write(format_stream_error_sse(**error_options).encode("utf-8"))
+        chunk = format_sse_event(build_stream_error_chunk(**error_options))
+        sink.write((chunk + format_sse_event("[DONE]")).encode("utf-8"))
         return False
 
     def _stream_success(self, outcome: StreamOutcome) -> bool:
@@ -1534,6 +1638,7 @@ class PassthroughAdapter(BackendAdapter):
             or outcome.incomplete
             or outcome.overflow
             or outcome.repetition_loop
+            or outcome.error_emitted
         )
 
     def _relay_stream(

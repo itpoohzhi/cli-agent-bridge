@@ -3,6 +3,7 @@
 Проверяется на фейковом адаптере и на реальных DroidAdapter/MuseAdapter: набор методов,
 маппинг модель -> адаптер, отказ от загрузки кода из конфигурации, изоляция сбоя shutdown.
 """
+
 from __future__ import annotations
 
 import sys
@@ -207,7 +208,7 @@ class TestRealAdapters(unittest.TestCase):
         reg = server.BACKENDS
         expected = {
             "claude-sonnet-5-5": "claude-p",
-            "gemini-3.8-flash": "agy",
+            "gemini-3.8-flash": "droid", "gemini-3.8-flash-agy": "agy",
             "gpt-6.1-sol": "openai-key-2",
             "claude-sonnet-5-5-droid": "droid",
             "gemini-3.8-flash-droid": "droid",
