@@ -6706,7 +6706,10 @@ class Handler(BaseHTTPRequestHandler):
         stopped = thread is not None and not thread.is_alive()
         owner = getattr(ports.turn_complete, "__self__", None)
         snap_fn = getattr(owner, "recovery_snapshot", None)
-        tool_status = str(snap_fn()) if callable(snap_fn) else ("closed" if ports.turn_complete is None else "unknown")
+        try:
+            tool_status = str(snap_fn()) if callable(snap_fn) else ("closed" if ports.turn_complete is None else "unknown")
+        except Exception:
+            tool_status = "unknown"
         return DoneSnapshot(
             DoneTextFacts(final_text, str(getattr(run, "_content_emitted_wire", "") or ""), full_error, request.errors[1]),
             DoneResultFacts(str((result_ev or {}).get("status") or "").strip().lower(),

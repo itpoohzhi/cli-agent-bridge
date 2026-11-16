@@ -156,6 +156,7 @@ def _resolve_done(
 ) -> recovery.TurnOutcomeResolution:
     """Единое решение выдачи и снятия ошибки принимается до любого reconcile."""
     text, result = snapshot.text, snapshot.result
+    drain_meta = snapshot.recovery.drain_meta
     status = result.result_status.upper()
     error = recovery.settle_error(text.result_error, text.cleared_error, status)
     facts = _causal_input(snapshot, enabled, error)
@@ -167,7 +168,7 @@ def _resolve_done(
         completion_done_without_tools=facts.completion.completion_done_without_tools,
         last_completion_seq=facts.completion.last_completion_seq,
         last_error_seq=facts.error.identity.seq,
-        drain_complete=snapshot.recovery.drain_meta.outcome != "timeout",
+        drain_complete=bool(drain_meta.outcome) and drain_meta.outcome != "timeout" and drain_meta.producer_stopped,
         had_transient_error=bool(getattr(snapshot.recovery.tail, "had_transient_error", False) or text.cleared_error),
         has_unclosed_tool_call=snapshot.recovery.tool_status != "closed",
     )

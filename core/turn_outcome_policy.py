@@ -125,8 +125,12 @@ def _causal_blocker(facts: CausalOutcomeInput) -> str:
         ("causal_recovery_disabled", config.causal_recovery_enabled is not True),
         ("missing_structured_error", identity.seq < 0),
         ("completion_not_after_error", completion.last_completion_seq <= identity.seq),
-        ("attempt_mismatch", identity.attempt != completion.completion_attempt),
-        ("attempt_mismatch", completion.completion_attempt < 0),
+        (
+            "attempt_mismatch",
+            config.attempt < 0 or identity.attempt != config.attempt
+            or completion.completion_attempt != config.attempt,
+        ),
+        ("non_error_result_status", error.result_status.strip().upper() != "ERROR"),
         ("unstructured_error", error.error_from_structured_record is not True),
         ("missing_error_identity", not identity.sha256),
         ("error_identity_mismatch", error.result_error_sha256 != identity.sha256),

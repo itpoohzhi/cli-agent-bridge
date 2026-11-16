@@ -43,7 +43,7 @@ def test_content_safety_echo(returncode: int, mode: str) -> None:
     decision = evaluate_causal_turn_recovery(_facts(returncode=returncode, text="Content safety: request rejected"))
     assert decision.recovered and decision.allow_reconcile and decision.clear_error
     assert decision.outcome_mode == mode
-@pytest.mark.parametrize("group,field,value,reason", (("config", "master_self_heal", False, "self_heal_disabled"), ("config", "causal_recovery_enabled", False, "causal_recovery_disabled"), ("identity", "seq", -1, "missing_structured_error"), ("error", "error_from_structured_record", False, "unstructured_error"), ("identity", "sha256", "", "missing_error_identity"), ("completion", "last_completion_seq", 321, "completion_not_after_error"), ("completion", "last_completion_seq", 320, "completion_not_after_error"),
+@pytest.mark.parametrize("group,field,value,reason", (("config", "master_self_heal", False, "self_heal_disabled"), ("config", "causal_recovery_enabled", False, "causal_recovery_disabled"), *(("config", "attempt", attempt, "attempt_mismatch") for attempt in (-1, 9)), *(("error", "result_status", status, "non_error_result_status") for status in ("", "DONE", "RUNNING")), ("completion", "completion_attempt", 1, "attempt_mismatch"), ("identity", "seq", -1, "missing_structured_error"), ("error", "error_from_structured_record", False, "unstructured_error"), ("identity", "sha256", "", "missing_error_identity"), ("completion", "last_completion_seq", 321, "completion_not_after_error"), ("completion", "last_completion_seq", 320, "completion_not_after_error"),
     ("identity", "attempt", 1, "attempt_mismatch"), ("completion", "completion_attempt", -1, "attempt_mismatch"), ("error", "result_error_sha256", "", "error_identity_mismatch"), ("error", "result_error_sha256", "other", "error_identity_mismatch"), ("completion", "completion_done_without_tools", False, "completion_has_tools"), ("completion", "has_final_text", False, "missing_final_text"), ("terminal", "has_late_error_or_open_step", True, "late_error_or_open_step"), ("process", "has_fatal_error", True, "fatal_error"), ("drain", "explicit_drain_complete", False, "drain_not_explicit"), ("drain", "drain_complete", False, "drain_incomplete"),
     ("drain", "producer_stopped", False, "producer_not_stopped"), ("terminal", "tool_status", "open", "tools_not_closed"), ("terminal", "tool_status", "unknown", "tools_not_closed"), ("terminal", "tool_status", "malformed", "tools_not_closed"), ("process", "process_exited", False, "process_not_exited"), *(("process", "returncode", rc, "unsupported_returncode") for rc in (None, -11, 139, 128, 2)),))
 def test_fail_closed(group: str, field: str, value: object, reason: str) -> None:
@@ -66,14 +66,16 @@ def test_digest_known_sha256_and_empty_identity() -> None:
     assert error_identity_digest(" abc\r\n") == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
     assert error_identity_digest(None) == error_identity_digest(" \r\n") == ""
     assert error_identity_digest("ERROR") != error_identity_digest("error") and error_identity_digest("a  b") != error_identity_digest("a b")
-def test_crlf_and_outer_whitespace_echo_is_recovered() -> None:
+@pytest.mark.parametrize("status", ("ERROR", "error", " \tErRoR\r\n"))
+def test_crlf_and_outer_whitespace_echo_is_recovered(status: str) -> None:
     facts = _facts(text=" \tERROR\r\nnext\rline  ")
-    facts = replace(facts, error=replace(facts.error, result_error_sha256=error_identity_digest("ERROR\nnext\nline")))
+    facts = replace(facts, error=replace(facts.error, result_status=status, result_error_sha256=error_identity_digest("ERROR\nnext\nline")))
     assert evaluate_causal_turn_recovery(facts).recovered
-def test_negative_matching_attempts_are_rejected() -> None:
-    facts = _changed("identity", attempt=-1)
-    facts = replace(facts, completion=replace(facts.completion, completion_attempt=-1))
-    assert evaluate_causal_turn_recovery(facts).reason == "attempt_mismatch"
+@pytest.mark.parametrize("attempt", (-1, 0, 1, 9))
+def test_matching_attempts_validate_current_attempt(attempt: int) -> None:
+    facts = _changed("identity", attempt=attempt)
+    facts = replace(facts, config=replace(facts.config, attempt=attempt), completion=replace(facts.completion, completion_attempt=attempt))
+    assert evaluate_causal_turn_recovery(facts).reason == ("causal_echo_recovered" if attempt >= 0 else "attempt_mismatch")
 def test_grouped_records_are_frozen_and_constructors_are_bounded() -> None:
     facts = _facts()
     records = (facts, facts.config, facts.error, facts.error.identity, facts.completion, facts.terminal, facts.terminal.drain, facts.terminal.process, evaluate_causal_turn_recovery(facts))
@@ -81,8 +83,6 @@ def test_grouped_records_are_frozen_and_constructors_are_bounded() -> None:
         assert len(fields(record)) <= 4
         with pytest.raises(FrozenInstanceError):
             setattr(record, fields(record)[0].name, None)
-def test_attempt_metadata_does_not_replace_error_completion_identity() -> None:
-    assert evaluate_causal_turn_recovery(_changed("config", attempt=9)).recovered
 def test_decision_flags_are_derived_and_immutable() -> None:
     decision = CausalOutcomeDecision(True, "causal_echo_only", "causal_echo_recovered", "")
     assert decision.allow_reconcile and decision.clear_error
@@ -287,14 +287,14 @@ def test_finalize_done_legacy(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, c
     expected = {"gone": ("client_gone", 1), "error": ("agy_error", 1, _LONG_ERROR[:500]), "payload_rc": ("agy_error", 7, _LONG_ERROR[:500]), "result_rc": ("agy_error", 2, _LONG_ERROR[:500])}
     assert result == expected.get(case, ("done", rc, "stderr"))
     assert content == ([] if case in ("error", "nonzero", "empty_final", "payload_rc", "result_rc") else ["\n\nФинал" if case == "fallback" else "Финал"])
-@pytest.mark.parametrize("outcome", ("timeout", "ok"))
-def test_finalize_transient_drain_veto(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, outcome: str) -> None:
+@pytest.mark.parametrize("outcome,stopped,recovered", (("timeout", True, False), ("ok", True, True), ("done", True, True), ("complete", True, True), ("", True, False), ("complete", False, False), ("", False, False), ("timeout", False, False)))
+def test_finalize_transient_drain_veto(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, outcome: str, stopped: bool, recovered: bool) -> None:
     monkeypatch.setenv("BRIDGE_DYNAMIC_CONFIG_PATH", str(tmp_path / "absent"))
     monkeypatch.setenv(_FLAG, "false")
     monkeypatch.delenv("AGY_SELF_HEAL_INTERRUPTED_TURN", raising=False)
     error, tail = "connection reset by peer", facade.InterruptionTailState()
     tail.note_error_record(1, text=error)
     tail.note_planner_record({"content": "Финал", "status": "DONE"}, 2)
-    snapshot = done.DoneSnapshot(done.DoneTextFacts("Финал", "", error, ""), done.DoneResultFacts("ERROR", 1, True, 0), done.DoneDeliveryFacts(False, True, lambda text: text, False), done.DoneRecoveryFacts(True, tail, done.DoneDrainFacts(outcome, True), "closed"))
+    snapshot = done.DoneSnapshot(done.DoneTextFacts("Финал", "", error, ""), done.DoneResultFacts("ERROR", 1, True, 0), done.DoneDeliveryFacts(False, True, lambda text: text, False), done.DoneRecoveryFacts(True, tail, done.DoneDrainFacts(outcome, stopped), "closed"))
     ports = done.DonePorts(lambda *args: args, lambda _text: None, lambda _events: None, lambda: False)
-    assert done.finalize_done(done.DoneRequest((1, "Финал", None), {}, ("", "")), ports, done.DoneRuntimePorts(lambda: snapshot), done.DoneConfig(None, 256), lambda _line: None) == (("agy_error", 1, error) if outcome == "timeout" else ("done", 0, ""))
+    assert done.finalize_done(done.DoneRequest((1, "Финал", None), {}, ("", "")), ports, done.DoneRuntimePorts(lambda: snapshot), done.DoneConfig(None, 256), lambda _line: None) == (("done", 0, "") if recovered else ("agy_error", 1, error))

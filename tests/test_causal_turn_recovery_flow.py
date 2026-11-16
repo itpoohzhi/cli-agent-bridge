@@ -11,6 +11,7 @@ import sys
 import threading
 import time
 from collections.abc import Callable
+from contextlib import nullcontext
 from operator import attrgetter
 from pathlib import Path
 from types import SimpleNamespace
@@ -49,6 +50,10 @@ class _Tail(Protocol):
     def _finish(self) -> None: ...
 class _Run(Protocol):
     q: queue.Queue[tuple[str, object]]
+class _Runner(Protocol):
+    stop: Callable[[], bool] | None
+    def attempt(self, index: int, budget: float) -> dict[str, object]: ...
+    def recovery_snapshot(self) -> str: ...
 class _Tool(Protocol):
     error: str
     def feed(self, text: str) -> bool: ...
@@ -99,11 +104,8 @@ def _make_tail(bridge: _Bridge, error_steps: tuple[int, ...], final_step: int) -
     """Воспроизвести подтверждённые error/DONE-записи текущей попытки."""
     plan = bridge._TurnPlan()
     plan.mode, plan.base_idx, plan.offset = "OFF", 0, 0
-    tail = bridge._TranscriptTail(
-        emit=_accept, stop_event=threading.Event(), done_event=threading.Event(),
-        resumed=False, plan=plan, turn_id="causal-replay", emit_content=_accept)
-    records: tuple[dict[str, object], ...] = (*(dict(type="ERROR_MESSAGE", step_index=step, status="DONE", content=_ERROR) for step in error_steps),
-        dict(type="PLANNER_RESPONSE", step_index=final_step, status="DONE", content=_FINAL, tool_calls=[]))
+    tail = bridge._TranscriptTail(emit=_accept, stop_event=threading.Event(), done_event=threading.Event(), resumed=False, plan=plan, turn_id="causal-replay", emit_content=_accept)
+    records: tuple[dict[str, object], ...] = (*(dict(type="ERROR_MESSAGE", step_index=step, status="DONE", content=_ERROR) for step in error_steps), dict(type="PLANNER_RESPONSE", step_index=final_step, status="DONE", content=_FINAL, tool_calls=[]))
     for record in records:
         tail._emit_record(json.dumps(record, ensure_ascii=False).encode("utf-8"))
     tail.done_event.set()
@@ -118,12 +120,10 @@ def _make_run(tail: _Tail) -> _Run:
     result = dict(status="ERROR", error=_ERROR, conversation_id="causal-replay")
     events.put(("result", result))
     events.put(("done", (1, _FINAL, result)))
-    run: object = SimpleNamespace(
-        q=events, _tail=tail, started=time.monotonic(), got_event=True, content_streaming=True, usage_enabled=False,
+    return cast(_Run, cast(object, SimpleNamespace(q=events, _tail=tail, started=time.monotonic(), got_event=True, content_streaming=True, usage_enabled=False,
         proc=SimpleNamespace(returncode=1), controller=SimpleNamespace(on_activity=_accept),
         terminal_drain=_empty_drain, reconcile_result=str,  # str: финал целиком, live-доставки не было
-        _arbiter=SimpleNamespace(last_result_diverged=False), err_box=(), turn_id="causal-replay")
-    return cast(_Run, cast(object, run))
+        _arbiter=SimpleNamespace(last_result_diverged=False), err_box=(), turn_id="causal-replay")))
 def _serve_replay(bridge: _Bridge, run: _Run, tool_stop: Callable[[], bool] | None = None, options: dict[str, object] | None = None) -> tuple[list[_Chunk], _Outcome]:
     """Получить реальные SSE-кадры вокруг _execute(result → done), без HTTP/CLI."""
     frames: list[str] = []
@@ -169,20 +169,15 @@ def test_recovered_terminal_has_no_sse_error(monkeypatch: pytest.MonkeyPatch, tm
     assert len(logs) == 1 and logs[0]["reason"] == "causal_echo_recovered"
     assert set(logs[0]) == {"reason", "last_error_seq", "last_completion_seq", "rc"}
     assert _ERROR not in "".join(messages) and _FINAL not in "".join(messages)
-@pytest.mark.parametrize("veto", (
-    "env", "canonical_env", "json", "canonical_json", "broken", "symlink",
-    "master", "signal", "running", "no_proc_running", "open_tool", "unknown_tool",
-    "live_producer", "incomplete_drain", "fatal",
-))
+@pytest.mark.parametrize("veto", ("env", "canonical_env", "json", "canonical_json", "broken", "symlink",
+    "master", "signal", "running", "no_proc_running", "open_tool", "unknown_tool", "live_producer", "incomplete_drain", "fatal"))
 def test_recovery_vetoes(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, veto: str) -> None:
     """Каждый запрет сохраняет ошибку и не выдаёт неподтверждённый финал."""
     bridge = _load_bridge(monkeypatch, tmp_path)
     run = _make_run(_make_tail(bridge, (218, 321), 370))
     tool_stop = None
     if veto in ("env", "canonical_env", "master"):
-        name = {"env": "AGY_CAUSAL_RECOVERY_ENABLED",
-                "canonical_env": "BRIDGE_CAUSAL_TURN_RECOVERY_ENABLED",
-                "master": "AGY_SELF_HEAL_INTERRUPTED_TURN"}[veto]
+        name = {"env": "AGY_CAUSAL_RECOVERY_ENABLED", "canonical_env": "BRIDGE_CAUSAL_TURN_RECOVERY_ENABLED", "master": "AGY_SELF_HEAL_INTERRUPTED_TURN"}[veto]
         monkeypatch.setenv(name, "false")
     elif veto == "symlink":
         _ = (tmp_path / "target.json").write_text("{}")
@@ -192,8 +187,7 @@ def test_recovery_vetoes(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, veto: 
             "json": '{"causal_recovery_enabled": false}',
             "canonical_json": '{"causal_turn_recovery_enabled": false}', "broken": "{"}[veto])
     elif veto in ("signal", "running", "no_proc_running"):
-        proc = None if veto == "no_proc_running" else SimpleNamespace(returncode=-9 if veto == "signal" else None)
-        monkeypatch.setattr(run, "proc", proc)
+        monkeypatch.setattr(run, "proc", None if veto == "no_proc_running" else SimpleNamespace(returncode=-9 if veto == "signal" else None))
         monkeypatch.setattr(run, "process_exited", False, raising=False)
     elif veto in ("open_tool", "unknown_tool"):
         tool = bridge._ToolTurn([], _accept, _accept, _accept)
@@ -207,9 +201,9 @@ def test_recovery_vetoes(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, veto: 
     else:
         cast(_Tail, getattr(run, "_tail")).drain_outcome = "timeout"
     chunks, out = _serve_replay(bridge, run, tool_stop)
-    assert out["state"] == "agy_error" and out["rc"] != 0 and out["err"]
-    assert out["text"] == "" and any("error" in chunk for chunk in chunks)
-def test_tool_snapshot_is_read_only(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    assert out["state"] == "agy_error" and out["rc"] != 0 and out["err"] and out["text"] == "" and any("error" in chunk for chunk in chunks)
+@pytest.mark.parametrize("previous,fail", ((None, False), (None, True), (_accept, False), (_accept, True)))
+def test_tool_snapshot_is_read_only(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, previous: Callable[[], bool] | None, fail: bool) -> None:
     """Снимок не завершает ход; незакрытый блок и ошибка запрещают recovery."""
     bridge = _load_bridge(monkeypatch, tmp_path)
     tool, done, clean = (bridge._ToolTurn([], _accept, _accept, _accept) for _ in range(3))
@@ -226,6 +220,17 @@ def test_tool_snapshot_is_read_only(monkeypatch: pytest.MonkeyPatch, tmp_path: P
     # emulate_tools: снимок до turn_complete() для чистого хода не блокирует recovery
     _assert_final_preserved(*_serve_replay(bridge, _make_run(_make_tail(bridge, (218, 321), 370)), clean.turn_complete))
     assert getattr(clean, "_finished") is False
+    runner = cast(_Runner, object.__new__(cast(type[object], getattr(sys.modules["agy_runtime.sse_body_runner"], "_SseBodyRunner"))))
+    vars(runner).update(s=SimpleNamespace(ctx={"tool_stop": clean.turn_complete}, disconnected=False), buffering=False, deadline=float("inf"), time=time, stop=previous)
+    def invoke() -> dict[str, object]:
+        assert runner.stop == clean.turn_complete
+        if fail:
+            raise RuntimeError("attempt failed")
+        return {}
+    monkeypatch.setattr(runner, "_invoke", invoke)
+    with pytest.raises(RuntimeError, match="attempt failed") if fail else nullcontext():
+        assert runner.attempt(0, 1.0) == {}
+    assert runner.stop is previous and (previous is not None or runner.recovery_snapshot() == "closed")
 @pytest.mark.parametrize("mode", ("off", "retry", "rollback", "both"))
 @pytest.mark.parametrize("case", ("clean", "empty", "open", "unknown", "broken", "no_tools"))
 @pytest.mark.parametrize("quiet", (False, True))
@@ -236,13 +241,10 @@ def test_sse_runner_tool_recovery_join(monkeypatch: pytest.MonkeyPatch, tmp_path
     monkeypatch.setenv("BRIDGE_STREAM_TOOL_ROLLBACK_ENABLED", str(mode in ("rollback", "both")))
     if case in ("unknown", "broken"):
         def snapshot(_self: object) -> str:
-            if mode != "off":
-                raise RuntimeError("snapshot failed")
-            return "unknown"
+            raise RuntimeError("snapshot failed")
         monkeypatch.setattr(bridge._ToolTurn, "recovery_snapshot", None if case == "unknown" else snapshot)
     run = _make_run(_make_tail(bridge, (218, 321), 370))
-    options: dict[str, object] = dict(emulate_tools=case != "no_tools", quiet=quiet,
-        prelude={"empty": "<tool_call>", "open": '<tool_call>{"name":"unfinished"'}.get(case, ""))
+    options: dict[str, object] = dict(emulate_tools=case != "no_tools", quiet=quiet, prelude={"empty": "<tool_call>", "open": '<tool_call>{"name":"unfinished"'}.get(case, ""))
     chunks, out = _serve_replay(bridge, run, options=options)
     if case in ("clean", "no_tools"):
         _assert_final_preserved(chunks, out)
@@ -277,13 +279,11 @@ def test_done_recovery_flag_returns_strict_bools(monkeypatch: pytest.MonkeyPatch
     path.unlink()
     path.symlink_to(tmp_path)
     assert enabled() is False
-@pytest.mark.parametrize("case", (
-    ({"error": "E" * 600, "status": "ERROR"}, {}, ("E" * 500, "cleared"), "wire", ("E" * 600, "error", "cleared", "wire")),
+@pytest.mark.parametrize("case", (({"error": "E" * 600, "status": "ERROR"}, {}, ("E" * 500, "cleared"), "wire", ("E" * 600, "error", "cleared", "wire")),
     (None, {"error": "R", "status": " Done "}, ("", ""), None, ("R", "done", "", "")),
     (None, {}, ("fallback", ""), None, ("fallback", "", "", "")),
     ({"error": "P", "status": "ERROR"}, {"error": "R", "status": " Done "}, ("", ""), None, ("R", "done", "", "")),  # request.result_ev приоритетнее payload
-    ({"error": "P", "status": "ERROR"}, None, ("", ""), None, ("P", "error", "", "")),
-))
+    ({"error": "P", "status": "ERROR"}, None, ("", ""), None, ("P", "error", "", "")),))
 def test_snapshot_done_keeps_full_facts(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, case: _Case) -> None:
     """DoneSnapshot хранит полную ошибку (>500), статус, cleared_error и уже выданный текст."""
     payload_ev, result_ev, errors, wire, expected = case

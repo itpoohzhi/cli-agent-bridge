@@ -87,7 +87,7 @@ class _SseBodyRunner:
         except Exception:
             return "unknown"
     def attempt(self, index: int, budget: float) -> dict[str, Any]:
-        s, ctx = self.s, self.s.ctx
+        s, ctx, prev_stop = self.s, self.s.ctx, self.stop
         if self.buffering:
             s.buffer.rollback_uncommitted()
             self.prepare_buffer()
@@ -101,6 +101,7 @@ class _SseBodyRunner:
         try:
             out = self._invoke()
         finally:
+            self.stop = prev_stop
             if not is_present(stop):
                 _ = ctx.pop("tool_stop", None)
             else:
@@ -108,8 +109,7 @@ class _SseBodyRunner:
         if all((self.expired(), not self.cancelled())):
             out.update( state="timeout", rc=124, err="retry_budget_exhausted",
                 timeout_limit_s=budget, )
-        self.deadline = float("inf")
-        self.last_out = out
+        self.deadline, self.last_out = float("inf"), out
         if self.buffering:
             self.reconcile_trace(out)
         return out
