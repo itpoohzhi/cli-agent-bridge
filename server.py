@@ -35,7 +35,6 @@ BRIDGE_KEY и DROID_DSH_BRIDGE_KEY; ротация файла отзывает �
 без интерактивного логина) наследуется потомком как есть — его подкладывает
 start.sh из ~/.zshenv; `droid exec` читает его из окружения сам.
 """
-
 from __future__ import annotations
 
 import base64
@@ -82,7 +81,7 @@ from tools.receipt_schema import (  # noqa: E402,F401
     settings_profile_digest as settings_profile_digest, tools_policy_digest as tools_policy_digest,
     validate_model_catalog, validate_receipt_components,
 )
-
+from core.http_accept import configure_accepted_socket  # noqa: E402
 from adapters import ADAPTER_KINDS  # noqa: E402  - реестр видов адаптеров задан в коде
 from adapters.passthrough_adapter import (  # noqa: E402
     ClientGone,
@@ -435,7 +434,7 @@ WORKSPACE = ROOT / "workspace"
 MAX_CONCURRENT = int(_bridge_env("MAX_CONCURRENT", "128"))
 QUEUE_TIMEOUT_S = float(_bridge_env("QUEUE_TIMEOUT_S", "900.0"))
 TIMEOUT_S = float(_bridge_env("TIMEOUT_S", "1800.0"))
-KEEPALIVE_S = float(_bridge_env("KEEPALIVE_S", "10.0"))
+KEEPALIVE_S = float(_bridge_env("KEEPALIVE_S", "3.0"))
 IDLE_TIMEOUT_S = float(_bridge_env("IDLE_TIMEOUT_S", "120.0"))
 SAFETY_CAP_S = WatchdogConfig.from_env().safety_cap_s
 UI_RESERVED_SLOTS = int(_bridge_env("UI_RESERVED_SLOTS", "2"))
@@ -5253,14 +5252,10 @@ class _ByteBudget:
     def release(self, amount: int) -> None:
         with self._lock:
             self._used = max(0, self._used - int(amount))
-
-
 _DELIVERY_BUDGET = _ByteBudget(MAX_DELIVERY_BYTES)
-
 
 class _LiveBudgetExceeded(Exception):
     """RW-011 в живом ходе: очередной кусок live-доставки не влез в бюджет памяти."""
-
 
 def release_turn_slot(handler: Any, t_held: bool, t_released: list[bool]) -> None:
     """Освобождает слоты хода под _qos_lock с оповещением ожидающих запросов."""
@@ -5273,7 +5268,6 @@ def release_turn_slot(handler: Any, t_held: bool, t_released: list[bool]) -> Non
                 _subagent_slots.release()
             _qos_lock.notify_all()
 
-
 class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     timeout = 300
@@ -5284,6 +5278,10 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
     _context_pruned: str | None = None  # X-DSH-Context-Pruned запроса (CD-003)
     _trace: RequestTrace | None = None
     _response_status = 0
+
+    def setup(self) -> None:
+        super().setup()
+        configure_accepted_socket(self.connection)
 
     def end_headers(self) -> None:
         if LIFECYCLE.is_draining():
@@ -6637,7 +6635,7 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
         for frame in TURN_MANAGER.iter_sse_stream(
             turn,
             from_seq=from_seq,
-            keepalive_interval_s=min(10.0, KEEPALIVE_S),
+            keepalive_interval_s=KEEPALIVE_S,
             client_gone_fn=lambda: _client_gone(self.connection),
         ):
             if not self._emit(frame):
@@ -7526,7 +7524,7 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
             for frame in TURN_MANAGER.iter_sse_stream(
                 managed_turn,
                 from_seq=from_seq,
-                keepalive_interval_s=min(10.0, KEEPALIVE_S),
+                keepalive_interval_s=KEEPALIVE_S,
                 client_gone_fn=lambda: _client_gone(self.connection),
             ):
                 if not self._emit(frame):
@@ -7773,9 +7771,7 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
             emit("data: " + json.dumps({"error": err}, ensure_ascii=False) + "\n\n")
         emit("data: [DONE]\n\n")
 
-
 BridgeHandler = Handler
-
 
 def is_so_reuseport_enabled() -> bool:
     """Проверяет включение совместного bind через BRIDGE_SO_REUSEPORT_ENABLED."""
@@ -7786,7 +7782,6 @@ def is_so_reuseport_enabled() -> bool:
         "on",
     )
 
-
 class Server(ThreadingHTTPServer):
     """HTTP-сервер с семафором числа соединений на уровне приёма (C-11)."""
 
@@ -7794,6 +7789,11 @@ class Server(ThreadingHTTPServer):
     daemon_threads = False
     request_queue_size = 64
     allow_reuse_address = True
+
+    def get_request(self) -> tuple[Any, Any]:
+        sock, addr = super().get_request()
+        configure_accepted_socket(sock)
+        return sock, addr
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         self._listener_close_lock = threading.Lock()
