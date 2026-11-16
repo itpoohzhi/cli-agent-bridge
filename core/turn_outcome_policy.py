@@ -51,20 +51,25 @@ def is_fatal_safety_error(text: str | None) -> bool:
         if "\\" in cur:
             cur = re.sub(r"\\+x([0-9a-fA-F]{2})", lambda m: chr(int(m.group(1), 16)), cur)
             cur = re.sub(r"\\+([0-7]{3})", lambda m: chr(int(m.group(1), 8)), cur)
+            cur = cur.replace('\\"', '"').replace("\\'", "'")
+        cur = unicodedata.normalize("NFKD", cur)
+        cur = "".join(c for c in cur if unicodedata.category(c) not in ("Mn", "Mc", "Me", "Cf"))
         cur = unicodedata.normalize("NFKC", cur)
-        cur = re.sub(r"[\u200b-\u200f\u202a-\u202e\u2060-\u206f\ufeff\xad]", "", cur)
         if cur == prev:
             break
     else:
         if html.unescape(cur) != cur or re.search(r"%[0-9a-fA-F]{2}|&#x?[0-9a-fA-F]+;|\\+[uUx0-7]", cur):
             return True  # Неразрешённое остаточное кодирование: fail-closed.
     lowered = cur.replace("+", " ").casefold()
-    block_reasons = re.findall(r"""\b(?:block_reason|blockreason)\b["']?\s*[:=]\s*["']?([\w-]+)""", lowered)
+    has_block = bool(re.search(
+        r"""\b(?:block_reason|blockreason)\b["\x27]?\s*[:=]\s*(?!["\x27]?(?:null|none)["\x27]?(?:\b|[^\w])|""|\x27\x27|\[\s*\]|\{\s*\})[^\s,;}]""",
+        lowered,
+    ))
     finish_reasons = re.findall(r"""\b(?:finish_reason|finishreason|stop_reason|stopreason)\b["']?\s*[:=]\s*["']?([\w-]+)""", lowered)
     return (
         any(marker in lowered for marker in _SAFETY_MARKERS)
         or bool(re.search(r"(?<![\w-])safety(?![\w-])", lowered))
-        or any(reason not in ("null", "none") for reason in block_reasons)
+        or has_block
         or any(reason in _FATAL_FINISH_REASONS for reason in finish_reasons)
     )
 

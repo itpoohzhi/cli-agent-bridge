@@ -72,6 +72,16 @@ class InterruptionTailState:
         content = rec.get("content")
         has_tools = bool(rec.get("tool_calls"))
         text = content if isinstance(content, str) else ""
+        struct_safety = any(
+            causal.is_fatal_safety_error(f"{k}: {v}")
+            for k, v in rec.items()
+            if str(k).lower() in ("block_reason", "blockreason", "finish_reason", "finishreason", "stop_reason", "stopreason", "reason", "error", "message") and v is not None
+        ) or causal.is_fatal_safety_error(text) or causal.is_fatal_safety_error(json.dumps(rec, default=str))
+        if struct_safety:
+            self.had_safety_error = True
+            self.final_planner, self.final_planner_content = False, ""
+            self.has_open_planner_after_completion = True
+            return
         done = str(rec.get("status", DONE_STATUS)).upper() == DONE_STATUS
         self.final_planner = bool(text.strip()) and not has_tools and done
         self.has_open_planner_after_completion = not self.final_planner
@@ -92,14 +102,10 @@ def tail_causal_facts(tail: object) -> TailCausalFacts:
     """Экспортирует каузальные факты отдельно от совместимого legacy-словаря."""
     def get[T](name: str, default: T) -> T:
         return cast(T, getattr(tail, name, default))
-    error = causal.CausalErrorIdentity(
-        get("last_error_step_index", -1), get("last_error_attempt", -1),
-        get("last_error_sha256", ""), get("last_error_length", 0),
-    )
-    completion = causal.CausalCompletionFacts(
-        get("last_planner_step_index", -1), get("last_completion_attempt", -1),
-        bool(get("final_planner", False)), bool(get("final_planner_content", "").strip()),
-    )
+    error = causal.CausalErrorIdentity(get("last_error_step_index", -1), get("last_error_attempt", -1),
+                                      get("last_error_sha256", ""), get("last_error_length", 0))
+    completion = causal.CausalCompletionFacts(get("last_planner_step_index", -1), get("last_completion_attempt", -1),
+                                             bool(get("final_planner", False)), bool(get("final_planner_content", "").strip()))
     late = error.seq >= completion.last_completion_seq and error.seq >= 0
     return TailCausalFacts(error, bool(get("error_from_structured_record", False)),
                            completion, late or bool(get("has_open_planner_after_completion", False)))
@@ -122,12 +128,9 @@ def trusted_final_text(final_text: str, error: str, tail: object, causal_input: 
         snapshot = tail_causal_facts(tail)
         if causal_input is None:
             return ""
-        consistent = (
-            snapshot.error == causal_input.error.identity,
-            snapshot.error_from_structured_record == causal_input.error.error_from_structured_record,
-            snapshot.completion == causal_input.completion,
-            not snapshot.has_late_error_or_open_step,
-        )
+        consistent = (snapshot.error == causal_input.error.identity,
+                      snapshot.error_from_structured_record == causal_input.error.error_from_structured_record,
+                      snapshot.completion == causal_input.completion, not snapshot.has_late_error_or_open_step)
         if not all(consistent) or not evaluate_done_causal_recovery(causal_input, error).allow_reconcile:
             return ""
     planner = str(getattr(tail, "final_planner_content", ""))
@@ -199,10 +202,8 @@ def resolve_done_turn_outcome(**kw: object) -> TurnOutcomeResolution:
                       and f.rc == f.causal_input.terminal.process.returncode)
         healed = decision.clear_error and consistent
         reason = decision.reason if not decision.recovered or consistent else "inconsistent_causal_facts"
-        return TurnOutcomeResolution(
-            DONE_STATE if healed else ERROR_STATE, 0 if healed else f.rc or 1,
-            "" if healed else f.result_error, healed, reason, True,
-        )
+        return TurnOutcomeResolution(DONE_STATE if healed else ERROR_STATE, 0 if healed else f.rc or 1,
+                                     "" if healed else f.result_error, healed, reason, True)
     clean = not (f.rc or f.result_error or f.result_status == ERROR_STATUS)
     blocker = _heal_blocker(f, transient)
     reasons = (("clean_done", clean), (blocker, bool(blocker)), (SELF_HEALED_REASON, _is_recovered(f)), ("not_recovered", True))
@@ -296,5 +297,4 @@ def evaluate_graceful_interruption(**kw: object) -> GracefulInterruptionDecision
     partial = f.delivered_content or f.delivered_reasoning
     ok = f.graceful_enabled and partial and transient and not f.delivered_tool_calls and not f.has_unclosed_tool_call
     channel = "content" if f.delivered_content else "reasoning_content"
-    return GracefulInterruptionDecision(ok, f.notice_text if ok else "", channel if ok else "none",
-                                        "stop" if ok else "error", "graceful_partial_close" if ok else "graceful_blocked")
+    return GracefulInterruptionDecision(ok, f.notice_text if ok else "", channel if ok else "none", "stop" if ok else "error", "graceful_partial_close" if ok else "graceful_blocked")

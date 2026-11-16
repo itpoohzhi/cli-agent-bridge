@@ -162,3 +162,42 @@ def test_non_safety_finish_reason_allows_causal_recovery(monkeypatch: pytest.Mon
     tail._emit_record(json.dumps(dict(type="PLANNER_RESPONSE", step_index=3, content=flow._FINAL)).encode())
     assert not getattr(tail, "had_safety_error", False)
     flow._assert_final_preserved(*flow._serve_replay(bridge, flow._make_run(tail)))
+
+
+@pytest.mark.parametrize("marker", (
+    *("sa" + char + "fety: request rejected" for char in "\u0301\u034f\ufe0f\u061c"),
+    r'{\"blockReason\": \"OTHER\"}',
+    '{"blockReason": {"code": "OTHER"}}', '{"block_reason": ["OTHER"]}',
+))
+def test_combining_and_structured_safety_veto(marker: str) -> None:
+    assert is_fatal_safety_error(marker)
+
+
+@pytest.mark.parametrize("value", ('""', "''", "[]", "[ ]", "{}", "{ }", "null", '"NONE"'))
+def test_empty_block_reason_is_neutral(value: str) -> None:
+    assert not is_fatal_safety_error(f'{{"blockReason": {value}}}')
+
+
+@pytest.mark.parametrize("metadata", (
+    {"finishReason": "SAFETY"}, {"blockReason": {"code": "OTHER"}},
+    {"block_reason": ["OTHER"]}, {"details": {"finishReason": "SAFETY"}},
+    {"content": "sa\u0301fety: request rejected"},
+))
+def test_planner_safety_invalidates_previous_completion(metadata: dict[str, object]) -> None:
+    tail = recovery.InterruptionTailState()
+    tail.note_planner_record({"content": "Previous final", "status": "DONE"}, 1, attempt=0)
+    assert tail.final_planner
+    tail.note_planner_record({"content": "New final", "status": "DONE", **metadata}, 2, attempt=0)
+    assert tail.had_safety_error
+    assert not tail.final_planner
+    assert tail.final_planner_content == ""
+    assert tail.has_open_planner_after_completion
+
+
+def test_planner_safety_blocks_replay(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    bridge = flow._load_bridge(monkeypatch, tmp_path)
+    tail = flow._make_tail(bridge, (1,), 2)
+    tail._emit_record(json.dumps(dict(type="PLANNER_RESPONSE", step_index=3, content=flow._FINAL, finishReason="SAFETY")).encode())
+    assert getattr(tail, "had_safety_error", False)
+    _, out = flow._serve_replay(bridge, flow._make_run(tail))
+    assert (out["state"], out["rc"], out["text"]) == ("agy_error", 1, "")
