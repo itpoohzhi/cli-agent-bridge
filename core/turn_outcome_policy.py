@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from hashlib import sha256
 import html
 import re
+import unicodedata
 from urllib.parse import unquote_plus
 
 
@@ -27,7 +28,9 @@ _SAFETY_MARKERS: tuple[str, ...] = (
     "content_filter", "safety_check", "safety_policy", "refusal",
     "content_safety", "safety_filter", "prohibited_content", "recitation", "fatal_safety_error",
 )
-_BENIGN_FINISH_REASONS = ("null", "none", "stop", "length", "tool_calls", "end_turn", "tool_use", "max_tokens", "stop_sequence")
+_FATAL_FINISH_REASONS: frozenset[str] = frozenset(
+    ("safety", "content_filter", "recitation", "refusal", "blocklist", "prohibited_content")
+)
 
 
 def is_fatal_safety_error(text: str | None) -> bool:
@@ -40,22 +43,29 @@ def is_fatal_safety_error(text: str | None) -> bool:
         if "&" in cur:
             cur = html.unescape(cur)
         if "\\u" in cur:
-            cur = re.sub(r"\\u([0-9a-fA-F]{4})", lambda m: chr(int(m.group(1), 16)), cur)
+            cur = re.sub(r"\\+u([0-9a-fA-F]{4})", lambda m: chr(int(m.group(1), 16)), cur)
         if "\\U" in cur:
-            if any(int(code, 16) > 0x10FFFF for code in re.findall(r"\\U([0-9a-fA-F]{8})", cur)):
+            if any(int(code, 16) > 0x10FFFF for code in re.findall(r"\\+U([0-9a-fA-F]{8})", cur)):
                 return True
-            cur = re.sub(r"\\U([0-9a-fA-F]{8})", lambda m: chr(int(m.group(1), 16)), cur)
+            cur = re.sub(r"\\+U([0-9a-fA-F]{8})", lambda m: chr(int(m.group(1), 16)), cur)
+        if "\\" in cur:
+            cur = re.sub(r"\\+x([0-9a-fA-F]{2})", lambda m: chr(int(m.group(1), 16)), cur)
+            cur = re.sub(r"\\+([0-7]{3})", lambda m: chr(int(m.group(1), 8)), cur)
+        cur = unicodedata.normalize("NFKC", cur)
+        cur = re.sub(r"[\u200b-\u200f\u202a-\u202e\u2060-\u206f\ufeff\xad]", "", cur)
         if cur == prev:
             break
     else:
-        if html.unescape(cur) != cur or re.search(r"%[0-9a-fA-F]{2}|&#x?[0-9a-fA-F]+;|\\[uU][0-9a-fA-F]{4}", cur):
+        if html.unescape(cur) != cur or re.search(r"%[0-9a-fA-F]{2}|&#x?[0-9a-fA-F]+;|\\+[uUx0-7]", cur):
             return True  # Неразрешённое остаточное кодирование: fail-closed.
     lowered = cur.replace("+", " ").casefold()
-    reasons: list[str] = re.findall(r"""\b(?:block_reason|blockreason|finish_reason|finishreason|stop_reason|stopreason)\b["']?\s*[:=]\s*["']?([\w-]+)""", lowered)
+    block_reasons = re.findall(r"""\b(?:block_reason|blockreason)\b["']?\s*[:=]\s*["']?([\w-]+)""", lowered)
+    finish_reasons = re.findall(r"""\b(?:finish_reason|finishreason|stop_reason|stopreason)\b["']?\s*[:=]\s*["']?([\w-]+)""", lowered)
     return (
         any(marker in lowered for marker in _SAFETY_MARKERS)
         or bool(re.search(r"(?<![\w-])safety(?![\w-])", lowered))
-        or any(reason not in _BENIGN_FINISH_REASONS for reason in reasons)
+        or any(reason not in ("null", "none") for reason in block_reasons)
+        or any(reason in _FATAL_FINISH_REASONS for reason in finish_reasons)
     )
 
 

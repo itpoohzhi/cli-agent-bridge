@@ -18,7 +18,7 @@ def test_encoded_and_machine_safety_codes(marker: str) -> None:
     assert is_fatal_safety_error(marker)
 
 
-@pytest.mark.parametrize("marker", (r"\u0073afety: request rejected", "&#x73;afety: request rejected", "content%255fpolicy%255fviolation", "%2573afety: connection reset", "content%25255fpolicy%25255fviolation", "content_safety", "safety_filter", "fatal_safety_error: connection reset", '{"block_reason": "OTHER"}', *("%" + "25" * depth + "73afety: connection reset" for depth in (8, 9, 35)), "%" + "25" * 35 + "41", '{"finish_reason": "OTHER"}'))
+@pytest.mark.parametrize("marker", (r"\u0073afety: request rejected", "&#x73;afety: request rejected", "content%255fpolicy%255fviolation", "%2573afety: connection reset", "content%25255fpolicy%25255fviolation", "content_safety", "safety_filter", "fatal_safety_error: connection reset", '{"block_reason": "OTHER"}', *("%" + "25" * depth + "73afety: connection reset" for depth in (8, 9, 35)), "%" + "25" * 35 + "41"))
 def test_nested_encoded_safety_veto(marker: str) -> None:
     assert is_fatal_safety_error(marker)
 
@@ -70,7 +70,7 @@ def test_safety_history_blocks_terminal_recovery(monkeypatch: pytest.MonkeyPatch
     assert any("error" in chunk for chunk in chunks)
 
 
-@pytest.mark.parametrize("field,value", (("block_reason", "OTHER"), ("block_reason", "SAFETY"), ("finish_reason", "SAFETY"), ("reason", "SAFETY"), ("error", "content_filter"), ("message", "Policy violation"), ("details", {"block_reason": "OTHER"}), ("blockReason", "OTHER"), ("stop_reason", "refusal"), ("finishReason", "OTHER"), ("promptFeedback", {"blockReason": "OTHER"})))
+@pytest.mark.parametrize("field,value", (("block_reason", "OTHER"), ("block_reason", "SAFETY"), ("finish_reason", "SAFETY"), ("reason", "SAFETY"), ("error", "content_filter"), ("message", "Policy violation"), ("details", {"block_reason": "OTHER"}), ("blockReason", "OTHER"), ("stop_reason", "refusal"), ("finishReason", "SAFETY"), ("promptFeedback", {"blockReason": "OTHER"})))
 def test_structured_record_safety_blocks_recovery(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, field: str, value: str | dict[str, str]) -> None:
     bridge = flow._load_bridge(monkeypatch, tmp_path)
     monkeypatch.setattr(flow, "_ERROR", "connection reset by peer")
@@ -136,3 +136,29 @@ def test_non_json_error_metadata(reason: str) -> None:
     tail = recovery.InterruptionTailState()
     tail.note_error_record("ERROR_MESSAGE", {"blockReason": reason, "content": "connection reset by peer", "metadata": object()}, idx=1)
     assert tail.had_safety_error is (reason == "OTHER")
+
+
+@pytest.mark.parametrize("marker", (
+    *("sa" + char + "fety: request rejected" for char in "\u200b\u200c\u200d\ufeff\xad\u200e\u202a\u2060"),
+    r"\x73afety: request rejected", r"\163afety: request rejected",
+    "s%E2%80%8Bafety: request rejected", r"\\x73afety", r"\\163afety",
+    r"\x5cu0073afety", "ｓａｆｅｔｙ: request rejected",
+    "finishReason: SAFETY", "blockReason: OTHER",
+))
+def test_obfuscated_safety_veto(marker: str) -> None:
+    assert is_fatal_safety_error(marker)
+    tail = recovery.InterruptionTailState()
+    tail.note_error_record("ERROR_MESSAGE", {"content": marker}, idx=1)
+    assert tail.had_safety_error
+
+
+@pytest.mark.parametrize("field", ("finish_reason", "finishReason", "stop_reason", "stopReason"))
+@pytest.mark.parametrize("reason", ("MALFORMED_FUNCTION_CALL", "error", "OTHER", "stop", "length", "tool_calls", "end_turn", "tool_use", "max_tokens"))
+def test_non_safety_finish_reason_allows_causal_recovery(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, field: str, reason: str) -> None:
+    assert not is_fatal_safety_error(f"{field}: {reason}")
+    bridge = flow._load_bridge(monkeypatch, tmp_path)
+    tail = flow._make_tail(bridge, (1,), 2)
+    tail._emit_record(json.dumps({"type": "ERROR_MESSAGE", "step_index": 2, "content": flow._ERROR, field: reason}).encode())
+    tail._emit_record(json.dumps(dict(type="PLANNER_RESPONSE", step_index=3, content=flow._FINAL)).encode())
+    assert not getattr(tail, "had_safety_error", False)
+    flow._assert_final_preserved(*flow._serve_replay(bridge, flow._make_run(tail)))
