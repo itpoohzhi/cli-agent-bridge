@@ -1,39 +1,9 @@
 #!/usr/bin/env python3
 """OpenAI-совместимый мост к CLI `claude -p` (Claude Code).
-
-Один запрос /v1/chat/completions = один headless-ход
-`claude -p --output-format stream-json --verbose --include-partial-messages`.
-Поток stream-json переводится в OpenAI Chat Completions (stream и не-stream).
-
-Мост эмулирует OpenAI function calling: если запрос содержит непустой `tools`,
-в промпт добавляется протокол и схемы инструментов, а встроенные инструменты
-Claude Code отключаются (`--tools ""`). Модель просят отвечать блоками
-`<tool_call>{"name":…,"arguments":{…}}</tool_call>`; потоковые блоки переводятся
-в OpenAI-чанки `delta.tool_calls`, история с `tool_calls`/`role:"tool"`
-рендерится обратно в те же блоки.
-
-Общая протокольная логика живёт только в универсальном ядре `core/` (ADR 0014,
-AD-002: этот файл в репозитории — SSOT, локальных копий парсера нет; без core
-мост не стартует). Весь поток Claude всегда проходит через
-`core.tool_emulation.StreamNormalizer` поверх
-`ToolCallParser(strict_live=True)` (AD-004, ALWAYS-ON): повреждённый XML не
-попадает в `content`, fallback на терминальный `result` исключён, ошибка
-потока — корректный `502 proxy_error`.
-
-Изображения (`image_url` data URI PNG/JPEG/GIF/WebP) мост материализует в изолированный
-сессионный каталог `/tmp/claude-img-<uuid>/` (0700, файлы 0600) и запускает
-Claude с `--allowedTools "Read(<каталог>/**)"`, `--restricted` и
-`--add-dir <каталог>` (AD-003, workspace-read);
-каталог удаляется в `finally` после подтверждённого завершения ребёнка. Без
-картинок сохраняется прежний режим `--tools ""`.
-
-Reasoning публикуется в реальном времени (AD-005): нативные `thinking_delta` и
-теги размышлений в тексте уходят в SSE как `choices[0].delta.reasoning_content`
-до терминального события; в JSON тот же накопленный итог отдаётся как
-`message.reasoning_content`.
-
-Секреты с диска не читаются: ключ авторизации берётся только из окружения
-CLAUDE_P_BRIDGE_KEY, переменные окружения ребёнка не трогаются.
+Один запрос = один stream-json ход; протокол только из core (AD-002).
+Reasoning нормализуется всегда; теги инструментов в OFF+TEXT буквальны,
+в EMULATE/FORBID/OFF+ERROR — fail-closed без result-fallback (AD-004/005).
+Вложения: изоляция 0700/0600, Read через --add-dir, cleanup после reap (AD-003).
 """
 
 from __future__ import annotations
@@ -51,9 +21,10 @@ import sys
 import threading
 import time
 import uuid
+from collections.abc import Callable
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple, cast
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 for _p in (_REPO_ROOT, Path(__file__).resolve().parents[1]):
@@ -75,6 +46,7 @@ except ImportError:
     AdaptiveTimeoutController = None  # type: ignore[assignment,misc]
 
 try:
+    from core.runtime_env import resolve_toolless_tag_policy
     from core.stream_framing import format_stream_error_sse
     from core.tool_emulation import (  # noqa: E402
         DEFAULT_MAX_IMAGE_BYTES,
@@ -84,11 +56,19 @@ try:
         LiveParserError,
         StreamNormalizer,
         _messages_to_prompt,
-        _tool_choice_none,
         build_tool_schemas,
         extract_data_url_images,
         extract_thinking_delta,
         sanitize_tool_call,
+    )
+    from core.tool_mode import (
+        TOOLLESS_PURE_TEXT_HINT,
+        NormalizerModeSpec,
+        NormalizerSinks,
+        ToolMode,
+        build_mode_spec,
+        format_tool_mode_log,
+        resolve_tool_mode,
     )
 except ImportError as exc:
     # Fail-closed (AD-002): без согласованного core мост не запускается;
@@ -109,13 +89,9 @@ def _raw_cache_read(usage: dict) -> object:
 
 
 def _wire_usage(usage: dict) -> dict:
-    """OpenAI-`usage` из result-события `claude -p` (арифметика кэша — core.usage_wire).
+    """Кэш исключён из Claude input_tokens (fixtures/claude_result_usage.json).
 
-    `input_tokens` Claude исключает cache-read и cache-creation (подтверждено живым
-    result-событием, tests/fixtures/claude_result_usage.json), поэтому они
-    прибавляются к `prompt_tokens` в общем модуле; несогласованность — только
-    мусорные значения кэша. Cache-read передаётся СЫРЫМ: фильтр один — внутри
-    `build_wire_usage`, он же выставляет `inconsistent` (мусор не попадает на wire).
+    core.usage_wire единолично фильтрует и прибавляет сырой cache-read/creation.
     """
     wire, inconsistent = build_wire_usage(
         usage.get("input_tokens", 0),
@@ -315,8 +291,7 @@ POLL_INTERVAL_S = float(os.environ.get("CLAUDE_P_BRIDGE_POLL_INTERVAL_S", "1"))
 STDERR_DRAIN_S = float(os.environ.get("CLAUDE_P_BRIDGE_STDERR_DRAIN_S", "0.05"))
 HTTP_TIMEOUT_S = float(os.environ.get("CLAUDE_P_BRIDGE_HTTP_TIMEOUT_S", "300"))
 HTTP_BACKLOG = _env_positive_int("CLAUDE_P_BRIDGE_HTTP_BACKLOG", 64)
-# Лимиты и корень временных каталогов изображений — только через env с безопасными
-# значениями по умолчанию из core (без хардкода эксплуатационных параметров).
+# Лимиты изображений — env с безопасными значениями по умолчанию из core.
 MAX_IMAGES = _env_positive_int("CLAUDE_P_BRIDGE_MAX_IMAGES", DEFAULT_MAX_IMAGES)
 MAX_IMAGE_BYTES = _env_positive_int(
     "CLAUDE_P_BRIDGE_MAX_IMAGE_BYTES", DEFAULT_MAX_IMAGE_BYTES
@@ -374,11 +349,7 @@ def _extract_request_images(req: dict) -> list:
 
 
 def _stage_images(images: list) -> Path | None:
-    """Материализовать изображения в `/tmp/claude-img-<uuid>/` (0700, файлы 0600).
-
-    Каталог создаётся атомарно без изменения глобального umask, файлы —
-    exclusive/no-follow созданием. При частичной ошибке каталог удаляется здесь же.
-    """
+    """Каталог 0700 без umask; файлы 0600 exclusive/no-follow; cleanup при ошибке."""
     if not images:
         return None
     img_dir = IMAGE_TMP_ROOT / f"claude-img-{uuid.uuid4().hex}"
@@ -436,12 +407,7 @@ def _build_claude_cmd(model: str, effort: str, img_dir: Path | None = None) -> l
 
 
 def _effort(value: Any, model: str = MODEL_ID) -> str:
-    """reasoning_effort -> уровень claude для модели (замеры KB 13.10/19.10.2026).
-
-    Opus 5.5: low/medium/high; xhigh и max -> high. Sonnet 5.5: low/medium/high/xhigh;
-    max -> xhigh. Haiku 5.5: low/medium/high/xhigh/max (max не по умолчанию: 300 с+
-    против 25-40 с на high). Всё остальное (none/пусто/мусор) -> дефолт модели `high`.
-    """
+    """Модельный reasoning_effort; неизвестное значение -> SUPPORTED_MODELS."""
     eff = str(value or "").strip().lower()
     default = SUPPORTED_MODELS.get(model, "high")
     if model == "claude-haiku-5-5":
@@ -594,7 +560,7 @@ class Run:
         self.proc.wait(timeout=PROCESS_WAIT_S)
         with _active_lock:
             _active.pop(self.proc.pid, None)
-        spawn_registered.unregister(self.proc)
+        cast(Any, spawn_registered).unregister(self.proc)
         for stream in (self.proc.stdin, self.proc.stdout, self.proc.stderr):
             try:
                 if stream is not None:
@@ -609,6 +575,162 @@ def _client_gone(sock: socket.socket) -> bool:
         return bool(ready) and sock.recv(1, socket.MSG_PEEK) == b""
     except (OSError, ValueError):
         return True
+
+
+class _Callbacks(NamedTuple):
+    on_text: Callable[[str], bool]
+    on_reasoning: Callable[[str], bool]
+    on_tool_call: Callable[[dict], bool]
+    keepalive: Callable[[], bool] | None = None
+
+
+class _Turn(NamedTuple):
+    prompt: str
+    model: str
+    effort: str
+    tag: str
+    images: list
+    tools: list
+    mode_spec: NormalizerModeSpec
+
+
+def _failed(state: str, err: str = "") -> dict:
+    return {"state": state, "rc": 1, "text": "", "reasoning": "", "usage": {},
+            "result": {}, "err": err, "tool_calls": []}
+
+
+def _prompt_for(req: dict, tools: list, images: list, mode_spec: NormalizerModeSpec) -> str:
+    raw = req.get("messages")
+    messages = raw if isinstance(raw, list) else []
+    prompt = _messages_to_prompt(messages, tools, req.get("tool_choice"), images or None)
+    return prompt + ("\n\n" + TOOLLESS_PURE_TEXT_HINT if mode_spec.mode is ToolMode.OFF else "")
+
+
+def _watchdog_for(run: Run) -> Any:
+    proc = getattr(run, "proc", None)
+    pid = getattr(proc, "pid", None)
+    if not (_is_watchdog_enabled() and AdaptiveTimeoutController is not None and pid):
+        return None
+    controller = AdaptiveTimeoutController(
+        idle_timeout_s=CLAUDE_P_BRIDGE_IDLE_TIMEOUT_S,
+        safety_cap_s=CLAUDE_P_BRIDGE_SAFETY_CAP_S,
+        io_wait_cap_s=CLAUDE_P_BRIDGE_IO_WAIT_CAP_S,
+        watchdog_interval_s=CLAUDE_P_BRIDGE_WATCHDOG_INTERVAL_S,
+    )
+    controller.register_pgid(pid)
+    return controller
+
+
+class _Execution:
+    """Состояние одного транспорта; протокольный разбор остаётся в core."""
+
+    def __init__(self, run: Run, callbacks: _Callbacks,
+                 mode_spec: NormalizerModeSpec, tools: list | None) -> None:
+        self.run, self.callbacks, self.mode_spec = run, callbacks, mode_spec
+        self.schemas = build_tool_schemas(tools or [])
+        self.tool_calls: list = []
+        self.usage: dict = {}
+        self.result: dict = {}
+        self.gone = False
+        self.last_ka = self.last_check = time.monotonic()
+        self.normalizer = StreamNormalizer.for_mode(
+            mode_spec, NormalizerSinks(self.add_content, self.add_reasoning, self.add_call),
+            strict_live=True,
+        )
+
+    def state(self, name: str, rc: int, err: str = "") -> dict:
+        return {"rc": rc, "text": self.normalizer.content, "usage": self.usage,
+                "reasoning": self.normalizer.reasoning_content,
+                "result": self.result, "state": name, "err": err,
+                "tool_calls": self.tool_calls}
+
+    def add_content(self, text: str) -> None:
+        if not self.gone and text and not self.callbacks.on_text(text):
+            self.gone = True
+
+    def add_reasoning(self, text: str) -> None:
+        if not self.gone and text and not self.callbacks.on_reasoning(text):
+            self.gone = True
+
+    def add_call(self, call: dict) -> None:
+        if self.mode_spec.mode is not ToolMode.EMULATE:
+            raise LiveParserError("tool_call published without tool emulation")
+        if self.gone:
+            return
+        entry = {
+            "index": len(self.tool_calls), "id": "call_" + uuid.uuid4().hex[:24],
+            "type": "function", "function": {
+                "name": call["name"],
+                "arguments": json.dumps(call["arguments"], ensure_ascii=False),
+            },
+        }
+        # Схемная санитизация — один раз на владельце маршрута.
+        for item in sanitize_tool_call(entry, self.schemas):
+            item = dict(item, index=len(self.tool_calls))
+            self.tool_calls.append(item)
+            if not self.callbacks.on_tool_call(item):
+                self.gone = True
+                return
+
+    def next_event(self) -> tuple[str, Any]:
+        try:
+            return self.run.q.get(timeout=POLL_INTERVAL_S)
+        except queue.Empty:
+            keepalive = self.callbacks.keepalive
+            if keepalive is not None and time.monotonic() - self.last_ka >= KEEPALIVE_S:
+                self.last_ka = time.monotonic()
+                self.gone = not keepalive()
+            return "idle", None
+
+    def check_watchdog(self, controller: Any) -> str:
+        now = time.monotonic()
+        if controller is None or now - self.last_check < controller.watchdog_interval_s:
+            return ""
+        self.last_check = now
+        stop, reason, _ = controller.check(self.run.proc.pid)
+        if stop and reason in ("idle_timeout", "absolute_cap"):
+            _kill_group(self.run.proc)
+            return f"claude-p watchdog: {reason}"
+        return ""  # child_exited: ждём done из очереди, не убиваем.
+
+    def dispatch(self, kind: str, payload: Any) -> dict | None:
+        if kind == "text":
+            self.normalizer.feed_text(str(payload))
+        elif kind == "thinking":
+            self.normalizer.feed_thinking(str(payload))
+        elif kind == "result":
+            self.result = payload
+            self.usage = payload.get("usage") or {}
+        elif kind == "pump_error":
+            return self.state("pump_error", 1, str(payload))
+        elif kind == "done":
+            self.normalizer.finish()  # Битый хвост — ошибка, result-fallback нет.
+            if self.gone:
+                return self.state("client_gone", 1)
+            time.sleep(STDERR_DRAIN_S)
+            return self.state("done", payload, "".join(self.run.err_box))
+        if self.gone:
+            return self.state("client_gone", 1)
+        return None
+
+    def execute(self, connection: socket.socket) -> dict:
+        controller = _watchdog_for(self.run)
+        try:
+            while True:
+                if _client_gone(connection):
+                    return self.state("client_gone", 1)
+                reason = self.check_watchdog(controller)
+                if reason:
+                    return self.state("timeout", 1, reason)
+                kind, payload = self.next_event()
+                if controller is not None and kind in ("text", "thinking", "result"):
+                    controller.record_activity(kind)
+                out = self.dispatch(kind, payload)
+                if out is not None:
+                    return out
+        finally:
+            if controller is not None:
+                controller.close()
 
 
 @_LIFECYCLE.install
@@ -653,201 +775,78 @@ class Handler(BaseHTTPRequestHandler):
                     return "client_gone"
         return ""
 
-    def _execute(self, run: Run, on_text, on_reasoning, on_tool_call,
-                 keepalive, emulate_tools: bool, tools: list | None = None) -> dict:
-        """Гнать ход до конца.
+    def _execute(self, run: Run, callbacks: _Callbacks,
+                 mode_spec: NormalizerModeSpec, tools: list | None = None) -> dict:
+        """AD-002/004: reasoning (REASONING_TAGS + feed_thinking) всегда включён.
 
-        on_text/on_reasoning/on_tool_call/keepalive возвращают False, если клиент ушёл.
-        Весь текстовый поток ВСЕГДА проходит через `StreamNormalizer` поверх
-        `ToolCallParser(strict_live=True)` (AD-004, ALWAYS-ON — в том числе без
-        tools и при tool_choice=none): повреждённый `<tool_call>` поднимает
-        `LiveParserError`, сырой XML в content не уходит; распознанный вызов без
-        эмуляции — ошибка протокола, а не опубликованный инструмент. Reasoning
-        (нативный thinking и теги в тексте) публикуется до терминального события.
+        Теги инструментов fail-closed в EMULATE/FORBID/OFF+ERROR;
+        OFF+TEXT передаёт их байт-в-байт. False от callback означает уход клиента.
         """
-        pieces = []
-        reasoning_pieces: list = []
-        tool_calls: list = []
-        usage = {}
-        result_ev = {}
-        tool_schemas = build_tool_schemas(tools or [])
-        last_ka = time.monotonic()
-        gone = [False]
+        return _Execution(run, callbacks, mode_spec, tools).execute(self.connection)
 
-        def state(name: str, rc: int, err: str = "") -> dict:
-            return {"rc": rc, "text": "".join(pieces), "usage": usage,
-                    "reasoning": "".join(reasoning_pieces),
-                    "result": result_ev, "state": name, "err": err,
-                    "tool_calls": tool_calls}
-
-        def add_content(text: str) -> None:
-            if gone[0] or not text:
-                return
-            pieces.append(text)
-            if not on_text(text):
-                gone[0] = True
-
-        def add_reasoning(text: str) -> None:
-            if gone[0] or not text:
-                return
-            reasoning_pieces.append(text)
-            if not on_reasoning(text):
-                gone[0] = True
-
-        def add_call(call: dict) -> None:
-            if gone[0]:
-                return
-            if not emulate_tools:
-                raise LiveParserError("tool_call published without tool emulation")
-            entry = {
-                "index": len(tool_calls),
-                "id": "call_" + uuid.uuid4().hex[:24],
-                "type": "function",
-                "function": {
-                    "name": call["name"],
-                    "arguments": json.dumps(call["arguments"], ensure_ascii=False),
-                },
-            }
-            # Схемная санитизация — ровно один раз на владельце маршрута (AD-004).
-            for item in sanitize_tool_call(entry, tool_schemas):
-                item = dict(item, index=len(tool_calls))
-                tool_calls.append(item)
-                if not on_tool_call(item):
-                    gone[0] = True
-                    return
-
-        normalizer = StreamNormalizer(
-            add_content, add_reasoning, add_call, strict_live=True
-        )
-
-        controller = None
-        last_check_ts = time.monotonic()
-        proc = getattr(run, "proc", None)
-        proc_pid = getattr(proc, "pid", None) if proc is not None else None
-
-        if _is_watchdog_enabled() and AdaptiveTimeoutController is not None and proc_pid:
-            controller = AdaptiveTimeoutController(
-                idle_timeout_s=CLAUDE_P_BRIDGE_IDLE_TIMEOUT_S,
-                safety_cap_s=CLAUDE_P_BRIDGE_SAFETY_CAP_S,
-                io_wait_cap_s=CLAUDE_P_BRIDGE_IO_WAIT_CAP_S,
-                watchdog_interval_s=CLAUDE_P_BRIDGE_WATCHDOG_INTERVAL_S,
-            )
-            controller.register_pgid(proc_pid)
-
-        try:
-            while True:
-                if _client_gone(self.connection):
-                    return state("client_gone", 1)
-
-                now = time.monotonic()
-                if controller is not None and proc is not None and proc_pid and (
-                    now - last_check_ts >= controller.watchdog_interval_s
-                ):
-                    last_check_ts = now
-                    should_stop, reason, _ = controller.check(proc_pid)
-                    if should_stop and reason in ("idle_timeout", "absolute_cap"):
-                        _kill_group(proc)
-                        return state("timeout", 1, f"claude-p watchdog: {reason}")
-                    # Если reason == "child_exited" — нормальный выход потомка,
-                    # не убиваем, ждём done из очереди.
-
-                try:
-                    kind, payload = run.q.get(timeout=POLL_INTERVAL_S)
-                except queue.Empty:
-                    if keepalive is not None and time.monotonic() - last_ka >= KEEPALIVE_S:
-                        last_ka = time.monotonic()
-                        if not keepalive():
-                            return state("client_gone", 1)
-                    continue
-
-                if controller is not None and kind in ("text", "thinking", "result"):
-                    controller.record_activity(kind)
-
-                if kind == "text":
-                    normalizer.feed_text(str(payload))
-                    if gone[0]:
-                        return state("client_gone", 1)
-                elif kind == "thinking":
-                    normalizer.feed_thinking(str(payload))
-                    if gone[0]:
-                        return state("client_gone", 1)
-                elif kind == "result":
-                    result_ev = payload
-                    usage = payload.get("usage") or {}
-                elif kind == "pump_error":
-                    return state("pump_error", 1, str(payload))
-                elif kind == "done":
-                    # Fail-closed финал: незакрытый/битый хвост — LiveParserError наверх,
-                    # сырой XML текстом не досбрасываем. Fallback на терминальный
-                    # `result` исключён (AD-004): пустой ход — ошибка 502 в _error_body.
-                    normalizer.finish()
-                    if gone[0]:
-                        return state("client_gone", 1)
-                    time.sleep(STDERR_DRAIN_S)
-                    return state("done", payload, "".join(run.err_box))
-        finally:
-            if controller is not None:
-                controller.close()
-
-    def _run_once(self, req: dict, on_text, on_reasoning, on_tool_call, keepalive) -> dict:
-        raw_messages = req.get("messages")
-        messages: list = raw_messages if isinstance(raw_messages, list) else []
+    def _run_once(self, req: dict, callbacks: _Callbacks) -> dict:
         raw_tools = req.get("tools")
         tools = [t for t in raw_tools if isinstance(t, dict)] if isinstance(raw_tools, list) else []
         tool_choice = req.get("tool_choice")
-        emulate_tools = bool(tools) and not _tool_choice_none(tool_choice)
+        mode = resolve_tool_mode(tools, tool_choice)
+        policy = resolve_toolless_tag_policy(os.environ)
+        mode_spec = build_mode_spec(mode, policy)
         model, model_err = _resolve_model(req)
         if model_err is not None:
-            return {"state": "bad_model", "rc": 1, "text": "", "usage": {}, "result": {},
-                    "err": model_err["message"], "tool_calls": []}
+            return _failed("bad_model", model_err["message"])
         try:
             images = _extract_request_images(req)
         except ImageInputError as exc:
-            return {"state": "bad_image", "rc": 1, "text": "", "usage": {}, "result": {},
-                    "err": exc.code, "tool_calls": []}
-        prompt = _messages_to_prompt(messages, tools, tool_choice, images or None)
+            return _failed("bad_image", exc.code)
+        prompt = _prompt_for(req, tools, images, mode_spec)
         effort = _effort(req.get("reasoning_effort"), model)
         tag = (f"client={self.client_address[0]}:{self.client_address[1]} "
                f"ua={(self.headers.get('User-Agent') or '-')[:60]}")
-        reason = self._acquire_slot(keepalive)
+        _log(f"request model={model} effort={effort} {format_tool_mode_log(tools, tool_choice, mode_spec)} {tag}")
+        turn = _Turn(prompt, model, effort, tag, images, tools, mode_spec)
+        reason = self._acquire_slot(callbacks.keepalive)
         if reason:
             _log(f"no slot ({reason}) model={model} effort={effort} {tag}")
-            return {"state": reason, "rc": 1, "text": "", "usage": {}, "result": {},
-                    "err": "", "tool_calls": []}
+            return _failed(reason)
         t0 = time.monotonic()
+        try:
+            out = self._run_staged(turn, callbacks)
+        finally:
+            _slots.release()
+        self._log_turn_done(turn, out, t0)
+        return out
+
+    def _run_staged(self, turn: _Turn, callbacks: _Callbacks) -> dict:
         img_dir = None
         can_cleanup = True
         try:
             try:
-                img_dir = _stage_images(images)
-                run = Run(prompt, model, effort, tag, img_dir=img_dir)
+                img_dir = _stage_images(turn.images)
+                run = Run(turn.prompt, turn.model, turn.effort, turn.tag, img_dir=img_dir)
                 can_cleanup = False
             except OSError as exc:
-                _log(f"image stage/spawn failed model={model} err={exc!r:.200} {tag}")
-                return {"state": "image_error", "rc": 1, "text": "", "usage": {},
-                        "result": {}, "err": str(exc)[:200], "tool_calls": []}
+                _log(f"image stage/spawn failed model={turn.model} err={exc!r:.200} {turn.tag}")
+                return _failed("image_error", str(exc)[:200])
             try:
-                out = self._execute(run, on_text, on_reasoning, on_tool_call,
-                                    keepalive, emulate_tools, tools)
+                return self._execute(run, callbacks, turn.mode_spec, turn.tools)
             except LiveParserError as exc:
-                # AD-004: битый поток — 502 proxy_error; сырой XML клиенту не уходит.
-                _log(f"parser_error model={model} err={exc} {tag}")
-                out = {"state": "parser_error", "rc": 1, "text": "", "reasoning": "",
-                       "usage": {}, "result": {}, "err": str(exc), "tool_calls": []}
+                _log(f"parser_error model={turn.model} err={exc} {turn.tag}")
+                return _failed("parser_error", str(exc))
             finally:
                 run.close()  # сначала завершить и reap своего ребёнка
                 can_cleanup = True
         finally:
             if can_cleanup:
                 _cleanup_img_dir(img_dir)
-            _slots.release()
+
+    @staticmethod
+    def _log_turn_done(turn: _Turn, out: dict, t0: float) -> None:
         out_calls = out.get("tool_calls")
         out_text = out.get("text")
-        _log(f"done model={model} effort={effort} rc={out['rc']} state={out['state']} "
+        _log(f"done model={turn.model} effort={turn.effort} rc={out['rc']} state={out['state']} "
              f"tools={len(out_calls) if isinstance(out_calls, list) else 0} "
              f"out_bytes={len(out_text.encode()) if isinstance(out_text, str) else 0} "
-             f"wall_s={time.monotonic() - t0:.1f} {tag}")
-        return out
+             f"wall_s={time.monotonic() - t0:.1f} {turn.tag}")
 
     @staticmethod
     def _error_body(out: dict) -> Any:
@@ -965,7 +964,7 @@ class Handler(BaseHTTPRequestHandler):
             self._serve_json(req)
 
     def _serve_json(self, req: dict) -> None:
-        out = self._run_once(req, lambda _v: True, lambda _v: True, lambda _e: True, None)
+        out = self._run_once(req, _Callbacks(lambda _v: True, lambda _v: True, lambda _e: True))
         if out.get("state") == "client_gone":
             return
         err = self._error_body(out)
@@ -992,15 +991,7 @@ class Handler(BaseHTTPRequestHandler):
         completion_id = f"chatcmpl-claudep-{uuid.uuid4().hex[:12]}"
         created = int(time.time())
         shown_model = str(req.get("model") or MODEL_ID)
-        try:
-            self.send_response(200)
-            self.send_header("Content-Type", "text/event-stream")
-            self.send_header("Cache-Control", "no-cache")
-            self.send_header("X-Accel-Buffering", "no")
-            self.end_headers()
-            self.close_connection = True
-        except (BrokenPipeError, ConnectionResetError, OSError):
-            _log("client gone before headers")
+        if not self._start_sse():
             return
 
         def chunk(delta: dict, finish=None, usage: dict | None = None) -> str:
@@ -1013,21 +1004,30 @@ class Handler(BaseHTTPRequestHandler):
                 payload["usage"] = usage
             return "data: " + json.dumps(payload, ensure_ascii=False) + "\n\n"
 
-        def on_text(value: str) -> bool:
-            return self._emit(chunk({"content": value}))
-
-        def on_reasoning(value: str) -> bool:
-            return self._emit(chunk({"reasoning_content": value}))
-
-        def on_tool_call(entry: dict) -> bool:
-            return self._emit(chunk({"tool_calls": [entry]}))
-
-        def keepalive() -> bool:
-            return self._emit(": keepalive\n\n")
-
+        callbacks = _Callbacks(
+            lambda value: self._emit(chunk({"content": value})),
+            lambda value: self._emit(chunk({"reasoning_content": value})),
+            lambda entry: self._emit(chunk({"tool_calls": [entry]})),
+            lambda: self._emit(": keepalive\n\n"),
+        )
         if not self._emit(chunk({"role": "assistant", "content": ""})):
             return
-        out = self._run_once(req, on_text, on_reasoning, on_tool_call, keepalive)
+        self._finish_sse(req, self._run_once(req, callbacks), chunk)
+
+    def _start_sse(self) -> bool:
+        try:
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("X-Accel-Buffering", "no")
+            self.end_headers()
+            self.close_connection = True
+            return True
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            _log("client gone before headers")
+            return False
+
+    def _finish_sse(self, req: dict, out: dict, chunk: Callable) -> None:
         if out.get("state") == "client_gone":
             _log("client gone mid-stream, child killed")
             return

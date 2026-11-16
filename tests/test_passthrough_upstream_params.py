@@ -17,6 +17,7 @@ import server  # noqa: E402
 from adapters.passthrough_adapter import PassthroughAdapter, PassthroughLimits  # noqa: E402
 from core.backend_adapter import backend_entry_error  # noqa: E402
 import test_passthrough_adapter as seam  # noqa: E402
+import test_codex_catalogue_contract as contracts  # noqa: E402
 
 DEEPSEEK = "deepseek-v4.1-flash"
 GO_PORT = 10830
@@ -192,10 +193,8 @@ def test_key_ref_is_reread_on_every_request(go: GoStand) -> None:
     )
 
 
-def test_unreadable_key_ref_keeps_client_credentials(go: GoStand) -> None:
-    go.key_file.unlink()
-    sent = go.call({"model": DEEPSEEK}, headers={"Authorization": "Bearer client-own"})
-    assert sent["headers"]["authorization"] == "Bearer client-own"
+def test_unreadable_key_ref_rejects_client_credentials(go: GoStand) -> None:
+    contracts.assert_unreadable_key_ref_rejects_client_credentials(go)
 
 
 def test_per_request_session_header_is_fresh_uuid4(go: GoStand) -> None:
@@ -281,7 +280,7 @@ def test_missing_headers_file_is_tolerated(go: GoStand) -> None:
 def test_compiled_fleet_routes_deepseek_through_opencode_go_adapter() -> None:
     fleet = json.loads((Path(server.ROOT) / "fleet.json").read_text(encoding="utf-8"))
     backend = fleet["backends"]["opencode-go"]
-    catalog = server._build_catalog(fleet)
+    catalog = server._build_catalog(contracts.opencode_go_fleet_fixture(fleet))
     assert catalog["models"][DEEPSEEK]["backend"] == "opencode-go"
     registry = server.AdapterRegistry.from_fleet(
         catalog, server.ADAPTER_KINDS, lambda: catalog, server

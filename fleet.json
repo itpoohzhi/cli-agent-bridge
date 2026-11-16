@@ -77,21 +77,6 @@
       "backend": "codex",
       "effort": "max"
     },
-    "gemini-4-carbon-low": {
-      "backend_id": "gemini-4-carbon",
-      "backend": "agy",
-      "effort": "low"
-    },
-    "gemini-4-carbon-medium": {
-      "backend_id": "gemini-4-carbon",
-      "backend": "agy",
-      "effort": "medium"
-    },
-    "gemini-4-carbon-high": {
-      "backend_id": "gemini-4-carbon",
-      "backend": "agy",
-      "effort": "high"
-    },
     "gemini-4-hydrogen-low": {
       "backend_id": "gemini-4-hydrogen",
       "backend": "agy",
@@ -181,8 +166,8 @@
   "default_model": "muse-wonder-full-1.0",
   "policy_ref": {
     "path": "~/Мой диск/Context/models.md",
-    "sha256": "35935ff43c0f17753f34ed3ded07f71be314c1ed265550ea07b3c4620d2fc674",
-    "reviewed_at": "2026-10-08T12:24:00+03:00",
+    "sha256": "6fc23e304e870f0d91678a401e784692099e7414e73c904d3e3f769722d3354c",
+    "reviewed_at": "2026-11-14",
     "snapshot": "architecture/receipts/architect-03-h12-live-policy-snapshot.md",
     "historical_refs": [
       "3f719d2e51e5de8dcf9bfac286f7688653952a0989e0b20c6c9073d71f5edb3a",
@@ -262,7 +247,6 @@
     "agy": {
       "kind": "passthrough",
       "enabled": true,
-      "required": false,
       "owned_by": "agy-bridge",
       "max_concurrent": 128,
       "base_url": "http://127.0.0.1:9887/v1",
@@ -271,7 +255,6 @@
     "claude-p": {
       "kind": "passthrough",
       "enabled": true,
-      "required": false,
       "owned_by": "claude-p-bridge",
       "max_concurrent": 128,
       "base_url": "http://127.0.0.1:9881/v1",
@@ -280,7 +263,6 @@
     "codex": {
       "kind": "passthrough",
       "enabled": true,
-      "required": false,
       "owned_by": "openai-codex",
       "max_concurrent": 128,
       "base_url": "http://127.0.0.1:2455/v1",
@@ -289,7 +271,6 @@
     "muse": {
       "kind": "muse",
       "enabled": true,
-      "required": false,
       "owned_by": "meta-muse",
       "max_concurrent": 64,
       "wrapper": "~/.config/muse-launch/muse-cli.sh",
@@ -306,7 +287,6 @@
     "opencode-go": {
       "kind": "passthrough",
       "enabled": true,
-      "required": false,
       "owned_by": "opencode-go",
       "max_concurrent": 64,
       "base_url": "http://127.0.0.1:10830/go/v1",
@@ -335,7 +315,6 @@
     "opencode-go-claude": {
       "kind": "passthrough",
       "enabled": true,
-      "required": false,
       "owned_by": "opencode-go-claude",
       "max_concurrent": 64,
       "base_url": "http://127.0.0.1:10830/go/v1",
@@ -356,17 +335,39 @@
         "x-opencode-session": "{uuid4}"
       }
     },
+    "deepseek-direct": {
+      "kind": "passthrough",
+      "enabled": true,
+      "owned_by": "deepseek",
+      "max_concurrent": 1,
+      "base_url": "http://127.0.0.1:10830/sg-deepseek",
+      "api_key_env": "DEEPSEEK_API_KEY"
+    },
+    "openai-key-2": {
+      "kind": "passthrough",
+      "enabled": true,
+      "owned_by": "openai-direct",
+      "max_concurrent": 1,
+      "base_url": "http://127.0.0.1:10830/sg-openai",
+      "api_key_env": "OPENAI_API_KEY_2"
+    },
+    "openai-key-3": {
+      "kind": "passthrough",
+      "enabled": true,
+      "owned_by": "openai-direct",
+      "max_concurrent": 1,
+      "base_url": "http://127.0.0.1:10830/sg-openai",
+      "api_key_env": "OPENAI_API_KEY_3"
+    },
     "droid": {
       "kind": "droid",
       "enabled": true,
-      "required": false,
       "owned_by": "factory-droid",
       "max_concurrent": 64
     },
     "opencode-zen": {
       "kind": "passthrough",
       "enabled": true,
-      "required": false,
       "owned_by": "opencode-zen-bridge",
       "max_concurrent": 128,
       "base_url": "http://127.0.0.1:9883/v1",
@@ -386,14 +387,29 @@
       "default_effort": "high",
       "context_window": 1048576,
       "max_tokens": 65536,
-      "input": [
-        "text"
-      ],
       "images": {
-        "cli_registry": "implicit_supported",
-        "status": "unverified",
-        "method": null,
-        "proof": null
+        "status": "unverified"
+      },
+      "routing": {
+        "algorithm": "weighted-sha256-v1",
+        "enabled": true,
+        "catalog_hash": "acd043cd148c00556455eec24f42e55de524d7829906c3ed36e0c867e41cd6fd",
+        "legacy_backend": "agy",
+        "disabled_backend": "agy",
+        "routes": [
+          {
+            "route_id": "agy",
+            "backend": "agy",
+            "weight": 100,
+            "priority": 10
+          },
+          {
+            "route_id": "droid",
+            "backend": "droid",
+            "weight": 0,
+            "priority": 30
+          }
+        ]
       }
     },
     {
@@ -408,14 +424,8 @@
       "default_effort": "high",
       "context_window": 1048576,
       "max_tokens": 65536,
-      "input": [
-        "text"
-      ],
       "images": {
-        "cli_registry": "implicit_supported",
-        "status": "unverified",
-        "method": null,
-        "proof": null
+        "status": "unverified"
       }
     },
     {
@@ -423,21 +433,13 @@
       "backend": "agy",
       "name": "Gemini 4 Carbon (AGY)",
       "efforts": [
-        "low",
-        "medium",
-        "high"
+        "off"
       ],
-      "default_effort": "high",
+      "default_effort": "off",
       "context_window": 1048576,
       "max_tokens": 65536,
-      "input": [
-        "text"
-      ],
       "images": {
-        "cli_registry": "implicit_supported",
-        "status": "unverified",
-        "method": null,
-        "proof": null
+        "status": "unverified"
       }
     },
     {
@@ -453,14 +455,8 @@
       "default_effort": "high",
       "context_window": 1048576,
       "max_tokens": 65536,
-      "input": [
-        "text"
-      ],
       "images": {
-        "cli_registry": "implicit_supported",
-        "status": "unverified",
-        "method": null,
-        "proof": null
+        "status": "unverified"
       }
     },
     {
@@ -475,14 +471,29 @@
       "default_effort": "low",
       "context_window": 1000000,
       "max_tokens": 128000,
-      "input": [
-        "text"
-      ],
       "images": {
-        "cli_registry": "implicit_supported",
-        "status": "unverified",
-        "method": null,
-        "proof": null
+        "status": "unverified"
+      },
+      "routing": {
+        "algorithm": "weighted-sha256-v1",
+        "enabled": true,
+        "catalog_hash": "9ee778fa614c6e4bc1c555a006827b096790504f996472b2947632b4b19359f5",
+        "legacy_backend": "claude-p",
+        "disabled_backend": "claude-p",
+        "routes": [
+          {
+            "route_id": "claude-p",
+            "backend": "claude-p",
+            "weight": 100,
+            "priority": 10
+          },
+          {
+            "route_id": "opencode-go-claude",
+            "backend": "opencode-go-claude",
+            "weight": 100,
+            "priority": 15
+          }
+        ]
       }
     },
     {
@@ -497,14 +508,8 @@
       "default_effort": "high",
       "context_window": 1000000,
       "max_tokens": 128000,
-      "input": [
-        "text"
-      ],
       "images": {
-        "cli_registry": "implicit_supported",
-        "status": "unverified",
-        "method": null,
-        "proof": null
+        "status": "unverified"
       }
     },
     {
@@ -520,59 +525,29 @@
       "default_effort": "high",
       "context_window": 1000000,
       "max_tokens": 128000,
-      "input": [
-        "text"
-      ],
       "images": {
-        "cli_registry": "implicit_supported",
-        "status": "unverified",
-        "method": null,
-        "proof": null
-      }
-    },
-    {
-      "id": "gpt-6.1-sol",
-      "backend": "codex",
-      "name": "GPT-6.1 Sol (Codex passthrough)",
-      "efforts": [
-        "low",
-        "medium",
-        "high",
-        "max"
-      ],
-      "default_effort": "high",
-      "context_window": 272000,
-      "max_tokens": 128000,
-      "input": [
-        "text"
-      ],
-      "images": {
-        "cli_registry": "implicit_supported",
-        "status": "unverified",
-        "method": null,
-        "proof": null
-      }
-    },
-    {
-      "id": "gpt-6.1-terra",
-      "backend": "codex",
-      "name": "GPT-6.1 Terra (Codex passthrough)",
-      "efforts": [
-        "low",
-        "medium",
-        "high"
-      ],
-      "default_effort": "high",
-      "context_window": 500000,
-      "max_tokens": 128000,
-      "input": [
-        "text"
-      ],
-      "images": {
-        "cli_registry": "implicit_supported",
-        "status": "unverified",
-        "method": null,
-        "proof": null
+        "status": "unverified"
+      },
+      "routing": {
+        "algorithm": "weighted-sha256-v1",
+        "enabled": true,
+        "catalog_hash": "a3f47ee2ec963cf44b9c4d559858c2e78b28961ee375ddbc07faabf7e9e7402d",
+        "legacy_backend": "claude-p",
+        "disabled_backend": "claude-p",
+        "routes": [
+          {
+            "route_id": "claude-p",
+            "backend": "claude-p",
+            "weight": 100,
+            "priority": 10
+          },
+          {
+            "route_id": "droid",
+            "backend": "droid",
+            "weight": 0,
+            "priority": 30
+          }
+        ]
       }
     },
     {
@@ -590,14 +565,9 @@
       "default_effort": "high",
       "context_window": 1048576,
       "max_tokens": 131072,
-      "input": [
-        "text"
-      ],
       "images": {
         "cli_registry": "explicit_unsupported",
-        "status": "unsupported",
-        "method": null,
-        "proof": null
+        "status": "unsupported"
       },
       "policy_lines": [
         321
@@ -613,14 +583,8 @@
       "default_effort": "max",
       "context_window": 1048576,
       "max_tokens": 131072,
-      "input": [
-        "text"
-      ],
       "images": {
-        "cli_registry": "implicit_supported",
-        "status": "unverified",
-        "method": null,
-        "proof": null
+        "status": "unverified"
       },
       "policy_lines": [
         321
@@ -636,14 +600,8 @@
       "default_effort": "max",
       "context_window": 1048576,
       "max_tokens": 131072,
-      "input": [
-        "text"
-      ],
       "images": {
-        "cli_registry": "implicit_supported",
-        "status": "unverified",
-        "method": null,
-        "proof": null
+        "status": "unverified"
       },
       "policy_lines": [
         321
@@ -663,14 +621,8 @@
       "default_effort": "high",
       "context_window": 1048576,
       "max_tokens": 131072,
-      "input": [
-        "text"
-      ],
       "images": {
-        "cli_registry": "implicit_supported",
-        "status": "unverified",
-        "method": null,
-        "proof": null
+        "status": "unverified"
       },
       "policy_lines": [
         321
@@ -690,14 +642,8 @@
       "default_effort": "high",
       "context_window": 1048576,
       "max_tokens": 131072,
-      "input": [
-        "text"
-      ],
       "images": {
-        "cli_registry": "implicit_supported",
-        "status": "unverified",
-        "method": null,
-        "proof": null
+        "status": "unverified"
       },
       "policy_lines": [
         321
@@ -705,8 +651,8 @@
     },
     {
       "id": "deepseek-v4.1-flash",
-      "backend": "opencode-go",
-      "name": "DeepSeek V4.1 Flash (OpenCode Go bridge)",
+      "backend": "deepseek-direct",
+      "name": "DeepSeek V4.1 Flash (direct)",
       "efforts": [
         "off",
         "low",
@@ -716,20 +662,124 @@
       "default_effort": "off",
       "context_window": 1000000,
       "max_tokens": 384000,
-      "input": [
-        "text"
-      ],
       "images": {
         "cli_registry": "explicit_supported",
-        "status": "unverified",
-        "method": null,
-        "proof": null
+        "status": "unverified"
       },
-      "policy_lines": [
-        106,
-        394,
-        432
-      ]
+      "routing": {
+        "algorithm": "weighted-sha256-v1",
+        "enabled": true,
+        "catalog_hash": "0e1061aa272b458e402e229d654d806cace425d7b8e16d10526d1ecb96ff0f3a",
+        "legacy_backend": "deepseek-direct",
+        "disabled_backend": "opencode-go",
+        "routes": [
+          {
+            "route_id": "deepseek-direct",
+            "backend": "deepseek-direct",
+            "weight": 100,
+            "priority": 20
+          },
+          {
+            "route_id": "opencode-go",
+            "backend": "opencode-go",
+            "weight": 0,
+            "priority": 10
+          }
+        ]
+      }
+    },
+    {
+      "id": "gpt-6.1-sol",
+      "backend": "openai-key-2",
+      "name": "GPT-6.1 Sol (OpenAI key 2)",
+      "efforts": [
+        "low",
+        "medium",
+        "high",
+        "max"
+      ],
+      "default_effort": "high",
+      "context_window": 272000,
+      "max_tokens": 128000,
+      "images": {
+        "status": "unverified"
+      },
+      "routing": {
+        "algorithm": "weighted-sha256-v1",
+        "enabled": true,
+        "catalog_hash": "6549c1ad9b2b814b158503e244f2b44a5ca8391743da3388949ba2693c669561",
+        "legacy_backend": "openai-key-2",
+        "disabled_backend": "codex",
+        "routes": [
+          {
+            "route_id": "codex",
+            "backend": "codex",
+            "weight": 0,
+            "priority": 10
+          },
+          {
+            "route_id": "droid",
+            "backend": "droid",
+            "weight": 0,
+            "priority": 30
+          },
+          {
+            "route_id": "openai-key-2",
+            "backend": "openai-key-2",
+            "weight": 50,
+            "priority": 20
+          },
+          {
+            "route_id": "openai-key-3",
+            "backend": "openai-key-3",
+            "weight": 50,
+            "priority": 20
+          }
+        ]
+      }
+    },
+    {
+      "id": "gpt-6.1-terra",
+      "backend": "openai-key-2",
+      "name": "GPT-6.1 Terra (OpenAI key 2)",
+      "efforts": [
+        "low",
+        "medium",
+        "high"
+      ],
+      "default_effort": "high",
+      "context_window": 500000,
+      "max_tokens": 128000,
+      "images": {
+        "status": "unverified"
+      },
+      "routing": {
+        "algorithm": "weighted-sha256-v1",
+        "enabled": true,
+        "catalog_hash": "6549c1ad9b2b814b158503e244f2b44a5ca8391743da3388949ba2693c669561",
+        "legacy_backend": "openai-key-2",
+        "disabled_backend": "codex",
+        "routes": [
+          {
+            "route_id": "codex",
+            "backend": "codex",
+            "weight": 0,
+            "priority": 10
+          },
+          {
+            "route_id": "openai-key-2",
+            "backend": "openai-key-2",
+            "weight": 50,
+            "priority": 20
+          },
+          {
+            "route_id": "openai-key-3",
+            "backend": "openai-key-3",
+            "weight": 50,
+            "priority": 20
+          }
+        ]
+      }
     },
     {
       "id": "claude-sonnet-5-5-droid",
@@ -744,14 +794,8 @@
       "default_effort": "high",
       "context_window": 1000000,
       "max_tokens": 128000,
-      "input": [
-        "text"
-      ],
       "images": {
-        "cli_registry": "implicit_supported",
-        "status": "unverified",
-        "method": null,
-        "proof": null
+        "status": "unverified"
       },
       "policy_lines": [
         26,
@@ -774,14 +818,8 @@
       "default_effort": "high",
       "context_window": 1048576,
       "max_tokens": 65536,
-      "input": [
-        "text"
-      ],
       "images": {
-        "cli_registry": "implicit_supported",
-        "status": "unverified",
-        "method": null,
-        "proof": null
+        "status": "unverified"
       },
       "policy_lines": [
         100,
@@ -804,14 +842,8 @@
       "default_effort": "high",
       "context_window": 272000,
       "max_tokens": 128000,
-      "input": [
-        "text"
-      ],
       "images": {
-        "cli_registry": "implicit_supported",
-        "status": "unverified",
-        "method": null,
-        "proof": null
+        "status": "unverified"
       },
       "policy_lines": [
         111,
@@ -832,14 +864,8 @@
       "default_effort": "high",
       "context_window": 200000,
       "max_tokens": 32000,
-      "input": [
-        "text"
-      ],
       "images": {
-        "cli_registry": "implicit_supported",
-        "status": "unverified",
-        "method": null,
-        "proof": null
+        "status": "unverified"
       }
     },
     {
@@ -853,14 +879,8 @@
       "default_effort": "high",
       "context_window": 200000,
       "max_tokens": 32000,
-      "input": [
-        "text"
-      ],
       "images": {
-        "cli_registry": "implicit_supported",
-        "status": "unverified",
-        "method": null,
-        "proof": null
+        "status": "unverified"
       }
     },
     {
@@ -874,14 +894,8 @@
       "default_effort": "high",
       "context_window": 200000,
       "max_tokens": 32000,
-      "input": [
-        "text"
-      ],
       "images": {
-        "cli_registry": "implicit_supported",
-        "status": "unverified",
-        "method": null,
-        "proof": null
+        "status": "unverified"
       }
     },
     {
@@ -895,14 +909,8 @@
       "default_effort": "high",
       "context_window": 200000,
       "max_tokens": 32000,
-      "input": [
-        "text"
-      ],
       "images": {
-        "cli_registry": "implicit_supported",
-        "status": "unverified",
-        "method": null,
-        "proof": null
+        "status": "unverified"
       }
     },
     {
@@ -916,14 +924,9 @@
       "default_effort": "high",
       "context_window": 262144,
       "max_tokens": 131072,
-      "input": [
-        "text"
-      ],
       "images": {
         "cli_registry": "unsupported",
-        "status": "unverified",
-        "method": null,
-        "proof": null
+        "status": "unverified"
       }
     },
     {
@@ -940,14 +943,9 @@
       "default_effort": "high",
       "context_window": 1048576,
       "max_tokens": 131072,
-      "input": [
-        "text"
-      ],
       "images": {
         "cli_registry": "unsupported",
-        "status": "unverified",
-        "method": null,
-        "proof": null
+        "status": "unverified"
       }
     },
     {
@@ -961,14 +959,9 @@
       "default_effort": "high",
       "context_window": 1000000,
       "max_tokens": 262144,
-      "input": [
-        "text"
-      ],
       "images": {
         "cli_registry": "unsupported",
-        "status": "unverified",
-        "method": null,
-        "proof": null
+        "status": "unverified"
       }
     },
     {
@@ -982,14 +975,8 @@
       "default_effort": "high",
       "context_window": 200000,
       "max_tokens": 32000,
-      "input": [
-        "text"
-      ],
       "images": {
-        "cli_registry": "implicit_supported",
-        "status": "unverified",
-        "method": null,
-        "proof": null
+        "status": "unverified"
       }
     },
     {
@@ -1006,14 +993,9 @@
       "default_effort": "high",
       "context_window": 1000000,
       "max_tokens": 512000,
-      "input": [
-        "text"
-      ],
       "images": {
         "cli_registry": "unsupported",
-        "status": "unverified",
-        "method": null,
-        "proof": null
+        "status": "unverified"
       }
     },
     {
@@ -1027,14 +1009,8 @@
       "default_effort": "high",
       "context_window": 200000,
       "max_tokens": 32000,
-      "input": [
-        "text"
-      ],
       "images": {
-        "cli_registry": "implicit_supported",
-        "status": "unverified",
-        "method": null,
-        "proof": null
+        "status": "unverified"
       }
     },
     {
@@ -1048,14 +1024,8 @@
       "default_effort": "high",
       "context_window": 200000,
       "max_tokens": 32000,
-      "input": [
-        "text"
-      ],
       "images": {
-        "cli_registry": "implicit_supported",
-        "status": "unverified",
-        "method": null,
-        "proof": null
+        "status": "unverified"
       }
     }
   ]
