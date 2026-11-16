@@ -876,6 +876,50 @@ class TestLiveFailureEnvelopeAfterPrefix(unittest.TestCase):
 
         self._assert_fail_close_envelope(self._serve(adapter_boom), "adapter exploded")
 
+    def _error_usage(self, usage: dict) -> list:
+        def failing(ctx, keepalive, sse_writer):
+            self.assertTrue(sse_writer("content", "partial"))
+            return {
+                "state": "droid_error",
+                "rc": 1,
+                "text": "partial",
+                "err": "adapter went down",
+                "usage": usage,
+                "events": [],
+                "tool_calls": [],
+                "backend_kind": "droid",
+            }
+
+        frames = self._serve(failing)
+        payloads = [json.loads(f[len("data: ") :]) for f in frames if f.startswith("data: {")]
+        return [p for p in payloads if "error" in p]
+
+    def test_error_frame_survives_none_usage_counter(self):
+        errors = self._error_usage({"input_tokens": 120, "output_tokens": None})
+        self.assertEqual(len(errors), 1)
+        self.assertEqual(errors[0]["usage"]["prompt_tokens"], 120)
+        self.assertEqual(errors[0]["usage"]["completion_tokens"], 0)
+        self.assertEqual(errors[0]["usage"]["total_tokens"], 120)
+
+    def test_error_frame_usage_follows_positive_wire_usage_contract(self):
+        for usage in (
+            {"input_tokens": 0, "output_tokens": 0, "cache_read_tokens": 50},
+            {"input_tokens": -5, "output_tokens": -1},
+            {"input_tokens": True, "output_tokens": None},
+            {"input_tokens": "abc", "output_tokens": [1]},
+            {},
+        ):
+            with self.subTest(usage=usage):
+                errors = self._error_usage(usage)
+                self.assertEqual(len(errors), 1)
+                self.assertNotIn("usage", errors[0])
+
+    def test_error_frame_keeps_positive_usage_with_cache(self):
+        errors = self._error_usage({"input_tokens": 100, "output_tokens": 20, "cache_read_tokens": 40})
+        self.assertEqual(errors[0]["usage"]["prompt_tokens"], 100)
+        self.assertEqual(errors[0]["usage"]["completion_tokens"], 20)
+        self.assertEqual(errors[0]["usage"]["prompt_tokens_details"], {"cached_tokens": 40})
+
     def test_healthy_live_turn_keeps_success_frames(self):
         def healthy(ctx, keepalive, sse_writer):
             self.assertTrue(sse_writer("content", "partial"))

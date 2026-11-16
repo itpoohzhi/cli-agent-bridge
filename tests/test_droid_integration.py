@@ -14,6 +14,7 @@ from tools import droid_image
 
 DROID_MODEL_IDS = (
     "claude-sonnet-5-5-droid",
+    "gemini-3.8-flash",
     "gemini-3.8-flash-droid",
     "gpt-6.1-sol-droid",
 )
@@ -21,6 +22,7 @@ BASE_TOOLS = tuple(f"tool-{index}" for index in range(35))
 EXTRA_TOOL = "wait-for-script-cli"
 MODEL_EFFORTS = (
     ("low", "medium", "high", "max"),
+    ("low", "medium", "high"),
     ("low", "medium", "high"),
     ("low", "medium", "high", "max"),
 )

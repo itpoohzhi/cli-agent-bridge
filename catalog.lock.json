@@ -1,16 +1,16 @@
 {
-  "compiled_at": "2026-11-15T00:19:20+0300",
+  "compiled_at": "2026-11-16T00:00:00Z",
   "compiler_version": 1,
-  "fleet_sha256": "b9d7a8dd6776abad0690ce01566088bbde31500298133d97817b8bb7a82d2c7a",
+  "fleet_sha256": "26f7833b7e30e9dd5d41d620941cbd81fd8ced6257c638f431ef7aeddf9518a8",
   "inputs": {
     "discovery_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
     "manifests": {
-      "_fleet.yaml": "889034a7bbbafdbf2ca8d86a2010834ee3aa19f64edd0175bae7712bd832b272",
-      "agy.yaml": "16d3044cfcda0fc59a785d701d1997535e5e299352f70fce6b481109a091ce15",
+      "_fleet.yaml": "eff0416cd144dd33d31198eb132e829fefc0b081594ddbfde4657ddf08c993ee",
+      "agy.yaml": "080b22bf492a28cf9929e8c590f47142022c93fec4f8885ca288768418ca1918",
       "claude-p.yaml": "cd2b0208bdac758ca6d68186b6eb65790866b6f7e29bd0fcf24ce111529318a4",
       "codex.yaml": "e7f1a1fe67c877cea6b5d5577d38dd975ef4bb09d2429df3ff3eb61b38a57447",
       "deepseek-direct.yaml": "5decd8d0524651aa79cf0a5ef0879ee65633afd2394557b0cee8e86a96b262c7",
-      "droid.yaml": "59e0d87ef9e998b878b6115ebf3844b0c3dbac27a927bacc28a6835798b1117f",
+      "droid.yaml": "1b5fb0def2d41feb65638161f6a5b9827894eca6c055f361750e5e3001e5177c",
       "muse.yaml": "610c34e6a064333504b3b6ec7aeed78c597d69526b56d701f6fbd42727ec3b78",
       "openai-key-2.yaml": "f3a13ea5b5b18353dda5e02e9678fd88aa2c21a18a53e44f4e8f0ce05f9f0fba",
       "openai-key-3.yaml": "eccc73e68769ab0d742b5ace825af8bbcb2d02f07068e272c608ddefd1b2177e",
@@ -18,7 +18,7 @@
       "opencode-go.yaml": "8d27372c95fcf802352d38e4e6f3a6c1919030ef6220d3c6c2c5808fe6077f68",
       "opencode-zen.yaml": "9239b0e1c543c23037f5407b6c64a0db04735d092ba7ccc53d197f83f91d1636"
     },
-    "manifests_sha256": "b7d5cabe8383f5d822743b70a009343fb58439e87bc603cdb5edcb86176ad91d"
+    "manifests_sha256": "48bc666fd83a3daf77da5ca78e330fd77e312d1159ce5846ebe2805630dc1ecb"
   },
   "models": {
     "beam-free": {
@@ -142,11 +142,19 @@
       "status": "quarantine"
     },
     "gemini-3.8-flash": {
-      "alternates": [
-        {
-          "provider": "droid"
-        }
-      ],
+      "alternates": [],
+      "efforts_proven": [],
+      "family": "Google",
+      "family_source": "exact_map",
+      "history": [],
+      "in_fleet": true,
+      "provider": "droid",
+      "quorum_eligible": false,
+      "quota_group": "factory-droid",
+      "status": "quarantine"
+    },
+    "gemini-3.8-flash-agy": {
+      "alternates": [],
       "efforts_proven": [],
       "family": "Google",
       "family_source": "prefix",

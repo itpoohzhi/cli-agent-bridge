@@ -37,6 +37,7 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, Unpack
 
 from core.backend_adapter import FleetViolation, build_catalog
 from core.compile_model_records import CompileOptions, CompileResult
+from core.compile_model_records import model_record as model_record
 from core.compile_routes_pipeline import compile_catalog as _compile_catalog
 from core.compile_routes_pipeline import render_fleet_json as _render_fleet_json
 from core.model_lifecycle import (
@@ -248,47 +249,6 @@ def _receipt_efforts(
     if default not in efforts and efforts:
         default = efforts[-1]
     return efforts, default
-
-
-def model_record(
-    manifest: ProviderManifest,
-    model_id: str,
-    meta: Mapping[str, Any],
-    receipt: Optional[Mapping[str, Any]],
-) -> Dict[str, Any]:
-    """Запись модели schema 3: overrides ⊕ discovery.meta ⊕ models_defaults."""
-    rule = manifest.rule_for(model_id)
-    override: Mapping[str, Any] = rule.fields if rule else {}
-    defaults = manifest.models_defaults
-    efforts = list(override.get("efforts") or defaults.efforts)
-    default_effort = str(override.get("default_effort") or defaults.default_effort)
-    if receipt is not None:
-        proven, proven_default = _receipt_efforts(
-            receipt, rule.efforts_pin if rule else None
-        )
-        if proven:
-            efforts, default_effort = proven, proven_default
-    record: Dict[str, Any] = {
-        "id": model_id,
-        "backend": manifest.provider_id,
-        "name": str(override.get("name") or model_id),
-        "efforts": efforts,
-        "default_effort": default_effort,
-        "context_window": override.get(
-            "context_window", meta.get("context_window", defaults.context_window)
-        ),
-        "max_tokens": override.get(
-            "max_tokens", meta.get("max_tokens", defaults.max_tokens)
-        ),
-        "input": list(override.get("input") or ["text"]),
-        "images": dict(override.get("images") or DEFAULT_IMAGES),
-    }
-    if override.get("policy_lines"):
-        record["policy_lines"] = list(override["policy_lines"])
-    for key in _OVERRIDE_EXTRA_KEYS:
-        if override.get(key) is not None:
-            record[key] = override[key]
-    return record
 
 
 def _check_single(
