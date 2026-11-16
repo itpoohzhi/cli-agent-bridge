@@ -21,6 +21,44 @@ from tests.test_merge_recovery_contracts import _handler, _runner
 from tests.transport_test_support import RecordingSink
 
 
+@pytest.mark.parametrize("cache", ["invalid", True, {}, -1, 3, None])
+def test_facade_error_usage_survives_invalid_cache(cache: Any) -> None:
+    from tests.test_live_stream import TestLiveFailureEnvelopeAfterPrefix
+
+    case = TestLiveFailureEnvelopeAfterPrefix()
+
+    def dispatch(_ctx: dict, _keepalive: Any, writer: Any) -> dict:
+        assert writer("content", "partial")
+        return {
+            "state": "droid_error",
+            "rc": 1,
+            "err": "fixture failure",
+            "backend_kind": "droid",
+            "text": "partial",
+            "usage": {
+                "input_tokens": 17,
+                "output_tokens": 9,
+                "cache_read_tokens": cache,
+            },
+        }
+
+    try:
+        frames = case._serve(dispatch)
+    finally:
+        case.doCleanups()
+    errors = [
+        json.loads(f[6:]) for f in frames if f.startswith("data: {") and '"error"' in f
+    ]
+    assert len(errors) == 1
+    assert errors[0]["usage"] == {
+        "prompt_tokens": 17,
+        "completion_tokens": 9,
+        "total_tokens": 26,
+        "prompt_tokens_details": {"cached_tokens": 3 if cache == 3 else 0},
+    }
+    assert frames[-1] == "data: [DONE]\n\n"
+
+
 @pytest.mark.parametrize("buffering", [False, True])
 @pytest.mark.parametrize("preamble", [False, True])
 @pytest.mark.parametrize(

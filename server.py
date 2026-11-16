@@ -7837,7 +7837,7 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
                     _wire_usage(
                         _usage_counter(err_usage.get("input_tokens")),
                         _usage_counter(err_usage.get("output_tokens")),
-                        err_usage.get("cache_read_tokens"),
+                        _usage_counter(err_usage.get("cache_read_tokens")),
                     )
                 )
             except (TypeError, ValueError, AttributeError):

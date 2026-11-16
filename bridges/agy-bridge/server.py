@@ -1328,7 +1328,7 @@ def _mask_secrets(text: str) -> str:
 
 
 def _err_summary(err: Any, limit: int = 200) -> str:
-    text = " ".join(str(err or "").split())
+    text = " ".join(_mask_secrets(str(err or "")).split())
     return text[:limit]
 
 

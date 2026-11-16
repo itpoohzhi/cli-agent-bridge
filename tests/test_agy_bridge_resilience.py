@@ -1,15 +1,4 @@
-"""Тесты отказоустойчивости agy-bridge (ADR-0007, arch-spec r2 §6, RW-008).
-
-Покрыто 15 сценариев: детекция неактивности группы, сброс таймера по CPU и по
-протокольным событиям, fail-closed при деградации `ps`, троттлинг `check()` в
-`_execute`, `child_exited` как штатное завершение, `absolute_cap` -> `timeout`,
-kill-switch, контракт ошибки `idle_timeout` (HTTP 504 / SSE), зачистка группы
-процессов и reap лидера, изоляция таймаута источника в `fetch_via_playwright.py`.
-
-Мост `bridges/agy-bridge/server.py` лежит в каталоге с дефисом, поэтому грузится
-через `importlib`. Таймауты малые (`idle_timeout_s=0.2`) либо мок-часы; процессы
-создаются с `start_new_session=True` и убираются в `finally`.
-"""
+"""Отказоустойчивость agy-bridge: watchdog, SSE, процессы и маскирование (ADR-0007)."""
 
 from __future__ import annotations
 
@@ -79,6 +68,17 @@ def _load_bridge() -> Any:
 
 
 srv = _load_bridge()
+
+
+def test_err_summary_redacts_before_truncation() -> None:
+    secrets = [prefix + "z" * 40 for prefix in ("sk-", "AIza", "ghp_", "")]
+    for secret in [*secrets, "api_key=short-private-value"]:
+        for limit in (1, 12, 120, 200):
+            prefix = "x " * max(0, (limit - 10) // 2)
+            err = prefix + secret + "\n tail"
+            expected = " ".join(srv._mask_secrets(err).split())[:limit]
+            assert srv._err_summary(err, limit) == expected
+            assert secret.split("=")[-1][:4] not in expected
 
 
 class _FakeClock:

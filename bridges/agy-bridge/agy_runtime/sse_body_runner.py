@@ -189,7 +189,7 @@ class _SseBodyRunner:
                     not self.cancelled(), ) ):
                 out = ( self.last_out if self.last_out
                     else dict(state="pump_error", rc=1, err="retry cancelled") )
-            success = dict(done=True).get(str(out.get("state")), False)
+            success = out.get("state") == "done"
             if all((success, out.get("rc") == 0)):
                 if not self.cancelled():
                     proceed = self.drain()
@@ -214,7 +214,7 @@ class _SseBodyRunner:
         proceed = True
         if all(((not is_present(err)), (is_present(s.tool_turn)))):
             s.tool_turn.finish()
-            proceed = not any((self.cancelled(), not any((s.tool_turn.ok, s.tool_turn.error))))
+            proceed = not self.cancelled() and (s.tool_turn.ok or bool(s.tool_turn.error))
             if s.tool_turn.error:
                 err = s.tool_turn.error_body()
             elif s.tool_turn.calls:
