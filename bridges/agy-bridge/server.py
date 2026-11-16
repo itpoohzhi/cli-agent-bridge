@@ -7825,9 +7825,14 @@ class Handler(BaseHTTPRequestHandler):
     def _serve_json(self, ctx: dict) -> None:
         self._reset_flush_window()
         try:
-            self._serve_json_body(ctx)
+            self._json_body_runner(ctx)
         finally:
             self._reset_flush_window()
+
+    def _json_body_runner(self, ctx: dict) -> None:
+        """Установить начальную попытку JSON и передать её job-производителю."""
+        ctx["attempt_index"] = 0
+        sse_body_runner.invoke_at_attempt(0, lambda: self._serve_json_body(ctx))
 
     def _serve_json_body(self, ctx: dict) -> None:
         progress = _ToolProgress(

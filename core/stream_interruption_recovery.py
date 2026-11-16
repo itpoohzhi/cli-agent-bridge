@@ -131,20 +131,20 @@ def trusted_final_text(final_text: str, error: str, tail: object, causal_input: 
             return ""
     planner = str(getattr(tail, "final_planner_content", ""))
     healed = (final_text or planner) if getattr(tail, "final_planner", False) else ""
-    trusted = healed if error else final_text
-    return trusted
+    return healed if error else final_text
 
 def tail_turn_facts(tail: object, cleared_error: str = "") -> dict[str, object]:
     """Факты хода из транскрипт-хвоста для `resolve_done_turn_outcome` (без хвоста — нейтральны)."""
-    return {
+    facts: dict[str, object] = {
         "completion_done_without_tools": bool(getattr(tail, "final_planner", False)),
         "last_completion_seq": getattr(tail, "last_planner_step_index", -1),
         "last_error_seq": getattr(tail, "last_error_step_index", -1),
         "drain_complete": getattr(tail, "drain_outcome", "") != "timeout",
         "had_transient_error": bool(getattr(tail, "had_transient_error", False)) or bool(cleared_error),
-        "had_safety_error": bool(getattr(tail, "had_safety_error", False)),
     }
-
+    if getattr(tail, "had_safety_error", False):
+        facts["had_safety_error"] = True
+    return facts
 @dataclass(frozen=True)
 class TurnOutcomeResolution:
     """Итог разбора done."""

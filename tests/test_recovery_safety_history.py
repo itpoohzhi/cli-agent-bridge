@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from contextlib import nullcontext
 from pathlib import Path
 
 import pytest
@@ -14,6 +15,43 @@ from core.turn_outcome_policy import is_fatal_safety_error
 @pytest.mark.parametrize("marker", ("policy%5fviolation", "policy+violation", "SAFETY", "BLOCK_REASON: SAFETY", "PROHIBITED_CONTENT", "RECITATION"))
 def test_encoded_and_machine_safety_codes(marker: str) -> None:
     assert is_fatal_safety_error(marker)
+
+
+@pytest.mark.parametrize("marker", ("content%255fpolicy%255fviolation", "%2573afety: connection reset", "content%25255fpolicy%25255fviolation", "content_safety", "safety_filter", "fatal_safety_error: connection reset", '{"block_reason": "OTHER"}'))
+def test_nested_encoded_safety_veto(marker: str) -> None:
+    assert is_fatal_safety_error(marker)
+
+
+@pytest.mark.parametrize("text", ("safety_cap_s exceeded", "thread_safety lock error", "thread-safety lock error", '{"block_reason": null}', '{"block_reason": "NONE"}', 'block_reason: none'))
+def test_operational_safety_and_neutral_block_reason(text: str) -> None:
+    assert not is_fatal_safety_error(text)
+
+
+@pytest.mark.parametrize("job", (False, True))
+@pytest.mark.parametrize("fail", (False, True))
+def test_json_initial_attempt_scope(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, job: bool, fail: bool) -> None:
+    import sys
+
+    bridge = flow._load_bridge(monkeypatch, tmp_path)
+    runtime = sys.modules["agy_runtime.sse_body_runner"]
+    handler = bridge.Handler.__new__(bridge.Handler)
+    observed: list[tuple[object, ...]] = []
+    sent: list[tuple[int, object]] = []
+    handler._send = lambda code, body: sent.append((code, body))
+    def invoke(*_args: object) -> flow._Outcome:
+        observed.append(flow._start_attempt_tail(bridge, monkeypatch))
+        if fail:
+            raise RuntimeError("attempt failed")
+        return flow._Outcome(state="done", text="final", rc=0, err="")
+    handler._run_once_impl = invoke
+    setattr(handler, "connection", None)
+    monkeypatch.setattr(bridge, "_client_gone", lambda _conn: False)
+    ctx = dict(model="test", full_prompt="test", emulate_tools=False, step_job_id=f"json-{fail}" if job else "")
+    with pytest.raises(RuntimeError, match="attempt failed") if fail and not job else nullcontext():
+        getattr(handler, "_serve_json")(ctx)
+    assert observed == [(0, 0, 0, 0)]
+    assert getattr(runtime, "current_attempt_index")() == -1
+    assert fail or sent[0][0] == 200
 
 
 @pytest.mark.parametrize("error", ("connection reset by peer", "Malformed function call"))
