@@ -260,12 +260,10 @@
   },
   "backends": {
     "agy": {
-      "kind": "passthrough",
+      "kind": "stdio_resident",
       "enabled": true,
       "owned_by": "agy-bridge",
-      "max_concurrent": 128,
-      "base_url": "http://127.0.0.1:9887/v1",
-      "api_key_env": "AGY_BRIDGE_KEY"
+      "max_concurrent": 128
     },
     "claude-p": {
       "kind": "passthrough",
@@ -319,7 +317,7 @@
         ]
       },
       "per_request_headers": {
-        "x-opencode-session": "{uuid4}"
+        "x-opencode-session": "{session_affinity}"
       },
       "default_body_extra": {
         "thinking": {
@@ -347,7 +345,7 @@
         ]
       },
       "per_request_headers": {
-        "x-opencode-session": "{uuid4}"
+        "x-opencode-session": "{session_affinity}"
       }
     },
     "deepseek-direct": {
@@ -387,6 +385,14 @@
       "max_concurrent": 128,
       "base_url": "http://127.0.0.1:9883/v1",
       "api_key_env": "OPENCODE_ZEN_BRIDGE_KEY"
+    },
+    "agy-passthrough": {
+      "kind": "passthrough",
+      "enabled": false,
+      "owned_by": "agy-bridge",
+      "max_concurrent": 128,
+      "base_url": "http://127.0.0.1:9887/v1",
+      "api_key_env": "AGY_BRIDGE_KEY"
     }
   },
   "models": [
@@ -402,10 +408,6 @@
       "default_effort": "high",
       "context_window": 1048576,
       "max_tokens": 65536,
-      "input": [
-        "text",
-        "tools"
-      ],
       "images": {
         "status": "unverified"
       },
@@ -423,10 +425,6 @@
       "default_effort": "high",
       "context_window": 1048576,
       "max_tokens": 65536,
-      "input": [
-        "text",
-        "tools"
-      ],
       "images": {
         "status": "unverified"
       }
@@ -441,10 +439,6 @@
       "default_effort": "off",
       "context_window": 1048576,
       "max_tokens": 65536,
-      "input": [
-        "text",
-        "tools"
-      ],
       "images": {
         "status": "unverified"
       }
@@ -462,10 +456,6 @@
       "default_effort": "high",
       "context_window": 1048576,
       "max_tokens": 65536,
-      "input": [
-        "text",
-        "tools"
-      ],
       "images": {
         "status": "unverified"
       }

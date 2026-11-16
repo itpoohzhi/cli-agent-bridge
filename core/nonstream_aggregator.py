@@ -9,11 +9,45 @@ import time
 from collections.abc import Callable, Iterable, Mapping
 from typing import Any
 
-from core.liveness_signals import SEMANTIC_TEXT_KEYS, SIGNAL_S, T_LITERALS, classify_chunk, internal_stream_requested, parse_sse_json
+from core.liveness_signals import (
+    SEMANTIC_TEXT_KEYS,
+    SIGNAL_S,
+    T_LITERALS,
+    classify_chunk,
+    internal_stream_requested,
+    parse_sse_json,
+)
+from core.runtime_env import flag_enabled
+from core.usage_wire import (
+    CACHE_CREATION_KEYS,
+    _first_count,
+    _is_count,
+    build_wire_usage,
+    extract_cache_read_tokens,
+)
 
 _Obj = dict[str, Any]
 SignalHook = Callable[[str, frozenset[str]], None]
 _META_KEYS = ("id", "created", "model", "system_fingerprint")
+CACHE_KEYS_TO_CLEAN = (
+    "prompt_tokens_details",
+    "cached_tokens",
+    "prompt_cache_hit_tokens",
+    "cache_read_tokens",
+    "cache_read_input_tokens",
+    "cacheReadTokens",
+    "cachedTokens",
+    *CACHE_CREATION_KEYS,
+    "input_tokens",
+    "output_tokens",
+)
+_CACHE_ALIASES = (
+    "prompt_cache_hit_tokens",
+    "cache_read_tokens",
+    "cache_read_input_tokens",
+    "cacheReadTokens",
+    "cachedTokens",
+)
 
 
 class NonstreamError(Exception):
@@ -59,7 +93,11 @@ def _apply_call(calls: dict[int, _Obj], call: _Obj) -> None:
 def _apply_delta(state: _Obj, delta: _Obj) -> None:
     _merge_first(state, "role", delta.get("role"), "role")
     if isinstance(delta.get("function_call"), dict):
-        _apply_function(state.setdefault("fcall", {"args": []}), delta["function_call"], "function_call")
+        _apply_function(
+            state.setdefault("fcall", {"args": []}),
+            delta["function_call"],
+            "function_call",
+        )
     for key in SEMANTIC_TEXT_KEYS:
         if isinstance(delta.get(key), str) and delta[key]:
             state["text"].setdefault(key, []).append(delta[key])
@@ -78,12 +116,78 @@ def _render_choice(index: int, state: _Obj) -> _Obj:
     calls: _Obj = {}
     if state["calls"]:
         calls["tool_calls"] = [
-            {"id": c.get("id", ""), "type": c.get("type") or "function", "function": _fn(c)} for _, c in sorted(state["calls"].items())
+            {
+                "id": call.get("id", ""),
+                "type": call.get("type") or "function",
+                "function": _fn(call),
+            }
+            for _, call in sorted(state["calls"].items())
         ]
     if state.get("fcall"):
         calls["function_call"] = _fn(state["fcall"])
-    message = {"role": state.get("role") or "assistant", "content": text.pop("content", "") or (None if calls else ""), **text, **calls}
+    message = {
+        "role": state.get("role") or "assistant",
+        "content": text.pop("content", "") or (None if calls else ""),
+        **text,
+        **calls,
+    }
     return {"index": index, "message": message, "finish_reason": state["finish"]}
+
+
+def _wire_usage(usage: Mapping[str, Any]) -> _Obj:
+    """Нормализует usage и удаляет сырые Anthropic/cache-поля из OpenAI wire."""
+    out = dict(usage)
+    original_details = usage.get("prompt_tokens_details")
+    prompt_val = usage.get("prompt_tokens")
+    input_includes_cache = _is_count(prompt_val)
+    prompt_tokens = prompt_val
+    if prompt_tokens is None:
+        prompt_tokens = usage.get("input_tokens")
+    completion_tokens = usage.get("completion_tokens")
+    if completion_tokens is None:
+        completion_tokens = usage.get("output_tokens")
+    cache_creation = _first_count(usage, CACHE_CREATION_KEYS)
+
+    wire, inconsistent = build_wire_usage(
+        prompt_tokens,
+        completion_tokens,
+        extract_cache_read_tokens(usage),
+        input_includes_cache=input_includes_cache,
+        cache_creation_tokens=cache_creation,
+    )
+    prompt = wire["prompt_tokens"]
+    completion = wire["completion_tokens"]
+    out["prompt_tokens"] = prompt
+    out["completion_tokens"] = completion
+
+    wire_details = wire.get("prompt_tokens_details")
+    details = dict(wire_details) if isinstance(wire_details, Mapping) else None
+
+    for key in _CACHE_ALIASES:
+        out.pop(key, None)
+    out.pop("cached_tokens", None)
+
+    if inconsistent or details is None:
+        preserved_details = (
+            dict(original_details) if isinstance(original_details, Mapping) else {}
+        )
+        preserved_details.pop("cached_tokens", None)
+        if preserved_details:
+            out["prompt_tokens_details"] = preserved_details
+        else:
+            out.pop("prompt_tokens_details", None)
+    else:
+        merged_details = {
+            **dict(original_details if isinstance(original_details, Mapping) else {}),
+            **details,
+        }
+        out["prompt_tokens_details"] = merged_details
+
+    for key in (*CACHE_CREATION_KEYS, "input_tokens", "output_tokens"):
+        out.pop(key, None)
+
+    out["total_tokens"] = prompt + completion
+    return out
 
 
 class NonstreamAggregator:
@@ -99,7 +203,9 @@ class NonstreamAggregator:
     def _too_large(self) -> NonstreamError:
         return _bad("upstream_response_too_large", "response exceeds limit")
 
-    def add_event(self, raw: bytes, data: str | None, on_signal: SignalHook | None = None) -> None:
+    def add_event(
+        self, raw: bytes, data: str | None, on_signal: SignalHook | None = None
+    ) -> None:
         self._raw_bytes += len(raw)
         if self._raw_bytes > self._max:
             raise self._too_large()
@@ -126,7 +232,10 @@ class NonstreamAggregator:
         for choice in choices if isinstance(choices, list) else ():
             if not isinstance(choice, dict):
                 continue
-            state = self._choices.setdefault(choice_index(choice.get("index")), {"text": {}, "calls": {}, "finish": None})
+            state = self._choices.setdefault(
+                choice_index(choice.get("index")),
+                {"text": {}, "calls": {}, "finish": None},
+            )
             if isinstance(choice.get("delta"), dict):
                 _apply_delta(state, choice["delta"])
             if isinstance(choice.get("finish_reason"), str) and choice["finish_reason"]:
@@ -144,14 +253,18 @@ class NonstreamAggregator:
         self._check_complete()
         meta = self._meta
         out: _Obj = {
-            "id": meta.get("id") or "chatcmpl-passthrough", "object": "chat.completion",
-            "created": meta.get("created") or int(time.time()), "model": meta.get("model") or "",
+            "id": meta.get("id") or "chatcmpl-passthrough",
+            "object": "chat.completion",
+            "created": meta.get("created") or int(time.time()),
+            "model": meta.get("model") or "",
         }
         if meta.get("system_fingerprint"):
             out["system_fingerprint"] = meta["system_fingerprint"]
-        out["choices"] = [_render_choice(i, self._choices[i]) for i in sorted(self._choices)]
+        out["choices"] = [
+            _render_choice(index, self._choices[index]) for index in sorted(self._choices)
+        ]
         if self._usage is not None:
-            out["usage"] = self._usage
+            out["usage"] = _wire_usage(self._usage)
         return out
 
     def encode(self) -> bytes:
@@ -162,10 +275,12 @@ class NonstreamAggregator:
 
 
 def aggregate_events(
-    events: Iterable[tuple[bytes, str | None]], on_signal: SignalHook | None, max_body_bytes: int,
+    events: Iterable[tuple[bytes, str | None]],
+    on_signal: SignalHook | None,
+    max_body_bytes: int,
     expired: Callable[[], str] | None = None,
 ) -> bytes:
-    """SSE up to [DONE] -> body; else 502/504 (break/EOF on an expired window is 504)."""
+    """SSE up to [DONE] -> body; else 502/504."""
     agg = NonstreamAggregator(max_body_bytes)
     timeout = NonstreamError(504, "upstream_timeout", "upstream timeout")
     try:
@@ -184,7 +299,12 @@ def aggregate_events(
         raise _bad("upstream_stream_error", "stream failed") from None
 
 
-def internal_stream_body(path: str, request: Mapping[str, Any], raw_body: bytes) -> bytes | None:
+def internal_stream_body(
+    path: str,
+    request: Mapping[str, Any],
+    raw_body: bytes,
+    supports_stream_options: bool = True,
+) -> bytes | None:
     """Body with internal stream=true; None when not applicable."""
     try:
         data = json.loads(raw_body) if internal_stream_requested(path, request) else None
@@ -192,16 +312,33 @@ def internal_stream_body(path: str, request: Mapping[str, Any], raw_body: bytes)
         data = None
     if not isinstance(data, dict):
         return None
-    return json.dumps({**data, "stream": True}, ensure_ascii=False).encode("utf-8")
+    if not supports_stream_options:
+        data.pop("stream_options", None)
+    elif flag_enabled("BRIDGE_INTERNAL_STREAM_USAGE_ENABLED"):
+        options = data.get("stream_options")
+        data["stream_options"] = {
+            **(options if isinstance(options, dict) else {}),
+            "include_usage": True,
+        }
+    try:
+        body = json.dumps({**data, "stream": True}, ensure_ascii=False).encode("utf-8")
+    except UnicodeEncodeError:
+        body = json.dumps({**data, "stream": True}, ensure_ascii=True).encode("utf-8")
+    return body
 
 
 def request_deadlines(limits: Any, aggregate: bool) -> tuple[float, float]:
     """(request deadline, socket-open deadline)."""
     now, ns = time.monotonic(), limits.nonstream
     cap = now + (ns.safety_cap_s if aggregate else limits.total_timeout_s)
-    return cap, min(cap, now + ns.first_progress_timeout_s) if aggregate else cap
+    return (
+        cap,
+        min(cap, now + ns.first_progress_timeout_s) if aggregate else cap,
+    )
 
 
-def relax_socket_timeout(sock: socket.socket | None, deadline: float, read_timeout_s: float) -> None:
+def relax_socket_timeout(
+    sock: socket.socket | None, deadline: float, read_timeout_s: float
+) -> None:
     if sock is not None:
         sock.settimeout(max(0.001, min(read_timeout_s, deadline - time.monotonic())))

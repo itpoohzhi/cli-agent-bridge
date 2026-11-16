@@ -97,6 +97,11 @@ from core.stream_framing import (
     format_stream_error_sse,
     is_graceful_error_framing_enabled,
 )
+from core.session_affinity import (
+    register_response_affinity,
+    request_scope,
+    session_affinity,
+)
 from core.usage_wire import positive_wire_usage
 
 _SLIDING_WIN_FLAG = DynamicFlagSource(FLAG_PASSTHROUGH_SLIDING_WINDOW)
@@ -188,6 +193,20 @@ def _apply_body_defaults(data: dict[str, Any], extra: Mapping[str, Any]) -> bool
     }
     data.update(missing)
     return bool(missing)
+
+
+def _extract_response_id(payload: Any) -> str | None:
+    if not isinstance(payload, Mapping):
+        return None
+    val = payload.get("id")
+    if isinstance(val, str) and val:
+        return val
+    resp = payload.get("response")
+    if isinstance(resp, Mapping):
+        r_val = resp.get("id")
+        if isinstance(r_val, str) and r_val:
+            return r_val
+    return None
 
 
 @dataclass(frozen=True)
@@ -1403,13 +1422,45 @@ class PassthroughAdapter(BackendAdapter):
                 picked[str(name)] = found[1]
         return picked
 
-    def _upstream_headers(self) -> dict[str, str]:
+    def _supports_stream_options(self, path: str, request: Mapping[str, Any]) -> bool:
+        if not str(path).startswith("/v1/chat/completions"):
+            return False
+        backend_cfg = getattr(self, "config", None) or {}
+        val = backend_cfg.get("supports_stream_options")
+        if val is not None:
+            return bool(val)
+        model = str(request.get("model", "")).lower()
+        if any(frag in model for frag in ("claude", "anthropic")):
+            return False
+        return True
+
+    def _upstream_headers(
+        self,
+        raw_body: bytes = b"",
+        headers: Mapping[str, str] | None = None,
+        affinity_out: dict[str, str] | None = None,
+    ) -> dict[str, str]:
         """Заголовки, принудительно заменяющие клиентские: из файла, затем per-request."""
+        if headers is None:
+            headers = {}
         extra = self._read_json_headers()
         per_request = self.config.get("per_request_headers")
+        computed_affinity: str | None = None
+        computed_scope: str | None = None
         if isinstance(per_request, Mapping):
             for name, template in per_request.items():
-                extra[str(name)] = str(template).replace("{uuid4}", str(uuid.uuid4()))
+                value = str(template).replace("{uuid4}", str(uuid.uuid4()))
+                if "{session_affinity}" in value:
+                    if computed_affinity is None:
+                        computed_affinity = session_affinity(raw_body, headers, self.id)
+                        computed_scope = request_scope(raw_body, headers, self.id)
+                    value = value.replace("{session_affinity}", computed_affinity)
+                extra[str(name)] = value
+        if computed_affinity is not None:
+            scope_val = computed_scope or ""
+            if affinity_out is not None:
+                affinity_out["affinity_uuid"] = computed_affinity
+                affinity_out["affinity_scope"] = scope_val
         return extra
 
     def _with_body_defaults(self, raw_body: bytes) -> bytes:
@@ -1639,6 +1690,16 @@ class PassthroughAdapter(BackendAdapter):
             http.client.HTTPException,
         ) as exc:
             return self._response_error(sink, exc, kw)
+        aff = kw.get("affinity_uuid")
+        scope = kw.get("affinity_scope") or ""
+        if resp.status == 200 and aff and isinstance(body, (bytes, str)):
+            try:
+                data = json.loads(body)
+            except (ValueError, TypeError, UnicodeError):
+                data = None
+            resp_id = _extract_response_id(data)
+            if resp_id:
+                register_response_affinity(resp_id, aff, scope=scope)
         return self._emit_response(resp, sink, (body, aggregate))
 
     def _get_retry_bulkhead(self) -> NonstreamRetryBulkhead:
@@ -1820,4 +1881,12 @@ class PassthroughAdapter(BackendAdapter):
             return self._stream_io_error(sink, outcome, {**kw, "error": exc})
         finally:
             sink.close()
-        return self._stream_success(outcome)
+        ok = self._stream_success(outcome)
+        if ok:
+            last = getattr(outcome, "last_chunk", None) or {}
+            resp_id = _extract_response_id(last)
+            aff = kw.get("affinity_uuid")
+            scope = kw.get("affinity_scope") or ""
+            if resp_id and aff:
+                register_response_affinity(resp_id, aff, scope=scope)
+        return ok

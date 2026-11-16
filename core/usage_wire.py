@@ -7,14 +7,16 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import TypeGuard
+from typing import Any, TypeGuard
 
 # Ключи cache-read токенов в usage апстримов (порядок = приоритет).
 CACHE_READ_KEYS: tuple[str, ...] = (
+    "prompt_cache_hit_tokens",
     "cacheReadTokens",
     "cache_read_tokens",
     "cache_read_input_tokens",
     "cachedTokens",
+    "cached_tokens",
 )
 
 # Ключи cache-creation токенов (порядок = приоритет).
@@ -26,8 +28,8 @@ CACHE_CREATION_KEYS: tuple[str, ...] = (
 
 
 def _is_count(value: object) -> TypeGuard[int]:
-    """Целое счётное значение; `bool` допустимым числом не является."""
-    return isinstance(value, int) and not isinstance(value, bool)
+    """Целое счётное значение (>= 0); `bool` допустимым числом не является."""
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
 
 
 def normalize_prompt_cache_details(
@@ -60,26 +62,46 @@ def normalize_prompt_cache_details(
     return {"cached_tokens": cache_read_tokens}, False
 
 
-def _first_count(usage: Mapping | None, keys: tuple[str, ...]) -> int | None:
-    if not isinstance(usage, Mapping):
+def _value(source: Any, key: str) -> Any:
+    """Безопасное чтение поля из Mapping или SDK-объекта с атрибутами."""
+    if isinstance(source, Mapping):
+        return source.get(key)
+    if source is None:
+        return None
+    try:
+        return getattr(source, key, None)
+    except (AttributeError, TypeError):
+        return None
+
+
+def _first_count(usage: Any, keys: tuple[str, ...]) -> int | None:
+    if usage is None:
         return None
     for key in keys:
-        value = usage.get(key)
-        if _is_count(value) and value >= 0:
-            return value
+        val = _value(usage, key)
+        if _is_count(val) and val >= 0:
+            return val
     return None
 
 
-def extract_cache_read_tokens(usage: Mapping | None) -> int | None:
+def extract_cache_read_tokens(usage: Any) -> int | None:
     """Cache-read токены из usage апстрима; нет валидного значения — `None`.
 
-    Берётся первый ключ из `CACHE_READ_KEYS` с неотрицательным `int` (не `bool`).
+    В первую очередь проверяет канонический `prompt_tokens_details.cached_tokens`,
+    затем первый ключ из `CACHE_READ_KEYS` с неотрицательным `int` (не `bool`).
     Значений не выдумываем: отсутствие данных — `None`, ключ на wire не появится.
     """
+    if usage is None:
+        return None
+    canonical = _first_count(
+        _value(usage, "prompt_tokens_details"), ("cached_tokens",)
+    )
+    if canonical is not None:
+        return canonical
     return _first_count(usage, CACHE_READ_KEYS)
 
 
-def extract_cache_creation_tokens(usage: Mapping | None) -> int | None:
+def extract_cache_creation_tokens(usage: Any) -> int | None:
     """Cache-creation токены из usage апстрима; нет валидного значения — `None`."""
     return _first_count(usage, CACHE_CREATION_KEYS)
 
