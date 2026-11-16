@@ -89,6 +89,11 @@ def positive_int(environ: _Env, name: str, default: int) -> int:
     return bounded_int(environ, name, default, 1, math.inf)
 
 
+def error_classify_max_chars() -> int:
+    """Настраиваемый предел префикса ошибки functionCall без I/O в recovery."""
+    return positive_int(os.environ, "BRIDGE_ERROR_CLASSIFY_MAX_CHARS", 4096)
+
+
 class ConfigSnapshotError(Exception):
     """Dynamic config file unreadable (fail-closed)."""
 

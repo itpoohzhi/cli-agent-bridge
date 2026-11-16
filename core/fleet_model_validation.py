@@ -152,7 +152,8 @@ def _image_consistency(
     if images.get("cli_registry") == "explicit_unsupported" and status != "unsupported":
         raise FleetViolation("status_inconsistent", mid)
     if status in ("unsupported", "unverified") and (
-        images.get("method") is not None or input_types != ["text"]
+        images.get("method") is not None
+        or [kind for kind in input_types if kind != "tools"] != ["text"]
     ):
         raise FleetViolation("status_inconsistent", mid)
 

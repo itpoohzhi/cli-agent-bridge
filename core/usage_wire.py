@@ -138,3 +138,13 @@ def build_wire_usage(
     if details is not None:
         wire["prompt_tokens_details"] = details
     return wire, inconsistent
+
+
+def positive_wire_usage(usage: object) -> dict | None:
+    """Копия wire-`usage` с положительными счётчиками, иначе `None` (ошибка не обнуляет токены)."""
+    if not isinstance(usage, Mapping):
+        return None
+    keys = ("prompt_tokens", "completion_tokens", "total_tokens")
+    values: list[object] = [usage.get(k) for k in keys]  # pyright: ignore[reportUnknownMemberType]
+    positive = any(isinstance(v, int) and not isinstance(v, bool) and v > 0 for v in values)
+    return dict(usage) if positive else None  # pyright: ignore[reportUnknownArgumentType]

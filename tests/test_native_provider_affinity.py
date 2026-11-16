@@ -1,31 +1,43 @@
 import json
 from pathlib import Path
 import pytest
-from server import build_cli_model_selection, prepare_passthrough_request, resolve_target_model
+from server import (
+    build_cli_model_selection,
+    prepare_passthrough_request,
+    resolve_target_model,
+)
 from core.provider_manifest import read_yaml_file
 from tests.bridge_testlib import BridgeCase
 
 ROOT = Path(__file__).resolve().parent.parent
 
+
 def _load_catalog():
     with (ROOT / "catalog.lock.json").open(encoding="utf-8") as f:
         return json.load(f)
+
 
 def _load_fleet():
     with (ROOT / "fleet.json").open(encoding="utf-8") as f:
         return json.load(f)
 
-@pytest.mark.parametrize("model_id,expected_provider", [
-    ("gemini-3.8-flash", "agy"),
-    ("claude-sonnet-5-5", "claude-p"),
-    ("deepseek-v4.1-flash", "deepseek-direct"),
-    ("gpt-6.1-sol", "openai-key-2"),
-])
+
+@pytest.mark.parametrize(
+    "model_id,expected_provider",
+    [
+        ("gemini-3.8-flash-agy", "agy"),
+        ("gemini-3.8-flash", "droid"),
+        ("claude-sonnet-5-5", "claude-p"),
+        ("deepseek-v4.1-flash", "deepseek-direct"),
+        ("gpt-6.1-sol", "openai-key-2"),
+    ],
+)
 def test_native_provider_priority(model_id, expected_provider):
     cat = _load_catalog()
     models = cat.get("models", {})
     assert model_id in models, f"{model_id} not in catalog.lock.json"
     assert models[model_id].get("provider") == expected_provider
+
 
 @pytest.mark.parametrize("model_id", [
     "gemini-3.8-flash-droid",
@@ -38,11 +50,14 @@ def test_explicit_droid_models(model_id):
     assert model_id in models, f"{model_id} not in catalog.lock.json"
     assert models[model_id].get("provider") == "droid"
 
-@pytest.mark.parametrize("model_id", [
-    "gemini-3.8-flash",
-    "claude-sonnet-5-5",
-    "gpt-6.1-sol",
-])
+
+@pytest.mark.parametrize(
+    "model_id",
+    [
+        "claude-sonnet-5-5",
+        "gpt-6.1-sol",
+    ],
+)
 def test_droid_alternates(model_id):
     cat = _load_catalog()
     models = cat.get("models", {})
@@ -50,6 +65,7 @@ def test_droid_alternates(model_id):
     alts = models[model_id].get("alternates", [])
     providers = [a.get("provider") if isinstance(a, dict) else a for a in alts]
     assert "droid" in providers
+
 
 @pytest.mark.parametrize("droid_model,upstream_model", [
     ("gemini-3.8-flash-droid", "gemini-3.8-flash"),
@@ -63,6 +79,7 @@ def test_droid_upstream_model(droid_model, upstream_model):
     assert entry is not None, f"{droid_model} not in fleet.json models"
     assert entry.get("upstream_model") == upstream_model
 
+
 EXPECTED_FAMILY_PROVIDER = {
     "Google": "agy",
     "Anthropic": "claude-p",
@@ -70,6 +87,10 @@ EXPECTED_FAMILY_PROVIDER = {
     "DeepSeek": "deepseek-direct",
     "Meta": "muse",
 }
+
+# gemini-3.8-flash маршрутизируется в droid намеренно (agy отвечает 503 No capacity); явный AGY — `-agy`.
+DROID_ROUTED_CANONICAL = frozenset({"gemini-3.8-flash"})
+
 
 def test_native_provider_affinity_invariant():
     """Инвариант: родной провайдер всегда побеждает агрегаторы (droid, opencode-zen)."""
@@ -80,17 +101,29 @@ def test_native_provider_affinity_invariant():
     for model_id, info in models.items():
         provider = info.get("provider")
         family = info.get("family")
-        alternates = [a.get("provider") if isinstance(a, dict) else a for a in info.get("alternates", [])]
+        alternates = [
+            a.get("provider") if isinstance(a, dict) else a
+            for a in info.get("alternates", [])
+        ]
 
-        if model_id.endswith("-droid"):
+        if model_id in DROID_ROUTED_CANONICAL:
+            assert provider == "droid", f"{model_id} should be droid, got {provider}"
+        elif model_id.endswith("-droid"):
             assert provider == "droid", f"{model_id} should be droid, got {provider}"
         elif family in EXPECTED_FAMILY_PROVIDER:
             expected = EXPECTED_FAMILY_PROVIDER[family]
-            assert provider == expected, f"{model_id} (family={family}) should be {expected}, got {provider}"
-            assert provider not in aggregators, f"Canonical model {model_id} cannot have aggregator as primary, got {provider}"
+            assert provider == expected, (
+                f"{model_id} (family={family}) should be {expected}, got {provider}"
+            )
+            assert provider not in aggregators, (
+                f"Canonical model {model_id} cannot have aggregator as primary, got {provider}"
+            )
 
         if any(alt in aggregators for alt in alternates):
-            assert provider not in aggregators, f"{model_id} has aggregator alternate but primary is {provider}"
+            assert provider not in aggregators, (
+                f"{model_id} has aggregator alternate but primary is {provider}"
+            )
+
 
 @pytest.mark.parametrize("droid_model,expected_canonical", [
     ("gemini-3.8-flash-droid", "gemini-3.8-flash"),
@@ -112,18 +145,29 @@ def _backend_aliases(model, backend, efforts):
 
 
 def test_explicit_effort_alias_contract():
-    """Все 32 effort-алиаса проверяются по точной форме с учётом Hydrogen и Argon (Carbon без effort)."""
+    """Все 35 effort-алиасов, включая отдельный AGY Flash; Carbon без effort."""
     expected = {
-        **_backend_aliases("gemini-3.8-flash-droid", "droid", ("low", "medium", "high")),
-        **_backend_aliases("gpt-6.1-sol-droid", "droid", ("low", "medium", "high", "max")),
-        **_backend_aliases("claude-sonnet-5-5-droid", "droid", ("low", "medium", "high", "max")),
+        **_backend_aliases(
+            "gemini-3.8-flash-droid", "droid", ("low", "medium", "high")
+        ),
+        **_backend_aliases(
+            "gpt-6.1-sol-droid", "droid", ("low", "medium", "high", "max")
+        ),
+        **_backend_aliases(
+            "claude-sonnet-5-5-droid", "droid", ("low", "medium", "high", "max")
+        ),
         **_backend_aliases("gpt-6.1-sol", "codex", ("low", "medium", "high", "max")),
-        **_backend_aliases("gemini-3.8-flash", "agy", ("low", "medium", "high")),
-        **_backend_aliases("claude-sonnet-5-5", "claude-p", ("low", "medium", "high", "max")),
+        **_backend_aliases("gemini-3.8-flash", "droid", ("low", "medium", "high")),
+        **_backend_aliases("gemini-3.8-flash-agy", "agy", ("low", "medium", "high")),
+        **_backend_aliases(
+            "claude-sonnet-5-5", "claude-p", ("low", "medium", "high", "max")
+        ),
         **_backend_aliases("claude-opus-5-5", "claude-p", ("medium", "high")),
         **_backend_aliases("claude-haiku-5-5", "opencode-go-claude", ("low",)),
         **_backend_aliases("gemini-4-argon", "agy", ("low", "medium", "high")),
-        **_backend_aliases("gemini-4-hydrogen", "agy", ("low", "medium", "high", "xhigh")),
+        **_backend_aliases(
+            "gemini-4-hydrogen", "agy", ("low", "medium", "high", "xhigh")
+        ),
     }
     assert _load_fleet().get("aliases", {}) == expected
 
@@ -192,15 +236,27 @@ def test_passthrough_target_model_rewriting():
 
 
 def test_exact_effort_alias_count():
-    """Проверяет ровно 32 effort-алиаса, включая четыре Gemini 4 Hydrogen; Carbon без алиасов."""
+    """Проверяет ровно 35 effort-алиасов; Carbon без алиасов."""
     fleet = _load_fleet()
     aliases = fleet.get("aliases", {})
-    assert len(aliases) == 32, f"Expected 32 total aliases in fleet, got {len(aliases)}"
+    assert len(aliases) == 35, f"Expected 35 total aliases in fleet, got {len(aliases)}"
     target_aliases = [
-        k for k in aliases
-        if any(m in k for m in ("gemini-3.8-flash", "gemini-4-hydrogen", "gpt-6.1-sol", "claude-sonnet-5-5"))
+        k
+        for k in aliases
+        if any(
+            m in k
+            for m in (
+                "gemini-3.8-flash",
+                "gemini-4-argon",
+                "gemini-4-hydrogen",
+                "gpt-6.1-sol",
+                "claude-sonnet-5-5",
+            )
+        )
     ]
-    assert len(target_aliases) == 26, f"Expected 26 target aliases including Hydrogen, got {len(target_aliases)}"
+    assert len(target_aliases) == 32, (
+        f"Expected 32 target aliases including Argon, Hydrogen and AGY Flash, got {len(target_aliases)}"
+    )
 
 
 def test_manifest_priority_values():
@@ -220,16 +276,17 @@ def test_fallback_candidate_ranking_to_droid_when_native_fails():
     from core.fleet_explain import explain_model
     from core.provider_manifest import load_manifests
     from adapters import ADAPTER_KINDS
+
     cat = _load_catalog()
     manifests = load_manifests(ROOT / "providers.d", ADAPTER_KINDS).manifests
-    entry = explain_model(cat, manifests, "gemini-3.8-flash")
+    entry = explain_model(cat, manifests, "claude-sonnet-5-5")
     assert entry is not None
-    assert entry.primary == "agy"
+    assert entry.primary == "claude-p"
     assert "droid" in entry.alternates
     p_map = {pid: p for p, pid in entry.candidates}
-    assert p_map["agy"] == 10
+    assert p_map["claude-p"] == 10
     assert p_map["droid"] == 30
-    assert p_map["agy"] < p_map["droid"]
+    assert p_map["claude-p"] < p_map["droid"]
 
 
 class TestNativeProviderE2ERouting(BridgeCase):

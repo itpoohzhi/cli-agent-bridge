@@ -35,7 +35,6 @@ BRIDGE_KEY и DROID_DSH_BRIDGE_KEY; ротация файла отзывает �
 без интерактивного логина) наследуется потомком как есть — его подкладывает
 start.sh из ~/.zshenv; `droid exec` читает его из окружения сам.
 """
-
 from __future__ import annotations
 
 import base64
@@ -77,12 +76,20 @@ from agent_browser import (  # noqa: E402,F401  - единый loopback-конт
     is_loopback_cdp_url,
 )
 from tools.receipt_schema import (  # noqa: E402,F401
-    RECEIPT_PROBES as RECEIPT_PROBES, RECEIPT_SCHEMA, RPC_API_VERSION, SETTINGS_PROFILE as SETTINGS_PROFILE,
-    TOOLS_POLICY as TOOLS_POLICY, ReceiptV3, catalog_tool_ids, receipt_gate_problem,
-    settings_profile_digest as settings_profile_digest, tools_policy_digest as tools_policy_digest,
-    validate_model_catalog, validate_receipt_components,
+    RECEIPT_PROBES as RECEIPT_PROBES,
+    RECEIPT_SCHEMA,
+    RPC_API_VERSION,
+    SETTINGS_PROFILE as SETTINGS_PROFILE,
+    TOOLS_POLICY as TOOLS_POLICY,
+    ReceiptV3,
+    catalog_tool_ids,
+    receipt_gate_problem,
+    settings_profile_digest as settings_profile_digest,
+    tools_policy_digest as tools_policy_digest,
+    validate_model_catalog,
+    validate_receipt_components,
 )
-
+from core.http_accept import AdmissionBudget, configure_accepted_socket  # noqa: E402
 from adapters import ADAPTER_KINDS  # noqa: E402  - реестр видов адаптеров задан в коде
 from adapters.passthrough_adapter import (  # noqa: E402
     ClientGone,
@@ -121,7 +128,15 @@ from core.lifecycle import (  # noqa: E402,F401 - сохраняем прежн�
     get_qos_manager,
     has_live_parent,
 )
-from core.prompt_prefix_stability import compute_tools_budget_overhead as compute_tools_budget_overhead  # noqa: E402
+from core.prompt_prefix_stability import (  # noqa: E402
+    compute_tools_budget_overhead as compute_tools_budget_overhead,
+)
+from core.log_redaction import (  # noqa: E402
+    mask_credential_context,
+    mask_long_tokens,
+    safe_log_tokens,
+)
+from core.runtime_build_info import RuntimeBuildInfo  # noqa: E402
 from core.tool_emulation import (  # noqa: E402,F401  - общая эмуляция tools (MB-REQ-007), реэкспорт имён
     TOOL_CALL_CLOSE,
     TOOL_CALL_OPEN,
@@ -163,7 +178,7 @@ from core.chat_key import (  # noqa: E402
     digest_of,
     resolve_chat_key as resolve_chat_key,
 )
-from core.usage_wire import normalize_prompt_cache_details  # noqa: E402
+from core.usage_wire import normalize_prompt_cache_details, positive_wire_usage  # noqa: E402
 from core.watchdog import (  # noqa: E402,F401
     DEFAULT_IDLE_TIMEOUT_S,
     DEFAULT_SAFETY_CAP_S,
@@ -177,11 +192,23 @@ from core.cli_runtime_config import (  # noqa: E402 - импорт после н
     cli_label,
     cli_number,
 )
-from core.liveness_registry import get_registry, new_passthrough_turn_id as new_passthrough_turn_id  # noqa: E402
-from core.liveness_signals import FLAG_TELEMETRY, passthrough_window as passthrough_window  # noqa: E402
+from core.liveness_registry import (  # noqa: E402
+    get_registry,
+    new_passthrough_turn_id as new_passthrough_turn_id,
+)
+from core.liveness_signals import (  # noqa: E402
+    FLAG_TELEMETRY,
+    passthrough_window as passthrough_window,
+)
 from core.runtime_env import DynamicFlagSource, flag_enabled  # noqa: E402
 from core.request_telemetry import RequestTelemetryStore  # noqa: E402
-from core.telemetry_hooks import TelemetryHooksMixin, known_model, resolve_backend_topology, telemetry_note, telemetry_tail  # noqa: E402
+from core.telemetry_hooks import (  # noqa: E402
+    TelemetryHooksMixin,
+    known_model,
+    resolve_backend_topology,
+    telemetry_note,
+    telemetry_tail,
+)
 from core.gateway_execution_policy import (  # noqa: E402
     AUTONOMY_LEVELS as AUTONOMY_LEVELS,
     AUTONOMY_OFF as AUTONOMY_OFF,
@@ -213,15 +240,33 @@ from core.passthrough_autonomy import (  # noqa: E402
     strip_passthrough_request as _strip_passthrough_env,  # noqa: F401 - поздний host-порт
 )
 from core import gated_registry as greg, quarantine_gate as qgate  # noqa: E402
-from core.droid_session_gate import ToolsGateError, admit_model, plan_tools_disable, verify_tools_disabled  # noqa: E402
+from core.droid_session_gate import (  # noqa: E402
+    ToolsGateError,
+    admit_model,
+    plan_tools_disable,
+    verify_tools_disabled,
+)
 from core.effort_policy import (  # noqa: E402
-    DEFAULT_LOG_EFFORT_MAX_CHARS, EFFORT_ORDER, FLAG_EFFORT_CATALOG as FLAG_EFFORT_CATALOG, ModelEffortSpec,
-    catalog_effort_specs, clamp_effort_downward as clamp_effort_downward, describe_clamp as describe_clamp, resolve_alias_effort,
+    DEFAULT_LOG_EFFORT_MAX_CHARS,
+    EFFORT_ORDER,
+    FLAG_EFFORT_CATALOG as FLAG_EFFORT_CATALOG,
+    ModelEffortSpec,
+    catalog_effort_specs,
+    clamp_effort_downward as clamp_effort_downward,
+    describe_clamp as describe_clamp,
+    resolve_alias_effort,
     resolve_model_effort_fields,
 )
-from core.effortless_policy import EffortValidationError as EffortValidationError, card_effort_fields, effortless_specs  # noqa: E402
+from core.effortless_policy import (  # noqa: E402
+    EffortValidationError as EffortValidationError,
+    card_effort_fields,
+    effortless_specs,
+)
+
 CLI_CFG = CliRuntimeConfig.from_env()
-REQUEST_TELEMETRY = RequestTelemetryStore()  # DuckDB/sqlite3, неблокирующая запись, BRIDGE_TELEMETRY_* (core/defaults.py)
+REQUEST_TELEMETRY = (
+    RequestTelemetryStore()
+)  # DuckDB/sqlite3, неблокирующая запись, BRIDGE_TELEMETRY_* (core/defaults.py)
 
 
 def build_cli_model_selection(ctx: dict) -> str:
@@ -570,6 +615,7 @@ _qos_lock = threading.Condition()
 _active = {}
 _active_lock = threading.Lock()
 _started = time.time()
+BUILD_INFO = RuntimeBuildInfo(Path(__file__).resolve().parent)
 # Монотонная метка последнего успешного хода (0.0 = не было / последний провалился).
 _last_ok = [0.0]
 # Байтовый бюджет admission; включается в main() (в тестах/импорте — None).
@@ -986,7 +1032,8 @@ def _mask_secrets(text: str) -> str:
     """Длинные токены, WebSocket URL и абсолютные пути -> ***."""
     masked = _WS_URL.sub("ws://***", text)
     masked = _FILESYSTEM_PATH.sub("***", masked)
-    return _SECRET.sub("***", masked)
+    masked = mask_credential_context(masked)
+    return mask_long_tokens(masked, _SECRET, safe_tokens=safe_log_tokens())
 
 
 def _err_summary(err: Any, limit: int = 200) -> str:
@@ -1028,7 +1075,9 @@ def _env_int_nonneg(name: str, default: int) -> int:
         return default
 
 
-_LOG_EFFORT_MAX = _env_limit("BRIDGE_LOG_EFFORT_MAX_CHARS", DEFAULT_LOG_EFFORT_MAX_CHARS)
+_LOG_EFFORT_MAX = _env_limit(
+    "BRIDGE_LOG_EFFORT_MAX_CHARS", DEFAULT_LOG_EFFORT_MAX_CHARS
+)
 FORWARD_ENV_MAX_KEYS = _env_limit("BRIDGE_FORWARD_ENV_MAX_KEYS", 64)
 FORWARD_ENV_MAX_VALUE = _env_limit("BRIDGE_FORWARD_ENV_MAX_VALUE", 32768)
 _FORWARD_KEY = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,127}")
@@ -3702,6 +3751,13 @@ def _map_usage(token_usage: Any) -> dict:
     }
 
 
+def _usage_counter(value: Any) -> int:
+    """Счётчик токенов из внутреннего `usage`: не-целые, bool и отрицательные значения -> 0."""
+    if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+        return value
+    return 0
+
+
 def _wire_usage(
     prompt_tokens: Any, completion_tokens: Any, cache_read_tokens: Any
 ) -> dict:
@@ -5253,14 +5309,10 @@ class _ByteBudget:
     def release(self, amount: int) -> None:
         with self._lock:
             self._used = max(0, self._used - int(amount))
-
-
 _DELIVERY_BUDGET = _ByteBudget(MAX_DELIVERY_BYTES)
-
 
 class _LiveBudgetExceeded(Exception):
     """RW-011 в живом ходе: очередной кусок live-доставки не влез в бюджет памяти."""
-
 
 def release_turn_slot(handler: Any, t_held: bool, t_released: list[bool]) -> None:
     """Освобождает слоты хода под _qos_lock с оповещением ожидающих запросов."""
@@ -5273,7 +5325,6 @@ def release_turn_slot(handler: Any, t_held: bool, t_released: list[bool]) -> Non
                 _subagent_slots.release()
             _qos_lock.notify_all()
 
-
 class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     timeout = 300
@@ -5284,6 +5335,10 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
     _context_pruned: str | None = None  # X-DSH-Context-Pruned запроса (CD-003)
     _trace: RequestTrace | None = None
     _response_status = 0
+
+    def setup(self) -> None:
+        super().setup()
+        configure_accepted_socket(self.connection)
 
     def end_headers(self) -> None:
         if LIFECYCLE.is_draining():
@@ -6637,7 +6692,7 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
         for frame in TURN_MANAGER.iter_sse_stream(
             turn,
             from_seq=from_seq,
-            keepalive_interval_s=min(10.0, KEEPALIVE_S),
+            keepalive_interval_s=KEEPALIVE_S,
             client_gone_fn=lambda: _client_gone(self.connection),
         ):
             if not self._emit(frame):
@@ -6646,7 +6701,9 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
 
     # ---- HTTP --------------------------------------------------------------------
     def do_GET(self) -> None:  # noqa: N802
-        self._trace = self._req_started_mono = None  # GET-ответы (_send) в телеметрию запросов не попадают
+        self._trace = self._req_started_mono = (
+            None  # GET-ответы (_send) в телеметрию запросов не попадают
+        )
         path = self.path.split("?", 1)[0]
         if path in ("/health", "/v1/health"):
             # Контракт из семи ключей прежний (расширять запрещено); ok = AND по обязательным
@@ -6667,7 +6724,12 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
                     "tool_emulation": True,
                     "uptime_s": int(time.time() - _started),
                 },
-                extra_headers={"X-Bridge-Draining": "true"} if draining else None,
+                extra_headers={
+                    # Провенанс — заголовками: семиключевой JSON-контракт /health не расширяется.
+                    "X-Bridge-Git-Head-Sha": str(BUILD_INFO.git_head_sha),
+                    "X-Bridge-Boot-Ts": f"{BUILD_INFO.boot_ts:.3f}",
+                    **({"X-Bridge-Draining": "true"} if draining else {}),
+                },
             )
             return
         if self._handle_models_get():
@@ -7526,7 +7588,7 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
             for frame in TURN_MANAGER.iter_sse_stream(
                 managed_turn,
                 from_seq=from_seq,
-                keepalive_interval_s=min(10.0, KEEPALIVE_S),
+                keepalive_interval_s=KEEPALIVE_S,
                 client_gone_fn=lambda: _client_gone(self.connection),
             ):
                 if not self._emit(frame):
@@ -7568,6 +7630,7 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
             code: str = "live_prefix_invalidated",
             error_type: str = "stream_error",
             finish_reason: str | None = None,
+            usage: dict | None = None,
         ) -> str:
             err_chunk = build_stream_error_chunk(
                 message=message,
@@ -7577,6 +7640,7 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
                 finish_reason=finish_reason,
                 completion_id=completion_id,
                 created=created,
+                usage=usage,
             )
             err_chunk["choices"][0]["delta"] = {}
             return "data: " + json.dumps(err_chunk, ensure_ascii=False) + "\n\n"
@@ -7651,14 +7715,20 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
                     sink_closed.set()
         except Exception as exc:  # noqa: BLE001 - RW-211: клиенту нужен конверт, а не сырой сбой
             if self._client_write_dead:
-                _log(f"client_write_dead: dispatch error suppressed err={_err_summary(repr(exc), 160)!r}")
+                _log(
+                    f"client_write_dead: dispatch error suppressed err={_err_summary(repr(exc), 160)!r}"
+                )
                 lease.record_discard("client_disconnected")
                 return
             if not live_sent[0]:
                 raise
             _log(f"live_dispatch_failed err={_err_summary(repr(exc), 160)!r}")
             lease.record_failure(exc)
-            emit(stream_error_frame(str(exc)[:500] or exc.__class__.__name__, finish_reason=None))
+            emit(
+                stream_error_frame(
+                    str(exc)[:500] or exc.__class__.__name__, finish_reason=None
+                )
+            )
             emit("data: [DONE]\n\n")
             return
         if self._client_write_dead:
@@ -7758,8 +7828,27 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
                     + "\n\n"
                 )
         elif err.get("type") == "live_prefix_invalidated" or live_sent[0] > 0:
-            if err.get("type") == "live_prefix_invalidated" or out.get("backend_kind") == "droid":
-                emit(stream_error_frame(str(err["message"]), finish_reason=None))
+            # Накопленные токены закоммиченного потока переживают терминальную ошибку (не 0/0/0).
+            err_usage = out.get("usage") or {}
+            try:
+                kept_usage = positive_wire_usage(
+                    _wire_usage(
+                        _usage_counter(err_usage.get("input_tokens")),
+                        _usage_counter(err_usage.get("output_tokens")),
+                        _usage_counter(err_usage.get("cache_read_tokens")),
+                    )
+                )
+            except (TypeError, ValueError, AttributeError):
+                kept_usage = None
+            if (
+                err.get("type") == "live_prefix_invalidated"
+                or out.get("backend_kind") == "droid"
+            ):
+                emit(
+                    stream_error_frame(
+                        str(err["message"]), finish_reason=None, usage=kept_usage
+                    )
+                )
             else:
                 emit(
                     stream_error_frame(
@@ -7767,15 +7856,14 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
                         code=str(err.get("code") or err.get("type") or "stream_error"),
                         error_type=str(err.get("type") or "server_error"),
                         finish_reason=None,
+                        usage=kept_usage,
                     )
                 )
         else:
             emit("data: " + json.dumps({"error": err}, ensure_ascii=False) + "\n\n")
         emit("data: [DONE]\n\n")
 
-
 BridgeHandler = Handler
-
 
 def is_so_reuseport_enabled() -> bool:
     """Проверяет включение совместного bind через BRIDGE_SO_REUSEPORT_ENABLED."""
@@ -7786,14 +7874,18 @@ def is_so_reuseport_enabled() -> bool:
         "on",
     )
 
-
 class Server(ThreadingHTTPServer):
-    """HTTP-сервер с семафором числа соединений на уровне приёма (C-11)."""
+    """HTTP-сервер с бюджетом допуска соединений на уровне приёма (C-11)."""
 
     # ThreadingMixIn отслеживает non-daemon потоки: выход main не обрывает SSE.
     daemon_threads = False
     request_queue_size = 64
     allow_reuse_address = True
+
+    def get_request(self) -> tuple[Any, Any]:
+        sock, addr = super().get_request()
+        configure_accepted_socket(sock)
+        return sock, addr
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         self._listener_close_lock = threading.Lock()
@@ -7802,9 +7894,8 @@ class Server(ThreadingHTTPServer):
         self._connections: dict[socket.socket, bool] = {}
         self._closing_connections = False
         super().__init__(*args, **kwargs)
-        self._conn_sem = threading.BoundedSemaphore(
-            int(FLEET["admission"]["max_http_connections"])
-        )
+        # admission_limit и резервы UI/заголовков — из BridgeIOConfig/BRIDGE_*
+        self._admission_budget = AdmissionBudget()
 
     def server_bind(self) -> None:
         """Разрешает совместный bind до привязки сокета, если ОС поддерживает его."""
@@ -7868,7 +7959,8 @@ class Server(ThreadingHTTPServer):
         request.sendall(head + body)
 
     def process_request(self, request: Any, client_address: Any) -> None:
-        if not self._conn_sem.acquire(blocking=False):
+        ticket = str(id(request))
+        if not self._admission_budget.acquire(ticket):
             try:
                 peer = f"{client_address[0]}:{client_address[1]}"
             except (TypeError, IndexError):
@@ -7888,7 +7980,7 @@ class Server(ThreadingHTTPServer):
         except Exception:
             with self._connections_lock:
                 self._connections.pop(request, None)
-            self._conn_sem.release()
+            self._admission_budget.release(ticket)
             self.shutdown_request(request)
             raise
 
@@ -7898,7 +7990,7 @@ class Server(ThreadingHTTPServer):
         finally:
             with self._connections_lock:
                 self._connections.pop(request, None)
-            self._conn_sem.release()
+            self._admission_budget.release(str(id(request)))
 
 
 def _sweep_workspace(cutoff_s: float = 3600.0) -> None:
