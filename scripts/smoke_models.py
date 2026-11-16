@@ -5,28 +5,31 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
+from collections.abc import Iterator
+import hashlib
+import importlib
 from functools import lru_cache
 import json
+import math
 import os
 from pathlib import Path
 import re
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.request
-from typing import Any, Literal, NamedTuple, overload
+from typing import Any, Callable, Literal, NamedTuple, overload
+from urllib.parse import urlsplit, urlunsplit
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from core.stream_outcome import OutcomeKind, StreamOutcomeClassifier
 
-DEFAULT_MODELS_MD = Path(
-    os.environ.get("MODELS_MD_PATH") or "~/Мой диск/Context/models.md"
-).expanduser()
-DEFAULT_MODEL_NOTES_MD = Path(
-    os.environ.get("MODEL_NOTES_MD_PATH") or "~/Мой диск/Context/model-notes.md"
-).expanduser()
+DEFAULT_MODELS_MD = Path(os.environ.get("MODELS_MD_PATH") or "~/Мой диск/Context/models.md").expanduser()
+DEFAULT_MODEL_NOTES_MD = Path(os.environ.get("MODEL_NOTES_MD_PATH") or "~/Мой диск/Context/model-notes.md").expanduser()
 DEFAULT_HUB_URL = os.environ.get("HUB_BRIDGE_URL", "http://127.0.0.1:9882/v1")
-
 
 class ModelEntry(NamedTuple):
     role: str
@@ -34,25 +37,17 @@ class ModelEntry(NamedTuple):
     effort: str
     family: str
 
-
 class ModelLimitException(Exception):
     """Raised when a model cannot run because of a temporary usage limit."""
 
-    def __init__(
-        self,
-        detail: str,
-        model_id: str = "",
-        status_code: int | None = None,
-    ) -> None:
+    def __init__(self, detail: str, model_id: str='', status_code: int | None=None) -> None:
         super().__init__(detail)
         self.detail = detail
         self.model_id = model_id
         self.status_code = status_code
 
-
 def _clean_markdown_cell(value: str) -> str:
     return value.strip().strip("` ")
-
 
 def _catalog_lock_path() -> Path:
     """Сайдкар каталога: `BRIDGE_CATALOG_LOCK` либо `<BRIDGE_STATE_DIR>/catalog.lock.json`."""
@@ -61,7 +56,6 @@ def _catalog_lock_path() -> Path:
         return Path(explicit).expanduser()
     state = os.environ.get("BRIDGE_STATE_DIR") or "~/work/cli-agent-bridge/state"
     return Path(state).expanduser() / "catalog.lock.json"
-
 
 def _catalog_families() -> dict[str, str]:
     """`models[mid].family` из сайдкара каталога; нет файла/поля - пустая карта."""
@@ -79,10 +73,9 @@ def _catalog_families() -> dict[str, str]:
             families[str(model_id)] = family.strip()
     return families
 
-
 def _effort_overrides() -> dict[str, str]:
     """Data-driven override эффорта: env `BRIDGE_SMOKE_EFFORT_OVERRIDES` = JSON {"model": "effort"}."""
-    raw = os.environ.get("BRIDGE_SMOKE_EFFORT_OVERRIDES", "").strip()
+    raw = os.environ.get('BRIDGE_SMOKE_EFFORT_OVERRIDES', '').strip()
     if not raw:
         return {}
     try:
@@ -91,178 +84,101 @@ def _effort_overrides() -> dict[str, str]:
         return {}
     if not isinstance(data, dict):
         return {}
-    return {
-        str(model): str(effort).lower()
-        for model, effort in data.items()
-        if isinstance(effort, str) and effort.strip()
-    }
-
+    return {str(model): str(effort).lower() for model, effort in data.items() if isinstance(effort, str) and effort.strip()}
 
 def parse_models_md(path: Path) -> list[ModelEntry]:
-    """Extract model, effort, family, and role entries from models.md tables."""
+    """Извлекает уникальные пары роль/модель из канонических таблиц."""
     path = Path(path).expanduser()
     if not path.is_file():
-        raise FileNotFoundError(f"Канонический файл models.md не найден: {path}")
+        raise FileNotFoundError(f'Канонический файл models.md не найден: {path}')
+    families, overrides = (_catalog_families(), _effort_overrides())
+    entries: dict[tuple[str, str], ModelEntry] = {}
+    for role, cells, schema in _model_rows(path.read_text(encoding='utf-8')):
+        for entry in _model_entries(role, cells, schema, families, overrides):
+            entries.setdefault((entry.role, entry.model_id), entry)
+    return list(entries.values())
 
-    content = path.read_text(encoding="utf-8")
-    catalog_families = _catalog_families()
-    effort_overrides = _effort_overrides()
-    entries: list[ModelEntry] = []
-    current_role = "General"
-    current_table_role = ""
-    table_schema: dict[str, int] | None = None
+def _column_index(values: list[str], prefixes: tuple[str, ...]) -> int:
+    return next((i for i, value in enumerate(values) if value.startswith(prefixes)), -1)
 
+def _model_schema(cells: list[str]) -> dict[str, int] | None:
+    values = [_clean_markdown_cell(cell).lower() for cell in cells]
+    model = _column_index(values, ('модель', 'слот'))
+    effort = next((i for i, value in enumerate(values) if value == 'effort'), -1)
+    if min(model, effort) < 0:
+        return None
+    return dict(model=model, effort=effort, family=_column_index(values, ('family',)), role=_column_index(values, ('роль',)))
+
+def _indexed_cell(cells: list[str], index: int) -> str:
+    return cells[index] if 0 <= index < len(cells) else ''
+
+def _model_cells(line: str) -> list[str]:
+    if not (line.startswith("|") and line.endswith("|")):
+        return []
+    cells = [cell.strip() for cell in line.strip("|").split("|")]
+    return [] if all(re.fullmatch(r":?-{2,}:?", cell.replace(" ", "")) for cell in cells) else cells
+
+def _model_rows(content: str) -> Iterator[tuple[str, list[str], dict[str, int]]]:
+    """Хранит только состояние заголовка и наследуемой роли таблицы."""
+    role, table_role, schema = ('General', '', None)
     for raw_line in content.splitlines():
         line = raw_line.strip()
-        if line.startswith("### "):
-            header = line[4:].strip()
-            current_role = header.split("—", 1)[0].strip()
-            current_table_role = ""
-            table_schema = None
+        if line.startswith('### '):
+            role = line[4:].strip().split('—', 1)[0].strip()
+        if line.startswith(('## ', '### ')):
+            table_role, schema = ('', None)
+        cells = _model_cells(line)
+        if not cells:
             continue
-        if line.startswith("## "):
-            table_schema = None
-            current_table_role = ""
-
-        if not (line.startswith("|") and line.endswith("|")):
+        header = _model_schema(cells)
+        if header is not None:
+            schema, table_role = (header, '')
             continue
-
-        cells = [cell.strip() for cell in line.strip("|").split("|")]
-        normalized = [_clean_markdown_cell(cell).lower() for cell in cells]
-        if all(re.fullmatch(r":?-{2,}:?", cell.replace(" ", "")) for cell in cells):
+        if not _model_row_fits(cells, schema):
             continue
+        assert schema is not None
+        cleaned_role = re.sub('[`*_]', '', _indexed_cell(cells, schema['role'])).strip().split('(', 1)[0].strip()
+        table_role = cleaned_role or table_role
+        yield (table_role or role, cells, schema)
 
-        effort_index = next(
-            (idx for idx, value in enumerate(normalized) if value == "effort"), None
-        )
-        model_index = next(
-            (
-                idx
-                for idx, value in enumerate(normalized)
-                if value.startswith("модель") or value.startswith("слот")
-            ),
-            None,
-        )
-        if effort_index is not None and model_index is not None:
-            family_index = next(
-                (idx for idx, value in enumerate(normalized) if value.startswith("family")),
-                -1,
-            )
-            role_index = next(
-                (idx for idx, value in enumerate(normalized) if value.startswith("роль")),
-                -1,
-            )
-            table_schema = {
-                "model": model_index,
-                "effort": effort_index,
-                "family": family_index,
-                "role": role_index,
-            }
-            current_table_role = ""
+def _model_row_fits(cells: list[str], schema: dict[str, int] | None) -> bool:
+    return schema is not None and max(schema['model'], schema['effort']) < len(cells)
+
+def _cell_models(cell: str) -> list[str]:
+    models = re.findall('`([a-zA-Z0-9][a-zA-Z0-9._/-]*)`', cell)
+    if not models:
+        match = re.search('[a-zA-Z0-9][a-zA-Z0-9._/-]*', _clean_markdown_cell(cell))
+        models = [match.group(0)] if match else []
+    return models if '+' in cell else models[:1]
+
+def _cell_efforts(cell: str) -> list[str]:
+    efforts = re.findall('`(xhigh|high|medium|low|max|off)`', cell, flags=re.I)
+    if not efforts:
+        match = re.search('\\b(xhigh|high|medium|low|max|off)\\b', cell, flags=re.I)
+        efforts = [match.group(1)] if match else ['']
+    return [effort.lower() for effort in efforts]
+
+def _annotated_efforts(cell: str) -> list[tuple[str, set[str]]]:
+    return [(match.group(1).lower(), {p.strip().lower() for p in re.split(r"\s*,\s*|\s*;\s*", match.group(2)) if p.strip()})
+            for match in re.finditer(r"`?(xhigh|high|medium|low|max|off)`?\s*\(([^)]*)\)", cell, flags=re.I)]
+
+def _model_entries(role: str, cells: list[str], schema: dict[str, int], families: dict[str, str], overrides: dict[str, str]) -> list[ModelEntry]:
+    """Согласует парные модели/effort/family и явные аннотации провайдеров."""
+    efforts = _cell_efforts(cells[schema['effort']])
+    annotations = _annotated_efforts(cells[schema['effort']])
+    family_cell = _indexed_cell(cells, schema['family'])
+    parts = list(filter(None, (re.sub(r"[`*]", "", p).strip() for p in re.split(r"\s*\+\s*|\s*;\s*", family_cell))))
+    fallback = parts[0] if parts else family_cell.strip()
+    entries = []
+    for i, model in enumerate(_cell_models(cells[schema['model']])):
+        if model.lower() in {'модель', 'слот', 'пакет', 'роль', 'local', 'none', '—', '-'}:
             continue
-
-        if table_schema is None:
-            continue
-
-        model_index = table_schema["model"]
-        effort_index = table_schema["effort"]
-        family_index = table_schema["family"]
-        role_index = table_schema["role"]
-        if model_index >= len(cells) or effort_index >= len(cells):
-            continue
-
-        if role_index >= 0 and role_index < len(cells):
-            role_cell = cells[role_index].strip()
-            if role_cell:
-                cleaned_role = re.sub(r"[`*_]", "", role_cell).strip()
-                cleaned_role = cleaned_role.split("(", 1)[0].strip()
-                if cleaned_role:
-                    current_table_role = cleaned_role
-        role = current_table_role or current_role
-
-        model_cell = cells[model_index]
-        model_ids = re.findall(r"`([a-zA-Z0-9][a-zA-Z0-9._/-]*)`", model_cell)
-        if not model_ids:
-            plain_model = _clean_markdown_cell(model_cell)
-            match = re.search(r"[a-zA-Z0-9][a-zA-Z0-9._/-]*", plain_model)
-            model_ids = [match.group(0)] if match else []
-        if not model_ids:
-            continue
-        if "+" not in model_cell and len(model_ids) > 1:
-            model_ids = model_ids[:1]
-
-        effort_cell = cells[effort_index]
-        efforts = re.findall(
-            r"`(xhigh|high|medium|low|max|off)`", effort_cell, flags=re.IGNORECASE
-        )
-        if not efforts:
-            match = re.search(
-                r"\b(xhigh|high|medium|low|max|off)\b",
-                effort_cell,
-                flags=re.IGNORECASE,
-            )
-            efforts = [match.group(1)] if match else [""]
-        efforts = [effort.lower() for effort in efforts]
-
-        annotated_efforts: list[tuple[str, set[str]]] = []
-        for annotation in re.finditer(
-            r"`?(xhigh|high|medium|low|max|off)`?\s*\(([^)]*)\)",
-            effort_cell,
-            flags=re.IGNORECASE,
-        ):
-            providers = {
-                provider.strip().lower()
-                for provider in re.split(r"\s*,\s*|\s*;\s*", annotation.group(2))
-                if provider.strip()
-            }
-            annotated_efforts.append((annotation.group(1).lower(), providers))
-
-        family_cell = cells[family_index] if 0 <= family_index < len(cells) else ""
-        family_parts = [
-            re.sub(r"[`*]", "", part).strip()
-            for part in re.split(r"\s*\+\s*|\s*;\s*", family_cell)
-            if re.sub(r"[`*]", "", part).strip()
-        ]
-        fallback_family = family_parts[0] if family_parts else family_cell.strip()
-
-        for idx, model_id in enumerate(model_ids):
-            if model_id.lower() in {
-                "модель",
-                "слот",
-                "пакет",
-                "роль",
-                "local",
-                "none",
-                "—",
-                "-",
-            }:
-                continue
-            effort = efforts[idx] if idx < len(efforts) else efforts[0]
-            family_hint = family_parts[idx] if idx < len(family_parts) else fallback_family
-            family = catalog_families.get(model_id) or family_hint.strip()
-
-            family_lower = family.lower()
-            explicit_annotation_matched = False
-            for annotated_effort, providers in annotated_efforts:
-                if family_lower in providers:
-                    effort = annotated_effort
-                    explicit_annotation_matched = True
-                    break
-
-            if not explicit_annotation_matched and model_id in effort_overrides:
-                effort = effort_overrides[model_id]
-
-            entries.append(ModelEntry(role, model_id, effort, family))
-
-    seen: set[tuple[str, str]] = set()
-    unique_entries: list[ModelEntry] = []
-    for entry in entries:
-        key = (entry.role, entry.model_id)
-        if key not in seen:
-            seen.add(key)
-            unique_entries.append(entry)
-    return unique_entries
-
+        effort = efforts[i] if i < len(efforts) else efforts[0]
+        hint = parts[i] if i < len(parts) else fallback
+        family = families.get(model) or hint.strip()
+        effort = next((value for value, providers in annotations if family.lower() in providers), overrides.get(model, effort))
+        entries.append(ModelEntry(role, model, effort, family))
+    return entries
 
 def parse_temp_off_models(notes_path: Path = DEFAULT_MODEL_NOTES_MD) -> set[str]:
     """Return model IDs explicitly marked TEMP OFF in bullet or table rows."""
@@ -321,69 +237,35 @@ def parse_temp_off_models(notes_path: Path = DEFAULT_MODEL_NOTES_MD) -> set[str]
             models.add(candidate)
     return models
 
-
 def mask_secret(text: str) -> str:
-    """Mask bearer tokens and API keys in diagnostic text."""
-    return re.sub(
-        r"(Bearer\s+|api[_-]?key[:=]\s*)[a-zA-Z0-9_\-.]{8,}",
-        r"\1[MASKED]",
-        text,
-        flags=re.IGNORECASE,
-    )
-
+    """Маскирует значения секретов до вывода и записи."""
+    for name, value in os.environ.items():
+        if value and re.search('(?:KEY|TOKEN|SECRET|PASSWORD)$', name, re.I):
+            text = text.replace(value, '[REDACTED]')
+    return re.sub('((?:Bearer|Basic)\\s+|(?:api[_-]?key|token|secret|password)["\']?\\s*[:=]\\s*["\']?)[^\\s"\'\\\\;,}&]+', '\\1[REDACTED]', text, flags=re.IGNORECASE)
 
 def is_model_limit_error(status_code: int, body: str) -> bool:
-    """Return whether an HTTP or streamed error is an explicit model limit."""
+    """Распознаёт явный лимит модели в HTTP или структурированной ошибке."""
     if status_code <= 0 or not body:
         return False
-    if status_code == 429:
+    if status_code == 429 or _structured_limit(body):
         return True
+    phrases = ("rate limit", "rate_limit", "quota exceeded", "quota_exceeded", "resource_exhausted",
+               "resource exhausted", "insufficient_quota", "model_cooldown", "penalized_until",
+               "temp_off", "temp off", "blocked_by_limit", "too many requests")
+    return status_code in (200, 400, 403, 409, 413, 422) and any(phrase in body.lower() for phrase in phrases)
 
-    structured_markers = {
-        "rate_limit_error",
-        "rate_limit_exceeded",
-        "quota_exceeded",
-        "resource_exhausted",
-        "insufficient_quota",
-        "model_cooldown",
-        "temp_off",
-        "blocked_by_limit",
-    }
+def _structured_limit(body: str) -> bool:
+    """Структурированный тип/код лимита имеет приоритет над HTTP-статусом."""
     try:
         parsed = json.loads(body)
     except (TypeError, ValueError):
-        parsed = None
-    if isinstance(parsed, dict):
-        error = parsed.get("error")
-        if isinstance(error, dict):
-            error_type = str(error.get("type") or "").lower()
-            error_code = str(error.get("code") or "").lower()
-            if error_type in structured_markers or error_code in structured_markers:
-                return True
-
-    if status_code >= 500:
         return False
-    if status_code not in (200, 400, 403, 409, 413, 422):
+    error = parsed.get('error') if isinstance(parsed, dict) else None
+    if not isinstance(error, dict):
         return False
-
-    lowered = body.lower()
-    explicit_phrases = (
-        "rate limit",
-        "rate_limit",
-        "quota exceeded",
-        "quota_exceeded",
-        "resource_exhausted",
-        "resource exhausted",
-        "insufficient_quota",
-        "model_cooldown",
-        "penalized_until",
-        "temp_off",
-        "temp off",
-        "blocked_by_limit",
-        "too many requests",
-    )
-    return any(phrase in lowered for phrase in explicit_phrases)
-
+    markers = {'rate_limit_error', 'rate_limit_exceeded', 'quota_exceeded', 'resource_exhausted', 'insufficient_quota', 'model_cooldown', 'temp_off', 'blocked_by_limit'}
+    return any((str(error.get(key) or '').lower() in markers for key in ('type', 'code')))
 
 def _fleet_path() -> Path:
     """`BRIDGE_FLEET_PATH`, затем `DROID_DSH_BRIDGE_FLEET`, иначе `<repo>/fleet.json`."""
@@ -391,7 +273,6 @@ def _fleet_path() -> Path:
     if raw:
         return Path(raw).expanduser()
     return Path(__file__).resolve().parents[1] / "fleet.json"
-
 
 @lru_cache(maxsize=1)
 def _load_fleet_config() -> tuple[frozenset[str], dict[str, str]]:
@@ -427,7 +308,6 @@ def _load_fleet_config() -> tuple[frozenset[str], dict[str, str]]:
                 if target_id:
                     aliases[str(alias)] = str(target_id)
     return frozenset(models), aliases
-
 
 def build_bridge_payload(
     model_id: str,
@@ -467,7 +347,6 @@ def build_bridge_payload(
         payload["thinking"] = {"type": "disabled"}
     return payload
 
-
 def _resolve_api_key(api_key: str | None) -> str:
     key = api_key or os.environ.get("BRIDGE_KEY") or os.environ.get("HUB_API_KEY")
     if not key:
@@ -482,7 +361,6 @@ def _resolve_api_key(api_key: str | None) -> str:
                 pass
     return key or os.environ.get("OPENAI_API_KEY") or "test-smoke-key"
 
-
 def _read_error_body(response: Any) -> str:
     try:
         body = response.read()
@@ -492,121 +370,73 @@ def _read_error_body(response: Any) -> str:
         return body.decode("utf-8", "replace")
     return str(body)
 
-
-def smoke_test_model(
-    hub_url: str,
-    model_id: str,
-    timeout_s: float = 20.0,
-    api_key: str | None = None,
-    effort: str = "",
-    subagent_id: str = "",
-    use_subprocess: bool = False,
-    strict_limits: bool = False,
-    raise_on_limit: bool = False,
-) -> tuple[bool, str, float]:
-    """Send one isolated OpenAI-compatible streaming smoke request."""
-    if use_subprocess:
+def smoke_test_model(hub_url: str, model_id: str, *args: Any, **kwargs: Any) -> tuple[bool, str, float]:
+    """Проверяет полезный исход с прежними позиционными и keyword опциями."""
+    options = _smoke_options(args, kwargs)
+    if options.use_subprocess:
         ok, status, latency, _pid = smoke_test_model_subprocess(
-            hub_url,
-            model_id,
-            timeout_s=timeout_s,
-            api_key=api_key,
-            effort=effort,
-            subagent_id=subagent_id,
+            hub_url, model_id, timeout_s=options.timeout_s, api_key=options.api_key,
+            effort=options.effort, subagent_id=options.subagent_id,
         )
         return ok, status, float(latency)
-
-    key = _resolve_api_key(api_key)
-    endpoint = hub_url.rstrip("/") + "/chat/completions"
-    payload = build_bridge_payload(model_id, effort=effort, stream=True)
-    request = urllib.request.Request(
-        endpoint, data=json.dumps(payload).encode("utf-8"), method="POST"
-    )
-    request.add_header("Content-Type", "application/json")
-    request.add_header("Authorization", f"Bearer {key}")
-    request.add_header("X-Subagent-Id", subagent_id or f"smoke-{model_id}")
-
-    started = time.monotonic()
-    ttft: float | None = None
-    got_done = False
+    started, key = time.monotonic(), ""
     try:
-        try:
-            with urllib.request.urlopen(request, timeout=timeout_s) as response:
-                status_code = response.getcode()
-                if status_code != 200:
-                    error_body = _read_error_body(response)
-                    elapsed = float(time.monotonic() - started)
-                    if is_model_limit_error(status_code, error_body):
-                        detail = mask_secret(error_body.strip()) or f"HTTP {status_code}"
-                        raise ModelLimitException(detail, model_id, status_code)
-                    detail = mask_secret(error_body.strip())
-                    status = f"HTTP {status_code}"
-                    if detail:
-                        status += f": {detail}"
-                    return False, status, elapsed
-
-                for raw_line in response:
-                    line = raw_line.decode("utf-8", "replace").strip()
-                    if not line or not line.startswith("data:"):
-                        continue
-                    data_text = line[5:].strip()
-                    if data_text == "[DONE]":
-                        got_done = True
-                        break
-                    try:
-                        chunk = json.loads(data_text)
-                    except ValueError:
-                        continue
-
-                    if isinstance(chunk, dict) and chunk.get("error"):
-                        elapsed = float(time.monotonic() - started)
-                        error_text = json.dumps(chunk, ensure_ascii=False)
-                        if is_model_limit_error(status_code, error_text):
-                            raise ModelLimitException(
-                                mask_secret(error_text), model_id, status_code
-                            )
-                        return False, mask_secret(f"ERROR: {error_text}"), elapsed
-
-                    choices = chunk.get("choices") or [] if isinstance(chunk, dict) else []
-                    if choices:
-                        delta = choices[0].get("delta") or {}
-                        if (
-                            delta.get("content")
-                            or delta.get("reasoning_content")
-                            or delta.get("thinking")
-                        ) and ttft is None:
-                            ttft = time.monotonic() - started
-
-                elapsed = float(time.monotonic() - started)
-                if ttft is not None:
-                    return True, "STREAM_OK", float(ttft)
-                if got_done:
-                    return True, "DONE_OK", elapsed
-                return False, "ERROR: No stream chunks", elapsed
-        except ModelLimitException:
-            raise
-        except urllib.error.HTTPError as exc:
-            elapsed = float(time.monotonic() - started)
-            error_body = _read_error_body(exc)
-            error_text = error_body or str(exc.reason)
-            if is_model_limit_error(exc.code, error_text):
-                raise ModelLimitException(
-                    mask_secret(error_text.strip()) or f"HTTP {exc.code}",
-                    model_id,
-                    exc.code,
-                )
-            status = f"HTTP {exc.code}"
-            if error_text:
-                status += f": {mask_secret(error_text.strip())}"
-            return False, status, elapsed
-        except Exception as exc:
-            elapsed = float(time.monotonic() - started)
-            return False, mask_secret(f"ERROR: {exc}"), elapsed
+        key = _resolve_api_key(options.api_key)
+        request = _smoke_request(
+            hub_url.rstrip("/") + "/chat/completions",
+            build_bridge_payload(model_id, effort=options.effort, stream=True),
+            key, options.subagent_id or f"smoke-{model_id}",
+        )
+        row = _request_outcome(request, options.timeout_s)
+        return row["useful"], row["status"], float(time.monotonic() - started)
     except ModelLimitException:
-        if raise_on_limit:
+        if options.raise_on_limit:
             raise
-        return not strict_limits, "SKIPPED_LIMIT", float(time.monotonic() - started)
+        return not options.strict_limits, "SKIPPED_LIMIT", float(time.monotonic() - started)
+    except Exception as exc:
+        return False, _mask_receipt(f"ERROR: {exc}", key), float(time.monotonic() - started)
 
+def _smoke_options(args: tuple[Any, ...], kwargs: dict[str, Any]) -> argparse.Namespace:
+    """Связывает старые опции, отклоняя лишние и повторные аргументы."""
+    values = dict(timeout_s=20.0, api_key=None, effort='', subagent_id='', use_subprocess=False, strict_limits=False, raise_on_limit=False)
+    if len(args) > len(values):
+        raise TypeError('too many smoke_test_model arguments')
+    positional = dict(zip(values, args))
+    if positional.keys() & kwargs.keys() or kwargs.keys() - values.keys():
+        raise TypeError('duplicate or unknown smoke_test_model arguments')
+    return argparse.Namespace(**values | positional | kwargs)
+
+def _smoke_request(endpoint: str, payload: dict[str, Any], key: str, request_id: str) -> urllib.request.Request:
+    """Создаёт запрос; секрет остаётся только в HTTP-заголовке."""
+    headers = {'Content-Type': 'application/json', 'Authorization': f'Bearer {key}', 'X-Subagent-Id': request_id, 'X-Request-Id': request_id}
+    return urllib.request.Request(endpoint, data=json.dumps(payload).encode(), method='POST', headers=headers)
+
+def _request_outcome(request: urllib.request.Request, timeout: float) -> dict[str, Any]:
+    """Читает до EOF; классификацию SSE/JSON полностью выполняет ядро."""
+    try:
+        response = urllib.request.urlopen(request, timeout=timeout)
+    except urllib.error.HTTPError as exc:
+        response = exc
+    with response:
+        code = response.getcode()
+        status = code if isinstance(code, int) else 0
+        classifier = StreamOutcomeClassifier(status=status, content_type=response.headers.get("Content-Type", "text/event-stream"))
+        digest = hashlib.sha256()
+        for chunk in response:
+            classifier.feed(chunk)
+            digest.update(chunk)
+        kind = classifier.finish().kind
+        if status == 429:
+            raise ModelLimitException(f"HTTP {status}", status_code=status)
+        return dict(http_status=status, useful=status == 200 and kind is OutcomeKind.OK,
+                    status="STREAM_OK" if kind is OutcomeKind.OK else kind.value,
+                    body_sha256=digest.hexdigest(), **_observed_attribution(response, request))
+
+def _observed_attribution(response: Any, request: urllib.request.Request) -> dict[str, str]:
+    """Не позволяет даже отражённому upstream ключу попасть в receipt."""
+    key = str(request.get_header('Authorization', '')).removeprefix('Bearer ')
+    fields = {'attempted_backend': 'X-Attempted-Backend', 'canonical_model': 'X-Canonical-Model', 'wire_owned_by': 'X-Wire-Owned-By'}
+    return {name: _mask_receipt(str(response.headers.get(header, '')), key) for name, header in fields.items()}
 
 @overload
 def smoke_test_model_subprocess(
@@ -619,7 +449,6 @@ def smoke_test_model_subprocess(
     return_pgid: Literal[False] = ...,
 ) -> tuple[bool, str, float, int]: ...
 
-
 @overload
 def smoke_test_model_subprocess(
     hub_url: str,
@@ -631,7 +460,6 @@ def smoke_test_model_subprocess(
     *,
     return_pgid: Literal[True],
 ) -> tuple[bool, str, float, int, int]: ...
-
 
 def smoke_test_model_subprocess(
     hub_url: str,
@@ -742,25 +570,17 @@ def smoke_test_model_subprocess(
         worker_pgid,
     )
 
-
-def deduplicate_models_for_parallel(
-    entries: list[ModelEntry], all_roles: bool = False
-) -> list[ModelEntry]:
+def deduplicate_models_for_parallel(entries: list[ModelEntry], all_roles: bool=False) -> list[ModelEntry]:
     """Remove duplicate parallel checks while preserving the first role seen."""
     seen: set[tuple[str, ...]] = set()
     result: list[ModelEntry] = []
     for entry in entries:
-        key = (
-            (entry.role, entry.model_id, entry.effort.lower())
-            if all_roles
-            else (entry.model_id, entry.effort.lower())
-        )
+        key = (entry.role, entry.model_id, entry.effort.lower()) if all_roles else (entry.model_id, entry.effort.lower())
         if key in seen:
             continue
         seen.add(key)
         result.append(entry)
     return result
-
 
 def run_parallel_smoke(
     entries: list[ModelEntry],
@@ -861,7 +681,6 @@ def run_parallel_smoke(
 
     return [result for result in results if result is not None]
 
-
 def _load_capability_probe() -> Any:
     """Подгружает `capability_probe.py` рядом со скриптом (каталог scripts не пакет)."""
     cached = sys.modules.get("capability_probe")
@@ -878,148 +697,325 @@ def _load_capability_probe() -> Any:
     spec.loader.exec_module(module)
     return module
 
-
 def _run_probe_model(args: argparse.Namespace) -> int:
     """`--probe-model`: коды выхода 0 confirmed / 1 quarantine_failed / 2 inconclusive / 3 usage."""
     try:
         probe = _load_capability_probe()
     except (ImportError, OSError) as exc:
-        print(f"USAGE: capability probe unavailable: {exc}", file=sys.stderr)
+        print(f'USAGE: capability probe unavailable: {exc}', file=sys.stderr)
         return 3
-    return int(
-        probe.probe_cli(
-            args.probe_model,
-            provider_id=args.provider or None,
-            hub_url=args.hub_url,
-            force=args.force,
-            as_json=args.as_json,
-            providers_dir=args.providers_dir,
-        )
-    )
+    return int(probe.probe_cli(args.probe_model, provider_id=args.provider or None, hub_url=args.hub_url, force=args.force, as_json=args.as_json, providers_dir=args.providers_dir))
 
+def parse_nfr_number(name: str, raw: Any) -> float:
+    """Невалидное значение заменяется default, а не прижимается к границе."""
+    bounds = {"BRIDGE_HALF_OPEN_LEASE_TTL_S": (60, 5, 600), "BRIDGE_CATALOG_TTL_S": (60, 5, 600),
+              "MODEL_NOTES_REFRESH_INTERVAL_S": (30, 5, 300), "MODEL_NOTES_READ_TIMEOUT_S": (2, 0.01, 10),
+              "MODEL_NOTES_STALE_GRACE_S": (60, 0, 60), "CLOCK_SKEW_TOLERANCE_S": (5, 0, 60)}
+    default, low, high = bounds[name]
+    if isinstance(raw, bool):
+        return float(default)
+    try:
+        number = float(raw)
+    except (TypeError, ValueError, OverflowError):
+        return float(default)
+    return number if math.isfinite(number) and low <= number <= high else float(default)
 
-def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(
-        description="Smoke test runner for models defined in models.md"
-    )
-    parser.add_argument("--models-md", type=Path, default=DEFAULT_MODELS_MD)
-    parser.add_argument("--model-notes-md", type=Path, default=DEFAULT_MODEL_NOTES_MD)
-    parser.add_argument("--hub-url", type=str, default=DEFAULT_HUB_URL)
-    parser.add_argument("--model", type=str, default="")
-    parser.add_argument("--effort", type=str, default="")
-    parser.add_argument("--subagent-id", type=str, default="")
-    parser.add_argument("--dry-run", action="store_true")
-    parser.add_argument("--live", action="store_true")
-    parser.add_argument("--timeout", type=float, default=15.0)
-    parser.add_argument("--max-workers", type=int, default=None)
-    parser.add_argument("--all-roles", action="store_true")
-    parser.add_argument("--subprocesses", action="store_true")
-    parser.add_argument("--strict-limits", action="store_true")
-    parser.add_argument("--worker-single", action="store_true", help=argparse.SUPPRESS)
-    parser.add_argument(
-        "--probe-model",
-        type=str,
-        default="",
-        help="run the capability probe (P1..P5) for one canonical model id",
-    )
-    parser.add_argument("--provider", type=str, default="", help="provider id for --probe-model")
-    parser.add_argument("--force", action="store_true", help="re-probe even if confirmed")
-    parser.add_argument("--json", dest="as_json", action="store_true")
-    parser.add_argument("--providers-dir", type=Path, default=None)
+def load_launch_argv(path: Path, validator: Callable[[list[str]], Any]) -> list[str]:
+    """Проверяет JSON argv каноническим preflight, без запуска."""
+    argv = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(argv, list) or len(argv) < 3:
+        raise ValueError("launch-argv-json must contain a launch_seat argv array")
+    if not all(isinstance(arg, str) and arg and "\0" not in arg for arg in argv):
+        raise ValueError("launch-argv-json contains invalid arguments")
+    if not all((Path(argv[0]).is_absolute(),
+                re.fullmatch(r"python(?:\d+(?:\.\d+)*)?", Path(argv[0]).name, re.I),
+                Path(argv[1]).is_absolute(), Path(argv[1]).name == "launch_seat.py")):
+        raise ValueError("launch-argv-json must invoke absolute launch_seat.py without a shell")
+    if validator(argv) is False:
+        raise ValueError("canonical launch validation failed")
+    return argv
+
+def _valid_request(row: Any) -> bool:
+    """Минимум доказательств полезного запроса, без доверия к HTTP 200."""
+    if not isinstance(row, dict):
+        return False
+    return all((row.get("http_status") == 200, row.get("useful") is True, row.get("stream") is False,
+                all(isinstance(row.get(key), str) and row[key]
+                    for key in ("request_id", "model", "attempted_backend", "trace_ref"))))
+
+def _valid_rows(rows: Any, count: int) -> bool:
+    """Проверяет число полезных запросов и уникальность их идентификаторов."""
+    if not isinstance(rows, list) or len(rows) != count:
+        return False
+    if not all((_valid_request(row) for row in rows)):
+        return False
+    return len({row['request_id'] for row in rows}) == count
+
+def _valid_h2(data: dict[str, Any]) -> bool:
+    """H-2 фиксирован спецификацией: двадцать запросов и минимум 12 codex."""
+    rows, summary = (data['requests'], data['H-2'])
+    if not _valid_rows(rows, 20) or not isinstance(summary, dict):
+        return False
+    codex = sum((row['attempted_backend'] == 'codex' for row in rows))
+    droid = sum((row['attempted_backend'] == 'droid' for row in rows))
+    return all((summary == {'n': 20, 'codex_hits': codex, 'droid_hits': droid}, codex >= 12, codex + droid == 20))
+
+def _valid_h2b(data: dict[str, Any]) -> bool:
+    """Каждая enabled edge подтверждается отдельным forced запросом."""
+    section, edges = data["H-2b"], data["effective_config"]["enabled_edges"]
+    rows = section["forced_edges"]
+    if set(edges) != {"codex", "droid"} or not _valid_rows(rows, len(edges)):
+        return False
+    return all(({row.get("forced_backend") for row in rows} == set(edges),
+                all(_valid_attribution(row) for row in rows),
+                all(section.get(edge + "_status") == "PASS" for edge in edges)))
+
+def _valid_attribution(row: dict[str, Any]) -> bool:
+    """Проверяет observed-атрибуцию, не выводя backend из имени модели."""
+    return all((row.get("attempted_backend") == row.get("forced_backend"),
+                bool(row.get("canonical_model")), row.get("canonical_model") == row.get("expected_canonical_model"),
+                bool(row.get("wire_owned_by")), row.get("wire_owned_by") == row.get("expected_wire_owned_by")))
+
+def validate_live_receipt(data: Any) -> bool:
+    """Fail-closed: отдельный H-2 не подменяет полную приёмку r9."""
+    required = ("run_id revision cab_base skils_base deployed_cab_sha deployed_skils_sha "
+                "panel_proof_sha256 council_receipt_sha256 owner_authorization_ref started_at_utc completed_at_utc "
+                "hub_url bridge_err_segments commands raw_logs checks_tsv").split()
+    try:
+        if not all(data.get(key) for key in required):
+            return False
+        return all((data["schema_version"] == "1.0", data["status"] == "PASS", data["H-0"]["status"] == "PASS",
+                    _valid_h2(data), _valid_h2b(data), _receipt_safety(data)))
+    except (KeyError, TypeError, AttributeError, ValueError):
+        return False
+
+def _receipt_safety(data: dict[str, Any]) -> bool:
+    """Независимые H-3/H-6 и отсутствие аварий обязательны для общего PASS."""
+    guards, launch = data["H-3"], data["H-6"]
+    return all((guards["openai_key_2_hits"] == 0, guards["openai_key_3_hits"] == 0,
+                guards["complete_coverage"] is True, launch["launch_rc"] == 0, launch["cli_fallback_rc"] == 0,
+                launch["run_id"] == data["run_id"], bool(launch["receipt_ref"]),
+                all(command["rc"] == 0 and command["crash_evidence_refs"] == [] for command in data["commands"])))
+
+def _mask_receipt(value: Any, secret: str = "") -> Any:
+    """Рекурсивно санитизирует данные до сериализации и файлового write."""
+    if isinstance(value, dict):
+        return {mask_secret(str(key)): "[REDACTED]"
+                if re.fullmatch(r"(?i).*?(?:api[_-]?key|token|secret|password|authorization)", str(key))
+                else _mask_receipt(item, secret) for key, item in value.items()}
+    if isinstance(value, (tuple, list)):
+        return [_mask_receipt(item, secret) for item in value]
+    if isinstance(value, str):
+        masked = mask_secret(value)
+        return masked.replace(secret, "[REDACTED]") if secret else masked
+    return value
+
+def write_live_receipt(path: Path, data: dict[str, Any]) -> None:
+    """Атомарно заменяет receipt только уже маскированным JSON."""
+    encoded = json.dumps(_mask_receipt(data), ensure_ascii=False, indent=2) + '\n'
+    fd, temporary = tempfile.mkstemp(prefix='.' + path.name + '.', dir=path.parent)
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8') as stream:
+            stream.write(encoded)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        Path(temporary).unlink(missing_ok=True)
+
+def _add_harness_arguments(parser: argparse.ArgumentParser) -> None:
+    """Настройки H-2/H-2b не меняют обычную матрицу без явного opt-in."""
+    parser.add_argument('--run-id', default='')
+    parser.add_argument('--v2safe-live-receipt', type=Path)
+    parser.add_argument('--launch-argv-json', type=Path)
+    parser.add_argument('--launch-validator', default=os.environ.get('SMOKE_LAUNCH_VALIDATOR', ''))
+    parser.add_argument('--owner-authorization-ref', default='')
+    parser.add_argument('--h2b-model', default=os.environ.get('SMOKE_H2B_MODEL', ''))
+    parser.add_argument('--h2b-path', default='/v1/providers/codex/v1/chat/completions')
+    parser.add_argument('--h2b-canonical-model', default='')
+    parser.add_argument('--h2b-owned-by', default='')
+    parser.add_argument('--h2b-peer-model', default='')
+    parser.add_argument('--h2b-peer-owned-by', default='')
+    parser.add_argument('--h2-model', default=os.environ.get('SMOKE_H2_MODEL', ''))
+    parser.add_argument('--bridge-log', type=Path, help='live bridge log for observed request/backend correlation')
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description='Smoke test runner for models defined in models.md')
+    parser.add_argument('--models-md', type=Path, default=DEFAULT_MODELS_MD)
+    parser.add_argument('--model-notes-md', type=Path, default=DEFAULT_MODEL_NOTES_MD)
+    parser.add_argument('--hub-url', type=str, default=DEFAULT_HUB_URL)
+    parser.add_argument('--model', type=str, default='')
+    parser.add_argument('--effort', type=str, default='')
+    parser.add_argument('--subagent-id', type=str, default='')
+    parser.add_argument('--dry-run', action='store_true')
+    parser.add_argument('--live', action='store_true')
+    parser.add_argument('--timeout', type=float, default=15.0)
+    parser.add_argument('--max-workers', type=int, default=None)
+    parser.add_argument('--all-roles', action='store_true')
+    parser.add_argument('--subprocesses', action='store_true')
+    parser.add_argument('--strict-limits', action='store_true')
+    parser.add_argument('--worker-single', action='store_true', help=argparse.SUPPRESS)
+    parser.add_argument('--probe-model', type=str, default='', help='run the capability probe (P1..P5) for one canonical model id')
+    parser.add_argument('--provider', type=str, default='', help='provider id for --probe-model')
+    parser.add_argument('--force', action='store_true', help='re-probe even if confirmed')
+    parser.add_argument('--json', dest='as_json', action='store_true')
+    parser.add_argument('--providers-dir', type=Path, default=None)
+    _add_harness_arguments(parser)
+    return parser
+
+def _harness_preflight(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
+    """До сети проверяет разрешение владельца и канонический preflight."""
+    if args.v2safe_live_receipt:
+        if not args.launch_argv_json or not args.launch_argv_json.is_file():
+            parser.error('--v2safe-live-receipt requires existing --launch-argv-json')
+        try:
+            module, name = args.launch_validator.rsplit(':', 1)
+            load_launch_argv(args.launch_argv_json, getattr(importlib.import_module(module), name))
+        except (ValueError, OSError, ImportError, AttributeError, argparse.ArgumentError):
+            parser.error('--launch-argv-json requires canonical --launch-validator module:callable')
+    required = 'run_id owner_authorization_ref h2_model h2b_model h2b_canonical_model h2b_owned_by h2b_peer_model h2b_peer_owned_by'.split()
+    if not all((getattr(args, name) for name in required)):
+        parser.error('H-2/H-2b require run-id, owner authorization, models and wire attribution')
+    path = urlsplit(args.h2b_path)
+    if path.scheme or path.netloc or (not re.fullmatch('/v1/providers/[^/]+/v1/chat/completions', args.h2b_path)):
+        parser.error('--h2b-path must be a provider-scoped chat/completions path')
+
+def _harness_request(args: argparse.Namespace, model: str, path: str, request_id: str) -> dict[str, Any]:
+    """Нестриминговый запрос хранит только исход, атрибуцию и SHA тела."""
+    base = urlsplit(args.hub_url)
+    endpoint = urlunsplit((base.scheme, base.netloc, path, '', ''))
+    payload = build_bridge_payload(model, effort=args.effort, stream=False)
+    payload['model'] = model
+    request = _smoke_request(endpoint, payload, _resolve_api_key(None), request_id)
+    row: dict[str, Any] = dict(request_id=request_id, model=model, stream=False, path=path, trace_ref='request:' + request_id)
+    try:
+        row.update(_request_outcome(request, args.timeout))
+        if args.bridge_log:
+            row.update(_logged_attribution(args.bridge_log, request_id))
+            if '/providers/' in path:
+                row['wire_owned_by'] = _wire_owner(args, model, endpoint)
+    except Exception as exc:
+        row.update(http_status=0, useful=False, status=type(exc).__name__)
+    return _mask_receipt(row, str(request.get_header('Authorization', '')).removeprefix('Bearer '))
+
+def _logged_attribution(path: Path, request_id: str) -> dict[str, str]:
+    """Читает bridge.err, не выводя backend из имени или URL."""
+    observed: dict[str, str] = {}
+    with path.open(encoding='utf-8') as stream:
+        for line in stream:
+            fields = dict(re.findall('\\b([a-z_]+)=([^\\s]+)', line))
+            if request_id not in (fields.get('request_id'), fields.get('subagent_id')):
+                continue
+            for source, target in (('model', 'canonical_model'), ('backend', 'attempted_backend')):
+                if source in fields:
+                    observed[target] = fields[source]
+    if not all((observed.get(key) for key in ('canonical_model', 'attempted_backend'))):
+        raise ValueError('missing correlated bridge attribution')
+    return observed
+
+def _wire_owner(args: argparse.Namespace, model: str, endpoint: str) -> str:
+    """owned_by берётся из реального provider-scoped /models."""
+    endpoint = endpoint.removesuffix('chat/completions') + 'models'
+    request = urllib.request.Request(endpoint, headers={'Authorization': f'Bearer {_resolve_api_key(None)}'})
+    with urllib.request.urlopen(request, timeout=args.timeout) as response:
+        if response.getcode() != 200:
+            raise ValueError('wire catalog unavailable')
+        data = json.load(response)
+    matches = [item.get('owned_by', '') for item in data['data'] if item.get('id') == model]
+    return str(matches[0]) if len(matches) == 1 else ''
+
+def _run_live_harness(args: argparse.Namespace) -> int:
+    """Выполняет H-2/H-2b, не подменяя отсутствующие H-0/H-3/H-6."""
+    rows = [_harness_request(args, args.h2_model, "/v1/chat/completions", f"{args.run_id}-h2-{i}") for i in range(20)]
+    summary = dict(n=len(rows), codex_hits=sum(row.get("attempted_backend") == "codex" for row in rows),
+                   droid_hits=sum(row.get("attempted_backend") == "droid" for row in rows))
+    receipt = {"schema_version": "1.0", "run_id": args.run_id, "requests": rows, "H-2": summary,
+               "owner_authorization_ref": args.owner_authorization_ref,
+               "effective_config": {"enabled_edges": ["codex", "droid"]}, "H-2b": _forced_probes(args),
+               "status": "BLOCKED", "not_verified": ["H-0", "H-3", "H-6"]}
+    passed = _valid_h2(receipt) and _valid_h2b(receipt)
+    receipt["h2_h2b_status"] = "PASS" if passed else "FAIL"
+    if args.v2safe_live_receipt:
+        write_live_receipt(args.v2safe_live_receipt, receipt)
+    print(json.dumps(_mask_receipt(receipt), ensure_ascii=False))
+    return 0 if passed else 1
+
+def _forced_probes(args: argparse.Namespace) -> dict[str, Any]:
+    """H-2b заставляет обе edges с независимыми ожидаемыми wire owner."""
+    primary = args.h2b_path.split('/')[3]
+    peer = 'droid' if primary == 'codex' else 'codex'
+    cases = ((primary, args.h2b_model, args.h2b_path, args.h2b_owned_by), (peer, args.h2b_peer_model, f'/v1/providers/{peer}/v1/chat/completions', args.h2b_peer_owned_by))
+    rows = []
+    for backend, model, path, owner in cases:
+        row = _harness_request(args, model, path, f'{args.run_id}-h2b-{backend}')
+        row.update(forced_backend=backend, expected_canonical_model=args.h2b_canonical_model, expected_wire_owned_by=owner)
+        rows.append(row)
+    return {'forced_edges': rows, **{row['forced_backend'] + '_status': 'PASS' if _valid_request(row) and _valid_attribution(row) else 'FAIL' for row in rows}}
+
+def main(argv: list[str] | None=None) -> int:
+    parser = build_parser()
     args = parser.parse_args(argv)
-
+    harness = bool(args.v2safe_live_receipt or args.h2b_model)
+    if args.dry_run:
+        args.live = args.worker_single = False
+        if args.probe_model or harness:
+            print('PASS: dry-run; no network requests or launch processes')
+            return 0
+    if harness and args.live:
+        _harness_preflight(args, parser)
+        return _run_live_harness(args)
     if args.probe_model:
         return _run_probe_model(args)
+    return _run_worker(args) if args.worker_single else _run_matrix(args)
 
-    if args.worker_single:
-        ok, status, latency = smoke_test_model(
-            args.hub_url,
-            args.model,
-            timeout_s=args.timeout,
-            effort=args.effort,
-            subagent_id=args.subagent_id,
-        )
-        print(
-            json.dumps(
-                {
-                    "ok": ok,
-                    "status": status,
-                    "latency": latency,
-                    "pgid": os.getpgrp(),
-                },
-                ensure_ascii=False,
-            ),
-            flush=True,
-        )
-        return 0 if ok else 1
+def _run_worker(args: argparse.Namespace) -> int:
+    """Сохраняет контракт изолированного worker-single."""
+    ok, status, latency = smoke_test_model(args.hub_url, args.model, timeout_s=args.timeout, effort=args.effort, subagent_id=args.subagent_id)
+    print(json.dumps(dict(ok=ok, status=status, latency=latency, pgid=os.getpgrp()), ensure_ascii=False), flush=True)
+    return 0 if ok else 1
 
+def _run_matrix(args: argparse.Namespace) -> int:
     models = parse_models_md(args.models_md)
     if args.model:
         models = [entry for entry in models if entry.model_id == args.model]
     models = deduplicate_models_for_parallel(models, all_roles=args.all_roles)
     if not models:
-        print("FAIL: No models found matching criteria.")
+        print('FAIL: No models found matching criteria.')
         return 1
+    print(f'=== Smoke Models Matrix (Found {len(models)} model entries) ===')
+    print(f"{'Role':<24} | {'Model ID':<32} | {'Family':<12} | {'Status':<20} | {'Latency':<10}")
+    print('-' * 112)
+    return _report_matrix(args, _matrix_results(args, models))
 
-    print(f"=== Smoke Models Matrix (Found {len(models)} model entries) ===")
-    print(
-        f"{'Role':<24} | {'Model ID':<32} | {'Family':<12} | "
-        f"{'Status':<20} | {'Latency':<10}"
-    )
-    print("-" * 112)
-
+def _matrix_results(args: argparse.Namespace, models: list[ModelEntry]) -> list[dict[str, Any]]:
+    """Сухой прогон не вызывает ни HTTP, ни дочерние процессы."""
     if args.live and not args.dry_run:
-        results = run_parallel_smoke(
-            models,
-            args.hub_url,
-            timeout_s=args.timeout,
-            max_workers=args.max_workers,
-            use_subprocesses=args.subprocesses,
-            temp_off_models=parse_temp_off_models(args.model_notes_md),
-            strict_limits=args.strict_limits,
-        )
-    else:
-        results = [
-            {
-                "role": entry.role,
-                "model_id": entry.model_id,
-                "family": entry.family,
-                "ok": True,
-                "status": "CONFIGURED",
-                "latency": 0.0,
-            }
-            for entry in models
-        ]
+        return run_parallel_smoke(models, args.hub_url, timeout_s=args.timeout, max_workers=args.max_workers,
+                                  use_subprocesses=args.subprocesses,
+                                  temp_off_models=parse_temp_off_models(args.model_notes_md), strict_limits=args.strict_limits)
+    return [dict(role=e.role, model_id=e.model_id, family=e.family, ok=True, status="CONFIGURED", latency=0.0) for e in models]
 
+def _report_matrix(args: argparse.Namespace, results: list[dict[str, Any]]) -> int:
+    """Печатает прежнюю матрицу и возвращает её итоговый код."""
     for result in results:
-        latency = f"{result['latency']:.2f}s" if args.live and not args.dry_run else "-"
-        print(
-            f"{result['role']:<24} | {result['model_id']:<32} | "
-            f"{result['family']:<12} | {result['status']:<20} | {latency:<10}"
-        )
-
+        latency = f"{result['latency']:.2f}s" if args.live else '-'
+        print(f"{result['role']:<24} | {result['model_id']:<32} | {result['family']:<12} | {result['status']:<20} | {latency:<10}")
     if args.dry_run:
-        print("\nPASS: Configuration is valid (dry-run mode).")
+        print('\nPASS: Configuration is valid (dry-run mode).')
         return 0
     if not args.live:
-        print("\nNOTE: Run with --live to perform actual network requests.")
+        print('\nNOTE: Run with --live to perform actual network requests.')
         return 0
+    return _matrix_exit_code(results)
 
-    stream_ok_count = sum(
-        1 for result in results if result.get("status") in ("STREAM_OK", "DONE_OK")
-    )
-    skipped_limit_count = sum(
-        1 for result in results if result.get("status") == "SKIPPED_LIMIT"
-    )
-    print(
-        f"\nSUMMARY: total={len(results)} stream_ok={stream_ok_count} "
-        f"skipped_limit={skipped_limit_count}"
-    )
+def _matrix_exit_code(results: list[dict[str, Any]]) -> int:
+    """Считает статусы отдельно от представления матрицы."""
+    stream_ok_count = sum((result.get('status') in ('STREAM_OK', 'DONE_OK') for result in results))
+    skipped_limit_count = sum((result.get('status') == 'SKIPPED_LIMIT' for result in results))
+    print(f'\nSUMMARY: total={len(results)} stream_ok={stream_ok_count} skipped_limit={skipped_limit_count}')
     if results and stream_ok_count == 0:
         return 1
-    return 0 if all(bool(result["ok"]) for result in results) else 1
-
+    return 0 if all((bool(result['ok']) for result in results)) else 1
 
 if __name__ == "__main__":
     sys.exit(main())
-
