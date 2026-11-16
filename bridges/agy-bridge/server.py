@@ -6266,7 +6266,7 @@ def _terminal_state(name: str, err: str = "") -> dict[str, object]:
     }
 
 
-_DONE_RECOVERY_ALIASES = RecoveryAliases(("AGY_CAUSAL_RECOVERY_ENABLED",))
+_DONE_RECOVERY_ALIASES = RecoveryAliases(("AGY_CAUSAL_RECOVERY_ENABLED", "AGY_SELF_HEAL_INTERRUPTED_TURN"))
 
 
 def _done_recovery_aliases_enabled() -> bool:

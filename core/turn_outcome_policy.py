@@ -31,17 +31,22 @@ _SAFETY_MARKERS: tuple[str, ...] = (
 def is_fatal_safety_error(text: str | None) -> bool:
     """Распознаёт отказ защитных механизмов: такой ход не восстанавливается."""
     cur = text or ""
-    for _ in range(8):
+    for _ in range(32):
+        if "%" not in cur:
+            break
         dec = unquote_plus(cur)
         if dec == cur:
             break
         cur = dec
-    lowered = cur.casefold()
-    reasons: list[str] = re.findall(r"""\bblock_reason\b["']?\s*[:=]\s*["']?([\w-]+)""", lowered)
+    else:
+        if re.search(r"%[0-9a-fA-F]{2}", cur):
+            return True  # Неразрешённое остаточное кодирование: fail-closed.
+    lowered = cur.replace("+", " ").casefold()
+    reasons: list[str] = re.findall(r"""\b(?:block_reason|finish_reason)\b["']?\s*[:=]\s*["']?([\w-]+)""", lowered)
     return (
         any(marker in lowered for marker in _SAFETY_MARKERS)
         or bool(re.search(r"(?<![\w-])safety(?![\w-])", lowered))
-        or any(reason not in ("null", "none") for reason in reasons)
+        or any(reason not in ("null", "none", "stop", "length", "tool_calls") for reason in reasons)
     )
 
 

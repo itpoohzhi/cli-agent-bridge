@@ -44,15 +44,21 @@ class InterruptionTailState:
         """Без реального attempt или step_index каузальность не доказана."""
         if isinstance(rtype, int) or rtype == "ERROR_MESSAGE":
             text = kw.get("text", rec)
+            struct_safety = False
             if isinstance(rec, dict):
                 texts = (rec.get(key) for key in ("content", "message", "error"))
                 text = next(filter(None, texts), "")
+                struct_safety = any(
+                    causal.is_fatal_safety_error(str(v))
+                    for k, v in rec.items()
+                    if k in ("block_reason", "finish_reason", "reason", "error", "message") and v is not None
+                )
             text = str(text)
             seq = rtype if isinstance(rtype, int) else idx if idx is not None else -1
             self.final_planner, self.final_planner_content = False, ""
             self.has_open_planner_after_completion = self.last_planner_step_index >= 0
             self.had_transient_error |= is_transient_stream_interruption(text)
-            self.had_safety_error |= causal.is_fatal_safety_error(text)
+            self.had_safety_error |= struct_safety or causal.is_fatal_safety_error(text)
             if seq < 0 or seq >= self.last_error_step_index:
                 self.last_error_step_index = seq
                 self.last_error_sha256 = causal.error_identity_digest(text)
@@ -84,10 +90,8 @@ class TailCausalFacts:
 
 def tail_causal_facts(tail: object) -> TailCausalFacts:
     """Экспортирует каузальные факты отдельно от совместимого legacy-словаря."""
-
     def get[T](name: str, default: T) -> T:
         return cast(T, getattr(tail, name, default))
-
     error = causal.CausalErrorIdentity(
         get("last_error_step_index", -1), get("last_error_attempt", -1),
         get("last_error_sha256", ""), get("last_error_length", 0),
@@ -97,11 +101,8 @@ def tail_causal_facts(tail: object) -> TailCausalFacts:
         bool(get("final_planner", False)), bool(get("final_planner_content", "").strip()),
     )
     late = error.seq >= completion.last_completion_seq and error.seq >= 0
-    return TailCausalFacts(
-        error, bool(get("error_from_structured_record", False)),
-        completion, late or bool(get("has_open_planner_after_completion", False)),
-    )
-
+    return TailCausalFacts(error, bool(get("error_from_structured_record", False)),
+                           completion, late or bool(get("has_open_planner_after_completion", False)))
 def evaluate_done_causal_recovery(causal_input: causal.CausalOutcomeInput, error: str | None = None) -> causal.CausalOutcomeDecision:
     """Одно решение разрешает reconcile и снятие ошибки; эхо берётся целиком."""
     if error is not None:
@@ -295,6 +296,5 @@ def evaluate_graceful_interruption(**kw: object) -> GracefulInterruptionDecision
     partial = f.delivered_content or f.delivered_reasoning
     ok = f.graceful_enabled and partial and transient and not f.delivered_tool_calls and not f.has_unclosed_tool_call
     channel = "content" if f.delivered_content else "reasoning_content"
-    closed = (ok, f.notice_text, channel, "stop", "graceful_partial_close")
-    blocked = (ok, "", "none", "error", "graceful_blocked")
-    return GracefulInterruptionDecision(*(closed if ok else blocked))
+    return GracefulInterruptionDecision(ok, f.notice_text if ok else "", channel if ok else "none",
+                                        "stop" if ok else "error", "graceful_partial_close" if ok else "graceful_blocked")

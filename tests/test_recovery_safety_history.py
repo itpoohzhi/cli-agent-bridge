@@ -17,12 +17,12 @@ def test_encoded_and_machine_safety_codes(marker: str) -> None:
     assert is_fatal_safety_error(marker)
 
 
-@pytest.mark.parametrize("marker", ("content%255fpolicy%255fviolation", "%2573afety: connection reset", "content%25255fpolicy%25255fviolation", "content_safety", "safety_filter", "fatal_safety_error: connection reset", '{"block_reason": "OTHER"}'))
+@pytest.mark.parametrize("marker", ("content%255fpolicy%255fviolation", "%2573afety: connection reset", "content%25255fpolicy%25255fviolation", "content_safety", "safety_filter", "fatal_safety_error: connection reset", '{"block_reason": "OTHER"}', *("%" + "25" * depth + "73afety: connection reset" for depth in (8, 9, 35)), "%" + "25" * 35 + "41", '{"finish_reason": "OTHER"}'))
 def test_nested_encoded_safety_veto(marker: str) -> None:
     assert is_fatal_safety_error(marker)
 
 
-@pytest.mark.parametrize("text", ("safety_cap_s exceeded", "thread_safety lock error", "thread-safety lock error", '{"block_reason": null}', '{"block_reason": "NONE"}', 'block_reason: none'))
+@pytest.mark.parametrize("text", ("safety_cap_s exceeded", "thread_safety lock error", "thread-safety lock error", '{"block_reason": null}', '{"block_reason": "NONE"}', 'block_reason: none', *('{"finish_reason": "' + reason + '"}' for reason in ("null", "none", "stop", "length", "tool_calls"))))
 def test_operational_safety_and_neutral_block_reason(text: str) -> None:
     assert not is_fatal_safety_error(text)
 
@@ -69,6 +69,19 @@ def test_safety_history_blocks_terminal_recovery(monkeypatch: pytest.MonkeyPatch
     assert any("error" in chunk for chunk in chunks)
 
 
+@pytest.mark.parametrize("field,value", (("block_reason", "SAFETY"), ("finish_reason", "SAFETY"), ("reason", "SAFETY"), ("error", "content_filter"), ("message", "Policy violation")))
+def test_structured_record_safety_blocks_recovery(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, field: str, value: str) -> None:
+    bridge = flow._load_bridge(monkeypatch, tmp_path)
+    monkeypatch.setattr(flow, "_ERROR", "connection reset by peer")
+    tail = flow._make_tail(bridge, (1,), 2)
+    rec = {"type": "ERROR_MESSAGE", "step_index": 2, "content": flow._ERROR, field: value}
+    tail._emit_record(json.dumps(rec).encode())
+    tail._emit_record(json.dumps(dict(type="PLANNER_RESPONSE", step_index=3, content=flow._FINAL)).encode())
+    assert getattr(tail, "had_safety_error", False)
+    _, out = flow._serve_replay(bridge, flow._make_run(tail))
+    assert (out["state"], out["rc"], out["text"]) == ("agy_error", 1, "")
+
+
 @pytest.mark.parametrize("legacy", (None, "false"))
 def test_canonical_switch_needs_no_legacy_opt_in(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, legacy: str | None) -> None:
     bridge = flow._load_bridge(monkeypatch, tmp_path)
@@ -76,7 +89,11 @@ def test_canonical_switch_needs_no_legacy_opt_in(monkeypatch: pytest.MonkeyPatch
     monkeypatch.delenv("AGY_SELF_HEAL_INTERRUPTED_TURN")
     if legacy is not None:
         monkeypatch.setenv("AGY_SELF_HEAL_INTERRUPTED_TURN", legacy)
-    flow._assert_final_preserved(*flow._serve_replay(bridge, flow._make_run(flow._make_tail(bridge, (1,), 2))))
+    chunks, out = flow._serve_replay(bridge, flow._make_run(flow._make_tail(bridge, (1,), 2)))
+    if legacy == "false":
+        assert (out["state"], out["rc"], out["text"]) == ("agy_error", 1, "")
+    else:
+        flow._assert_final_preserved(chunks, out)
 
 
 def test_resolver_safety_config_vetoes_legacy_transient() -> None:
