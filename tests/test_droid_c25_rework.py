@@ -80,41 +80,183 @@ def test_non_droid_autonomy_keeps_passing_through(
     assert handler._serve_json.call_args.args[0]["autonomy"] == autonomy
 
 
-def test_judge_cannot_bypass_deny_through_body(
+JUDGE_DENY_ENV = "panel-judge-,judge-,seat-"
+
+
+def _assert_forbidden_for_role(handler: Any) -> None:
+    assert handler._send.call_args.args[0] == 403
+    assert (
+        handler._send.call_args.args[1]["error"]["type"] == "droid_forbidden_for_role"
+    )
+    handler._serve_json.assert_not_called()
+
+
+def _assert_served(handler: Any) -> None:
+    handler._send.assert_not_called()
+    handler._serve_json.assert_called_once()
+
+
+def _assert_autonomy_role_forbidden(handler: Any) -> None:
+    assert handler._send.call_args.args[0] == 400
+    assert handler._send.call_args.args[1]["error"]["type"] == "autonomy_role_forbidden"
+    handler._serve_json.assert_not_called()
+
+
+@pytest.mark.parametrize("autonomy", [None, "off"])
+def test_judge_read_only_passes_through_body(
+    cli_route: Callable[..., Any], monkeypatch: pytest.MonkeyPatch, autonomy: str | None
+) -> None:
+    """AD-001: судья с subagent_id из тела и без мутации допускается к droid-маршруту."""
+    monkeypatch.delenv("DROID_DENY_SUBAGENT_PREFIXES", raising=False)
+    body: dict[str, Any] = {
+        "model": "gpt-6.1-sol-droid",
+        "subagent_id": "judge-1",
+        "messages": [{"role": "user", "content": "hello"}],
+    }
+    if autonomy is not None:
+        body["autonomy"] = autonomy
+    _assert_served(cli_route(body, {}))
+
+
+@pytest.mark.parametrize("role", ["judge-1", "panel-judge-k1", "seat-3"])
+@pytest.mark.parametrize("autonomy", [None, "off"])
+def test_judge_read_only_passes_with_role_header(
+    cli_route: Callable[..., Any],
+    monkeypatch: pytest.MonkeyPatch,
+    role: str,
+    autonomy: str | None,
+) -> None:
+    """AD-001: все судейские префиксы в заголовке роли допускаются при autonomy off."""
+    monkeypatch.delenv("DROID_DENY_SUBAGENT_PREFIXES", raising=False)
+    body: dict[str, Any] = {
+        "model": "gpt-6.1-sol-droid",
+        "messages": [{"role": "user", "content": "hello"}],
+    }
+    if autonomy is not None:
+        body["autonomy"] = autonomy
+    _assert_served(cli_route(body, {"X-Subagent-Id": role}))
+
+
+def test_judge_read_only_passes_through_renamed_header(
     cli_route: Callable[..., Any], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """F-002: запрет судьям видит subagent_id из тела запроса."""
+    """AD-001: переименованный SUBAGENT_ID_HEADER тоже не отвергает read-only судью."""
+    monkeypatch.delenv("DROID_DENY_SUBAGENT_PREFIXES", raising=False)
+    monkeypatch.setattr(server, "SUBAGENT_ID_HEADER", "X-Role-Id")
+    handler = cli_route(
+        {
+            "model": "gpt-6.1-sol-droid",
+            "messages": [{"role": "user", "content": "hello"}],
+        },
+        {"X-Role-Id": "judge-1"},
+    )
+    _assert_served(handler)
+
+
+def test_judge_read_only_passes_with_disabled_attribution(
+    cli_route: Callable[..., Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AD-001: при выключенной атрибуции судья с autonomy off по-прежнему допускается."""
+    monkeypatch.delenv("DROID_DENY_SUBAGENT_PREFIXES", raising=False)
+    monkeypatch.setattr(server, "REQUEST_ATTRIBUTION_ENABLED", False)
+    handler = cli_route(
+        {
+            "model": "gpt-6.1-sol-droid",
+            "subagent_id": "judge-1",
+            "autonomy": "off",
+            "messages": [{"role": "user", "content": "hello"}],
+        },
+        {},
+    )
+    _assert_served(handler)
+
+
+@pytest.mark.parametrize("role", ["judge-1", "panel-judge-k1", "seat-3"])
+@pytest.mark.parametrize("autonomy", ["low", "medium", "high"])
+def test_judge_mutating_autonomy_is_rejected(
+    cli_route: Callable[..., Any],
+    monkeypatch: pytest.MonkeyPatch,
+    role: str,
+    autonomy: str,
+) -> None:
+    """AD-001: судья с мутирующей автономностью получает 400 autonomy_role_forbidden."""
     monkeypatch.delenv("DROID_DENY_SUBAGENT_PREFIXES", raising=False)
     handler = cli_route(
         {
-            "model": "gpt-6.1-sol",
+            "model": "gpt-6.1-sol-droid",
+            "autonomy": autonomy,
+            "messages": [{"role": "user", "content": "hello"}],
+        },
+        {"X-Subagent-Id": role},
+    )
+    _assert_autonomy_role_forbidden(handler)
+
+
+@pytest.mark.parametrize("autonomy", ["low", "medium"])
+def test_judge_mutating_autonomy_is_rejected_for_body_only_role(
+    cli_route: Callable[..., Any], monkeypatch: pytest.MonkeyPatch, autonomy: str
+) -> None:
+    """AD-001: роль только в теле не даёт судье обойти запрет мутирующей автономности."""
+    monkeypatch.delenv("DROID_DENY_SUBAGENT_PREFIXES", raising=False)
+    handler = cli_route(
+        {
+            "model": "gpt-6.1-sol-droid",
+            "subagent_id": "judge-1",
+            "autonomy": autonomy,
+            "messages": [{"role": "user", "content": "hello"}],
+        },
+        {},
+    )
+    _assert_autonomy_role_forbidden(handler)
+
+
+def test_judge_mutating_autonomy_is_rejected_with_opt_in_high(
+    cli_route: Callable[..., Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AD-001: opt-in на high уровня шлюза не снимает запрет мутации для судьи."""
+    monkeypatch.setenv("DROID_ALLOW_HIGH_AUTONOMY", "1")
+    monkeypatch.setenv("DROID_MUTATING_SUBAGENT_PREFIXES", "judge-,coder-")
+    handler = cli_route(
+        {
+            "model": "gpt-6.1-sol-droid",
+            "autonomy": "high",
+            "messages": [{"role": "user", "content": "hello"}],
+        },
+        {"X-Subagent-Id": "judge-1"},
+    )
+    _assert_autonomy_role_forbidden(handler)
+
+
+def test_judge_explicit_deny_env_still_blocks_through_body(
+    cli_route: Callable[..., Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F-002: явный DROID_DENY_SUBAGENT_PREFIXES по-прежнему видит subagent_id из тела."""
+    monkeypatch.setenv("DROID_DENY_SUBAGENT_PREFIXES", JUDGE_DENY_ENV)
+    handler = cli_route(
+        {
+            "model": "gpt-6.1-sol-droid",
             "subagent_id": "judge-1",
             "messages": [{"role": "user", "content": "hello"}],
         },
         {},
     )
-    assert handler._send.call_args.args[0] == 403
-    assert (
-        handler._send.call_args.args[1]["error"]["type"] == "droid_forbidden_for_role"
-    )
-    handler._serve_json.assert_not_called()
+    _assert_forbidden_for_role(handler)
 
 
-def test_judge_cannot_bypass_deny_through_renamed_header(
+def test_judge_explicit_deny_env_still_blocks_renamed_header(
     cli_route: Callable[..., Any], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """F-002: переименованный SUBAGENT_ID_HEADER тоже попадает под запрет."""
-    monkeypatch.delenv("DROID_DENY_SUBAGENT_PREFIXES", raising=False)
+    """F-002: явный запрет видит и переименованный SUBAGENT_ID_HEADER."""
+    monkeypatch.setenv("DROID_DENY_SUBAGENT_PREFIXES", JUDGE_DENY_ENV)
     monkeypatch.setattr(server, "SUBAGENT_ID_HEADER", "X-Role-Id")
     handler = cli_route(
-        {"model": "gpt-6.1-sol", "messages": [{"role": "user", "content": "hello"}]},
+        {
+            "model": "gpt-6.1-sol-droid",
+            "messages": [{"role": "user", "content": "hello"}],
+        },
         {"X-Role-Id": "judge-1"},
     )
-    assert handler._send.call_args.args[0] == 403
-    assert (
-        handler._send.call_args.args[1]["error"]["type"] == "droid_forbidden_for_role"
-    )
-    handler._serve_json.assert_not_called()
+    _assert_forbidden_for_role(handler)
 
 
 def test_mutating_http_rejects_missing_role_despite_library_opt_out(
@@ -125,7 +267,7 @@ def test_mutating_http_rejects_missing_role_despite_library_opt_out(
     monkeypatch.setenv("DROID_MUTATING_SUBAGENT_PREFIXES", "coder-")
     handler = cli_route(
         {
-            "model": "gpt-6.1-sol",
+            "model": "gpt-6.1-sol-droid",
             "autonomy": "low",
             "messages": [{"role": "user", "content": "hello"}],
         },
@@ -153,25 +295,21 @@ def test_judge_role_does_not_block_non_droid_backend(
     handler._serve_json.assert_called_once()
 
 
-def test_judge_deny_survives_disabled_attribution(
+def test_judge_explicit_deny_env_survives_disabled_attribution(
     cli_route: Callable[..., Any], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """F-002: при выключенной атрибуции запрет судьям всё равно читает тело запроса."""
-    monkeypatch.delenv("DROID_DENY_SUBAGENT_PREFIXES", raising=False)
+    """F-002: при выключенной атрибуции явный запрет судьям читает тело запроса."""
+    monkeypatch.setenv("DROID_DENY_SUBAGENT_PREFIXES", JUDGE_DENY_ENV)
     monkeypatch.setattr(server, "REQUEST_ATTRIBUTION_ENABLED", False)
     handler = cli_route(
         {
-            "model": "gpt-6.1-sol",
+            "model": "gpt-6.1-sol-droid",
             "subagent_id": "judge-1",
             "messages": [{"role": "user", "content": "hello"}],
         },
         {},
     )
-    assert handler._send.call_args.args[0] == 403
-    assert (
-        handler._send.call_args.args[1]["error"]["type"] == "droid_forbidden_for_role"
-    )
-    handler._serve_json.assert_not_called()
+    _assert_forbidden_for_role(handler)
 
 
 def test_wire_enforces_coder_role_despite_library_opt_out(

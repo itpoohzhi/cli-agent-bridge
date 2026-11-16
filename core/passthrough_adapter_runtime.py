@@ -12,8 +12,9 @@ import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from functools import partial
-from typing import Any, NotRequired, Protocol, TypedDict, final
+from typing import Any, NotRequired, Protocol, TypedDict, cast, final
 
+from core import passthrough_precommit
 from core.backend_adapter import PreSendTransientError
 from core.liveness_signals import LivenessWindow, passthrough_window
 from core.nonstream_aggregator import internal_stream_body, request_deadlines
@@ -101,12 +102,13 @@ class _RequestRuntime:
         if self.internal:
             window = window or passthrough_window(adapter.limits, exchange.path, exchange.request)
         raw = internal if self.internal else raw
-        self.exchange = replace(exchange, raw_body=raw, window=window)
         self.deadline, self.open_deadline = options.deadlines_fn(adapter.limits, self.internal)
         self.slide = open_sliding_deadline(
             self.deadline, adapter.limits, self.internal,
             exchange.request, options.sliding_enabled,
         )
+        window, self.slide = passthrough_precommit.request_window(window, self.slide)
+        self.exchange = replace(exchange, raw_body=raw, window=window)
         self.connection: http.client.HTTPConnection | None = None
         self.response: http.client.HTTPResponse | None = None
         self.successful = False
@@ -159,15 +161,11 @@ class _RequestRuntime:
         request, adapter = self.exchange, self.adapter
         try:
             self._check()
-            self.connection = adapter._open(
-                request.path, request.raw_body, request.headers, deadline=self.open_deadline,
-                on_socket=self._on_socket,
-                presend_deadline=getattr(request.sink, "presend_deadline", None),
-                on_pooling=self._on_pooling,
+            self.connection, self.response = passthrough_precommit.open_response(
+                adapter, cast(passthrough_precommit.PrecommitSink, request.sink), self.slide,
+                (request.path, request.raw_body, request.headers),
+                (self.open_deadline, self._on_socket, self._on_pooling, self.internal),
             )
-            self._check()
-            self.response = self.connection.getresponse()
-            self.slide.relax_socket(self.connection.sock, adapter.limits.read_timeout_s, self.internal)
             self._check()
         except PreSendTransientError as error:
             if getattr(request.sink, "accepts_presend_errors", False):
@@ -201,14 +199,16 @@ class _RequestRuntime:
             if connection is not None:
                 connection.close()
         self._check()
-        self.connection = adapter._open(
+        self.connection = cast(http.client.HTTPConnection, adapter._open(
             request.path, request.raw_body, request.headers, deadline=self.open_deadline,
             on_socket=self._on_socket,
             presend_deadline=getattr(request.sink, "presend_deadline", None),
             on_pooling=self._on_pooling,
             fresh=True,
+        ))
+        self.response = cast(passthrough_precommit.PrecommitSink, request.sink).read_response(
+            self.connection, self.slide, adapter.limits.reader_join_timeout_s
         )
-        self.response = self.connection.getresponse()
         self.slide.relax_socket(self.connection.sock, adapter.limits.read_timeout_s, self.internal)
         self._check()
         return self.response

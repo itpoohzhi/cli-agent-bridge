@@ -1,9 +1,5 @@
 """Общее ядро эмуляции OpenAI function calling (чистые функции, без I/O).
-
-Единый источник для всех бэкендов хаба: рендер истории и протокола инструментов в
-текстовый промпт, разбор блоков `<tool_call>…</tool_call>` из потока текстовых дельт.
-Модуль не импортирует `server` и адаптеры; `server.py` реэкспортирует имена для
-существующих тестов и совместимости.
+Рендер истории и инструментов, разбор текстовых дельт; реэкспортируется `server.py`.
 """
 
 from __future__ import annotations
@@ -27,14 +23,18 @@ from core.prompt_prefix_stability import (
     escape_role_delimiters as escape_role_delimiters,
 )
 from core.stream_fsm.repetition_guard import StreamRepetitionGuard
+from core.tool_mode import (
+    DEFAULT_EMULATE_SPEC, NormalizerModeSpec, NormalizerSinks,
+    ToollessTagPolicy, ToolMode, find_rejected_envelope, rejected_envelope_prefix_len,
+    _tool_choice_none as _tool_choice_none,
+)
 
 logger = logging.getLogger(__name__)
 
 TOOL_CALL_OPEN = "<tool_call>"
 TOOL_CALL_CLOSE = "</tool_call>"
 
-# ADR-0020 (BND-001): ядро окружение не читает — здесь только умолчания
-# RepetitionGuard; эффективные значения передаёт владелец маршрута аргументами.
+# ADR-0020 (BND-001): умолчания RepetitionGuard; конфигурацию передаёт владелец маршрута.
 DEFAULT_MAX_REPETITION_REPEATS = 20
 DEFAULT_MAX_REPETITION_TOKEN_LEN = 64
 REPETITION_MIN_REPEATS = 3
@@ -128,16 +128,6 @@ def _render_tool_call(item: Any) -> str:
     """Историю вызова рендерим тем же блоком, что просим от модели."""
     payload = json.dumps(_normalize_tool_call(item), ensure_ascii=False)
     return f"{TOOL_CALL_OPEN}{payload}{TOOL_CALL_CLOSE}"
-
-
-def _tool_choice_none(tool_choice: Any) -> bool:
-    """tool_choice:"none" — инструменты не предлагаем вовсе."""
-    if isinstance(tool_choice, str):
-        return tool_choice.strip().lower() == "none"
-    return (
-        isinstance(tool_choice, dict)
-        and str(tool_choice.get("type") or "").lower() == "none"
-    )
 
 
 def _tool_choice_name(tool_choice: Any) -> str:
@@ -933,14 +923,8 @@ def _find_tool_close_outside_string(text: str, start: int) -> int:
 
 class ToolCallParser:
     """Поток текстовых дельт -> content и завершённые вызовы инструментов.
-
-    Тег <tool_call> может прийти разорванным между дельтами: хвост, который может
-    оказаться началом тега, удерживается и не уходит в content до разрешения.
-
-    `strict_live=True` (AD-002, только Droid stream=true с живым sink) запрещает
-    malformed/unclosed recognized-блокам уйти в content как текст: вместо
-    `_flush_all()`/raw-passthrough поднимается `LiveParserError`. `strict_live=False`
-    (умолчание, legacy nonstream/без sink) ведёт себя абсолютно без изменений.
+    Префикс тега удерживается до разрешения. `strict_live=True` (AD-002) запрещает
+    повреждённым/незакрытым блокам уйти в content; legacy nonstream сохраняет текст.
     """
 
     def __init__(
@@ -1465,13 +1449,7 @@ DEFAULT_MAX_IMAGES = 10
 DEFAULT_MAX_IMAGE_BYTES = 10 * 1024 * 1024
 DEFAULT_MAX_TOTAL_IMAGE_BYTES = 20 * 1024 * 1024
 # Служебные теги протокола <tool_call>, не имеющие смысла вне настоящего блока.
-_ORPHAN_SERVICE_TAGS = (
-    TOOL_CALL_CLOSE,
-    "<arg_key>",
-    "</arg_key>",
-    "<arg_value>",
-    "</arg_value>",
-)
+_ORPHAN_SERVICE_TAGS = (TOOL_CALL_CLOSE, "<arg_key>", "</arg_key>", "<arg_value>", "</arg_value>")
 # (MIME, магический префикс, расширение файла) — принимаемые форматы вложений.
 # Для GIF/WebP префикс — только ориентир таблицы расширений: точную сигнатуру
 # (GIF87a/GIF89a; RIFF+WEBP в [8:12]) проверяет `_sniff_image_mime`.
@@ -1596,24 +1574,9 @@ def extract_thinking_delta(delta: Any) -> str:
 class StreamNormalizer:
     """Единый нормализатор живого потока: content / reasoning / tool_calls (AD-005).
 
-    Один лексический автомат на все выходы транспорта. В обычном тексте первая
-    встреченная конструкция определяет контекст до своего закрытия: теги
-    размышлений (`REASONING_TAGS`) уводят дельты в reasoning, блок `<tool_call>`
-    непрозрачен и целиком уходит в `ToolCallParser` (тег размышления внутри
-    JSON-строки аргумента канал не переключает; `<tool_call>` внутри размышления
-    вызовом не становится). Теги в Markdown-коде каналом не являются (контекст —
-    `_code_context`). Нативное thinking (`feed_thinking`) уже типизировано: в
-    парсер не подаётся и не исполняется.
-
-    Каждое событие сначала добавляется в аккумуляторы (`content`,
-    `reasoning_content`, `tool_calls`), затем синхронно уведомляется sink:
-    SSE-сериализатор публикует `delta.reasoning_content` сразу, до терминального
-    события, JSON берёт тот же итог в `message.reasoning_content`; сумма
-    SSE-дельт равна JSON-итогу при одинаковом входном потоке.
-
-    При `strict_live=True` повреждённый/незакрытый блок, orphan служебный тег и
-    EOF внутри размышления поднимают `LiveParserError` — сырой XML в content не
-    попадает (fail-closed). Мысли не генерируются: upstream не дал — пусто.
+    Первый тег задаёт непрозрачный контекст до закрытия; Markdown-код литерален.
+    Нативное thinking обходит парсер. Аккумулятор обновляется перед sink.
+    Строгий режим отклоняет повреждённые блоки без утечки служебного XML.
     """
 
     def __init__(
@@ -1626,29 +1589,54 @@ class StreamNormalizer:
         reasoning_tags=REASONING_TAGS,
         max_reasoning_depth: int = DEFAULT_MAX_REASONING_DEPTH,
     ):
-        self._on_content = on_content or (lambda _text: None)
-        self._on_reasoning = on_reasoning or (lambda _text: None)
-        self._on_tool_call = on_tool_call or (lambda _call: None)
-        self.strict_live = strict_live
+        self._initialize(NormalizerSinks(on_content, on_reasoning, on_tool_call), strict_live)
         self._tags = tuple(reasoning_tags)
         self._max_depth = max(int(max_reasoning_depth), 1)
-        self._parser = ToolCallParser(
-            self._emit_content, self._emit_call, strict_live=strict_live
-        )
-        self._buf = ""
+        self._apply_mode_spec(DEFAULT_EMULATE_SPEC)
+
+    @classmethod
+    def for_mode(
+        cls, mode_spec: NormalizerModeSpec, sinks: NormalizerSinks | None = None,
+        *, strict_live: bool = True,
+    ) -> "StreamNormalizer":
+        """Создаёт нормализатор без промежуточного парсера в режиме OFF."""
+        instance = cls.__new__(cls)
+        instance._initialize(sinks or NormalizerSinks(), strict_live)
+        instance._apply_mode_spec(mode_spec)
+        return instance
+
+    def _initialize(self, sinks: NormalizerSinks, strict_live: bool) -> None:
+        self._on_content = sinks.on_content or (lambda _text: None)
+        self._on_reasoning = sinks.on_reasoning or (lambda _text: None)
+        self._on_tool_call = sinks.on_tool_call or (lambda _call: None)
+        self.strict_live = strict_live
+        self._tags = REASONING_TAGS
+        self._max_depth = DEFAULT_MAX_REASONING_DEPTH
+        self._parser: ToolCallParser | None = None
+        self._buf, self._tag, self._doc = "", "", ""
         self._state = "text"  # text | reasoning | tool
-        self._tag = ""
+        self._reject_envelopes = False
         self._depth = 0
-        self._doc = ""  # текст, уже ушедший в ToolCallParser (для _code_context)
         self._content_pieces: list[str] = []
         self._reasoning_pieces: list[str] = []
         self._calls: list[dict] = []
+
+    def _apply_mode_spec(self, mode_spec: NormalizerModeSpec) -> None:
+        active = mode_spec.mode is not ToolMode.OFF or mode_spec.policy is ToollessTagPolicy.ERROR
+        self._reject_tools = active and mode_spec.mode is not ToolMode.EMULATE
+        # EMULATE+strict_live тоже fail-closed: голый конверт вне <tool_call> — утечка.
+        self._reject_envelopes = self._reject_tools or (active and self.strict_live)
+        if mode_spec.mode is ToolMode.EMULATE:
+            self._parser = ToolCallParser(
+                self._emit_content, self._emit_call, strict_live=self.strict_live
+            )
         candidates: list[tuple[str, str, str]] = []
         for tag in self._tags:
             candidates.append((f"<{tag}>", "reasoning_open", tag))
             candidates.append((f"</{tag}>", "orphan", tag))
-        candidates.append((TOOL_CALL_OPEN, "tool_open", ""))
-        candidates.extend((lit, "orphan", "") for lit in _ORPHAN_SERVICE_TAGS)
+        if active:
+            candidates.append((TOOL_CALL_OPEN, "tool_open", ""))
+            candidates.extend((lit, "orphan", "") for lit in _ORPHAN_SERVICE_TAGS)
         self._candidates = candidates
 
     @property
@@ -1665,13 +1653,12 @@ class StreamNormalizer:
 
     def has_open_tool_call(self) -> bool:
         """Есть ли незакрытый блок вызова инструмента, рассуждения или удержанный префикс."""
-        if self._state in ("tool", "reasoning") or self._parser.has_open_tool_call():
-            return True
-        if self._state == "text" and self._buf:
-            literals = [lit for lit, _k, _t in self._candidates]
-            if self._partial_prefix_len(literals) > 0:
-                return True
-        return False
+        return (
+            self._state in ("tool", "reasoning")
+            or (self._parser is not None and self._parser.has_open_tool_call())
+            or bool(self._partial_prefix_len([lit for lit, _k, _t in self._candidates]))
+            or (self._reject_envelopes and rejected_envelope_prefix_len(self._buf) > 0)
+        )
 
     def feed(self, text: str) -> None:
         self.feed_text(text)
@@ -1698,7 +1685,8 @@ class StreamNormalizer:
 
     def finish(self) -> None:
         self._drain(final=True)
-        self._parser.finish()
+        if self._parser is not None:
+            self._parser.finish()
 
     # -- sink-и нормализатора: аккумулятор сначала, уведомление следом ----------
     def _emit_content(self, text: str) -> None:
@@ -1719,7 +1707,10 @@ class StreamNormalizer:
         if text:
             # JSON вызова не участвует в Markdown-контексте последующего текста.
             self._doc += _OPAQUE_BLOCK if self._state == "tool" else text
-            self._parser.feed(text)
+            if self._parser is None:
+                self._emit_content(text)
+            else:
+                self._parser.feed(text)
 
     def _partial_prefix_len(self, literals) -> int:
         """Длина хвоста буфера — собственного префикса одного из литералов."""
@@ -1744,52 +1735,63 @@ class StreamNormalizer:
                 return
 
     def _drain_text(self, final: bool) -> bool:
-        """Шаг в обычном тексте; False — нужно ещё данных (или буфер пуст в финале)."""
-        best_idx = -1
-        best = None
-        for literal, kind, tag in self._candidates:
-            idx = self._buf.find(literal)
-            if idx != -1 and (best_idx == -1 or idx < best_idx):
-                best_idx, best = idx, (literal, kind, tag)
-        if best is None:
+        """S_PREFIX_HOLD не считается открытым блоком S_TOOL_GATE."""
+        found = ((self._buf.find(item[0]), item) for item in self._candidates)
+        found = min((item for item in found if item[0] >= 0), key=lambda item: item[0], default=None)
+        envelope = find_rejected_envelope(self._buf) if self._reject_envelopes else None
+        if envelope is not None and (found is None or envelope[0] <= found[0]):
+            found = (envelope[0], (envelope[1], "orphan", ""))
+        if found is None:
             if final:
-                literals = [
-                    lit for lit, kind, _t in self._candidates if kind != "tool_open"
-                ]
-                if self.strict_live and self._partial_prefix_len(literals):
-                    raise LiveParserError("unresolved reasoning tag prefix at finish")
-                self._feed_parser(self._buf)
-                self._buf = ""
-                return False
-            keep = self._partial_prefix_len([lit for lit, _k, _t in self._candidates])
-            if keep:
-                self._feed_parser(self._buf[:-keep])
-                self._buf = self._buf[-keep:]
+                self._finish_prefix_hold()
             else:
-                self._feed_parser(self._buf)
-                self._buf = ""
+                keep = self._partial_prefix_len([lit for lit, _k, _t in self._candidates])
+                if self._reject_envelopes:
+                    keep = max(keep, rejected_envelope_prefix_len(self._buf))
+                end = len(self._buf) - keep
+                self._feed_parser(self._buf[:end])
+                self._buf = self._buf[end:]
             return False
-        if best_idx > 0:
-            self._feed_parser(self._buf[:best_idx])
-            self._buf = self._buf[best_idx:]
+        index, candidate = found
+        if index:
+            self._feed_parser(self._buf[:index])
+            self._buf = self._buf[index:]
             return True
-        literal, kind, tag = best
+        return self._handle_candidate(candidate, final)
+
+    def _has_tool_prefix_candidate(self, text: str) -> bool:
+        """True — удержанный хвост оборван на префиксе тега; голый `</` — не префикс."""
+        if len(text) < 2 or text == "</":
+            return False
+        if any(literal.startswith(text) for literal, _kind, tag in self._candidates if not tag):
+            return True
+        return self._reject_envelopes and rejected_envelope_prefix_len(text) == len(text)
+
+    def _finish_prefix_hold(self) -> None:
+        if self._reject_tools and self._has_tool_prefix_candidate(self._buf):
+            if _code_context(self._doc + self._buf, len(self._doc), True) != "code":
+                raise LiveParserError("unresolved tool/service tag prefix at finish")
+        if self._parser is not None:
+            self._parser.finish()
+        self._doc += self._buf
+        self._emit_content(self._buf)
+        self._buf = ""
+
+    def _handle_candidate(self, candidate: tuple[str, str, str], final: bool) -> bool:
+        literal, kind, tag = candidate
         context = _code_context(self._doc + self._buf, len(self._doc), final)
         if context == "wait":
             return False
-        if context == "code":
-            self._feed_parser(literal)
-            self._buf = self._buf[len(literal) :]
-            return True
-        if kind == "reasoning_open":
-            self._state, self._tag, self._depth = "reasoning", tag, 1
-            self._buf = self._buf[len(literal) :]
-            return True
-        if kind == "tool_open":
-            self._state = "tool"
-            return True
-        if self.strict_live:
-            raise LiveParserError(f"orphan service tag: {literal.strip('<>/')}")
+        if context != "code":
+            if kind == "reasoning_open":
+                self._state, self._tag, self._depth = "reasoning", tag, 1
+                self._buf = self._buf[len(literal) :]
+                return True
+            if (self._reject_tools and not tag) or (self.strict_live and kind == "orphan"):
+                raise LiveParserError(f"unexpected service tag: {literal.strip('<>/')}")
+            if kind == "tool_open":
+                self._state = "tool"
+                return True
         self._feed_parser(literal)
         self._buf = self._buf[len(literal) :]
         return True
@@ -1832,8 +1834,8 @@ class StreamNormalizer:
         end = _find_tool_close_outside_string(self._buf, len(TOOL_CALL_OPEN))
         if end == -1:
             if final:
-                # Финал решает сам парсер: настоящий незакрытый блок — LiveParserError,
-                # процитированный в Markdown-коде — обычный текст.
+                if self.strict_live:
+                    raise LiveParserError("unclosed tool_call block")
                 self._feed_parser(self._buf)
                 self._buf = ""
                 self._state = "text"
@@ -1848,9 +1850,7 @@ _PARALLEL_NAME = "parallel"
 _PARALLEL_LIST_KEYS = ("tool_uses", "calls", "tools")
 _SUBCALL_NAME_KEYS = ("recipient_name", "name")
 _SUBCALL_ARGS_KEYS = ("parameters", "arguments")
-# Умолчания лимитов распаковки `parallel`: не потолки, а значения по умолчанию параметров
-# `max_parallel_calls`/`max_parallel_depth`. Ядро окружение не читает (BND-001) — эффективные
-# значения (env `BRIDGE_MAX_PARALLEL_CALLS`/`BRIDGE_MAX_PARALLEL_DEPTH`) передаёт владелец маршрута.
+# Умолчания `parallel`; конфигурацию лимитов передаёт владелец маршрута (BND-001).
 DEFAULT_MAX_PARALLEL_CALLS = 64
 DEFAULT_MAX_PARALLEL_DEPTH = 8
 # Семантические payload-поля: пустая строка там может быть осмысленной нагрузкой.
@@ -1876,9 +1876,7 @@ def _call_name_and_args(tool_call: Any) -> tuple[str, Any]:
 def _with_arguments(tool_call: Any, arguments: Any) -> Any:
     """Копия вызова с новыми arguments (тип и остальные поля вызова сохраняются)."""
     if isinstance(tool_call, ToolCall):
-        return replace(
-            tool_call, function=replace(tool_call.function, arguments=arguments)
-        )
+        return replace(tool_call, function=replace(tool_call.function, arguments=arguments))
     if isinstance(tool_call.get("function"), dict):
         return dict(
             tool_call, function=dict(tool_call["function"], arguments=arguments)
@@ -2212,6 +2210,4 @@ def finalize_turn(
         parser.finish()
     else:
         add_content(text)
-    return replace(
-        raw, text="".join(pieces), tool_calls=tuple(tool_calls), events=tuple(events)
-    )
+    return replace(raw, text="".join(pieces), tool_calls=tuple(tool_calls), events=tuple(events))
