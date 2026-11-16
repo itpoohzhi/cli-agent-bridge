@@ -14,8 +14,8 @@ Pure-ядро `compile_catalog` не читает диск и не исполь�
 2. Модели провайдера = `models_overrides ∪ discovery.static ∪ discovery.model_ids`.
    Поля: `models_overrides` ⊕ discovery.meta ⊕ `models_defaults`; для `confirmed`/`stale` с
    валидной квитанцией efforts берутся из `efforts_proven`.
-3. Один `model_id` у нескольких провайдеров: побеждает минимальный `(priority, provider_id)`,
-   остальные — в `alternates` сайдкара.
+3. Один `model_id` у нескольких провайдеров: при явном routing побеждает максимальный вес
+   enabled bridge, затем `(priority, provider_id)`; без routing сохраняется прежний выбор.
 4. Каждая модель проверяется `build_catalog(strict)` на синтетическом каталоге из одной
    модели: провал -> `rejected[mid]`, в `fleet` модель не попадает.
 5. Порядок детерминирован: провайдеры по `(priority, provider_id)`, модели по `model_id`.
@@ -32,15 +32,14 @@ import hashlib
 import json
 import os
 import tempfile
-from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, Unpack
 
 from core.backend_adapter import FleetViolation, build_catalog
+from core.compile_model_records import CompileOptions, CompileResult
+from core.compile_routes_pipeline import compile_catalog as _compile_catalog
+from core.compile_routes_pipeline import render_fleet_json as _render_fleet_json
 from core.model_lifecycle import (
-    STATUS_CONFIRMED,
-    STATUS_QUARANTINE,
-    STATUS_STALE,
     LifecycleRegistry,
 )
 from core.provider_manifest import (
@@ -49,7 +48,6 @@ from core.provider_manifest import (
     load_manifests,
     providers_dir,
     read_yaml_file,
-    resolve_family,
 )
 
 COMPILER_VERSION = 1
@@ -97,17 +95,6 @@ class CompileError(Exception):
         self.model = model
 
 
-@dataclass(frozen=True)
-class CompileResult:
-    """Итог компиляции: `fleet` (schema 3), `sidecar` (catalog-lock/1), диагностика."""
-
-    fleet: Dict[str, Any]
-    sidecar: Dict[str, Any]
-    rejected: Mapping[str, str] = field(default_factory=dict)
-    warnings: Tuple[str, ...] = ()
-    rejected_providers: Mapping[str, Tuple[str, ...]] = field(default_factory=dict)
-
-
 # ---- канонический вывод -------------------------------------------------------------
 
 
@@ -119,8 +106,8 @@ def canonical_json(obj: Any) -> bytes:
 
 
 def render_fleet_json(fleet: Mapping[str, Any]) -> bytes:
-    """Байты `fleet.json`: порядок ключей сохраняется, отступ 2, UTF-8, завершающий `\\n`."""
-    return (json.dumps(fleet, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
+    """Делегирует канонический многострочный вывод UTF-8 с завершающим LF."""
+    return _render_fleet_json(fleet)
 
 
 def sha256_hex(data: bytes) -> str:
@@ -397,209 +384,24 @@ def _history_max(env: Optional[Mapping[str, str]]) -> int:
         return 20
 
 
-def compile_catalog(
-    header: Mapping[str, Any],
-    manifests: Sequence[ProviderManifest],
-    *,
-    kinds: Mapping[str, Any],
-    discovery: Optional[Mapping[str, Any]] = None,
-    registry: Optional[LifecycleRegistry] = None,
-    receipts: Optional[Mapping[str, Mapping[str, Any]]] = None,
-    rejected_providers: Optional[Mapping[str, Tuple[str, ...]]] = None,
-    manifest_digests: Optional[Mapping[str, str]] = None,
-    now: str = "",
-    env: Optional[Mapping[str, str]] = None,
+# Делегирует компиляцию с совместимыми фабриками фасада.
+def compile_catalog(header: Mapping[str, Any], manifests: Sequence[ProviderManifest], *,
+    kinds: Mapping[str, Any], **options: Unpack[CompileOptions]) -> CompileResult:
+    options["error_factory"] = CompileError
+    options["result_factory"] = _compiled_result
+    return _compile_catalog(header, manifests, kinds=kinds, **options)
+
+
+def _compiled_result(
+    fleet: Dict[str, Any],
+    sidecar: Dict[str, Any],
+    rejected: Mapping[str, str],
+    warnings: Tuple[str, ...],
+    rejected_providers: Mapping[str, Tuple[str, ...]],
 ) -> CompileResult:
-    """Pure-компиляция каталога; `now` — строка времени сайдкара (не влияет на `fleet`)."""
-    clean_header = validate_header(header)
-    discovery = discovery or {}
-    receipts = receipts or {}
-    history_max = _history_max(env)
-    ordered = sorted(manifests, key=lambda m: (m.priority, m.provider_id))
-    rejected: Dict[str, str] = {}
-    rejected_by: Dict[str, str] = {}
-    warnings: List[str] = []
-    bad_providers: Dict[str, Tuple[str, ...]] = dict(rejected_providers or {})
-
-    backends: Dict[str, Any] = {}
-    fingerprints: Dict[str, str] = {}
-    for manifest in ordered:
-        found = discovery.get(manifest.provider_id)
-        fingerprints[manifest.provider_id] = (
-            getattr(found, "fingerprint_sha256", "") if found is not None else ""
-        )
-        if manifest.transport.bridge is None:
-            continue
-        entry = backend_entry(manifest)
-        probe_entry = dict(entry, enabled=True)
-        synthetic = {
-            "schema_version": 3,
-            "default_model": "-",
-            "image_limits": clean_header["image_limits"],
-            "admission": clean_header["admission"],
-            "backends": {manifest.provider_id: probe_entry},
-            "models": [],
-        }
-        try:
-            build_catalog(synthetic, kinds, mode="strict")
-        except FleetViolation as violation:
-            if violation.reason not in ("models_invalid", "default_model_invalid"):
-                bad_providers[manifest.provider_id] = (violation.reason,)
-                continue
-        backends[manifest.provider_id] = entry
-
-    fleet_models: Dict[str, Dict[str, Any]] = {}
-    fleet_owner: Dict[str, str] = {}
-    candidates: Dict[
-        str, List[Tuple[ProviderManifest, Dict[str, Any], Mapping[str, Any]]]
-    ] = {}
-    for manifest in ordered:
-        if manifest.provider_id in bad_providers:
-            continue
-        found = discovery.get(manifest.provider_id)
-        discovered = list(getattr(found, "model_ids", ()) or ())
-        meta_map: Mapping[str, Mapping[str, Any]] = getattr(found, "meta", {}) or {}
-        for model_id in _model_ids(manifest, discovered):
-            rule = manifest.rule_for(model_id)
-            if rule is not None and "quorum_eligible" in rule.fields:
-                warnings.append(f"quorum_eligible_override_ignored:{model_id}")
-            candidates.setdefault(model_id, []).append(
-                (manifest, dict(meta_map.get(model_id, {})), {})
-            )
-
-    sidecar_models: Dict[str, Dict[str, Any]] = {}
-    for model_id in sorted(candidates):
-        providers = candidates[model_id]
-        bridged = [item for item in providers if item[0].transport.bridge is not None]
-        serving = [item for item in providers if item[0].enabled]
-        primary = (serving or providers)[0][0]
-        fleet_source = bridged[0] if bridged else None
-        alternates = [
-            {"provider": item[0].provider_id}
-            for item in providers
-            if item[0].provider_id != primary.provider_id
-        ]
-        status_owner = primary
-        fp = fingerprints.get(status_owner.provider_id, "")
-        record = (
-            registry.get((status_owner.provider_id, model_id, fp)) if registry else None
-        )
-        status = record.status if record is not None else STATUS_QUARANTINE
-        receipt = None
-        if (
-            record is not None
-            and status in (STATUS_CONFIRMED, STATUS_STALE)
-            and record.receipt_sha256
-        ):
-            candidate = receipts.get(record.receipt_sha256)
-            if (
-                isinstance(candidate, Mapping)
-                and candidate.get("verdict") == "confirmed"
-            ):
-                receipt = candidate
-            elif status == STATUS_CONFIRMED:
-                status = STATUS_QUARANTINE
-        elif status == STATUS_CONFIRMED:
-            status = STATUS_QUARANTINE
-        if fleet_source is not None:
-            manifest, meta, _ = fleet_source
-            fleet_record = model_record(
-                manifest, model_id, meta, receipt if manifest is status_owner else None
-            )
-            reason = _check_single(clean_header, manifest, fleet_record, kinds)
-            if reason:
-                rejected[model_id] = reason
-                rejected_by[model_id] = manifest.provider_id
-                continue
-            fleet_models[model_id] = fleet_record
-            fleet_owner[model_id] = manifest.provider_id
-        family, family_source = resolve_family(status_owner, model_id)
-        quorum = bool(
-            status == STATUS_CONFIRMED
-            and family
-            and family_source in _QUORUM_FAMILY_SOURCES
-        )
-        entry: Dict[str, Any] = {
-            "provider": status_owner.provider_id,
-            "status": status,
-            "family": family,
-            "family_source": family_source,
-            "quorum_eligible": quorum,
-            "quota_group": status_owner.limits.quota_group,
-            "in_fleet": fleet_source is not None,
-            "efforts_proven": list(receipt.get("efforts_proven") or [])
-            if receipt
-            else [],
-            "alternates": alternates,
-            "history": [dict(h) for h in (record.history if record else ())][
-                -history_max:
-            ],
-        }
-        if receipt is not None and record is not None:
-            entry["probe"] = {
-                "receipt_sha256": record.receipt_sha256,
-                "fingerprint_sha256": record.fingerprint_sha256,
-                "probe_version": receipt.get("probe_version"),
-                "at": receipt.get("finished_at"),
-            }
-        sidecar_models[model_id] = entry
-
-    fleet: Dict[str, Any] = dict(clean_header)
-    fleet["backends"] = backends
-    fleet["models"] = [
-        fleet_models[mid]
-        for mid in _ordered_model_ids(fleet_models, fleet_owner, ordered)
-        if mid in fleet_models
-    ]
-    try:
-        build_catalog(fleet, kinds, mode="strict", constraints_enabled=False)
-    except FleetViolation as violation:
-        raise CompileError(violation.reason, violation.model) from violation
-    fleet_bytes = render_fleet_json(fleet)
-
-    digests = dict(manifest_digests or {})
-    discovery_digest = sha256_hex(
-        canonical_json(
-            {
-                pid: {
-                    "fingerprint_sha256": getattr(found, "fingerprint_sha256", ""),
-                    "model_ids": list(getattr(found, "model_ids", ()) or ()),
-                }
-                for pid, found in sorted(discovery.items())
-            }
-        )
-    )
-    sidecar: Dict[str, Any] = {
-        "schema": SIDECAR_SCHEMA,
-        "compiler_version": COMPILER_VERSION,
-        "compiled_at": now,
-        "inputs": {
-            "manifests": digests,
-            "manifests_sha256": sha256_hex(canonical_json(digests)),
-            "discovery_sha256": discovery_digest,
-        },
-        "fleet_sha256": sha256_hex(fleet_bytes),
-        "providers": {
-            m.provider_id: _provider_sidecar(m, fingerprints.get(m.provider_id, ""))
-            for m in ordered
-            if m.provider_id not in bad_providers
-        },
-        "models": sidecar_models,
-        "rejected": {
-            mid: {"provider": rejected_by.get(mid, ""), "reason": reason}
-            for mid, reason in sorted(rejected.items())
-        },
-        "rejected_providers": {
-            pid: list(r) for pid, r in sorted(bad_providers.items())
-        },
-    }
-    return CompileResult(
-        fleet=fleet,
-        sidecar=sidecar,
-        rejected=dict(rejected),
-        warnings=tuple(warnings),
-        rejected_providers=bad_providers,
-    )
+    """Привязывает sidecar к байтам публичного renderer, сохраняя legacy-тип результата."""
+    sidecar = dict(sidecar, fleet_sha256=sha256_hex(render_fleet_json(fleet)))
+    return CompileResult(fleet, sidecar, rejected, warnings, rejected_providers)
 
 
 def _ordered_model_ids(

@@ -81,7 +81,7 @@ def test_published_efforts_match_factory_capabilities(
 
 
 def test_removed_droid_models_absent_or_routed_via_opencode_go() -> None:
-    """Удалённые модели не возвращаются в Droid, а DeepSeek остаётся в Go."""
+    """DeepSeek идёт напрямую, сохраняя Go как резерв вне Droid; Kimi отсутствует."""
     fleet = cast(
         _FleetConfig,
         json.loads((ROOT / "fleet.json").read_text(encoding="utf-8")),
@@ -102,7 +102,7 @@ def test_removed_droid_models_absent_or_routed_via_opencode_go() -> None:
     assert "kimi-k3.1-pro" not in model_ids
     assert "kimi-k3.1-pro" not in droid_manifest["models_overrides"]
     assert "deepseek-v4.1-flash" in model_ids
-    assert any(m["id"] == "deepseek-v4.1-flash" and m.get("backend") == "opencode-go" for m in fleet["models"])
+    assert any(m["id"] == "deepseek-v4.1-flash" and m.get("backend") == "deepseek-direct" for m in fleet["models"])
     assert "deepseek-v4.1-flash" not in droid_manifest["models_overrides"]
     deepseek = go_manifest["models_overrides"]["deepseek-v4.1-flash"]
     assert deepseek["efforts"] == ["off", "low", "high", "max"]

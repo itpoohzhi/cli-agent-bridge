@@ -40,9 +40,20 @@ from core.backend_adapter import (
     AllowEntry,
     KindConstraints,
     _base_url_allowed,
-    kind_constraints,
+)
+from core.manifest_validation import (
+    ManifestContext,
+    ManifestErrors as _Errors,
+    ManifestHeader,
+    ManifestInput,
+    ManifestValidationPorts,
+    manifest_limits,
+    manifest_routing,
+    manifest_section,
+    validate_manifest_stages,
 )
 from core.param_adapter import GLOBAL_WHITELIST
+from core.routing_schema import RoutingConfig
 
 MANIFEST_VERSION = 1
 PROVIDER_ID_RE = re.compile(r"[a-z0-9][a-z0-9-]{0,31}")
@@ -256,6 +267,7 @@ class ProviderManifest:
     params: ParamsConfig = field(default_factory=ParamsConfig)
     probe: ProbeConfig = field(default_factory=ProbeConfig)
     manifest_version: int = MANIFEST_VERSION
+    routing: RoutingConfig = field(default_factory=RoutingConfig)
 
     @property
     def max_concurrent(self) -> int:
@@ -455,15 +467,6 @@ def resolve_family(
 
 
 # ---- валидация ---------------------------------------------------------------------
-
-
-class _Errors:
-    def __init__(self) -> None:
-        self.items: List[str] = []
-
-    def add(self, slug: str) -> None:
-        if slug not in self.items:
-            self.items.append(slug)
 
 
 def _parse_allow(
@@ -843,171 +846,138 @@ def _parse_fingerprint(raw: Any, err: _Errors) -> FingerprintConfig:
     )
 
 
-def validate_manifest(
-    doc: Any,
-    kinds: Optional[Mapping[str, Any]] = None,
-    *,
-    filename: Optional[str] = None,
-    env: Optional[Mapping[str, str]] = None,
-    schema: Optional[Mapping[str, Any]] = None,
-) -> ManifestValidationResult:
-    """Pure-валидация манифеста: никогда не бросает, ошибки — slug'и класса I.
+def _validate_bridge_options(bridge: BridgeTransport, constraints: KindConstraints, err: _Errors) -> None:
+    if not bridge.options:
+        return
+    schema_opts = constraints.options_schema
+    if not schema_opts or set(bridge.options) - set(schema_opts):
+        err.add("provider_options_invalid")
+    elif any(value not in schema_opts[key] for key, value in bridge.options.items()):
+        err.add("provider_options_invalid")
 
-    `kinds` — реестр видов (`adapters.ADAPTER_KINDS`); без него проверка `kind` и
-    ограничений вида пропускается. `filename` — имя файла (`demo.yaml`): `provider_id`
-    обязан совпадать со stem.
-    """
-    source = os.environ if env is None else env
-    err = _Errors()
-    if not isinstance(doc, dict):
-        return ManifestValidationResult(None, ("provider_manifest_invalid",))
-    try:
-        unknown = unknown_keys(doc, schema if schema is not None else load_schema())
-    except (OSError, ValueError):
-        unknown = []
-        err.add("provider_schema_unavailable")
-    if unknown:
-        err.add("provider_key_unknown")
-    version = doc.get("manifest_version")
-    if not _is_int(version) or version != MANIFEST_VERSION:
-        err.add("provider_manifest_version_unsupported")
-    provider_id = doc.get("provider_id")
-    if (
-        not isinstance(provider_id, str)
-        or not PROVIDER_ID_RE.fullmatch(provider_id)
-        or (filename is not None and provider_id != Path(filename).stem)
-    ):
-        err.add("provider_id_invalid")
-        provider_id = provider_id if isinstance(provider_id, str) else ""
-    kind = doc.get("kind")
-    constraints = KindConstraints()
-    kind_known = True  # неизвестный вид: проверки ограничений вида не применимы
-    if not isinstance(kind, str) or not kind:
-        err.add("provider_kind_unknown")
-        kind, kind_known = "", False
-    elif kinds is not None:
-        if kind not in kinds:
-            err.add("provider_kind_unknown")
-            kind_known = False
+
+def _validate_bridge_transport(
+    header: ManifestHeader, bridge: Optional[BridgeTransport],
+    allow: Tuple[AllowEntry, ...], err: _Errors,
+) -> None:
+    if bridge is None or not header.kind_known:
+        return
+    constraints = header.constraints
+    if bridge.base_url is not None:
+        if not constraints.base_url_allowed:
+            err.add("provider_base_url_unexpected")
         else:
-            constraints = kind_constraints(kinds, kind)
-    owned_by = doc.get("owned_by")
-    if not isinstance(owned_by, str) or not owned_by:
+            _validate_manifest_url(header.provider_id, bridge.base_url, allow, err)
+    elif constraints.base_url_allowed:
+        err.add("provider_base_url_missing")
+    if bridge.api_key_env is not None and not constraints.api_key_env_allowed:
         err.add("provider_manifest_invalid")
-        owned_by = ""
-    flags: Dict[str, bool] = {}
-    for key, default in (("enabled", True), ("required", False)):
-        value = doc.get(key, default)
-        if not isinstance(value, bool):
-            err.add("provider_manifest_invalid")
-            value = default
-        flags[key] = value
-    defaults = Defaults.from_env(source)
-    priority = doc.get("priority", defaults.priority)
-    if not _is_int(priority) or not 0 <= priority <= 1000:
-        err.add("provider_manifest_invalid")
-        priority = defaults.priority
+    _validate_bridge_options(bridge, constraints, err)
 
-    raw_transport = doc.get("transport", {})
-    if raw_transport is None:
-        raw_transport = {}
-    if not isinstance(raw_transport, dict):
-        err.add("provider_manifest_invalid")
-        raw_transport = {}
-    bridge = _parse_bridge(raw_transport.get("bridge"), err)
-    direct = _parse_direct(raw_transport.get("direct"), source, err)
-    allow = _parse_allow(doc.get("allow_base_url"), source, err)
 
-    raw_limits = doc.get("limits", {})
-    if raw_limits is None:
-        raw_limits = {}
-    if not isinstance(raw_limits, dict):
-        err.add("provider_manifest_invalid")
-        raw_limits = {}
-    cap = raw_limits.get("max_concurrent", defaults.max_concurrent)
-    if (
-        not _is_int(cap)
-        or cap < 1
-        or (
-            constraints.max_concurrent_max is not None
-            and cap > constraints.max_concurrent_max
-        )
-    ):
-        err.add("provider_max_concurrent_invalid")
-        cap = defaults.max_concurrent
-    quota = raw_limits.get("quota_group", provider_id)
-    if not isinstance(quota, str) or not QUOTA_GROUP_RE.fullmatch(quota):
-        err.add("provider_quota_group_invalid")
-        quota = provider_id
-    pin = raw_limits.get("pin_required", False)
-    timeout_s = raw_limits.get("timeout_s", defaults.timeout_s)
-    if not isinstance(pin, bool) or not _is_num(timeout_s) or timeout_s <= 0:
-        err.add("provider_manifest_invalid")
-        pin, timeout_s = False, defaults.timeout_s
-    limits = LimitsConfig(
-        cap, quota, bool(pin) or constraints.pin_required, float(timeout_s)
+def _validate_manifest_url(
+    provider_id: str, url: str, allow: Tuple[AllowEntry, ...], err: _Errors,
+) -> None:
+    allowed = (
+        any(entry.matches(url) for entry in allow)
+        if allow else _base_url_allowed(provider_id, url, None)
     )
-    fingerprint = _parse_fingerprint(doc.get("fingerprint"), err)
-    if limits.pin_required and not fingerprint.binary_path:
-        err.add("provider_technical_ref_missing")
+    if not allowed:
+        err.add("provider_base_url_invalid")
 
-    if bridge is not None and kind_known:
-        if bridge.base_url is not None:
-            if not constraints.base_url_allowed:
-                err.add("provider_base_url_unexpected")
-            elif allow:
-                if not any(entry.matches(bridge.base_url) for entry in allow):
-                    err.add("provider_base_url_invalid")
-            elif not _base_url_allowed(provider_id, bridge.base_url, None):
-                err.add("provider_base_url_invalid")
-        elif constraints.base_url_allowed:
-            err.add("provider_base_url_missing")
-        if bridge.api_key_env is not None and not constraints.api_key_env_allowed:
-            err.add("provider_manifest_invalid")
-        if bridge.options:
-            schema_opts = constraints.options_schema
-            if not schema_opts or set(bridge.options) - set(schema_opts):
-                err.add("provider_options_invalid")
-            else:
-                for opt_key, opt_value in bridge.options.items():
-                    if opt_value not in schema_opts[opt_key]:
-                        err.add("provider_options_invalid")
 
-    if direct is not None and direct.http:
-        direct_url = direct.http.get("base_url")
-        if isinstance(direct_url, str):
-            if allow:
-                if not any(entry.matches(direct_url) for entry in allow):
-                    err.add("provider_base_url_invalid")
-            elif not _base_url_allowed(provider_id, direct_url, None):
-                err.add("provider_base_url_invalid")
-        elif direct.type == "http":
-            err.add("provider_base_url_missing")
+def _validate_direct_transport(
+    provider_id: str, direct: Optional[TransportDirect],
+    allow: Tuple[AllowEntry, ...], err: _Errors,
+) -> None:
+    if direct is None or not direct.http:
+        return
+    url = direct.http.get("base_url")
+    if isinstance(url, str):
+        _validate_manifest_url(provider_id, url, allow, err)
+    elif direct.type == "http":
+        err.add("provider_base_url_missing")
 
-    manifest = ProviderManifest(
-        provider_id=provider_id,
-        kind=kind,
-        owned_by=owned_by,
-        enabled=flags["enabled"],
-        required=flags["required"],
-        priority=priority,
-        transport=TransportConfig(bridge, direct),
-        allow_base_url=allow,
+
+def _manifest_record(
+    header: ManifestHeader, context: ManifestContext[Defaults],
+    transport: Tuple[TransportConfig, Tuple[AllowEntry, ...]],
+    limits: LimitsConfig, fingerprint: FingerprintConfig,
+) -> ProviderManifest:
+    doc, defaults, err = context.doc, context.defaults, context.errors
+    return ProviderManifest(
+        provider_id=header.provider_id,
+        kind=header.kind,
+        owned_by=header.owned_by,
+        enabled=header.enabled,
+        required=header.required,
+        priority=header.priority,
+        transport=transport[0],
+        allow_base_url=transport[1],
         limits=limits,
         fingerprint=fingerprint,
         discovery=_parse_discovery(doc.get("discovery"), defaults, err),
         family_rule=_parse_family(doc.get("family_rule"), err),
-        models_defaults=_parse_models_defaults(
-            doc.get("models_defaults"), defaults, err
-        ),
+        models_defaults=_parse_models_defaults(doc.get("models_defaults"), defaults, err),
         models_overrides=_parse_overrides(doc.get("models_overrides"), err),
-        params=_parse_params(doc.get("params"), defaults, source, err),
+        params=_parse_params(doc.get("params"), defaults, context.env, err),
         probe=_parse_probe(doc.get("probe"), defaults, err),
+        routing=manifest_routing(doc, err),
+    )
+
+
+def _validated_manifest(
+    header: ManifestHeader, context: ManifestContext[Defaults],
+) -> ManifestValidationResult:
+    doc, err = context.doc, context.errors
+    raw = manifest_section(doc.get("transport"), err)
+    bridge = _parse_bridge(raw.get("bridge"), err)
+    direct = _parse_direct(raw.get("direct"), context.env, err)
+    allow = _parse_allow(doc.get("allow_base_url"), context.env, err)
+    parsed = manifest_limits(header, context, QUOTA_GROUP_RE)
+    limits = LimitsConfig(
+        parsed.max_concurrent, parsed.quota_group, parsed.pin_required, parsed.timeout_s,
+    )
+    fingerprint = _parse_fingerprint(doc.get("fingerprint"), err)
+    if limits.pin_required and not fingerprint.binary_path:
+        err.add("provider_technical_ref_missing")
+    _validate_bridge_transport(header, bridge, allow, err)
+    _validate_direct_transport(header.provider_id, direct, allow, err)
+    manifest = _manifest_record(
+        header, context, (TransportConfig(bridge, direct), allow), limits, fingerprint,
     )
     if err.items:
         return ManifestValidationResult(None, tuple(err.items))
     return ManifestValidationResult(manifest, ())
 
+
+def _manifest_ports() -> ManifestValidationPorts[Defaults, ManifestValidationResult]:
+    return ManifestValidationPorts(
+        defaults=Defaults.from_env,
+        build=_validated_manifest,
+        result=ManifestValidationResult,
+        load_schema=load_schema,
+        unknown_keys=unknown_keys,
+        provider_id_pattern=PROVIDER_ID_RE,
+        manifest_version=MANIFEST_VERSION,
+    )
+
+
+def _manifest_input(
+    doc: Any, kinds: Optional[Mapping[str, Any]], filename: Optional[str],
+    env: Optional[Mapping[str, str]], schema: Optional[Mapping[str, Any]],
+) -> ManifestInput:
+    return ManifestInput(
+        doc, kinds, Path(filename).stem if filename is not None else None,
+        os.environ if env is None else env, schema,
+    )
+
+
+def validate_manifest(
+    doc: Any, kinds: Optional[Mapping[str, Any]] = None, *, filename: Optional[str] = None,
+    env: Optional[Mapping[str, str]] = None, schema: Optional[Mapping[str, Any]] = None,
+) -> ManifestValidationResult:
+    return validate_manifest_stages(_manifest_input(doc, kinds, filename, env, schema), _manifest_ports())
 
 # ---- загрузка с диска --------------------------------------------------------------
 

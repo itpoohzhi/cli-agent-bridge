@@ -32,25 +32,26 @@ DROID_MODELS = {  # model_id -> (вендор, default_effort, efforts)
     "gemini-3.8-flash-droid": ("Google", "high", LMH),
 }
 PRIMARY = {
-    "gpt-6.1-sol": "codex",
+    "gpt-6.1-sol": "openai-key-2",
     "claude-sonnet-5-5": "claude-p",
     "gemini-3.8-flash": "agy",
     "gpt-6.1-sol-droid": "droid",
     "claude-sonnet-5-5-droid": "droid",
     "gemini-3.8-flash-droid": "droid",
     "claude-opus-5-5": "claude-p",
-    "claude-haiku-5-5": "opencode-go-claude",
+    "claude-haiku-5-5": "claude-p",
     "gemini-4-argon": "agy",
     "gemini-4-carbon": "agy",
-    "gpt-6.1-terra": "codex",
+    "gpt-6.1-terra": "openai-key-2",
 }
 ALTERNATES = {
-    "gpt-6.1-sol": ["droid"],
+    "gpt-6.1-sol": ["codex", "openai-key-3", "droid"],
+    "gpt-6.1-terra": ["codex", "openai-key-3"],
     "claude-sonnet-5-5": ["droid"],
     "gemini-3.8-flash": ["droid"],
-    "claude-haiku-5-5": ["claude-p"],
+    "claude-haiku-5-5": ["opencode-go-claude"],
 }
-GO_ONLY = ("deepseek-v4.1-flash",)  # вне droid: только мост opencode-go; kimi-k3.1-pro удалена из каталога
+DIRECT_MODELS = ("deepseek-v4.1-flash",)  # вне droid: direct с резервом opencode-go; kimi-k3.1-pro удалена
 SUFFIX_ALIASES = {
     **{
         f"gemini-3.8-flash-droid-{effort}": {
@@ -85,24 +86,20 @@ SUFFIX_ALIASES = {
         for effort in (*LMH, "max")
     },
     **{
-        f"gemini-4-carbon-{effort}": {
-            "target": "gemini-4-carbon",
-            "default_effort": effort,
+        f"gemini-4-hydrogen-{effort}": {
+            "backend_id": "gemini-4-hydrogen",
+            "backend": "agy",
+            "effort": effort,
+        }
+        for effort in (*LMH, "xhigh")
+    },
+    **{
+        f"gemini-4-argon-{effort}": {
+            "backend_id": "gemini-4-argon",
+            "backend": "agy",
+            "effort": effort,
         }
         for effort in LMH
-    },
-    "gemini-4-argon-low": {
-        "target": "gemini-4-argon",
-        "default_effort": "low",
-    },
-    "gemini-4-argon-medium": {
-        "target": "gemini-4-argon",
-        "default_effort": "medium",
-    },
-    "gemini-4-argon-high": {
-        "backend_id": "gemini-4-argon",
-        "backend": "agy",
-        "effort": "high",
     },
     **{
         f"gemini-3.8-flash-{effort}": {
@@ -157,7 +154,7 @@ def test_droid_manifest_registers_three_subscription_models() -> None:
     assert (droid.enabled, droid.priority) == (True, 30)
     limits = droid.limits
     assert (limits.max_concurrent, limits.quota_group, limits.timeout_s) == (
-        32,
+        64,
         "factory-droid",
         450,
     )
@@ -179,8 +176,11 @@ def test_provider_priorities() -> None:
         "muse": 10,
         "codex": 10,
         "opencode-go": 10,
-        "opencode-go-claude": 5,
+        "opencode-go-claude": 15,
         "opencode-zen": 50,
+        "openai-key-2": 20,
+        "openai-key-3": 20,
+        "deepseek-direct": 20,
     }
     assert {m.provider_id: m.priority for m in manifests} == expected
 
@@ -194,10 +194,10 @@ def test_primary_and_alternates_follow_priority(compiled: Any) -> None:
         assert [
             a["provider"] for a in compiled.sidecar["models"][mid]["alternates"]
         ] == alternates
-    for mid in GO_ONLY:
-        assert compiled.sidecar["models"][mid]["provider"] == "opencode-go"
-        assert backends[mid] == "opencode-go"
-        assert compiled.sidecar["models"][mid]["alternates"] == []
+    for mid in DIRECT_MODELS:
+        assert compiled.sidecar["models"][mid]["provider"] == "deepseek-direct"
+        assert backends[mid] == "deepseek-direct"
+        assert compiled.sidecar["models"][mid]["alternates"] == [{"provider": "opencode-go"}]
     assert "kimi-k3.1-pro" not in compiled.sidecar["models"]
     assert compiled.rejected == {} and compiled.rejected_providers == {}
 
@@ -213,7 +213,7 @@ def test_fleet_json_is_in_sync(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) 
     assert fleet_compile.main(["--check"]) == 0
     raw = json.loads((ROOT / "fleet.json").read_text(encoding="utf-8"))
     droid = raw["backends"]["droid"]
-    assert droid["enabled"] is True and droid["max_concurrent"] == 32
+    assert droid["enabled"] is True and droid["max_concurrent"] == 64
     # Версия/пин бинаря — из шапки манифеста, а не литерал теста (пере-снятие провенанса).
     header = load_header(PROVIDERS / "_fleet.yaml")
     assert raw["technical_ref"] == header["technical_ref"]
@@ -231,10 +231,12 @@ def test_explain_prints_deterministic_tiebreak(
     doc = json.loads(outputs[0])
     assert (doc["model_id"], doc["primary"], doc["alternates"]) == (
         "gpt-6.1-sol",
-        "codex",
-        ["droid"],
+        "openai-key-2",
+        ["codex", "openai-key-3", "droid"],
     )
     assert [(c["priority"], c["provider_id"]) for c in doc["candidates"]] == [
+        (20, "openai-key-2"),
+        (20, "openai-key-3"),
         (10, "codex"),
         (30, "droid"),
     ]
@@ -259,7 +261,10 @@ def test_suffix_aliases_match_pinned_ids_and_catalog(compiled: Any) -> None:
     for entry in aliases.values():
         model = by_id[entry.get("backend_id", entry.get("target"))]
         if "backend" in entry:
-            assert model["backend"] == entry["backend"]
+            assert entry["backend"] in {
+                model["backend"],
+                *(r["backend"] for r in model.get("routing", {}).get("routes", [])),
+            }
         assert entry.get("effort", entry.get("default_effort")) in model["efforts"]
 
 
@@ -278,7 +283,7 @@ def test_suffix_alias_resolves_to_base_with_effort(compiled: Any, alias: str) ->
 
 def test_deepseek_flash_is_not_redirected_to_free(compiled: Any) -> None:
     models = build_catalog(compiled.fleet, ADAPTER_KINDS)["models"]
-    assert models["deepseek-v4.1-flash"]["backend"] == "opencode-go"  # не droid
+    assert models["deepseek-v4.1-flash"]["backend"] == "deepseek-direct"  # не droid
     assert "deepseek-v4.1-flash" not in _aliases()
     assert (
         "deepseek-v4.1-flash-free" in models

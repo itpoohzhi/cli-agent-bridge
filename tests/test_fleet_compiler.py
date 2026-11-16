@@ -144,6 +144,20 @@ def test_fleet_json_schema_keys_not_extended() -> None:
     fleet = compile_from_disk(kinds=ADAPTER_KINDS, now=NOW).fleet
     assert set(fleet) <= FLEET_TOP_KEYS
     assert all(set(m) <= FLEET_MODEL_KEYS for m in fleet["models"])
+    assert all("input" not in m for m in fleet["models"])
+    assert all("required" not in b for b in fleet["backends"].values())
+    for model in fleet["models"]:
+        assert not {"method", "proof"} & model["images"].keys()
+        assert model["images"].get("cli_registry") != "implicit_supported"
+        assert "routing" not in model or len(model["routing"]["routes"]) > 1
+    normalized = build_catalog(fleet, ADAPTER_KINDS, mode="strict", constraints_enabled=False)
+    assert normalized["models"]["gpt-6.1-sol"]["input"] == ["text"]
+    assert normalized["models"]["gpt-6.1-sol"]["images"] == {
+        "status": "unverified",
+        "cli_registry": "implicit_supported",
+        "method": None,
+        "proof": None,
+    }
 
 
 # ---- детерминизм -------------------------------------------------------------------
@@ -154,6 +168,10 @@ def test_compile_is_byte_deterministic() -> None:
     second = compile_from_disk(kinds=ADAPTER_KINDS, now=NOW)
     assert render_fleet_json(first.fleet) == render_fleet_json(second.fleet)
     assert fc.canonical_json(first.sidecar) == fc.canonical_json(second.sidecar)
+    standard = (json.dumps(first.fleet, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
+    assert render_fleet_json(first.fleet) == standard
+    assert len(standard.splitlines()) <= 1062
+    assert len(render_fleet_json(first.sidecar).splitlines()) <= 734
 
 
 def test_input_order_does_not_change_output() -> None:
@@ -374,19 +392,22 @@ def discovery_fp() -> Dict[str, Any]:
     return {"alpha": SimpleNamespace(fingerprint_sha256=FP, model_ids=(), meta={})}
 
 
-def test_confirmed_with_valid_receipt_sets_efforts_and_quorum() -> None:
-    rc = receipt(proven=("low", "medium", "high"))
-    digest = sha(rc)
-    registry = registry_with(
+def probed_registry(
+    digest: str, efforts: tuple[str, ...] = ("high",)
+) -> LifecycleRegistry:
+    return registry_with(
         [
             (EVENT_DISCOVERED_OK, None),
             (EVENT_PROBE_START, None),
-            (
-                EVENT_PROBE_PASS,
-                {"receipt_sha256": digest, "efforts_proven": ["low", "medium", "high"]},
-            ),
+            (EVENT_PROBE_PASS, {"receipt_sha256": digest, "efforts_proven": list(efforts)}),
         ]
     )
+
+
+def test_confirmed_with_valid_receipt_sets_efforts_and_quorum() -> None:
+    rc = receipt(proven=("low", "medium", "high"))
+    digest = sha(rc)
+    registry = probed_registry(digest, ("low", "medium", "high"))
     result = compile_docs(
         manifest_doc(),
         registry=registry,
@@ -395,6 +416,7 @@ def test_confirmed_with_valid_receipt_sets_efforts_and_quorum() -> None:
     )
     entry = result.sidecar["models"]["alpha-one"]
     assert entry["status"] == "confirmed" and entry["quorum_eligible"] is True
+    assert result.sidecar["providers"]["alpha"]["fingerprint_sha256"] == FP
     assert entry["efforts_proven"] == ["low", "medium", "high"]
     assert (
         entry["probe"]["receipt_sha256"] == digest
@@ -412,16 +434,7 @@ def test_efforts_pin_limits_receipt_efforts() -> None:
     doc["models_overrides"]["alpha-one"]["efforts_pin"] = ["low"]
     rc = receipt(proven=("low", "high"), default="high")
     digest = sha(rc)
-    registry = registry_with(
-        [
-            (EVENT_DISCOVERED_OK, None),
-            (EVENT_PROBE_START, None),
-            (
-                EVENT_PROBE_PASS,
-                {"receipt_sha256": digest, "efforts_proven": ["low", "high"]},
-            ),
-        ]
-    )
+    registry = probed_registry(digest, ("low", "high"))
     result = compile_docs(
         doc, registry=registry, receipts={digest: rc}, discovery=discovery_fp()
     )
@@ -451,13 +464,7 @@ def test_confirmed_without_receipt_is_demoted_to_quarantine() -> None:
 def test_confirmed_with_non_confirmed_receipt_is_demoted() -> None:
     rc = receipt(verdict="quarantine_failed")
     digest = sha(rc)
-    registry = registry_with(
-        [
-            (EVENT_DISCOVERED_OK, None),
-            (EVENT_PROBE_START, None),
-            (EVENT_PROBE_PASS, {"receipt_sha256": digest, "efforts_proven": ["high"]}),
-        ]
-    )
+    registry = probed_registry(digest)
     result = compile_docs(
         manifest_doc(),
         registry=registry,
@@ -470,13 +477,7 @@ def test_confirmed_with_non_confirmed_receipt_is_demoted() -> None:
 def test_status_for_other_fingerprint_is_not_applied() -> None:
     rc = receipt()
     digest = sha(rc)
-    registry = registry_with(
-        [
-            (EVENT_DISCOVERED_OK, None),
-            (EVENT_PROBE_START, None),
-            (EVENT_PROBE_PASS, {"receipt_sha256": digest, "efforts_proven": ["high"]}),
-        ]
-    )
+    registry = probed_registry(digest)
     changed = {
         "alpha": SimpleNamespace(fingerprint_sha256="e" * 64, model_ids=(), meta={})
     }
@@ -559,27 +560,26 @@ def test_discovered_models_are_added_with_meta() -> None:
 
 
 def test_sidecar_shape() -> None:
-    result = compile_from_disk(kinds=ADAPTER_KINDS, now=NOW)
-    sidecar = result.sidecar
+    sidecar = compile_from_disk(kinds=ADAPTER_KINDS, now=NOW).sidecar
     assert sidecar["schema"] == "catalog-lock/1" and sidecar["compiled_at"] == NOW
     assert set(sidecar["inputs"]) == {
         "manifests",
         "manifests_sha256",
         "discovery_sha256",
     }
-    assert (
-        "_fleet.yaml" in sidecar["inputs"]["manifests"]
-        and "agy.yaml" in sidecar["inputs"]["manifests"]
-    )
+    assert {"_fleet.yaml", "agy.yaml"} <= sidecar["inputs"]["manifests"].keys()
     assert sidecar["providers"]["agy"]["allow_base_url"][0]["port"] == 9887
     assert sidecar["providers"]["opencode-go"]["direct"]["type"] == "http"
     assert sidecar["models"]["gpt-6.1-sol"]["family"] == "OpenAI"
     assert sidecar["models"]["claude-sonnet-5-5"]["family"] == "Anthropic"
     assert sidecar["models"]["muse-wonder-full-1.0"]["family"] == "Meta"
-    assert sidecar["models"]["deepseek-v4.1-flash"]["provider"] == "opencode-go"
+    assert sidecar["models"]["deepseek-v4.1-flash"]["provider"] == "deepseek-direct"
     assert "kimi-k3.1-pro" not in sidecar["models"]
     assert sidecar["models"]["deepseek-v4.1-flash"]["family"] == "DeepSeek"
     assert all(entry["status"] == "quarantine" for entry in sidecar["models"].values())
+    for provider in sidecar["providers"].values():
+        assert not {"params", "probe", "routing"} & provider.keys()
+        assert provider.get("fingerprint_sha256") != ""
 
 
 # ---- файлы: атомарность, квитанции, CLI --------------------------------------------

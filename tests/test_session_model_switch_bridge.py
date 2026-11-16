@@ -1,7 +1,4 @@
-"""L2 смены модели в сессии: хаб `:9882` с fake upstream и настоящий `agy-bridge` с фейковым CLI (argv фиксируется).
-
-L1-политика effort и классификатор отказов CLI — в `tests/test_session_model_switch.py`.
-"""
+"""L2 смены модели: хаб с fake upstream и agy-bridge с фейковым CLI; L1 — test_session_model_switch.py."""
 
 from __future__ import annotations
 
@@ -68,9 +65,10 @@ def _call(port: int, path: str, body: dict[str, Any] | None = None, headers: dic
         conn.close()
 
 
-@pytest.fixture
-def hub(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[SimpleNamespace]:
+@pytest.fixture(params=(False, True), ids=("legacy", "weighted"))
+def hub(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, request: pytest.FixtureRequest) -> Iterator[SimpleNamespace]:
     monkeypatch.setenv("BRIDGE_DYNAMIC_CONFIG_PATH", str(tmp_path / "absent.json"))
+    monkeypatch.setenv("BRIDGE_TRANSPORT_ROUTING_ENABLED", str(request.param).lower())
     seen: list[dict[str, Any]] = []
 
     class Upstream(BaseHTTPRequestHandler):
@@ -95,7 +93,7 @@ def hub(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[SimpleNames
         raw["models"] = [m for m in raw["models"] if m["backend"] == "agy"]
         raw["aliases"] = {k: v for k, v in raw["aliases"].items() if v["backend"] == "agy"}
         raw["default_model"] = ARGON
-        raw["backends"] = {"agy": {**raw["backends"]["agy"], "base_url": f"http://127.0.0.1:{upstream_port}/v1"}}
+        raw["backends"] = {key: {**value, "enabled": key == "agy", **({"base_url": f"http://127.0.0.1:{upstream_port}/v1"} if key == "agy" else {})} for key, value in raw["backends"].items()}
         catalog = server._build_catalog(raw)
         backends = AdapterRegistry.from_fleet(catalog, ADAPTER_KINDS, lambda: catalog, server)
         for name, value in (("FLEET", catalog), ("BACKENDS", backends), ("MODEL_ID", ARGON), ("_shutting_down", False),
@@ -191,19 +189,14 @@ def test_hub_rejects_effort_on_carbon_when_clamp_disabled(
     assert not hub.seen
     ok_status, _ = _chat(hub, CARBON, "OFF")
     assert ok_status == 200 and "reasoning_effort" not in hub.seen[-1]
-    bare_status, _ = _call(
-        hub.port,
-        "/v1/chat/completions",
-        {"model": CARBON, "messages": [{"role": "user", "content": "hi"}]},
-        {"x-dsh-chat-id": "switch-chat"},
-    )
+    bare_status, _ = _call(hub.port, "/v1/chat/completions",
+        {"model": CARBON, "messages": [{"role": "user", "content": "hi"}]}, {"x-dsh-chat-id": "switch-chat"})
     assert bare_status == 200 and "reasoning_effort" not in hub.seen[-1]
 
 
 # ---- agy-bridge с фейковым CLI -------------------------------------------------
 
-CIDS = ("82188e72-6eca-4f23-a0b3-2257ec43bd60", "fa92a264-8039-40dc-a716-37f7f64ea9e3",
-        "57172100-e4cf-4553-a0b6-f0af14c28a80", "0d4c2a9e-33a5-4c0e-9d57-6f3b8f1f9a11")
+CIDS = ("82188e72-6eca-4f23-a0b3-2257ec43bd60", "fa92a264-8039-40dc-a716-37f7f64ea9e3", "57172100-e4cf-4553-a0b6-f0af14c28a80", "0d4c2a9e-33a5-4c0e-9d57-6f3b8f1f9a11")
 
 
 @pytest.fixture

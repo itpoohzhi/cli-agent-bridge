@@ -86,8 +86,9 @@ def chat_body(model=None, effort=None, content=None, messages=None, **extra):
 
 
 def load_raw_fleet():
-    """Сырой JSON каталога (без нормализации) для сборки стендовых каталогов."""
-    return json.loads(Path(server.FLEET_PATH).read_text(encoding="utf-8"))
+    """JSON каталога с явными defaults для мутаций стендовых каталогов."""
+    from tests.passthrough_catalog_cases import mutable_test_fleet
+    return mutable_test_fleet(json.loads(Path(server.FLEET_PATH).read_text(encoding="utf-8")))
 
 
 # Модели, которые стенд FakeDroid обслуживает через бэкенд droid (боевой fleet.json
@@ -158,15 +159,8 @@ def _stand_context_max_output(model_id: str) -> int:
 
 def droidify_raw_fleet(data):
     """Сырой каталог -> стенд FakeDroid: droid включён, тестовые модели на droid."""
-    data["backends"]["droid"]["enabled"] = True
-    present = {m["id"] for m in data["models"]}
-    for m in data["models"]:
-        if m["id"] in _DROID_STAND_MODELS:
-            m["backend"] = "droid"
-    for legacy in _DROID_LEGACY_MODELS:
-        if legacy["id"] not in present:
-            data["models"].append(copy.deepcopy(legacy))
-    return data
+    from tests.passthrough_catalog_cases import droidify_test_fleet
+    return droidify_test_fleet(data, _DROID_STAND_MODELS, _DROID_LEGACY_MODELS)
 
 
 def install_droid_stand(data=None):
@@ -452,6 +446,7 @@ class BridgeCase(unittest.TestCase):
         self.addCleanup(self._restore_factory_key)
         os.environ["FACTORY_API_KEY"] = TEST_FACTORY_KEY
         self._env_fake = os.environ.get("FAKE_DROID_DIR")
+        self.addCleanup(self._restore_env, "FAKE_DROID_DIR", self._env_fake)
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
         base = Path(self._tmp.name)
@@ -495,10 +490,7 @@ class BridgeCase(unittest.TestCase):
         self._http_thread.join()
         self.httpd.server_close()
         server._reset_rpc_state()
-        if self._env_fake is None:
-            os.environ.pop("FAKE_DROID_DIR", None)
-        else:
-            os.environ["FAKE_DROID_DIR"] = self._env_fake
+        self._restore_env("FAKE_DROID_DIR", self._env_fake)
 
     @staticmethod
     def _restore_env(name: str, value: str | None) -> None:
