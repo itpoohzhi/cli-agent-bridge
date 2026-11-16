@@ -520,11 +520,17 @@ def _scan_credential_value(
             return (start if hollow else end), _NO_APPROVAL
         if text[pos] in ('"', "'") and text[end - 1] in ('"', "'"):
             # Закрывающая кавычка пары на деле открывает закавыченное значение (`api_key='"'hunter2;x'`):
-            # его разделители не обрывают маску. Fail-closed: значение маскируется целиком, в том числе
-            # с чужим префиксом внутри, а без закрывающей кавычки (обрыв лога) — до границы объемлющей
-            # строки или конца текста.
+            # его разделители не обрывают маску. Чужой префикс внутри найденной пары означает рассинхронизацию
+            # кавычек, как и «закрывающая» кавычка слитно со следующим значением (`api_key='"'hunter2 x='abc;def'`,
+            # `api_key='"'hunter2 x="abc'def"`: пара кончается на кавычке чужого значения, хвост утёк бы), поэтому
+            # такая пара не принимается. Fail-closed: без подходящей закрывающей кавычки (обрыв лога) значение
+            # маскируется до границы объемлющей строки или конца текста.
             quoted = _scan_quoted_value(text, end - 1, failed_until)
-            if quoted is not None:
+            if (
+                quoted is not None
+                and _attached_value_start(text, quoted - 1) == 0
+                and _CREDENTIAL_PREFIX_RE.search(text, end, quoted) is None
+            ):
                 return quoted, _NO_APPROVAL
             return _enclosing_close(text, end, frames), _NO_APPROVAL
         value_end = _skip(_SCHEME_VALUE_RE if is_scheme else _KEY_VALUE_RE, text, end)

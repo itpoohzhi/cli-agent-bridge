@@ -1913,6 +1913,16 @@ _R19_CASES: list[tuple[str, str, tuple[str, ...]]] = [
         "password=' truncated api_key=\"'\"hunter2;secret2",
         ("hunter2", "secret2"),
     ),
+    (
+        "RW001-nested-apostrophe-in-double-quotes",
+        'password=" truncated api_key=\'"\'hunter2 token="abc\'def"',
+        ("hunter2", "abc", "def"),
+    ),
+    (
+        "RW001-nested-single-quoted-secret",
+        "password=\" truncated api_key='\"'hunter2 token='abc;def'",
+        ("hunter2", "abc", "def"),
+    ),
 ]
 
 
