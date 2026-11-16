@@ -28,9 +28,52 @@ _SAFETY_MARKERS: tuple[str, ...] = (
     "content_filter", "safety_check", "safety_policy", "refusal",
     "content_safety", "safety_filter", "prohibited_content", "recitation", "fatal_safety_error",
 )
-_FATAL_FINISH_REASONS: frozenset[str] = frozenset(
-    ("safety", "content_filter", "recitation", "refusal", "blocklist", "prohibited_content")
+_FATAL_FINISH_FRAGMENTS: tuple[str, ...] = (
+    "safety", "content_filter", "prohibited", "recitation", "refusal", "blocklist",
 )
+# Голова клаузы «safety»: начало строки либо структурный разделитель; проза
+# вида "thread safety" сюда не попадает — нужен разделитель прямо перед словом.
+_SAFETY_HEAD_RE: re.Pattern[str] = re.compile(r"(?:^|[:;,(\[]\s*)safety(?![\w-])")
+_BLOCK_QUOTED_NEUTRAL: tuple[str, ...] = (
+    "", "null", "none", "unspecified", "block_reason_unspecified",
+)
+_BLOCK_TOKEN_NEUTRAL: tuple[str, ...] = (*_BLOCK_QUOTED_NEUTRAL, "[]", "{}")
+_BLOCK_STOP_RE: re.Pattern[str] = re.compile(r"[,;}\]\s]")
+_BLOCK_EMPTY_RE: re.Pattern[str] = re.compile(r"\[\s*\]|\{\s*\}")
+_BLOCK_TRAIL_RE: re.Pattern[str] = re.compile(r"^[\s,;}\]]*")
+
+
+def _block_value_is_fatal(rest: str) -> bool:
+    """Значение blockReason: нейтрально, только если оно пусто и без данных после него."""
+    quote = rest[:1]
+    if quote in ('"', "'"):
+        end = rest.find(quote, 1)
+        return True if end < 0 else rest[1:end].strip().lower() not in _BLOCK_QUOTED_NEUTRAL
+    bracket = _BLOCK_EMPTY_RE.match(rest)
+    if bracket:
+        return bool(_BLOCK_TRAIL_RE.sub("", rest[bracket.end():]).strip())
+    token = _BLOCK_STOP_RE.split(rest, 1)[0].strip().lower()
+    if token not in _BLOCK_TOKEN_NEUTRAL:
+        return True
+    return bool(_BLOCK_TRAIL_RE.sub("", rest[len(token):]).strip())
+
+
+def _has_fatal_finish_reason(reasons: list[str]) -> bool:
+    """Фатальный finishReason по фрагменту enum, в том числе префиксному (FINISH_REASON_*)."""
+    return any(fragment in reason for reason in reasons for fragment in _FATAL_FINISH_FRAGMENTS)
+
+
+def meta_pair_is_fatal(key: str, value: object) -> bool:
+    """Структурная классификация пары метаданных остановки без склейки в строку."""
+    name = key.lower()
+    if name == "depth_exceeded":
+        return True
+    if name in ("block_reason", "blockreason"):
+        return str(value).strip().lower() not in _BLOCK_TOKEN_NEUTRAL
+    text = str(value).lower()
+    if name in ("finish_reason", "finishreason", "stop_reason", "stopreason"):
+        return any(fragment in text for fragment in _FATAL_FINISH_FRAGMENTS)
+    return is_fatal_safety_error(str(value))
 
 
 def _normalize_safety_unicode(text: str) -> str:
@@ -68,17 +111,16 @@ def is_fatal_safety_error(text: str | None) -> bool:
         if html.unescape(cur) != cur or re.search(r"%[0-9a-fA-F]{2}|&#x?[0-9a-fA-F]+;|\\+[uUx0-7]", cur):
             return True  # Неразрешённое остаточное кодирование: fail-closed.
     lowered = cur.replace("+", " ").casefold()
-    neutral_pattern = r"""^\s*(?:"(?:null|none|unspecified|block_reason_unspecified)?"|\x27(?:null|none|unspecified|block_reason_unspecified)?\x27|null|none|\[\s*\]|\{\s*\})(?:\s*[,;}\]]|\s*$)"""
     has_block = any(
-        not re.match(neutral_pattern, lowered[m.end():])
-        for m in re.finditer(r"""\b(?:block_reason|blockreason)\b["\x27]?\s*[:=]\s*""", lowered)
+        _block_value_is_fatal(lowered[found.end():])
+        for found in re.finditer(r"""\b(?:block_reason|blockreason)\b["\x27]?\s*[:=]\s*""", lowered)
     )
     finish_reasons = re.findall(r"""\b(?:finish_reason|finishreason|stop_reason|stopreason)\b["']?\s*[:=]\s*["']?([\w-]+)""", lowered)
     return (
         any(marker in lowered for marker in _SAFETY_MARKERS)
-        or bool(re.search(r"(?<![\w-])safety(?![\w-])", lowered))
+        or bool(_SAFETY_HEAD_RE.search(lowered))
         or has_block
-        or any(reason in _FATAL_FINISH_REASONS for reason in finish_reasons)
+        or _has_fatal_finish_reason(finish_reasons)
     )
 
 

@@ -2,8 +2,12 @@
 from __future__ import annotations
 
 import json
+import queue
+import threading
 from contextlib import nullcontext
 from pathlib import Path
+from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 
@@ -215,6 +219,36 @@ def test_planner_free_prose_is_not_safety_metadata(text: str, field: str) -> Non
     assert not tail.had_safety_error
     assert tail.final_planner
     assert tail.final_planner_content == (text if field == "content" else "Final answer")
+
+
+def test_stdout_first_content_is_purged_when_safety_arrives(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    bridge = flow._load_bridge(monkeypatch, tmp_path)
+    run = cast(Any, object.__new__(cast(type, getattr(bridge, "Run"))))
+    run.q = queue.Queue()
+    run._emit_lock = threading.Lock()
+    run.drain_closed, run.has_fatal_error = False, False
+    run._content_emitted_wire = "partial stdout answer"
+    run.q.put(("text", "stdout first"))
+    run.q.put(("reasoning", "thinking"))
+    run.q.put(("result", {"status": "ERROR"}))
+    plan = bridge._TurnPlan()
+    plan.mode, plan.base_idx, plan.offset = "OFF", 0, 0
+    tail = bridge._TranscriptTail(emit=flow._accept, stop_event=threading.Event(), done_event=threading.Event(), resumed=False, plan=plan, turn_id="safety-abort", emit_content=flow._accept, run_ref=run)
+    run._tail = tail
+    tail._emit_record(json.dumps(dict(type="PLANNER_RESPONSE", step_index=3, content="Blocked answer", finishReason="SAFETY")).encode())
+    assert (tail.had_safety_error, run.has_fatal_error, run.drain_closed) == (True, True, True)
+    assert run._content_emitted_wire == ""
+    surviving: list[object] = []
+    while not run.q.empty():
+        surviving.append(run.q.get_nowait())
+    assert [cast(tuple[str, object], item)[0] for item in surviving] == ["result"]
+    assert run.offer_content("stdout", 4, "more") is False
+    handler = bridge.Handler.__new__(bridge.Handler)
+    run.proc, run.attempt = SimpleNamespace(returncode=1), 0
+    request = SimpleNamespace(payload=(1, "", None), result_ev=None, errors=("", ""))
+    ports = SimpleNamespace(state=dict.fromkeys, turn_complete=None)
+    snapshot = handler._snapshot_done(run, request, ports)
+    assert (snapshot.text.emitted_text, snapshot.result.has_fatal_error) == ("", True)
 
 
 @pytest.mark.parametrize("idx", (3, None))

@@ -4558,12 +4558,19 @@ class _TranscriptTail(InterruptionTailState):
             return
         self._emit_planner_record(rec, idx)
 
+    def _abort_run_safety(self) -> None:
+        """Фатальный safety-отказ: очистить очередь Run от ещё не принятого контента."""
+        run_ref = getattr(self, "run_ref", None)
+        if run_ref is not None and hasattr(run_ref, "abort_safety"):
+            run_ref.abort_safety()
+
     def _emit_planner_record(self, rec: dict[str, object], idx: int | None) -> None:
         """Проверить метаданные до отправки и фиксации planner-шагa."""
         if self.usage_enabled:
             self._record_usage(rec)
         self.note_planner_record(rec, idx if idx is not None else -1)
         if getattr(self, "had_safety_error", False):
+            self._abort_run_safety()
             return
         self._emit_planner_content(rec, idx)
         if idx is None:
@@ -5593,14 +5600,33 @@ class Run:
     def _on_tail_activity(self) -> None:
         self.note_producer_activity("transcript")
 
+    def abort_safety(self) -> None:
+        """Фатальный safety-отказ: закрыть выдачу и вычистить непринятый контент очереди."""
+        with self._emit_lock:
+            self.drain_closed = True
+            self.has_fatal_error = True
+            self._content_emitted_wire = ""
+            surviving = []
+            while True:
+                try:
+                    item = self.q.get_nowait()
+                except queue.Empty:
+                    break
+                if item[0] not in ("text", "reasoning"):
+                    surviving.append(item)
+            for item in surviving:
+                self.q.put(item)
+
     def offer_content(self, source: str, step_index: object, text: str) -> bool:
         """Кандидат planner-текста в арбитр; новый суффикс уходит в очередь под _emit_lock.
 
         Сокетного ввода-вывода здесь нет: потребитель (`_execute`) пишет в сокет сам.
-        False — выдача уже закрыта terminal barrier'ом.
+        False — выдача уже закрыта terminal barrier'ом или safety-отказом.
         """
         with self._emit_lock:
             if self.drain_closed:
+                return False
+            if getattr(self._tail, "had_safety_error", False) or getattr(self, "has_fatal_error", False):
                 return False
             suffix = self._arbiter.offer(
                 source, step_index, text, self._tail.cid or self.run_cid

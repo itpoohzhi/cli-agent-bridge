@@ -22,10 +22,12 @@ DEFAULT_INTERRUPTION_NOTICE: Final[str] = "\n\n[⚠️ Поток прерван
 DEFAULT_RETRY_CONFIG: Final[RetryBudgetConfig] = RetryBudgetConfig(max_attempts=2)
 MAX_ELAPSED_S: Final[float] = 1e308
 def _safety_meta_items(obj: object, depth: int = 0) -> list[tuple[str, object]]:
-    """Собрать вложенные причины остановки, исключая свободную прозу и инструменты."""
-    if depth > 4 or not isinstance(obj, (dict, list)):
+    """Собрать вложенные причины остановки; превышение глубины — fail-closed."""
+    if depth > 10:
+        return [("depth_exceeded", "fatal_safety_error")]
+    if not isinstance(obj, (dict, list)):
         return []
-    pairs = obj.items() if isinstance(obj, dict) else (("", elem) for elem in obj)
+    pairs = obj.items() if isinstance(obj, dict) else enumerate(obj)
     return [item for k, v in pairs if str(k).lower() not in ("content", "thinking", "tool_calls")
             for item in ([(str(k), v)] if str(k).lower() in ("block_reason", "blockreason", "finish_reason", "finishreason", "stop_reason", "stopreason")
                          else _safety_meta_items(v, depth + 1))]
@@ -54,7 +56,7 @@ class InterruptionTailState:
                 texts = (rec.get(key) for key in ("content", "message", "error"))
                 text = next(filter(None, texts), "")
                 metadata = _safety_meta_items(rec) + [(k, v) for k, v in rec.items() if str(k).lower() in ("reason", "error", "message") and v is not None]
-                struct_safety = any(causal.is_fatal_safety_error(f"{k}: {v}") for k, v in metadata) or causal.is_fatal_safety_error(str(text))
+                struct_safety = any(causal.meta_pair_is_fatal(k, v) for k, v in metadata) or causal.is_fatal_safety_error(str(text))
             text = str(text)
             seq = rtype if isinstance(rtype, int) else idx if idx is not None else -1
             self.final_planner, self.final_planner_content = False, ""
@@ -70,22 +72,20 @@ class InterruptionTailState:
                 self.error_from_structured_record = seq >= 0
 
     def note_planner_record(self, rec: dict[str, object], idx: int, *, attempt: int | None = None) -> None:
-        """Непустой DONE без tools завершает шаг; любой новый открытый шаг отменяет финал."""
-        if self.had_safety_error:
-            self.final_planner, self.final_planner_content = False, ""
-            self.has_open_planner_after_completion = True
-            return
-        content = rec.get("content")
-        has_tools = bool(rec.get("tool_calls"))
-        text = content if isinstance(content, str) else ""
-        struct_safety = any(causal.is_fatal_safety_error(f"{k}: {v}") for k, v in _safety_meta_items(rec))
-        if struct_safety:
+        """Непустой DONE без tools завершает шаг; запись без индекса финал не затирает."""
+        struct_safety = any(causal.meta_pair_is_fatal(k, v) for k, v in _safety_meta_items(rec))
+        if self.had_safety_error or struct_safety:
             self.had_safety_error = True
             self.final_planner, self.final_planner_content = False, ""
             self.has_open_planner_after_completion = True
             return
+        if idx < 0:
+            return
+        content = rec.get("content")
+        has_tools = bool(rec.get("tool_calls"))
+        text = content if isinstance(content, str) else ""
         done = str(rec.get("status", DONE_STATUS)).upper() == DONE_STATUS
-        self.final_planner = idx >= 0 and bool(text.strip()) and not has_tools and done
+        self.final_planner = bool(text.strip()) and not has_tools and done
         self.has_open_planner_after_completion = not self.final_planner
         self.final_planner_content = text if self.final_planner else ""
         if self.final_planner:
