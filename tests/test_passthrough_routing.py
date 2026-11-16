@@ -162,3 +162,26 @@ def test_invalid_json_releases_body_budget(route, auth):
 def test_upstream_failure_and_disconnect_release_body_budget(route, error):
     with pytest.raises(type(error)):
         route({"model": "gpt-6.1-terra"}, error=error)
+
+
+def test_provider_allowed_with_effort_alias_preserves_route_model_id(route, monkeypatch):
+    """F-004/F-006: _provider_allowed допускает модели с effort-суффиксами и не мутирует route.model_id."""
+    monkeypatch.setattr(server, "PROVIDER_SCOPES", {"test-provider": "agy"})
+    body = {"model": "gemini-4-argon-high"}
+    handler, _ = route(body, auth="Bearer hub-test-key")
+    handler._send.assert_not_called()
+    handler._serve_passthrough.assert_called_once()
+    _, _, req, resolved = handler._serve_passthrough.call_args.args
+    assert resolved == "gemini-4-argon"
+    assert req["model"] == "gemini-4-argon"
+    assert body["model"] == "gemini-4-argon-high"
+
+
+def test_provider_allowed_rejects_unknown_model_with_suffix(route, monkeypatch):
+    """_provider_allowed возвращает 404 для неизвестной модели с effort-суффиксом."""
+    monkeypatch.setattr(server, "PROVIDER_SCOPES", {"test-provider": "agy"})
+    body = {"model": "unknown-model-high"}
+    handler, _ = route(body, auth="Bearer hub-test-key")
+    assert handler._send.call_args.args[0] == 404
+    assert handler._send.call_args.args[1]["error"]["code"] == "model_not_found"
+    handler._serve_passthrough.assert_not_called()

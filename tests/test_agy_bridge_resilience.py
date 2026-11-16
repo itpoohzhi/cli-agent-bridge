@@ -15015,3 +15015,49 @@ class TestNonstreamLivenessResilience(unittest.TestCase):
         window.record_process(cpu_delta_s=5.0, new_children=3, alive=True)
         clock.now += 1.0
         self.assertEqual(window.expired(), REASON_FIRST)
+
+
+def test_format_print_timeout_normalizes_numeric_values():
+    bridge = _load_bridge()
+    formatter = bridge._format_print_timeout
+
+    assert formatter(None) == "0s"
+    assert formatter(False) == "0s"
+    assert formatter(True) == "0s"
+    assert formatter(-5) == "0s"
+    assert formatter(0) == "0s"
+    assert formatter(338) == "338s"
+    assert formatter("338") == "338s"
+    assert formatter("2.5") == "2.5s"
+    assert formatter(2.5) == "2.5s"
+    assert formatter("10m") == "10m"
+    assert formatter("invalid") == "0s"
+
+
+def test_prepare_agy_home_synchronizes_antigravity_credentials(tmp_path):
+    bridge = _load_bridge()
+    fake_home = tmp_path / "home"
+    fake_clean = tmp_path / "clean_home"
+    fake_home.mkdir(parents=True)
+    fake_clean.mkdir(parents=True)
+    fake_lib = fake_home / "Library"
+    fake_lib.mkdir(parents=True)
+
+    fake_cli = fake_home / ".gemini" / "antigravity-cli"
+    fake_cli.mkdir(parents=True)
+    (fake_cli / "antigravity-oauth-token").write_text("token-123", encoding="utf-8")
+    (fake_cli / "antigravity-account.json").write_text('{"email":"test@example.com"}', encoding="utf-8")
+
+    fake_brain = fake_clean / ".gemini" / "antigravity-cli" / "brain"
+    fake_conv = fake_clean / ".gemini" / "antigravity-cli" / "conversations"
+
+    with mock.patch.object(bridge, "HOME", fake_home), \
+         mock.patch.object(bridge, "CLEAN_HOME_DIR", fake_clean), \
+         mock.patch.object(bridge, "BRAIN_DIR", fake_brain), \
+         mock.patch.object(bridge, "CONV_DIR", fake_conv), \
+         mock.patch.object(bridge, "_AGY_HOME_INITIALIZED", False), \
+         mock.patch.object(bridge, "_ensure_symlink", lambda src, dst: None):
+        res = bridge._prepare_agy_home()
+        clean_cli = fake_clean / ".gemini" / "antigravity-cli"
+        assert (clean_cli / "antigravity-oauth-token").read_text(encoding="utf-8") == "token-123"
+        assert (clean_cli / "antigravity-account.json").read_text(encoding="utf-8") == '{"email":"test@example.com"}'

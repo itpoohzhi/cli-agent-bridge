@@ -1532,6 +1532,33 @@ def _verify_clean_home_root(clean_home: Path) -> Path:
     return clean_home_resolved
 
 
+def _format_print_timeout(val: object) -> str:
+    if val is None or isinstance(val, bool):
+        return "0s"
+    if isinstance(val, (int, float)):
+        if val <= 0:
+            return "0s"
+        if int(val) == val:
+            return f"{int(val)}s"
+        return f"{val}s"
+    raw = str(val).strip()
+    if not raw or raw in ("0", "0s"):
+        return "0s"
+    try:
+        num = float(raw)
+        if num <= 0:
+            return "0s"
+        if num.is_integer():
+            return f"{int(num)}s"
+        return f"{num}s"
+    except ValueError:
+        pass
+    import re
+    if re.match(r"^\d+(?:\.\d+)?(?:ms|s|m|h)$", raw):
+        return raw
+    return "0s"
+
+
 def _prepare_agy_home() -> Path:
     """Потокобезопасно (однократно) готовит изолированный HOME для `agy`.
 
@@ -1586,6 +1613,8 @@ def _prepare_agy_home() -> Path:
         for src, dst in (
             (real_gemini / "jetski-standalone-oauth-token", clean_gemini),
             (real_gemini / "projects.json", clean_gemini),
+            (real_cli / "antigravity-oauth-token", clean_gemini_cli),
+            (real_cli / "antigravity-account.json", clean_gemini_cli),
             (real_cli / "installation_id", clean_gemini_cli),
             (real_cli / "jetski_state.pbtxt", clean_gemini_cli),
             (real_cli / "settings.json", clean_gemini_cli),
@@ -5389,7 +5418,7 @@ class Run:
             "--model",
             model,
             *effort_cli_args(effort),
-            "--print-timeout=" + str(PRINT_TIMEOUT),
+            "--print-timeout=" + _format_print_timeout(PRINT_TIMEOUT),
         ]
         # Изображения хода: каталог файлов отдельным аргументом, cwd не подменяется.
         if add_dir is not None:
