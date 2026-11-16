@@ -5601,21 +5601,14 @@ class Run:
         self.note_producer_activity("transcript")
 
     def abort_safety(self) -> None:
-        """Фатальный safety-отказ: закрыть выдачу и вычистить непринятый контент очереди."""
+        """Фатальный safety-отказ: закрыть выдачу и атомарно очистить очередь."""
         with self._emit_lock:
             self.drain_closed = True
             self.has_fatal_error = True
-            self._content_emitted_wire = ""
-            surviving = []
-            while True:
-                try:
-                    item = self.q.get_nowait()
-                except queue.Empty:
-                    break
-                if item[0] not in ("text", "reasoning"):
-                    surviving.append(item)
-            for item in surviving:
-                self.q.put(item)
+            with self.q.mutex:
+                self.q.queue = collections.deque(
+                    x for x in self.q.queue if x[0] not in ("text", "reasoning")
+                )
 
     def offer_content(self, source: str, step_index: object, text: str) -> bool:
         """Кандидат planner-текста в арбитр; новый суффикс уходит в очередь под _emit_lock.

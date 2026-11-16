@@ -14,7 +14,7 @@ import pytest
 import test_causal_turn_recovery_flow as flow
 from core import stream_interruption_recovery as recovery
 from core.turn_finalization import read_recovery_switch
-from core.turn_outcome_policy import is_fatal_safety_error
+from core.turn_outcome_policy import _block_value_is_fatal, is_fatal_safety_error
 
 
 @pytest.mark.parametrize("marker", ("policy%5fviolation", "policy+violation", "SAFETY", "BLOCK_REASON: SAFETY", "PROHIBITED_CONTENT", "RECITATION"))
@@ -237,7 +237,7 @@ def test_stdout_first_content_is_purged_when_safety_arrives(monkeypatch: pytest.
     run._tail = tail
     tail._emit_record(json.dumps(dict(type="PLANNER_RESPONSE", step_index=3, content="Blocked answer", finishReason="SAFETY")).encode())
     assert (tail.had_safety_error, run.has_fatal_error, run.drain_closed) == (True, True, True)
-    assert run._content_emitted_wire == ""
+    assert run._content_emitted_wire == "partial stdout answer"
     surviving: list[object] = []
     while not run.q.empty():
         surviving.append(run.q.get_nowait())
@@ -248,7 +248,7 @@ def test_stdout_first_content_is_purged_when_safety_arrives(monkeypatch: pytest.
     request = SimpleNamespace(payload=(1, "", None), result_ev=None, errors=("", ""))
     ports = SimpleNamespace(state=dict.fromkeys, turn_complete=None)
     snapshot = handler._snapshot_done(run, request, ports)
-    assert (snapshot.text.emitted_text, snapshot.result.has_fatal_error) == ("", True)
+    assert (snapshot.text.emitted_text, snapshot.result.has_fatal_error) == ("partial stdout answer", True)
 
 
 @pytest.mark.parametrize("idx", (3, None))
@@ -274,3 +274,17 @@ def test_safety_veto_is_sticky_across_planner_records() -> None:
     assert not tail.final_planner
     assert tail.final_planner_content == ""
     assert tail.has_open_planner_after_completion
+
+
+@pytest.mark.parametrize("rest,fatal", ((' null, "finishReason": "STOP"}', False), (' "none" SAFETY', True), (' "none other"', True), (' "OTHER"', True), (' "NONE"', False), (' []', False), (' {}', False)))
+def test_block_reason_value_boundaries(rest: str, fatal: bool) -> None:
+    assert _block_value_is_fatal(rest) is fatal
+    assert is_fatal_safety_error('{"blockReason":' + rest) is fatal
+
+
+@pytest.mark.parametrize("record", ({"content": "Unindexed final"}, {"status": "RUNNING"}))
+def test_unindexed_planner_preserves_completion(record: dict[str, object]) -> None:
+    tail = recovery.InterruptionTailState()
+    tail.note_planner_record({"content": "Previous final"}, 3, attempt=0)
+    tail.note_planner_record(record, None)
+    assert (tail.last_planner_step_index, tail.final_planner, tail.final_planner_content) == (3, True, "Previous final")

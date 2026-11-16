@@ -71,7 +71,7 @@ class InterruptionTailState:
                 self.last_error_attempt = attempt if type(attempt) is int else -1
                 self.error_from_structured_record = seq >= 0
 
-    def note_planner_record(self, rec: dict[str, object], idx: int, *, attempt: int | None = None) -> None:
+    def note_planner_record(self, rec: dict[str, object], idx: int | None, *, attempt: int | None = None) -> None:
         """Непустой DONE без tools завершает шаг; запись без индекса финал не затирает."""
         struct_safety = any(causal.meta_pair_is_fatal(k, v) for k, v in _safety_meta_items(rec))
         if self.had_safety_error or struct_safety:
@@ -79,7 +79,7 @@ class InterruptionTailState:
             self.final_planner, self.final_planner_content = False, ""
             self.has_open_planner_after_completion = True
             return
-        if idx < 0:
+        if idx is None or idx < 0:
             return
         content = rec.get("content")
         has_tools = bool(rec.get("tool_calls"))

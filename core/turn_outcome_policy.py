@@ -38,24 +38,24 @@ _BLOCK_QUOTED_NEUTRAL: tuple[str, ...] = (
     "", "null", "none", "unspecified", "block_reason_unspecified",
 )
 _BLOCK_TOKEN_NEUTRAL: tuple[str, ...] = (*_BLOCK_QUOTED_NEUTRAL, "[]", "{}")
-_BLOCK_STOP_RE: re.Pattern[str] = re.compile(r"[,;}\]\s]")
-_BLOCK_EMPTY_RE: re.Pattern[str] = re.compile(r"\[\s*\]|\{\s*\}")
-_BLOCK_TRAIL_RE: re.Pattern[str] = re.compile(r"^[\s,;}\]]*")
 
 
 def _block_value_is_fatal(rest: str) -> bool:
-    """Значение blockReason: нейтрально, только если оно пусто и без данных после него."""
-    quote = rest[:1]
-    if quote in ('"', "'"):
-        end = rest.find(quote, 1)
-        return True if end < 0 else rest[1:end].strip().lower() not in _BLOCK_QUOTED_NEUTRAL
-    bracket = _BLOCK_EMPTY_RE.match(rest)
-    if bracket:
-        return bool(_BLOCK_TRAIL_RE.sub("", rest[bracket.end():]).strip())
-    token = _BLOCK_STOP_RE.split(rest, 1)[0].strip().lower()
-    if token not in _BLOCK_TOKEN_NEUTRAL:
-        return True
-    return bool(_BLOCK_TRAIL_RE.sub("", rest[len(token):]).strip())
+    """Значение blockReason: нейтрально, только если оно пусто/neutral и без опасных данных."""
+    m_quoted = re.match(r"""^\s*["']([^"']*)["'](?:\s*([^\s,;}\]\)]+))?""", rest)
+    if m_quoted:
+        inner = m_quoted.group(1).strip().lower()
+        extra = m_quoted.group(2)
+        if bool(extra):
+            return True
+        return inner not in _BLOCK_QUOTED_NEUTRAL
+    m_unquoted = re.match(r"""^\s*((?:\[\s*\]|\{\s*\})[^,;}\]\)\r\n]*|[^,;}\]\)\r\n]+)""", rest)
+    if not m_unquoted:
+        return False
+    raw_token = m_unquoted.group(1).strip().lower()
+    if re.fullmatch(r"""\[\s*\]|\{\s*\}""", raw_token):
+        return False
+    return raw_token not in _BLOCK_TOKEN_NEUTRAL
 
 
 def _has_fatal_finish_reason(reasons: list[str]) -> bool:
