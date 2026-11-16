@@ -5,6 +5,7 @@ kind: muse
 enabled: true
 required: false
 priority: 10
+routing: {weight: 100}
 owned_by: meta-muse
 transport:
   bridge:

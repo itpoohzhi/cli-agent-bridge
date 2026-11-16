@@ -25,10 +25,13 @@ from typing import (
     NamedTuple,
     Optional,
     Sequence,
+    cast,
     get_type_hints,
 )
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
+from core import backend_routing_models as _routing_models
 from core.effort_policy import EFFORT_LEVELS as _RANKED_EFFORT_LEVELS
+from core.routing_contract import FleetViolation as FleetViolation
 
 # Версия контракта: адаптер обязан подтверждать её в qualify() (несовпадение = модели недоступны).
 ADAPTER_API = 1
@@ -268,7 +271,7 @@ PIN_REQUIRED_KINDS = frozenset({"muse"})
 # Вид без собственного процесса: исполнение — raw HTTP-шов к upstream из `base_url` (ADR 0011).
 PASSTHROUGH_KIND = "passthrough"
 _LOOPBACK_BASE_URL = re.compile(
-    r"http://127\.0\.0\.1:([0-9]{1,5})(?:/[a-z0-9._-]+)*/v1"
+    r"http://127\.0\.0\.1:([0-9]{1,5})(?:(?:/[a-z0-9._-]+)*/v1|/sg-[a-z0-9._-]+)"
 )
 
 
@@ -355,7 +358,7 @@ class AllowEntry:
 
 
 # Дефолтная политика базового URL (env BRIDGE_DEFAULT_BASE_URL_POLICY — regex fullmatch).
-DEFAULT_BASE_URL_POLICY = r"http://127\.0\.0\.1:([0-9]{1,5})(?:/[a-z0-9._-]+)*/v1"
+DEFAULT_BASE_URL_POLICY = _LOOPBACK_BASE_URL.pattern
 
 
 def kind_constraints(kinds: Mapping[str, Any], kind: str) -> KindConstraints:
@@ -364,28 +367,43 @@ def kind_constraints(kinds: Mapping[str, Any], kind: str) -> KindConstraints:
     return found if isinstance(found, KindConstraints) else KindConstraints()
 
 
+def _loopback_origin_valid(base_url: str) -> bool:
+    """Проверяет обязательные ограничения origin и безопасность пути независимо от env."""
+    try:
+        parts = urlsplit(base_url)
+        port = parts.port
+    except ValueError:
+        return False
+    return all(
+        (
+            parts.scheme == "http",
+            parts.hostname in {"127.0.0.1", "localhost"},
+            parts.username is None,
+            parts.password is None,
+            not parts.query,
+            not parts.fragment,
+            port is not None and PROXY_PORT_MIN <= port <= PROXY_PORT_MAX,
+            base_url == parts.geturl(),
+            _routing_models.safe_path_segments(parts.path, unquote(parts.path)),
+        )
+    )
+
+
 def _base_url_allowed(
     backend_id: str,
     base_url: Any,
     allowlist: Optional[Mapping[str, Sequence[AllowEntry]]],
 ) -> bool:
-    """Базовый URL проходит allowlist бэкенда либо дефолтную loopback-политику."""
+    """Проверяет loopback-origin, настраиваемую политику URL и allowlist бэкенда."""
     if not isinstance(base_url, str):
         return False
-    entries = (allowlist or {}).get(backend_id)
-    if entries:
-        return any(entry.matches(base_url) for entry in entries)
-    policy = os.environ.get("BRIDGE_DEFAULT_BASE_URL_POLICY") or DEFAULT_BASE_URL_POLICY
-    try:
-        match = re.fullmatch(policy, base_url)
-    except re.error:
-        match = None
-    if match is None:
+    if not _loopback_origin_valid(base_url):
         return False
-    groups = match.groups()
-    if groups and groups[0] is not None:
-        return PROXY_PORT_MIN <= int(groups[0]) <= PROXY_PORT_MAX
-    return True
+    policy = os.environ.get("BRIDGE_DEFAULT_BASE_URL_POLICY") or DEFAULT_BASE_URL_POLICY
+    if not _routing_models.matches_url_policy(base_url, policy):
+        return False
+    entries = (allowlist or {}).get(backend_id)
+    return not entries or any(entry.matches(base_url) for entry in entries)
 
 
 def backend_entry_error(
@@ -526,15 +544,6 @@ def backend_entry_error(
     return ""
 
 
-class FleetViolation(Exception):
-    """Структурный отказ общего загрузчика каталога."""
-
-    def __init__(self, reason: str, model: str = "-") -> None:
-        super().__init__(reason)
-        self.reason = reason
-        self.model = model or "-"
-
-
 FLEET_TOP_KEYS = frozenset(
     {
         "schema_version",
@@ -549,24 +558,7 @@ FLEET_TOP_KEYS = frozenset(
         "aliases",
     }
 )
-FLEET_MODEL_KEYS = frozenset(
-    {
-        "id",
-        "backend",
-        "name",
-        "efforts",
-        "default_effort",
-        "context_window",
-        "max_tokens",
-        "input",
-        "images",
-        "policy_lines",
-        "upstream_model",
-        "resident",
-        "pool_size",
-        "alias_of",
-    }
-)
+FLEET_MODEL_KEYS = _routing_models.FLEET_MODEL_KEYS
 # Шкала каталога: `off` (отключённый reasoning) плюс ранжированные уровни политики effort.
 EFFORT_LEVELS = ("off", *_RANKED_EFFORT_LEVELS)
 IMAGE_STATUSES = ("unsupported", "unverified", "probe", "confirmed")
@@ -581,127 +573,14 @@ IMPLICIT_DROID_BACKEND = {
 
 
 def _validate_proof(model_id: str, images: dict, method: str, efforts: list) -> None:
-    proof = images.get("proof")
-    if proof is None:
-        raise FleetViolation("confirmed_proof_missing", model_id)
-    if not isinstance(proof, dict):
-        raise FleetViolation("confirmed_proof_malformed", model_id)
-    for key in (
-        "droid_version",
-        "droid_binary_sha256",
-        "method",
-        "impl_version",
-        "formats",
-    ):
-        if key not in proof:
-            raise FleetViolation("confirmed_proof_malformed", model_id)
-    if not isinstance(proof.get("droid_version"), str) or not isinstance(
-        proof.get("droid_binary_sha256"), str
-    ):
-        raise FleetViolation("confirmed_proof_malformed", model_id)
-    if not re.fullmatch(r"[0-9a-f]{64}", str(proof.get("droid_binary_sha256") or "")):
-        raise FleetViolation("confirmed_proof_malformed", model_id)
-    if proof.get("method") != method:
-        raise FleetViolation("confirmed_proof_malformed", model_id)
-    if not isinstance(proof.get("impl_version"), int) or isinstance(
-        proof.get("impl_version"), bool
-    ):
-        raise FleetViolation("confirmed_proof_malformed", model_id)
-    formats = proof.get("formats")
-    if not isinstance(formats, list) or not all(isinstance(f, str) for f in formats):
-        raise FleetViolation("confirmed_proof_malformed", model_id)
-    proven = proof.get("efforts_proven")
-    if not isinstance(proven, list) or not all(isinstance(p, str) for p in proven):
-        raise FleetViolation("confirmed_proof_malformed", model_id)
-    if (
-        not proven
-        or len(set(proven)) != len(proven)
-        or any(p not in efforts for p in proven)
-    ):
-        raise FleetViolation("confirmed_efforts_proven_invalid", model_id)
+    return _routing_models.validate_proof(model_id, images, method, efforts)
 
 
 def _normalize_model(
-    item: dict,
-    mid: str,
-    schema: int,
-    backends: Mapping[str, Any],
-    image_probe: bool,
+    item: dict, mid: str, schema: int, backends: Mapping[str, Any], image_probe: bool,
 ) -> Optional[dict]:
     """Проверка и нормализация одной записи модели; None — бэкенд выключен (модель пропущена)."""
-    if schema == 3:
-        if set(item) - FLEET_MODEL_KEYS:
-            raise FleetViolation("model_key_unknown", mid)
-        backend_id = item.get("backend")
-        if not isinstance(backend_id, str) or backend_id not in backends:
-            raise FleetViolation("model_backend_unknown", mid)
-    else:
-        backend_id = "droid"
-    efforts = item.get("efforts")
-    if (
-        not isinstance(efforts, list)
-        or not efforts
-        or not all(isinstance(e, str) for e in efforts)
-        or any(e not in EFFORT_LEVELS for e in efforts)
-    ):
-        raise FleetViolation("efforts_invalid", mid)
-    if item.get("default_effort") not in efforts:
-        raise FleetViolation("default_effort_invalid", mid)
-    images = item.get("images")
-    if not isinstance(images, dict) or images.get("status") not in IMAGE_STATUSES:
-        raise FleetViolation("status_invalid", mid)
-    status = images["status"]
-    input_types = item.get("input")
-    if not isinstance(input_types, list) or not all(
-        isinstance(t, str) for t in input_types
-    ):
-        raise FleetViolation("status_inconsistent", mid)
-    if images.get("cli_registry") == "explicit_unsupported" and status != "unsupported":
-        raise FleetViolation("status_inconsistent", mid)
-    if status in ("unsupported", "unverified") and (
-        images.get("method") is not None or input_types != ["text"]
-    ):
-        raise FleetViolation("status_inconsistent", mid)
-    method = images.get("method")
-    if status == "confirmed":
-        if method is None:
-            raise FleetViolation("confirmed_method_missing", mid)
-        if "image" not in input_types or "text" not in input_types:
-            raise FleetViolation("confirmed_input_missing", mid)
-        _validate_proof(mid, images, method, efforts)
-    if status == "probe":
-        if method is None or "image" not in input_types or "text" not in input_types:
-            raise FleetViolation("status_inconsistent", mid)
-        if not image_probe:
-            raise FleetViolation("probe_flag_missing", mid)
-    if method is not None and (
-        not isinstance(method, str) or method not in IMPLEMENTED_METHODS
-    ):
-        raise FleetViolation("method_not_implemented", mid)
-    if not backends[backend_id]["enabled"]:
-        return None
-    try:
-        window = int(item.get("context_window") or 0)
-    except (ValueError, TypeError, OverflowError) as exc:
-        raise FleetViolation("context_window_invalid", mid) from exc
-    res = {
-        "id": mid,
-        "backend": backend_id,
-        "name": str(item.get("name") or mid),
-        "efforts": [str(e) for e in efforts],
-        "default_effort": str(item["default_effort"]),
-        "context_window": window,
-        "input": [str(t) for t in input_types],
-        "images": {
-            "status": str(status),
-            "cli_registry": str(images.get("cli_registry") or ""),
-            "method": method,
-            "proof": images.get("proof"),
-        },
-    }
-    if "upstream_model" in item and isinstance(item["upstream_model"], str) and item["upstream_model"].strip():
-        res["upstream_model"] = item["upstream_model"].strip()
-    return res
+    return cast(Optional[dict], _routing_models.normalize_model(item, mid, schema, backends, image_probe))
 
 
 def build_catalog(
@@ -922,18 +801,8 @@ class BackendAdapter(ABC):
 
     def _catalog_models(self) -> list[BackendModel]:
         """Модели каталога, привязанные к этому бэкенду, в порядке fleet.json."""
-        catalog = self._catalog_source()
-        models = catalog.get("models") or {}
-        order = catalog.get("order") or list(models)
-        return [
-            BackendModel(
-                str(models[mid]["id"]),
-                str(models[mid]["backend"]),
-                int(models[mid].get("context_window") or 0),
-            )
-            for mid in order
-            if mid in models and models[mid].get("backend") == self.id
-        ]
+        catalog = cast(_routing_models.ModelCatalog, self._catalog_source())
+        return _routing_models.catalog_models(catalog, self.id, BackendModel)
 
     def active_count(self) -> int:
         """Число ходов в работе (для /health); по умолчанию 0."""
@@ -994,6 +863,7 @@ class AdapterRegistry:
 
     def __init__(self) -> None:
         self._adapters: dict[str, BackendAdapter] = {}
+        self._catalog_source: Callable[[], Mapping[str, Any]] | None = None
         self._lock = threading.Lock()
 
     def register(self, adapter: BackendAdapter) -> None:
@@ -1038,6 +908,7 @@ class AdapterRegistry:
         (конфигурация не может подключить произвольный код).
         """
         registry = cls()
+        registry._catalog_source = catalog_source
         backends = catalog.get("backends") or {}
         for backend_id in catalog.get("backend_order") or list(backends):
             config = backends[backend_id]
@@ -1059,10 +930,9 @@ class AdapterRegistry:
 
     def adapter_for_model(self, model_id: str) -> "BackendAdapter | None":
         """Адаптер, обслуживающий модель (по текущему каталогу); None — модели нет."""
-        for adapter in self._adapters.values():
-            if any(model.id == model_id for model in adapter.get_models()):
-                return adapter
-        return None
+        return _routing_models.registry_adapter(
+            self._adapters, self._catalog_source, model_id,
+        )
 
     def models(self) -> list[tuple[BackendAdapter, BackendModel]]:
         """Объединение моделей всех активных адаптеров: [(адаптер, модель)] в порядке реестра."""

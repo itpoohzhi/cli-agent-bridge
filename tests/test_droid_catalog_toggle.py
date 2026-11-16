@@ -68,7 +68,7 @@ class DroidCatalogRuntimeToggleTest(unittest.TestCase):
             self.assertEqual(droid_adapter.id, "droid")
         self.assertEqual(registry.get("droid") is not None, on)
         published = {model.id for _adapter, model in registry.models()}
-        # Профиль OFF скрывает базовый gpt-6.1-sol; при ON он маршрутизируется в codex.
+        # Профиль OFF скрывает базовый gpt-6.1-sol; при ON его владелец — OpenAI key 2.
         self.assertEqual("gpt-6.1-sol" in published, on)
         self.assertEqual(("droid" in [a.id for a in registry.adapters()]), on)
         self.assertEqual(len(catalog["aliases"]), 32 if on else 0)
@@ -241,7 +241,7 @@ class DroidCatalogRuntimeToggleTest(unittest.TestCase):
         self.assertNotIn("gpt-6.1-sol", catalog["models"])
         set_flag(True)
         sol = catalog["models"]["gpt-6.1-sol"]["name"]
-        self.assertEqual(sol, "GPT-6.1 Sol (Codex passthrough)")
+        self.assertEqual(sol, "GPT-6.1 Sol (OpenAI key 2)")
         set_flag(False)
         for model, name in names.items():
             self.assertEqual(catalog["models"][model]["name"], name)

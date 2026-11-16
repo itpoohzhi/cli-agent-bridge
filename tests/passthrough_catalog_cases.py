@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from adapters import ADAPTER_KINDS
 from adapters.passthrough_adapter import PassthroughAdapter
-from tests.bridge_testlib import load_raw_fleet
 from core.backend_adapter import AdapterRegistry
 from core.backend_adapter import FleetViolation
 from core.backend_adapter import backend_entry_error
@@ -18,8 +17,44 @@ import tempfile
 import unittest.mock
 
 
+_FAKE_EFFORTS = {
+    "claude-sonnet-5-5": ["low", "medium", "high", "max"],
+    "gemini-3.8-flash": ["low", "medium", "high"],
+    "gpt-6.1-sol": ["low", "medium", "high"],
+}
+
+
+def mutable_test_fleet(data: dict) -> dict:
+    """Восстановить только отсутствующие defaults, не нормализуя мутации."""
+    for model in data["models"]:
+        model.setdefault("input", ["text"])
+        model["images"].setdefault("cli_registry", "implicit_supported")
+    for backend in data["backends"].values():
+        backend.setdefault("required", False)
+    return data
+
+
+def droidify_test_fleet(data: dict, stand_models: tuple, legacy_models: tuple) -> dict:
+    """Изолировать маршруты и effort стенда, сохранив остальные записи."""
+    mutable_test_fleet(data)
+    data["backends"]["droid"]["enabled"] = True
+    legacy = {entry["id"]: entry for entry in legacy_models}
+    for index, model in enumerate(data["models"]):
+        if model["id"] in stand_models:
+            model.update(backend="droid", efforts=list(_FAKE_EFFORTS[model["id"]]))
+            model["default_effort"] = "high"
+            model.pop("routing", None)
+        elif model["id"] in legacy:
+            data["models"][index] = copy.deepcopy(legacy[model["id"]])
+    present = {model["id"] for model in data["models"]}
+    data["models"] += [copy.deepcopy(e) for e in legacy_models if e["id"] not in present]
+    return data
+
+
 class TestFleetPassthroughKind(unittest.TestCase):
     def raw(self) -> Any:
+        from tests.bridge_testlib import load_raw_fleet
+
         data = load_raw_fleet()
         return copy.deepcopy(data)
 
@@ -110,7 +145,15 @@ class TestFleetPassthroughKind(unittest.TestCase):
 
     def test_registry_builds_passthrough_adapter_without_spawn(self) -> None:
         data = self.raw()
-        data["backends"]["codex"]["enabled"] = True
+        data["backends"]["codex"] = {
+            "kind": "passthrough",
+            "enabled": True,
+            "base_url": "http://127.0.0.1:2455/v1",
+        }
+        for model in data["models"]:
+            if model["id"] in {"gpt-6.1-terra", "gpt-6.1-sol"}:
+                model["backend"] = "codex"
+                model.pop("routing", None)
         catalog = build_catalog(data, ADAPTER_KINDS)
         registry = AdapterRegistry.from_fleet(catalog, ADAPTER_KINDS, lambda: catalog)
         adapter = registry.get("codex")
@@ -118,6 +161,40 @@ class TestFleetPassthroughKind(unittest.TestCase):
         self.assertEqual({m.id for m in adapter.get_models()}, {"gpt-6.1-terra", "gpt-6.1-sol"})
         self.assertTrue(adapter.is_healthy())
         self.assertIs(registry.adapter_for_model("gpt-6.1-terra"), adapter)
+
+
+class TestCatalogFixtures(unittest.TestCase):
+    def test_omitted_defaults_are_mutable_without_replacing_explicit_values(self) -> None:
+        data = {"models": [{"images": {}}, {"images": {}}], "backends": {"a": {}}}
+        self.assertIs(mutable_test_fleet(data), data)
+        self.assertEqual(data["models"][0]["images"]["cli_registry"], "implicit_supported")
+        self.assertIs(data["backends"]["a"]["required"], False)
+        data["models"][0]["input"].append("image")
+        self.assertEqual(data["models"][1]["input"], ["text"])
+        data["models"][0].update(input=None, images={"cli_registry": None})
+        data["backends"]["a"]["required"] = None
+        mutable_test_fleet(data)
+        self.assertIsNone(data["models"][0]["input"])
+        self.assertIsNone(data["models"][0]["images"]["cli_registry"])
+        self.assertIsNone(data["backends"]["a"]["required"])
+        data["models"][0].update(input=["text", "image"], images={"cli_registry": "explicit_supported"})
+        data["backends"]["a"]["required"] = True
+        self.assertEqual(mutable_test_fleet(copy.deepcopy(data)), data)
+
+    def test_only_remapped_models_lose_production_routes(self) -> None:
+        from tests.bridge_testlib import droidify_raw_fleet, load_raw_fleet
+
+        original = load_raw_fleet()
+        data = copy.deepcopy(original)
+        self.assertIs(droidify_raw_fleet(data), data)
+        for model, source in zip(data["models"], original["models"]):
+            if source["id"] in {"claude-sonnet-5-5", "gemini-3.8-flash", "gpt-6.1-sol", "deepseek-v4.1-flash"}:
+                self.assertEqual(model["backend"], "droid")
+                self.assertNotIn("routing", model)
+            else:
+                self.assertEqual(model, source)
+        sol = next(model for model in data["models"] if model["id"] == "gpt-6.1-sol")
+        self.assertEqual(sol["efforts"], ["low", "medium", "high"])
 
 
 class TestBridgeSecrets(unittest.TestCase):

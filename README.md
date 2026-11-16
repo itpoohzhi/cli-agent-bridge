@@ -85,8 +85,8 @@ Replaying subscription tokens through an OAuth proxy carries three risks:
 
 ## Supported backends and connected agent CLIs
 
-One facade, several vendor CLIs. Models are routed strictly from `model` to `backend`
-by the fleet catalog, with no silent cross-backend fallback. Two adapters live
+One facade, several vendor CLIs. The fleet declares model transports; weighted
+routing is opt-in, with no silent cross-backend fallback when disabled. Two adapters live
 **in-tree** in this hub (`droid`, `muse`); the sibling bridges are in-tree as well, under
 `bridges/` (`agy-bridge`, `claude-p-bridge`, `muse-bridge`, `opencode-zen-bridge`),
 that expose the identical OpenAI facade on their own ports. All of them are
@@ -98,7 +98,7 @@ documented below and in the [port map](#ecosystem-port-and-architecture-map).
 | Meta Muse `muse` | In-tree hub adapter (opt-in) + dedicated bridge `bridges/muse-bridge/` | `:9882` / `:9886` | `muse-spark-1.3`, `muse-wonder-1.0` | [below](#muse-meta-muse-cli-in-tree-hub-and-dedicated-bridge) |
 | Claude Code `claude -p` | Sibling bridges + Droid route in the hub | `:9884`, `:9881` (+ `:9882`) | `claude-sonnet-5-5`, `claude-opus-5-5`, `claude-haiku-5-5` | [guide](#connecting-claude-code) |
 | Cursor Agent `cursor-agent -p` | Sibling bridge `grok46-bridge` | `:9885` | `cursor-grok-4.6-high` (Grok 4.6/4.7) | [guide](#connecting-cursor-cursor-agent-and-sibling-bridges) |
-| Antigravity `agy`, OpenCode Zen | Sibling bridges | `:9885`, `:9887` / `:9883` | `gemini-4-argon`, `gemini-3.8-flash`, free-tier models | [below](#agy-and-opencode-google-antigravity-and-opencode-zen) |
+| Antigravity `agy`, OpenCode Zen | Sibling bridges | `:9885`, `:9883` | `gemini-4-argon`, `gemini-3.8-flash`, free-tier models | [below](#agy-and-opencode-google-antigravity-and-opencode-zen) |
 
 ### `droid`: Factory Droid CLI (in-tree hub backend)
 
@@ -163,7 +163,7 @@ pin and launcher wrapper required), then restart and run
 
 - `agy-bridge` (`agy -p --output-format stream-json`): Gemini 4 Argon
   (`gemini-4-argon`) and Gemini 3.8 Flash (`gemini-3.8-flash`).
-- `opencode-zen-bridge` (`opencode` CLI, ports `:9887` / `:9883`): free-tier
+- `opencode-zen-bridge` (`opencode` CLI, port `:9883`): free-tier
   frontier models such as `deepseek-v4.1-flash-free`.
 - Details: [Google Antigravity CLI](#google-antigravity-cli-agy-bridge) and
   [OpenCode Zen / Go](#opencode-zen--go-opencode-zen-bridge).
@@ -187,7 +187,7 @@ arbitrary code, so a new CLI always lands as explicit, reviewable code plus
 | `:9884` | `claude-p-sonnet-bridge` | `claude -p` | `claude-sonnet-5-5` | Dedicated Sonnet 5.5 bridge |
 | `:9885` | `grok46-bridge` / `agy-bridge` | `cursor-agent -p` / `agy -p` | `cursor-grok-4.6-high`, `gemini-4-argon` | 500k context, stdin streaming, progressive thinking |
 | `:9886` | `muse-bridge` | `muse serve` + `muse exec` | `muse-wonder-1.0`, `muse-spark-1.3` | MSP JSON-RPC, `allowAll` approval, live reasoning |
-| `:9887` (also `:9883`) | `opencode-zen-bridge` | `opencode` CLI | `deepseek-v4.1-flash-free`, etc. | Free-tier models |
+| `:9883` | `opencode-zen-bridge` | `opencode` CLI | `deepseek-v4.1-flash-free`, etc. | Free-tier models |
 | `:10830` | `model-georouter` | Direct routing | `gemini-4-argon-contributor` | Geo-distributed fallback proxy |
 
 All bridges authenticate with a bearer key and answer `GET /health`; a client
@@ -311,7 +311,7 @@ cursor-agent -p --model <id> \
 
 ### OpenCode Zen / Go (`opencode-zen-bridge`)
 
-- Ports `:9887` / `:9883`.
+- Port `:9883`.
 - Serves free-tier frontier models via the `opencode` CLI (for example
   `deepseek-v4.1-flash-free`).
 
@@ -409,7 +409,7 @@ providers:
     api_key: ${MUSE_BRIDGE_KEY}
     models: [muse-wonder-1.0, muse-spark-1.3]
   opencode-zen-bridge:
-    base_url: http://127.0.0.1:9887/v1
+    base_url: http://127.0.0.1:9883/v1
     api_key: ${OPENCODE_ZEN_BRIDGE_KEY}
     models: [deepseek-v4.1-flash-free]
 ```
@@ -493,11 +493,11 @@ All runtime tuning is environment variables; the model fleet is `fleet.json`.
 | `DROID_DSH_BRIDGE_MAX_CONCURRENT` | `4` | Global concurrency cap |
 | `DROID_DSH_BRIDGE_IDLE_SECONDS` | `2700` | Resident-session idle TTL |
 
-`fleet.json` declares `backends` (kind, `enabled`, `max_concurrent`, binary
-path + `sha256` pin, wrapper) and `models` (each bound to exactly one
-`backend`, with allowed `reasoning_effort` levels). Unknown models and efforts
-are rejected with `400` before any work starts; nothing is coerced silently.
-Validate any edit before restart:
+`fleet.json` declares pinned `backends`, model efforts, and optional weighted routes.
+`BRIDGE_TRANSPORT_ROUTING_ENABLED` defaults to `false`, preserving native routing.
+When enabled, weights select eligible routes; zero-weight routes are reserves. Replay
+uses `X-Transport-Seed` before body `transport_seed` with the same eligible snapshot.
+Unknown models/efforts return `400`; validate catalog edits before restart:
 
 ```bash
 python3 fleet_check.py
