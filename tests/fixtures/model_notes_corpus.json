@@ -1,0 +1,1223 @@
+{
+  "schema_version": "1.0",
+  "metadata": {
+    "case_count": 65,
+    "positive_count": 40,
+    "negative_count": 25,
+    "tag_counts": {
+      "after": 4,
+      "before": 4,
+      "current": 21,
+      "effort": 3,
+      "equal": 4,
+      "expired-rule": 5,
+      "expiry": 9,
+      "generation": 10,
+      "global": 4,
+      "legacy": 35,
+      "malformed": 23,
+      "model": 14,
+      "msk": 11,
+      "section-1": 46,
+      "section-2": 11,
+      "transport": 9,
+      "utc": 6,
+      "wildcard": 1
+    },
+    "sources": [
+      "~/Мой диск/Context/model-notes.md §1–§2 (2026-11-16)",
+      "tests/test_bridges_speedup_resilience.py: test_model_notes_msk_expiration_without_parentheses",
+      ".ai-team/runs/tv2safe-20261116/architecture/arch-panel-packet.md: Notes lifecycle; VER-009"
+    ],
+    "contract": {
+      "result": "DTO or mapping: generation:int|null, expires_at:aware datetime|ISO8601|null, rules:sequence of rule DTO/mapping",
+      "rule": "model:str|null, transport:str|null, effort:str|null, expires_at:aware datetime|ISO8601|null; null scope means all; trailing * is an anchored model prefix",
+      "effort": "Recognized trailing effort suffix is separated from base model; base model without effort covers all effort levels.",
+      "row_expiry": "Active through equality (now <= expires); expired rules are omitted, not document errors. A bare HH:MM uses the MSK calendar date of now_dt, never tomorrow.",
+      "document_metadata": "Optional HTML comments <!-- GENERATION: nonnegative decimal integer --> and <!-- EXPIRY: YYYY-MM-DD HH:MM MSK|UTC -->. Missing metadata projects to null. Conflicting or malformed metadata fails closed.",
+      "document_expiry": "Document validity is exclusive: now < EXPIRY; equality and later raise BlocklistParseError.",
+      "empty_policy": "A recognized empty table is valid. Empty or unstructured text is not an explicit empty policy.",
+      "error": "Every invalid case must raise the canonical BlocklistParseError with a nonempty diagnostic.",
+      "ordering": "Rule order is not significant. No runtime source file or wall clock is read by corpus tests."
+    }
+  },
+  "cases": [
+    {
+      "id": "current-temp-off-pair",
+      "tags": [
+        "current",
+        "section-1",
+        "model",
+        "transport"
+      ],
+      "text": "## 1. Оперативные блокировки\n\n| Модель / транспорт | Статус | Причина | Обновлено | Условие снятия / обход |\n|---|---|---|---|---|\n| `muse-ember-1.0` / `muse` | TEMP OFF | директива | 2026-11-16 07:05 MSK | по директиве владельца |\n",
+      "now_dt": "2026-11-16T12:00:00+00:00",
+      "expected": {
+        "generation": null,
+        "expires_at": null,
+        "rules": [
+          {
+            "model": "muse-ember-1.0",
+            "transport": "muse",
+            "effort": null,
+            "expires_at": null
+          }
+        ]
+      }
+    },
+    {
+      "id": "legacy-temp-off-bare",
+      "tags": [
+        "legacy",
+        "section-1",
+        "model"
+      ],
+      "text": "##1. Оперативные блокировки\n\n| Модель | Статус | Причина |\n|---|---|---|\n| model-a | TEMP-OFF | quota |\n",
+      "now_dt": "2026-11-16T12:00:00+00:00",
+      "expected": {
+        "generation": null,
+        "expires_at": null,
+        "rules": [
+          {
+            "model": "model-a",
+            "transport": null,
+            "effort": null,
+            "expires_at": null
+          }
+        ]
+      }
+    },
+    {
+      "id": "legacy-limit-blocked-bare",
+      "tags": [
+        "legacy",
+        "section-1",
+        "model"
+      ],
+      "text": "##1. Оперативные блокировки\n\n| Модель | Статус | Причина |\n|---|---|---|\n| model-a | LIMIT-BLOCKED | quota |\n",
+      "now_dt": "2026-11-16T12:00:00+00:00",
+      "expected": {
+        "generation": null,
+        "expires_at": null,
+        "rules": [
+          {
+            "model": "model-a",
+            "transport": null,
+            "effort": null,
+            "expires_at": null
+          }
+        ]
+      }
+    },
+    {
+      "id": "legacy-limit-blocked-space",
+      "tags": [
+        "legacy",
+        "section-1",
+        "model"
+      ],
+      "text": "##1. Оперативные блокировки\n\n| Модель | Статус | Причина |\n|---|---|---|\n| `model-a` | `LIMIT BLOCKED` (`quota_window`) | quota |\n",
+      "now_dt": "2026-11-16T12:00:00+00:00",
+      "expected": {
+        "generation": null,
+        "expires_at": null,
+        "rules": [
+          {
+            "model": "model-a",
+            "transport": null,
+            "effort": null,
+            "expires_at": null
+          }
+        ]
+      }
+    },
+    {
+      "id": "legacy-pair-scope",
+      "tags": [
+        "legacy",
+        "section-1",
+        "transport"
+      ],
+      "text": "##1. Оперативные блокировки\n\n| Модель | Статус | Причина |\n|---|---|---|\n| model-a / codex | TEMP-OFF | quota |\n",
+      "now_dt": "2026-11-16T12:00:00+00:00",
+      "expected": {
+        "generation": null,
+        "expires_at": null,
+        "rules": [
+          {
+            "model": "model-a",
+            "transport": "codex",
+            "effort": null,
+            "expires_at": null
+          }
+        ]
+      }
+    },
+    {
+      "id": "header-only-explicit-empty",
+      "tags": [
+        "legacy",
+        "section-1"
+      ],
+      "text": "##1. Оперативные блокировки\n\n| Модель | Статус | Причина |\n|---|---|---|\n",
+      "now_dt": "2026-11-16T12:00:00+00:00",
+      "expected": {
+        "generation": null,
+        "expires_at": null,
+        "rules": []
+      }
+    },
+    {
+      "id": "current-active-not-ban",
+      "tags": [
+        "current",
+        "section-1"
+      ],
+      "text": "## 1. Оперативные блокировки\n\n| Модель / транспорт | Статус | Причина | Обновлено | Условие снятия / обход |\n|---|---|---|---|---|\n| `model-a` / `droid` | ACTIVE | prose BANNED TEMP OFF | 2026-11-16 10:00 MSK | — |\n",
+      "now_dt": "2026-11-16T12:00:00+00:00",
+      "expected": {
+        "generation": null,
+        "expires_at": null,
+        "rules": []
+      }
+    },
+    {
+      "id": "legacy-ok-not-ban",
+      "tags": [
+        "legacy",
+        "section-1"
+      ],
+      "text": "##1. Оперативные блокировки\n\n| Модель | Статус | Причина |\n|---|---|---|\n| model-a | OK | причина BANNED |\n",
+      "now_dt": "2026-11-16T12:00:00+00:00",
+      "expected": {
+        "generation": null,
+        "expires_at": null,
+        "rules": []
+      }
+    },
+    {
+      "id": "section2-model-banned",
+      "tags": [
+        "current",
+        "section-2",
+        "model"
+      ],
+      "text": "## 2. Постоянные запреты\n\n| Группа | Что | Статус | Нюанс / дата |\n|---|---|---|---|\n| Модели | `model-a` | BANNED | retired in 2026 |\n",
+      "now_dt": "2026-11-16T12:00:00+00:00",
+      "expected": {
+        "generation": null,
+        "expires_at": null,
+        "rules": [
+          {
+            "model": "model-a",
+            "transport": null,
+            "effort": null,
+            "expires_at": null
+          }
+        ]
+      }
+    },
+    {
+      "id": "section2-retired-bare",
+      "tags": [
+        "legacy",
+        "section-2",
+        "model"
+      ],
+      "text": "##2. Постоянные запреты\n\n| Группа | Что | Статус | Нюанс / дата |\n|---|---|---|---|\n| Модели | model-a | RETIRED | снят |\n",
+      "now_dt": "2026-11-16T12:00:00+00:00",
+      "expected": {
+        "generation": null,
+        "expires_at": null,
+        "rules": [
+          {
+            "model": "model-a",
+            "transport": null,
+            "effort": null,
+            "expires_at": null
+          }
+        ]
+      }
+    },
+    {
+      "id": "section2-banned-retired",
+      "tags": [
+        "current",
+        "section-2",
+        "model"
+      ],
+      "text": "## 2. Постоянные запреты\n\n| Группа | Что | Статус | Нюанс / дата |\n|---|---|---|---|\n| Модели | `model-a` | BANNED / RETIRED | снят |\n",
+      "now_dt": "2026-11-16T12:00:00+00:00",
+      "expected": {
+        "generation": null,
+        "expires_at": null,
+        "rules": [
+          {
+            "model": "model-a",
+            "transport": null,
+            "effort": null,
+            "expires_at": null
+          }
+        ]
+      }
+    },
+    {
+      "id": "section2-retired-qualified",
+      "tags": [
+        "current",
+        "section-2",
+        "model"
+      ],
+      "text": "## 2. Постоянные запреты\n\n| Группа | Что | Статус | Нюанс / дата |\n|---|---|---|---|\n| Модели | `mimo-v2.6-pro` | RETIRED в оркестрации | снят |\n",
+      "now_dt": "2026-11-16T12:00:00+00:00",
+      "expected": {
+        "generation": null,
+        "expires_at": null,
+        "rules": [
+          {
+            "model": "mimo-v2.6-pro",
+            "transport": null,
+            "effort": null,
+            "expires_at": null
+          }
+        ]
+      }
+    },
+    {
+      "id": "section2-active-transport",
+      "tags": [
+        "current",
+        "section-2",
+        "transport"
+      ],
+      "text": "## 2. Постоянные запреты\n\n| Группа | Что | Статус | Нюанс / дата |\n|---|---|---|---|\n| Транспорты | Factory Droid (Droid CLI) | ACTIVE (подписка) | прочие ID BANNED |\n",
+      "now_dt": "2026-11-16T12:00:00+00:00",
+      "expected": {
+        "generation": null,
+        "expires_at": null,
+        "rules": []
+      }
+    },
+    {
+      "id": "section2-global-transport-ban",
+      "tags": [
+        "current",
+        "section-2",
+        "global",
+        "transport"
+      ],
+      "text": "## 2. Постоянные запреты\n\n| Группа | Что | Статус | Нюанс / дата |\n|---|---|---|---|\n| Транспорты | `cursor-agent`, все модели | BANNED / RETIRED | снят |\n",
+      "now_dt": "2026-11-16T12:00:00+00:00",
+      "expected": {
+        "generation": null,
+        "expires_at": null,
+        "rules": [
+          {
+            "model": null,
+            "transport": "cursor-agent",
+            "effort": null,
+            "expires_at": null
+          }
+        ]
+      }
+    },
+    {
+      "id": "section2-multiple-models",
+      "tags": [
+        "current",
+        "section-2",
+        "model"
+      ],
+      "text": "## 2. Постоянные запреты\n\n| Группа | Что | Статус | Нюанс / дата |\n|---|---|---|---|\n| Модели | `fable`, `gpt-6-astra` | RETIRED | сняты |\n",
+      "now_dt": "2026-11-16T12:00:00+00:00",
+      "expected": {
+        "generation": null,
+        "expires_at": null,
+        "rules": [
+          {
+            "model": "fable",
+            "transport": null,
+            "effort": null,
+            "expires_at": null
+          },
+          {
+            "model": "gpt-6-astra",
+            "transport": null,
+            "effort": null,
+            "expires_at": null
+          }
+        ]
+      }
+    },
+    {
+      "id": "wildcard-generation-not-current-generation",
+      "tags": [
+        "current",
+        "section-2",
+        "wildcard",
+        "model"
+      ],
+      "text": "## 2. Постоянные запреты\n\n| Группа | Что | Статус | Нюанс / дата |\n|---|---|---|---|\n| Модели | `gpt-5.6-terra*` | RETIRED | `gpt-6.1-terra` не затронут |\n",
+      "now_dt": "2026-11-16T12:00:00+00:00",
+      "expected": {
+        "generation": null,
+        "expires_at": null,
+        "rules": [
+          {
+            "model": "gpt-5.6-terra*",
+            "transport": null,
+            "effort": null,
+            "expires_at": null
+          }
+        ]
+      }
+    },
+    {
+      "id": "exact-effort-slot",
+      "tags": [
+        "current",
+        "section-1",
+        "model",
+        "effort",
+        "transport"
+      ],
+      "text": "## 1. Оперативные блокировки\n\n| Модель / транспорт | Статус | Причина | Обновлено | Условие снятия / обход |\n|---|---|---|---|---|\n| `gemini-4-argon-high` / `agy` | TEMP OFF | quota | 2026-11-16 10:00 MSK | вручную |\n",
+      "now_dt": "2026-11-16T12:00:00+00:00",
+      "expected": {
+        "generation": null,
+        "expires_at": null,
+        "rules": [
+          {
+            "model": "gemini-4-argon",
+            "transport": "agy",
+            "effort": "high",
+            "expires_at": null
+          }
+        ]
+      }
+    },
+    {
+      "id": "base-model-all-efforts",
+      "tags": [
+        "current",
+        "section-1",
+        "model",
+        "effort"
+      ],
+      "text": "## 1. Оперативные блокировки\n\n| Модель / транспорт | Статус | Причина | Обновлено | Условие снятия / обход |\n|---|---|---|---|---|\n| `gemini-4-argon` | TEMP OFF | quota | 2026-11-16 10:00 MSK | вручную |\n",
+      "now_dt": "2026-11-16T12:00:00+00:00",
+      "expected": {
+        "generation": null,
+        "expires_at": null,
+        "rules": [
+          {
+            "model": "gemini-4-argon",
+            "transport": null,
+            "effort": null,
+            "expires_at": null
+          }
+        ]
+      }
+    },
+    {
+      "id": "several-slots-and-transport",
+      "tags": [
+        "current",
+        "section-1",
+        "effort",
+        "transport"
+      ],
+      "text": "## 1. Оперативные блокировки\n\n| Модель / транспорт | Статус | Причина | Обновлено | Условие снятия / обход |\n|---|---|---|---|---|\n| `model-a`, `model-a-high` / `claude` (`claude -p`, `:9881`) | LIMIT-BLOCKED | quota | 2026-11-16 10:00 MSK | вручную |\n",
+      "now_dt": "2026-11-16T12:00:00+00:00",
+      "expected": {
+        "generation": null,
+        "expires_at": null,
+        "rules": [
+          {
+            "model": "model-a",
+            "transport": "claude",
+            "effort": null,
+            "expires_at": null
+          },
+          {
+            "model": "model-a",
+            "transport": "claude",
+            "effort": "high",
+            "expires_at": null
+          }
+        ]
+      }
+    },
+    {
+      "id": "multiple-transports-not-description",
+      "tags": [
+        "current",
+        "section-1",
+        "transport"
+      ],
+      "text": "## 1. Оперативные блокировки\n\n| Модель / транспорт | Статус | Причина | Обновлено | Условие снятия / обход |\n|---|---|---|---|---|\n| `model-a` / `claude -p`, `opencode-go`, `:9882` | LIMIT-BLOCKED | `other-model` elsewhere | 2026-11-16 10:00 MSK | вручную |\n",
+      "now_dt": "2026-11-16T12:00:00+00:00",
+      "expected": {
+        "generation": null,
+        "expires_at": null,
+        "rules": [
+          {
+            "model": "model-a",
+            "transport": "claude -p",
+            "effort": null,
+            "expires_at": null
+          },
+          {
+            "model": "model-a",
+            "transport": "opencode-go",
+            "effort": null,
+            "expires_at": null
+          },
+          {
+            "model": "model-a",
+            "transport": ":9882",
+            "effort": null,
+            "expires_at": null
+          }
+        ]
+      }
+    },
+    {
+      "id": "all-models-one-transport",
+      "tags": [
+        "legacy",
+        "section-1",
+        "global",
+        "transport"
+      ],
+      "text": "##1. Оперативные блокировки\n\n| Модель | Статус | Причина |\n|---|---|---|\n| * / codex | TEMP-OFF | quota |\n",
+      "now_dt": "2026-11-16T12:00:00+00:00",
+      "expected": {
+        "generation": null,
+        "expires_at": null,
+        "rules": [
+          {
+            "model": null,
+            "transport": "codex",
+            "effort": null,
+            "expires_at": null
+          }
+        ]
+      }
+    },
+    {
+      "id": "one-model-all-transports",
+      "tags": [
+        "legacy",
+        "section-1",
+        "model",
+        "global"
+      ],
+      "text": "##1. Оперативные блокировки\n\n| Модель | Статус | Причина |\n|---|---|---|\n| model-a / * | TEMP-OFF | quota |\n",
+      "now_dt": "2026-11-16T12:00:00+00:00",
+      "expected": {
+        "generation": null,
+        "expires_at": null,
+        "rules": [
+          {
+            "model": "model-a",
+            "transport": null,
+            "effort": null,
+            "expires_at": null
+          }
+        ]
+      }
+    },
+    {
+      "id": "global-all-routes",
+      "tags": [
+        "legacy",
+        "section-1",
+        "global"
+      ],
+      "text": "##1. Оперативные блокировки\n\n| Модель | Статус | Причина |\n|---|---|---|\n| * / * | TEMP-OFF | maintenance |\n",
+      "now_dt": "2026-11-16T12:00:00+00:00",
+      "expected": {
+        "generation": null,
+        "expires_at": null,
+        "rules": [
+          {
+            "model": null,
+            "transport": null,
+            "effort": null,
+            "expires_at": null
+          }
+        ]
+      }
+    },
+    {
+      "id": "reason-backticks-not-models",
+      "tags": [
+        "current",
+        "section-1",
+        "model",
+        "transport"
+      ],
+      "text": "## 1. Оперативные блокировки\n\n| Модель / транспорт | Статус | Причина | Обновлено | Условие снятия / обход |\n|---|---|---|---|---|\n| `model-a` / `codex` (`codex exec`, `:9882`) | TEMP OFF | `model-b`, `droid`, `BANNED` | 2026-11-16 10:00 MSK | вручную |\n",
+      "now_dt": "2026-11-16T12:00:00+00:00",
+      "expected": {
+        "generation": null,
+        "expires_at": null,
+        "rules": [
+          {
+            "model": "model-a",
+            "transport": "codex",
+            "effort": null,
+            "expires_at": null
+          }
+        ]
+      }
+    },
+    {
+      "id": "dated-msk-before",
+      "tags": [
+        "current",
+        "section-1",
+        "msk",
+        "before"
+      ],
+      "text": "## 1. Оперативные блокировки\n\n| Модель / транспорт | Статус | Причина | Обновлено | Условие снятия / обход |\n|---|---|---|---|---|\n| `model-a` / `codex` | LIMIT-BLOCKED | quota | 2026-11-16 09:30 MSK | до 2026-11-16 18:00 MSK или успешный смоук `PONG` `rc=0` |\n",
+      "now_dt": "2026-11-16T14:59:59+00:00",
+      "expected": {
+        "generation": null,
+        "expires_at": null,
+        "rules": [
+          {
+            "model": "model-a",
+            "transport": "codex",
+            "effort": null,
+            "expires_at": "2026-11-16T15:00:00+00:00"
+          }
+        ]
+      }
+    },
+    {
+      "id": "short-msk-before",
+      "tags": [
+        "legacy",
+        "section-1",
+        "msk",
+        "before"
+      ],
+      "text": "##1. Оперативные блокировки\n\n| Модель | Статус | Причина |\n|---|---|---|\n| model-a | LIMIT BLOCKED (до 18:00 MSK) | quota |\n",
+      "now_dt": "2026-11-16T14:59:59+00:00",
+      "expected": {
+        "generation": null,
+        "expires_at": null,
+        "rules": [
+          {
+            "model": "model-a",
+            "transport": null,
+            "effort": null,
+            "expires_at": "2026-11-16T15:00:00+00:00"
+          }
+        ]
+      }
+    },
+    {
+      "id": "utc-before",
+      "tags": [
+        "legacy",
+        "section-1",
+        "utc",
+        "before"
+      ],
+      "text": "##1. Оперативные блокировки\n\n| Модель | Статус | Причина |\n|---|---|---|\n| model-a | LIMIT BLOCKED до 2026-11-16 15:00 UTC | quota |\n",
+      "now_dt": "2026-11-16T14:59:59+00:00",
+      "expected": {
+        "generation": null,
+        "expires_at": null,
+        "rules": [
+          {
+            "model": "model-a",
+            "transport": null,
+            "effort": null,
+            "expires_at": "2026-11-16T15:00:00+00:00"
+          }
+        ]
+      }
+    },
+    {
+      "id": "dated-msk-equal",
+      "tags": [
+        "current",
+        "section-1",
+        "msk",
+        "equal"
+      ],
+      "text": "## 1. Оперативные блокировки\n\n| Модель / транспорт | Статус | Причина | Обновлено | Условие снятия / обход |\n|---|---|---|---|---|\n| `model-a` / `codex` | LIMIT-BLOCKED | quota | 2026-11-16 09:30 MSK | до 2026-11-16 18:00 MSK или успешный смоук `PONG` `rc=0` |\n",
+      "now_dt": "2026-11-16T18:00:00+03:00",
+      "expected": {
+        "generation": null,
+        "expires_at": null,
+        "rules": [
+          {
+            "model": "model-a",
+            "transport": "codex",
+            "effort": null,
+            "expires_at": "2026-11-16T15:00:00+00:00"
+          }
+        ]
+      }
+    },
+    {
+      "id": "short-msk-equal",
+      "tags": [
+        "legacy",
+        "section-1",
+        "msk",
+        "equal"
+      ],
+      "text": "##1. Оперативные блокировки\n\n| Модель | Статус | Причина |\n|---|---|---|\n| model-a | LIMIT BLOCKED (до 18:00 MSK) | quota |\n",
+      "now_dt": "2026-11-16T18:00:00+03:00",
+      "expected": {
+        "generation": null,
+        "expires_at": null,
+        "rules": [
+          {
+            "model": "model-a",
+            "transport": null,
+            "effort": null,
+            "expires_at": "2026-11-16T15:00:00+00:00"
+          }
+        ]
+      }
+    },
+    {
+      "id": "utc-equal",
+      "tags": [
+        "legacy",
+        "section-1",
+        "utc",
+        "equal"
+      ],
+      "text": "##1. Оперативные блокировки\n\n| Модель | Статус | Причина |\n|---|---|---|\n| model-a | LIMIT BLOCKED до 2026-11-16 15:00 UTC | quota |\n",
+      "now_dt": "2026-11-16T18:00:00+03:00",
+      "expected": {
+        "generation": null,
+        "expires_at": null,
+        "rules": [
+          {
+            "model": "model-a",
+            "transport": null,
+            "effort": null,
+            "expires_at": "2026-11-16T15:00:00+00:00"
+          }
+        ]
+      }
+    },
+    {
+      "id": "dated-msk-after",
+      "tags": [
+        "current",
+        "section-1",
+        "msk",
+        "after",
+        "expired-rule"
+      ],
+      "text": "## 1. Оперативные блокировки\n\n| Модель / транспорт | Статус | Причина | Обновлено | Условие снятия / обход |\n|---|---|---|---|---|\n| `model-a` / `codex` | LIMIT-BLOCKED | quota | 2026-11-16 09:30 MSK | до 2026-11-16 18:00 MSK или успешный смоук `PONG` `rc=0` |\n",
+      "now_dt": "2026-11-16T15:00:01+00:00",
+      "expected": {
+        "generation": null,
+        "expires_at": null,
+        "rules": []
+      }
+    },
+    {
+      "id": "short-msk-after",
+      "tags": [
+        "legacy",
+        "section-1",
+        "msk",
+        "after",
+        "expired-rule"
+      ],
+      "text": "##1. Оперативные блокировки\n\n| Модель | Статус | Причина |\n|---|---|---|\n| model-a | LIMIT BLOCKED (до 18:00 MSK) | quota |\n",
+      "now_dt": "2026-11-16T15:00:01+00:00",
+      "expected": {
+        "generation": null,
+        "expires_at": null,
+        "rules": []
+      }
+    },
+    {
+      "id": "utc-after",
+      "tags": [
+        "legacy",
+        "section-1",
+        "utc",
+        "after",
+        "expired-rule"
+      ],
+      "text": "##1. Оперативные блокировки\n\n| Модель | Статус | Причина |\n|---|---|---|\n| model-a | LIMIT BLOCKED до 2026-11-16 15:00 UTC | quota |\n",
+      "now_dt": "2026-11-16T15:00:01+00:00",
+      "expected": {
+        "generation": null,
+        "expires_at": null,
+        "rules": []
+      }
+    },
+    {
+      "id": "short-msk-now-local-date",
+      "tags": [
+        "legacy",
+        "section-1",
+        "msk",
+        "expired-rule"
+      ],
+      "text": "##1. Оперативные блокировки\n\n| Модель | Статус | Причина |\n|---|---|---|\n| model-a | TEMP OFF до 01:00 MSK | quota |\n",
+      "now_dt": "2026-11-16T23:00:00+00:00",
+      "expected": {
+        "generation": null,
+        "expires_at": null,
+        "rules": []
+      }
+    },
+    {
+      "id": "expired-one-live-one",
+      "tags": [
+        "current",
+        "section-1",
+        "msk",
+        "expired-rule"
+      ],
+      "text": "## 1. Оперативные блокировки\n\n| Модель / транспорт | Статус | Причина | Обновлено | Условие снятия / обход |\n|---|---|---|---|---|\n| `model-a` / `codex` | LIMIT-BLOCKED | quota | 2026-11-15 09:00 MSK | до 2026-11-15 18:00 MSK |\n| `model-b` / `droid` | TEMP OFF | quota | 2026-11-16 10:00 MSK | вручную |\n",
+      "now_dt": "2026-11-16T12:00:00+00:00",
+      "expected": {
+        "generation": null,
+        "expires_at": null,
+        "rules": [
+          {
+            "model": "model-b",
+            "transport": "droid",
+            "effort": null,
+            "expires_at": null
+          }
+        ]
+      }
+    },
+    {
+      "id": "unrelated-section-not-ban",
+      "tags": [
+        "current",
+        "section-1",
+        "section-2"
+      ],
+      "text": "##1. Оперативные блокировки\n\n| Модель | Статус | Причина |\n|---|---|---|\n| model-a | OK | — |\n## 2. Постоянные запреты\n\n| Группа | Что | Статус | Нюанс / дата |\n|---|---|---|---|\n| Модели | `model-b` | ACTIVE | — |\n\n## 3. Нюансы\n| Модель | Статус |\n|---|---|\n| `example` | BANNED |\n",
+      "now_dt": "2026-11-16T12:00:00+00:00",
+      "expected": {
+        "generation": null,
+        "expires_at": null,
+        "rules": []
+      }
+    },
+    {
+      "id": "generation-zero",
+      "tags": [
+        "legacy",
+        "section-1",
+        "generation"
+      ],
+      "text": "<!-- GENERATION: 0 -->\n##1. Оперативные блокировки\n\n| Модель | Статус | Причина |\n|---|---|---|\n\n",
+      "now_dt": "2026-11-16T12:00:00+00:00",
+      "expected": {
+        "generation": 0,
+        "expires_at": null,
+        "rules": []
+      }
+    },
+    {
+      "id": "generation-large-integer",
+      "tags": [
+        "legacy",
+        "section-1",
+        "generation"
+      ],
+      "text": "<!-- GENERATION: 9007199254740991 -->\n##1. Оперативные блокировки\n\n| Модель | Статус | Причина |\n|---|---|---|\n| model-a | TEMP-OFF | quota |\n",
+      "now_dt": "2026-11-16T12:00:00+00:00",
+      "expected": {
+        "generation": 9007199254740991,
+        "expires_at": null,
+        "rules": [
+          {
+            "model": "model-a",
+            "transport": null,
+            "effort": null,
+            "expires_at": null
+          }
+        ]
+      }
+    },
+    {
+      "id": "document-expiry-before",
+      "tags": [
+        "legacy",
+        "section-1",
+        "generation",
+        "expiry",
+        "utc",
+        "before"
+      ],
+      "text": "<!-- GENERATION: 7 -->\n<!-- EXPIRY: 2026-11-16 15:00 UTC -->\n##1. Оперативные блокировки\n\n| Модель | Статус | Причина |\n|---|---|---|\n| model-a | TEMP-OFF | quota |\n",
+      "now_dt": "2026-11-16T14:59:59+00:00",
+      "expected": {
+        "generation": 7,
+        "expires_at": "2026-11-16T15:00:00+00:00",
+        "rules": [
+          {
+            "model": "model-a",
+            "transport": null,
+            "effort": null,
+            "expires_at": null
+          }
+        ]
+      }
+    },
+    {
+      "id": "document-expiry-equal",
+      "tags": [
+        "legacy",
+        "section-1",
+        "generation",
+        "expiry",
+        "utc",
+        "equal"
+      ],
+      "text": "<!-- GENERATION: 7 -->\n<!-- EXPIRY: 2026-11-16 15:00 UTC -->\n##1. Оперативные блокировки\n\n| Модель | Статус | Причина |\n|---|---|---|\n| model-a | TEMP-OFF | quota |\n",
+      "now_dt": "2026-11-16T18:00:00+03:00",
+      "expected": {
+        "error": "BlocklistParseError"
+      }
+    },
+    {
+      "id": "document-expiry-after",
+      "tags": [
+        "legacy",
+        "section-1",
+        "generation",
+        "expiry",
+        "utc",
+        "after"
+      ],
+      "text": "<!-- GENERATION: 7 -->\n<!-- EXPIRY: 2026-11-16 15:00 UTC -->\n##1. Оперативные блокировки\n\n| Модель | Статус | Причина |\n|---|---|---|\n| model-a | TEMP-OFF | quota |\n",
+      "now_dt": "2026-11-16T15:00:01+00:00",
+      "expected": {
+        "error": "BlocklistParseError"
+      }
+    },
+    {
+      "id": "document-msk-expiry",
+      "tags": [
+        "legacy",
+        "section-1",
+        "generation",
+        "expiry",
+        "msk"
+      ],
+      "text": "<!-- GENERATION: 8 -->\n<!-- EXPIRY: 2026-11-16 18:00 MSK -->\n##1. Оперативные блокировки\n\n| Модель | Статус | Причина |\n|---|---|---|\n\n",
+      "now_dt": "2026-11-16T12:00:00+00:00",
+      "expected": {
+        "generation": 8,
+        "expires_at": "2026-11-16T15:00:00+00:00",
+        "rules": []
+      }
+    },
+    {
+      "id": "empty-document",
+      "tags": [
+        "malformed"
+      ],
+      "text": "",
+      "now_dt": "2026-11-16T12:00:00+00:00",
+      "expected": {
+        "error": "BlocklistParseError"
+      }
+    },
+    {
+      "id": "prose-only",
+      "tags": [
+        "malformed"
+      ],
+      "text": "All models ACTIVE; model-a BANNED",
+      "now_dt": "2026-11-16T12:00:00+00:00",
+      "expected": {
+        "error": "BlocklistParseError"
+      }
+    },
+    {
+      "id": "missing-status-cell",
+      "tags": [
+        "legacy",
+        "section-1",
+        "malformed"
+      ],
+      "text": "##1. Оперативные блокировки\n\n| Модель | Статус | Причина |\n|---|---|---|\n| model-a |\n",
+      "now_dt": "2026-11-16T12:00:00+00:00",
+      "expected": {
+        "error": "BlocklistParseError"
+      }
+    },
+    {
+      "id": "extra-unescaped-cell",
+      "tags": [
+        "legacy",
+        "section-1",
+        "malformed"
+      ],
+      "text": "##1. Оперативные блокировки\n\n| Модель | Статус | Причина |\n|---|---|---|\n| model-a | TEMP-OFF | quota | extra |\n",
+      "now_dt": "2026-11-16T12:00:00+00:00",
+      "expected": {
+        "error": "BlocklistParseError"
+      }
+    },
+    {
+      "id": "missing-model",
+      "tags": [
+        "legacy",
+        "section-1",
+        "malformed"
+      ],
+      "text": "##1. Оперативные блокировки\n\n| Модель | Статус | Причина |\n|---|---|---|\n| | TEMP-OFF | quota |\n",
+      "now_dt": "2026-11-16T12:00:00+00:00",
+      "expected": {
+        "error": "BlocklistParseError"
+      }
+    },
+    {
+      "id": "missing-transport",
+      "tags": [
+        "legacy",
+        "section-1",
+        "malformed"
+      ],
+      "text": "##1. Оперативные блокировки\n\n| Модель | Статус | Причина |\n|---|---|---|\n| model-a / | TEMP-OFF | quota |\n",
+      "now_dt": "2026-11-16T12:00:00+00:00",
+      "expected": {
+        "error": "BlocklistParseError"
+      }
+    },
+    {
+      "id": "unclosed-backtick",
+      "tags": [
+        "legacy",
+        "section-1",
+        "malformed"
+      ],
+      "text": "##1. Оперативные блокировки\n\n| Модель | Статус | Причина |\n|---|---|---|\n| `model-a | TEMP-OFF | quota |\n",
+      "now_dt": "2026-11-16T12:00:00+00:00",
+      "expected": {
+        "error": "BlocklistParseError"
+      }
+    },
+    {
+      "id": "unknown-status",
+      "tags": [
+        "legacy",
+        "section-1",
+        "malformed"
+      ],
+      "text": "##1. Оперативные блокировки\n\n| Модель | Статус | Причина |\n|---|---|---|\n| model-a | TEMPOFF | quota |\n",
+      "now_dt": "2026-11-16T12:00:00+00:00",
+      "expected": {
+        "error": "BlocklistParseError"
+      }
+    },
+    {
+      "id": "invalid-expiry-clock",
+      "tags": [
+        "legacy",
+        "section-1",
+        "malformed",
+        "msk"
+      ],
+      "text": "##1. Оперативные блокировки\n\n| Модель | Статус | Причина |\n|---|---|---|\n| model-a | TEMP OFF до 25:00 MSK | quota |\n",
+      "now_dt": "2026-11-16T12:00:00+00:00",
+      "expected": {
+        "error": "BlocklistParseError"
+      }
+    },
+    {
+      "id": "invalid-expiry-date",
+      "tags": [
+        "legacy",
+        "section-1",
+        "malformed",
+        "msk"
+      ],
+      "text": "##1. Оперативные блокировки\n\n| Модель | Статус | Причина |\n|---|---|---|\n| model-a | TEMP OFF до 2026-02-30 18:00 MSK | quota |\n",
+      "now_dt": "2026-11-16T12:00:00+00:00",
+      "expected": {
+        "error": "BlocklistParseError"
+      }
+    },
+    {
+      "id": "missing-expiry-zone",
+      "tags": [
+        "legacy",
+        "section-1",
+        "malformed",
+        "expiry"
+      ],
+      "text": "##1. Оперативные блокировки\n\n| Модель | Статус | Причина |\n|---|---|---|\n| model-a | TEMP OFF до 2026-11-16 18:00 | quota |\n",
+      "now_dt": "2026-11-16T12:00:00+00:00",
+      "expected": {
+        "error": "BlocklistParseError"
+      }
+    },
+    {
+      "id": "unknown-expiry-zone",
+      "tags": [
+        "legacy",
+        "section-1",
+        "malformed",
+        "expiry"
+      ],
+      "text": "##1. Оперативные блокировки\n\n| Модель | Статус | Причина |\n|---|---|---|\n| model-a | TEMP OFF до 2026-11-16 18:00 XYZ | quota |\n",
+      "now_dt": "2026-11-16T12:00:00+00:00",
+      "expected": {
+        "error": "BlocklistParseError"
+      }
+    },
+    {
+      "id": "negative-generation",
+      "tags": [
+        "generation",
+        "malformed"
+      ],
+      "text": "<!-- GENERATION: -1 -->\n##1. Оперативные блокировки\n\n| Модель | Статус | Причина |\n|---|---|---|\n\n",
+      "now_dt": "2026-11-16T12:00:00+00:00",
+      "expected": {
+        "error": "BlocklistParseError"
+      }
+    },
+    {
+      "id": "fractional-generation",
+      "tags": [
+        "generation",
+        "malformed"
+      ],
+      "text": "<!-- GENERATION: 1.5 -->\n##1. Оперативные блокировки\n\n| Модель | Статус | Причина |\n|---|---|---|\n\n",
+      "now_dt": "2026-11-16T12:00:00+00:00",
+      "expected": {
+        "error": "BlocklistParseError"
+      }
+    },
+    {
+      "id": "nonnumeric-generation",
+      "tags": [
+        "generation",
+        "malformed"
+      ],
+      "text": "<!-- GENERATION: unknown -->\n##1. Оперативные блокировки\n\n| Модель | Статус | Причина |\n|---|---|---|\n\n",
+      "now_dt": "2026-11-16T12:00:00+00:00",
+      "expected": {
+        "error": "BlocklistParseError"
+      }
+    },
+    {
+      "id": "conflicting-generation",
+      "tags": [
+        "generation",
+        "malformed"
+      ],
+      "text": "<!-- GENERATION: 1 -->\n<!-- GENERATION: 2 -->\n##1. Оперативные блокировки\n\n| Модель | Статус | Причина |\n|---|---|---|\n\n",
+      "now_dt": "2026-11-16T12:00:00+00:00",
+      "expected": {
+        "error": "BlocklistParseError"
+      }
+    },
+    {
+      "id": "invalid-document-expiry",
+      "tags": [
+        "expiry",
+        "malformed"
+      ],
+      "text": "<!-- EXPIRY: tomorrow -->\n##1. Оперативные блокировки\n\n| Модель | Статус | Причина |\n|---|---|---|\n\n",
+      "now_dt": "2026-11-16T12:00:00+00:00",
+      "expected": {
+        "error": "BlocklistParseError"
+      }
+    },
+    {
+      "id": "naive-document-expiry",
+      "tags": [
+        "expiry",
+        "malformed"
+      ],
+      "text": "<!-- EXPIRY: 2026-11-16 18:00 -->\n##1. Оперативные блокировки\n\n| Модель | Статус | Причина |\n|---|---|---|\n\n",
+      "now_dt": "2026-11-16T12:00:00+00:00",
+      "expected": {
+        "error": "BlocklistParseError"
+      }
+    },
+    {
+      "id": "conflicting-document-expiry",
+      "tags": [
+        "expiry",
+        "malformed"
+      ],
+      "text": "<!-- EXPIRY: 2026-11-16 18:00 MSK -->\n<!-- EXPIRY: 2026-11-17 18:00 MSK -->\n##1. Оперативные блокировки\n\n| Модель | Статус | Причина |\n|---|---|---|\n\n",
+      "now_dt": "2026-11-16T12:00:00+00:00",
+      "expected": {
+        "error": "BlocklistParseError"
+      }
+    },
+    {
+      "id": "valid-then-malformed",
+      "tags": [
+        "legacy",
+        "section-1",
+        "malformed"
+      ],
+      "text": "##1. Оперативные блокировки\n\n| Модель | Статус | Причина |\n|---|---|---|\n| model-a | TEMP-OFF | quota |\n| model-b |\n",
+      "now_dt": "2026-11-16T12:00:00+00:00",
+      "expected": {
+        "error": "BlocklistParseError"
+      }
+    },
+    {
+      "id": "section2-missing-target",
+      "tags": [
+        "current",
+        "section-2",
+        "malformed"
+      ],
+      "text": "## 2. Постоянные запреты\n\n| Группа | Что | Статус | Нюанс / дата |\n|---|---|---|---|\n| Модели | | BANNED | — |\n",
+      "now_dt": "2026-11-16T12:00:00+00:00",
+      "expected": {
+        "error": "BlocklistParseError"
+      }
+    },
+    {
+      "id": "section2-unknown-status",
+      "tags": [
+        "current",
+        "section-2",
+        "malformed"
+      ],
+      "text": "## 2. Постоянные запреты\n\n| Группа | Что | Статус | Нюанс / дата |\n|---|---|---|---|\n| Модели | model-a | BANED | — |\n",
+      "now_dt": "2026-11-16T12:00:00+00:00",
+      "expected": {
+        "error": "BlocklistParseError"
+      }
+    },
+    {
+      "id": "naive-now-rejected",
+      "tags": [
+        "legacy",
+        "section-1",
+        "malformed"
+      ],
+      "text": "##1. Оперативные блокировки\n\n| Модель | Статус | Причина |\n|---|---|---|\n| model-a | TEMP-OFF | quota |\n",
+      "now_dt": "2026-11-16T12:00:00",
+      "expected": {
+        "error": "BlocklistParseError"
+      }
+    }
+  ]
+}
