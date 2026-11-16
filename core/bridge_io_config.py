@@ -16,7 +16,7 @@ class BridgeIOConfig:
     admission_limit: int = 128
     ui_reserve: int = 2
     header_headroom: int = 2
-    keepalive_s: float = 3.0
+    keepalive_s: float = 10.0
     read_timeout_s: float | None = None
     write_timeout_s: float | None = None
 

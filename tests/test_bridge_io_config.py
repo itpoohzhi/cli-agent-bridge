@@ -90,7 +90,7 @@ def test_socket_keepalive_is_independent_of_nodelay(nodelay: bool) -> None:
 
 @pytest.mark.parametrize(
     ("read_timeout", "write_timeout", "expected"),
-    [(None, None, 9.0), (2.5, None, 2.5), (None, 3.5, 3.5), (5.0, 1.5, 1.5)],
+    [(None, None, 9.0), (2.5, None, 2.5), (None, 3.5, 9.0), (5.0, 1.5, 5.0)],
 )
 def test_configured_socket_timeout(
     read_timeout: float | None, write_timeout: float | None, expected: float
@@ -113,7 +113,7 @@ def test_socket_timeouts_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
     assert (config.read_timeout_s, config.write_timeout_s) == (4.5, 2.5)
     with socket.socket() as sock:
         http_accept.configure_accepted_socket(sock)
-        assert sock.gettimeout() == 2.5
+        assert sock.gettimeout() == 4.5
 
 
 def test_server_accept_and_handler_setup_apply_socket_settings(
@@ -129,7 +129,7 @@ def test_server_accept_and_handler_setup_apply_socket_settings(
             accepted, address = httpd.get_request()
             with accepted:
                 assert accepted.getsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE) != 0
-                assert accepted.gettimeout() == 2.5
+                assert accepted.gettimeout() == 4.5
                 handler = server.Handler.__new__(server.Handler)
                 handler.request = accepted
                 handler.client_address = address
@@ -139,7 +139,7 @@ def test_server_accept_and_handler_setup_apply_socket_settings(
                     assert (
                         accepted.getsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE) != 0
                     )
-                    assert accepted.gettimeout() == 2.5
+                    assert accepted.gettimeout() == 4.5
                 finally:
                     handler.finish()
 
@@ -149,6 +149,129 @@ def test_server_accept_and_handler_setup_apply_socket_settings(
 def test_invalid_socket_timeout_is_rejected(field: str, value: float) -> None:
     with pytest.raises(ValueError, match=field):
         bridge_io_config.BridgeIOConfig(**{field: value})
+
+
+def test_keepalive_default_is_ten_seconds(monkeypatch: pytest.MonkeyPatch) -> None:
+    assert bridge_io_config.BridgeIOConfig().keepalive_s == 10.0
+    for name in (
+        "BRIDGE_KEEPALIVE_S",
+        "DROID_DSH_BRIDGE_KEEPALIVE_S",
+        "KEEPALIVE_S",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    assert bridge_io_config.load_bridge_io_config().keepalive_s == 10.0
+
+
+def test_server_process_request_rejects_when_budget_exhausted() -> None:
+    import server
+
+    httpd = server.Server(("127.0.0.1", 0), server.Handler)
+    try:
+        budget = bridge_io_config.AdmissionBudget(
+            bridge_io_config.BridgeIOConfig(
+                admission_limit=1, ui_reserve=0, header_headroom=0
+            )
+        )
+        assert budget.acquire("occupied") is True
+        occupied_tickets = budget._tickets.copy()
+        httpd._admission_budget = budget
+        request, peer = socket.socketpair()
+        try:
+            httpd.process_request(request, ("127.0.0.1", 12345))
+            response = peer.recv(1 << 16)
+            assert response.startswith(b"HTTP/1.1 503 Service Unavailable")
+            assert b"bridge overloaded: connection limit" in response
+            assert request not in httpd._connections
+            assert request.fileno() == -1
+            assert budget._tickets == occupied_tickets
+        finally:
+            if request.fileno() != -1:
+                request.close()
+            peer.close()
+    finally:
+        httpd.server_close()
+
+
+def test_server_process_request_thread_releases_ticket_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import server
+
+    httpd = server.Server(("127.0.0.1", 0), server.Handler)
+    try:
+        budget = bridge_io_config.AdmissionBudget(
+            bridge_io_config.BridgeIOConfig(
+                admission_limit=2, ui_reserve=0, header_headroom=0
+            )
+        )
+        monkeypatch.setattr(httpd, "_admission_budget", budget)
+        released: list[str] = []
+        original_release = budget.release
+
+        def release(ticket: str) -> None:
+            released.append(ticket)
+            original_release(ticket)
+
+        monkeypatch.setattr(budget, "release", release)
+        monkeypatch.setattr(server.Handler, "handle", lambda self: None)
+        request = socket.socket()
+        try:
+            ticket = str(id(request))
+            assert budget.acquire(ticket)
+
+            httpd.process_request_thread(request, ("127.0.0.1", 0))
+
+            assert released == [ticket]
+            assert budget._tickets == {}
+            assert request not in httpd._connections
+            assert request.fileno() == -1
+        finally:
+            request.close()
+    finally:
+        httpd.server_close()
+
+
+def test_server_process_request_releases_ticket_when_thread_start_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import threading
+
+    import server
+
+    class RaisingThread(threading.Thread):
+        def start(self) -> None:
+            raise RuntimeError("thread start failed")
+
+    httpd = server.Server(("127.0.0.1", 0), server.Handler)
+    budget = bridge_io_config.AdmissionBudget(
+        bridge_io_config.BridgeIOConfig(
+            admission_limit=2, ui_reserve=0, header_headroom=0
+        )
+    )
+    monkeypatch.setattr(httpd, "_admission_budget", budget)
+    released: list[str] = []
+    original_release = budget.release
+
+    def counted_release(ticket: str) -> None:
+        released.append(ticket)
+        original_release(ticket)
+
+    monkeypatch.setattr(budget, "release", counted_release)
+    monkeypatch.setattr(threading, "Thread", RaisingThread)
+    request = socket.socket()
+    ticket = str(id(request))
+    try:
+        with pytest.raises(RuntimeError, match="thread start failed"):
+            httpd.process_request(request, ("127.0.0.1", 0))
+        assert released == [ticket]
+        assert budget._tickets == {}
+        assert request not in httpd._connections
+        assert request.fileno() == -1
+    finally:
+        httpd._threads.clear()
+        httpd.server_close()
+        if request.fileno() != -1:
+            request.close()
 
 
 @pytest.mark.parametrize("override", [None, "17.5"])

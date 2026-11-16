@@ -81,7 +81,7 @@ from tools.receipt_schema import (  # noqa: E402,F401
     settings_profile_digest as settings_profile_digest, tools_policy_digest as tools_policy_digest,
     validate_model_catalog, validate_receipt_components,
 )
-from core.http_accept import configure_accepted_socket  # noqa: E402
+from core.http_accept import AdmissionBudget, configure_accepted_socket  # noqa: E402
 from adapters import ADAPTER_KINDS  # noqa: E402  - реестр видов адаптеров задан в коде
 from adapters.passthrough_adapter import (  # noqa: E402
     ClientGone,
@@ -7783,7 +7783,7 @@ def is_so_reuseport_enabled() -> bool:
     )
 
 class Server(ThreadingHTTPServer):
-    """HTTP-сервер с семафором числа соединений на уровне приёма (C-11)."""
+    """HTTP-сервер с бюджетом допуска соединений на уровне приёма (C-11)."""
 
     # ThreadingMixIn отслеживает non-daemon потоки: выход main не обрывает SSE.
     daemon_threads = False
@@ -7802,9 +7802,8 @@ class Server(ThreadingHTTPServer):
         self._connections: dict[socket.socket, bool] = {}
         self._closing_connections = False
         super().__init__(*args, **kwargs)
-        self._conn_sem = threading.BoundedSemaphore(
-            int(FLEET["admission"]["max_http_connections"])
-        )
+        # admission_limit и резервы UI/заголовков — из BridgeIOConfig/BRIDGE_*
+        self._admission_budget = AdmissionBudget()
 
     def server_bind(self) -> None:
         """Разрешает совместный bind до привязки сокета, если ОС поддерживает его."""
@@ -7868,7 +7867,8 @@ class Server(ThreadingHTTPServer):
         request.sendall(head + body)
 
     def process_request(self, request: Any, client_address: Any) -> None:
-        if not self._conn_sem.acquire(blocking=False):
+        ticket = str(id(request))
+        if not self._admission_budget.acquire(ticket):
             try:
                 peer = f"{client_address[0]}:{client_address[1]}"
             except (TypeError, IndexError):
@@ -7888,7 +7888,7 @@ class Server(ThreadingHTTPServer):
         except Exception:
             with self._connections_lock:
                 self._connections.pop(request, None)
-            self._conn_sem.release()
+            self._admission_budget.release(ticket)
             self.shutdown_request(request)
             raise
 
@@ -7898,7 +7898,7 @@ class Server(ThreadingHTTPServer):
         finally:
             with self._connections_lock:
                 self._connections.pop(request, None)
-            self._conn_sem.release()
+            self._admission_budget.release(str(id(request)))
 
 
 def _sweep_workspace(cutoff_s: float = 3600.0) -> None:

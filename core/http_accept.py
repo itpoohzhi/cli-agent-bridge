@@ -30,14 +30,10 @@ def configure_accepted_socket(
             connection.setsockopt(level, option, value)
         except (AttributeError, OSError, NotImplementedError):
             continue
-    # У Python-сокета один timeout для чтения и записи: соблюдаем оба потолка.
-    timeouts = [
-        value
-        for value in (settings.read_timeout_s, settings.write_timeout_s)
-        if value is not None
-    ]
+    # Таймаут сокета ограничивает только готовность к чтению: не зажимаем
+    # его коротким write-таймаутом, иначе длинный SSE-стрим обрывается.
     try:
-        if timeouts:
-            connection.settimeout(min(timeouts))
+        if settings.read_timeout_s is not None:
+            connection.settimeout(settings.read_timeout_s)
     except (AttributeError, OSError, NotImplementedError):
         return
