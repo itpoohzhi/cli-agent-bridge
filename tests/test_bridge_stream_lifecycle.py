@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import ast
+import inspect
 import os
 import socket
 from collections.abc import Callable, Iterator
@@ -16,6 +18,7 @@ import pytest
 import server
 from adapters import passthrough_adapter as passthrough
 from core import liveness_signals
+from core import stream_lifecycle as domain
 from core.passthrough_sliding_window import SlidingDeadline
 
 
@@ -228,3 +231,70 @@ def test_red_repro_concurrent_sse_queue_overflow_loses_terminal(
         for run, flags, events in zip(runs, published, retained, strict=True)
     )
     _check_contract(defect, published)
+
+
+def test_domain_stream_lifecycle_transitions() -> None:
+    clock = _Clock()
+    tracker = domain.StreamLifecycleTracker(clock.monotonic)
+    initial = tracker.snapshot
+    assert tracker.state is domain.StreamState.INIT
+    _ = tracker.record_event(": heartbeat\n\n")
+    assert tracker.state is domain.StreamState.INIT
+    clock.now += 1.0
+    _ = tracker.record_event({"choices": [{"delta": {"content": "answer"}}]})
+    assert tracker.state is domain.StreamState.ACTIVE
+    assert (initial.progress_count, initial.keepalive_count) == (0, 0)
+    assert (tracker.snapshot.progress_count, tracker.snapshot.keepalive_count) == (1, 1)
+    assert tracker.snapshot.last_progress_at == 101
+    assert tracker.snapshot.last_keepalive_at == 100
+    _ = tracker.record_event("[DONE]")
+    assert tracker.state is domain.StreamState.TERMINAL
+    frozen = tracker.snapshot
+    _ = tracker.record_event({"content": "late"})
+    _ = tracker.record_event(": keepalive")
+    assert tracker.snapshot is frozen
+
+
+def test_domain_terminal_scheduling_single_terminal() -> None:
+    states = domain.StreamState
+    for outcome in (states.COMPLETED, states.FAILED, states.CANCELLED):
+        tracker = domain.StreamLifecycleTracker(_Clock().monotonic)
+        with pytest.raises(ValueError):
+            _ = tracker.record_terminal(domain.StreamState.ACTIVE)
+        assert tracker.record_terminal(outcome, "first")
+        terminal = tracker.terminal
+        assert not tracker.record_terminal(domain.StreamState.FAILED, "late")
+        assert tracker.take_terminal() is terminal
+        assert tracker.state is outcome
+        assert tracker.terminal == domain.TerminalOutcome(outcome, "first")
+        assert not tracker.record_terminal(domain.StreamState.COMPLETED)
+        assert tracker.take_terminal() is None
+        assert tracker.terminal is terminal
+
+
+def test_domain_event_classification() -> None:
+    classify, kind = domain.classify_event, domain.StreamEventKind
+    empty: dict[str, object] = {}
+    for key in ("content", "reasoning_content", "tool_calls"):
+        value = [{"index": 0}] if key == "tool_calls" else "text"
+        assert classify({"choices": [{"delta": {key: value}}]}) is kind.PROGRESS
+    for event in (": heartbeat\n\n", ": keepalive", "ping", {"delta": empty}):
+        assert classify(event) is kind.KEEPALIVE
+    assert classify({"choices": [{"delta": empty}]}) is kind.KEEPALIVE
+    for event in ("[DONE]", "data: [DONE]\n\n", {"error": {"message": "fatal"}}):
+        assert classify(event) is kind.TERMINAL
+    for event in (None, "", "unknown", {"unrelated": "text"}):
+        assert classify(event) is kind.UNKNOWN
+    tracker = domain.StreamLifecycleTracker(_Clock().monotonic)
+    _ = tracker.record_event({"error": {"message": "fatal"}})
+    assert tracker.terminal == domain.TerminalOutcome(domain.StreamState.FAILED)
+
+
+def test_domain_pure_imports() -> None:
+    imports: set[str] = set()
+    for node in ast.walk(ast.parse(inspect.getsource(domain))):
+        if isinstance(node, ast.Import):
+            imports.update(alias.name.split(".")[0] for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            imports.add((node.module or "").split(".")[0])
+    assert imports <= {"typing", "dataclasses", "enum"}
