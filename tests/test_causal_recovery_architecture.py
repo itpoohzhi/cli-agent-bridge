@@ -14,12 +14,12 @@ import sys
 from typing import cast
 Fn = ast.FunctionDef | ast.AsyncFunctionDef
 Result = dict[str, str | int]
-BASE = "cc741edcb9e59d77e02a36790bd3c6e406dbdebb"
-BRIDGE = "bridges/agy-bridge/server.py"
+BASE = "74a9c6e685b596e36ffd54b68e3f4e4ead370587"
+BRIDGE, RUNNER = "bridges/agy-bridge/server.py", "bridges/agy-bridge/agy_runtime/sse_body_runner.py"
 CORE = ("core/turn_outcome_policy.py", "core/stream_interruption_recovery.py", "core/turn_finalization.py")
 STAGES = (("W0", ("tests/test_causal_turn_recovery_flow.py", "tests/test_causal_recovery_architecture.py")),
           ("W1-A", (CORE[0], "tests/test_causal_turn_recovery.py")), ("W1-B", (CORE[1],)), ("W1-C", (CORE[2],)),
-          ("W2", (BRIDGE,)), ("W3", ("tests/test_route_health_policy.py", "core/route_health_policy.py")))
+          ("W2", (BRIDGE, RUNNER)), ("W3", ("tests/test_route_health_policy.py", "core/route_health_policy.py")))
 NEW = frozenset((CORE[0], CORE[2], *STAGES[0][1], "tests/test_causal_turn_recovery.py"))
 RHP = "core/route_health_policy.py"
 OWNED = NEW | {CORE[1]}
@@ -130,8 +130,9 @@ def imports(rel: str, tree: ast.AST) -> set[str]:
         deps = {"core.turn_outcome_policy", RHP[:-3].replace("/", ".")} | (RHP_LIBS if rel == RHP else frozenset[str]())
         assert names <= LIBS | deps, (rel, names)
     else:
-        allowed = LIBS | {"argparse", "json", "math", "os", "pathlib", "time", "core.runtime_env",
-                          "core.stream_interruption_recovery", "core.turn_outcome_policy"}
+        allowed = ({"__future__", "json", "threading", "typing", "agy_runtime.midstream_resilience", "agy_runtime.sse_stream_helpers",
+                    "core.route_health_policy", "core.stream_resilience_policy", "core.stream_resilience_runtime"} if rel == RUNNER else
+                   LIBS | {"argparse", "json", "math", "os", "pathlib", "time", "core.runtime_env", "core.stream_interruption_recovery", "core.turn_outcome_policy"})
         assert names <= allowed, (rel, names)
     return names
 def acyclic(graph: Mapping[str, Iterable[str]]) -> None:
@@ -157,8 +158,8 @@ def protected(root: Path, base: str) -> Result:
               "core/passthrough_sliding_window.py", "adapters/passthrough_adapter.py")
     for path in paths:
         assert source(root, path) == source(root, path, base), ("protected", path)
-    assert len(source(root, "server.py").splitlines()) == 8932
-    return {"existing_telemetry_guard": "FAIL_UNCHANGED", "actual": 8932, "limit": 8801}
+    assert len(source(root, "server.py").splitlines()) == 8930
+    return {"existing_telemetry_guard": "FAIL_UNCHANGED", "actual": 8930, "limit": 8801}
 def scope_guard(root: Path, paths: Sequence[str], base: str = BASE) -> None:
     """Учесть tracked, untracked и ignored исходники диапазона `base`..рабочее дерево."""
     changed = git(root, "diff", "--name-only", base).splitlines()
@@ -205,7 +206,7 @@ def fresh_nodes(rel: str, old: ast.Module, tree: ast.Module) -> list[ast.stmt]:
 def inspect(root: Path, rel: str, ref: str) -> tuple[ast.Module, list[ast.stmt]]:
     """Постоянные проверки файла; сравнение с baseline — при доступном `ref`."""
     text = source(root, rel)
-    assert len(text.splitlines()) <= (8483 if rel == BRIDGE else 300), rel
+    assert len(text.splitlines()) <= (8483 if rel == BRIDGE else 250 if rel == RUNNER else 300), rel
     tree = ast.parse(text)
     old_text = source(root, rel, ref) if ref else ("" if rel in OWNED else None)
     if old_text is None:
@@ -225,8 +226,8 @@ def check(root: Path, stage: str, scope: str = "auto", base: str = BASE) -> Resu
     for rel in paths:
         tree, fresh = inspect(root, rel, ref)
         nodes += fresh
-        if rel in CORE:
-            graph[rel[:-3].replace("/", ".")] = imports(rel, tree)
+        if rel in (*CORE, RUNNER):
+            graph["agy_runtime.sse_body_runner" if rel == RUNNER else rel[:-3].replace("/", ".")] = imports(rel, tree)
         if rel == BRIDGE and stage in ("W2", "W3"):
             required = {"Handler._finish_done", "Handler._snapshot_done", "_ToolTurn.recovery_snapshot"}
             assert functions(tree).keys() >= required, "missing bridge helpers"

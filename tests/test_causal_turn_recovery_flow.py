@@ -2,7 +2,6 @@
 # Private entrypoints нужны для проверки реального транспортного контракта W2.
 # pyright: reportPrivateUsage=false
 from __future__ import annotations
-
 import importlib.util
 import json
 import os
@@ -16,9 +15,7 @@ from operator import attrgetter
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Protocol, TypedDict, cast
-
 import pytest
-
 _ROOT = Path(__file__).resolve().parents[1]
 _ERROR = ("Your previous response contained an improperly formatted function call: "
           "Malformed function call: Failed to parse function call; "
@@ -28,7 +25,6 @@ _FINAL = "Синтетический финальный ответ после в
 _TextCallback = Callable[[str], bool]
 _TraceCallback = Callable[[dict[str, object]], bool]
 _Case = tuple[dict[str, str] | None, dict[str, str], tuple[str, str], str | None, tuple[str, ...]]
-
 class _Delta(TypedDict, total=False):
     content: str
 class _Choice(TypedDict):
@@ -60,13 +56,14 @@ class _Tool(Protocol):
     def turn_complete(self) -> bool: ...
     def recovery_snapshot(self) -> str: ...
 class _Handler(Protocol):
+    _send: Callable[[int, object], None]
     send_response: Callable[..., object]
     send_header: Callable[..., object]
     end_headers: Callable[[], object]
     _emit: Callable[[str], bool]
     _job_client_gone: Callable[[], bool]
     _execute: Callable[..., _Outcome]
-    _run_once: Callable[..., _Outcome]
+    _run_once_impl: Callable[..., _Outcome]
     _serve_sse: Callable[[dict[str, object]], None]
     _snapshot_done: Callable[..., object]
 class _Bridge(Protocol):
@@ -77,33 +74,27 @@ class _Bridge(Protocol):
     Handler: type[_Handler]
     DYNAMIC_CONFIG_PATH: Path
     DYNAMIC_CONFIG_MAX_BYTES: int
-
 def _accept(*_args: object, **_kwargs: object) -> bool:
     """Заглушка успешной доставки без внешних эффектов."""
     return True
-
 def _empty_drain(_budget: float) -> tuple[()]:
     """Транспорт уже завершён и очередь хвоста пуста."""
     return ()
-
 def _load_bridge(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> _Bridge:
     """Загрузить bridge без opt-in и настроек живого стенда."""
     for name in tuple(os.environ):
-        if name.startswith(("AGY_", "BRIDGE_CAUSAL_TURN_RECOVERY")):
+        if name.startswith(("AGY_", "BRIDGE_CAUSAL_TURN_RECOVERY", "BRIDGE_STREAM_")):
             monkeypatch.delenv(name)
     # Отсутствующий global-конфиг нейтрален; local проверяется независимо.
     monkeypatch.setenv("BRIDGE_DYNAMIC_CONFIG_PATH", str(tmp_path / "global.json"))
     monkeypatch.setenv("AGY_BRIDGE_KEY", "test-key-causal-recovery")
-    spec = importlib.util.spec_from_file_location(
-        "agy_bridge_server_causal_recovery_under_test",
-        _ROOT / "bridges" / "agy-bridge" / "server.py")
+    spec = importlib.util.spec_from_file_location("agy_bridge_server_causal_recovery_under_test", _ROOT / "bridges" / "agy-bridge" / "server.py")
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     monkeypatch.setitem(sys.modules, spec.name, module)
     spec.loader.exec_module(module)
     monkeypatch.setattr(module, "DYNAMIC_CONFIG_PATH", tmp_path / "local.json")
     return cast(_Bridge, cast(object, module))
-
 def _make_tail(bridge: _Bridge, error_steps: tuple[int, ...], final_step: int) -> _Tail:
     """Воспроизвести подтверждённые error/DONE-записи текущей попытки."""
     plan = bridge._TurnPlan()
@@ -111,11 +102,8 @@ def _make_tail(bridge: _Bridge, error_steps: tuple[int, ...], final_step: int) -
     tail = bridge._TranscriptTail(
         emit=_accept, stop_event=threading.Event(), done_event=threading.Event(),
         resumed=False, plan=plan, turn_id="causal-replay", emit_content=_accept)
-    records: tuple[dict[str, object], ...] = (
-        *(dict(type="ERROR_MESSAGE", step_index=step, status="DONE", content=_ERROR)
-          for step in error_steps),
-        dict(type="PLANNER_RESPONSE", step_index=final_step, status="DONE",
-             content=_FINAL, tool_calls=[]))
+    records: tuple[dict[str, object], ...] = (*(dict(type="ERROR_MESSAGE", step_index=step, status="DONE", content=_ERROR) for step in error_steps),
+        dict(type="PLANNER_RESPONSE", step_index=final_step, status="DONE", content=_FINAL, tool_calls=[]))
     for record in records:
         tail._emit_record(json.dumps(record, ensure_ascii=False).encode("utf-8"))
     tail.done_event.set()
@@ -124,7 +112,6 @@ def _make_tail(bridge: _Bridge, error_steps: tuple[int, ...], final_step: int) -
     tail._finish()
     assert (tail.last_error_step_index, tail.last_planner_step_index, tail.final_planner_content) == (error_steps[-1], final_step, _FINAL)
     return tail
-
 def _make_run(tail: _Tail) -> _Run:
     """Подменить завершённый процесс и транспорт, не решение об исходе."""
     events: queue.Queue[tuple[str, object]] = queue.Queue()
@@ -132,14 +119,12 @@ def _make_run(tail: _Tail) -> _Run:
     events.put(("result", result))
     events.put(("done", (1, _FINAL, result)))
     run: object = SimpleNamespace(
-        q=events, _tail=tail, started=time.monotonic(), got_event=True,
-        content_streaming=True, usage_enabled=False,
+        q=events, _tail=tail, started=time.monotonic(), got_event=True, content_streaming=True, usage_enabled=False,
         proc=SimpleNamespace(returncode=1), controller=SimpleNamespace(on_activity=_accept),
         terminal_drain=_empty_drain, reconcile_result=str,  # str: финал целиком, live-доставки не было
         _arbiter=SimpleNamespace(last_result_diverged=False), err_box=(), turn_id="causal-replay")
     return cast(_Run, cast(object, run))
-
-def _serve_replay(bridge: _Bridge, run: _Run, tool_stop: Callable[[], bool] | None = None) -> tuple[list[_Chunk], _Outcome]:
+def _serve_replay(bridge: _Bridge, run: _Run, tool_stop: Callable[[], bool] | None = None, options: dict[str, object] | None = None) -> tuple[list[_Chunk], _Outcome]:
     """Получить реальные SSE-кадры вокруг _execute(result → done), без HTTP/CLI."""
     frames: list[str] = []
     outcomes: list[_Outcome] = []
@@ -147,47 +132,43 @@ def _serve_replay(bridge: _Bridge, run: _Run, tool_stop: Callable[[], bool] | No
     handler.send_response = handler.send_header = handler.end_headers = _accept
     handler._emit = lambda data: frames.append(data) or True
     handler._job_client_gone = lambda: False
-    def run_once(ctx: dict[str, object], on_text: _TextCallback, on_trace: _TraceCallback,
-                 on_reasoning: _TextCallback, keepalive: Callable[[], bool]) -> _Outcome:
+    def run_once(ctx: dict[str, object], on_text: _TextCallback, on_trace: _TraceCallback, on_reasoning: _TextCallback, keepalive: Callable[[], bool]) -> _Outcome:
         # Уже открытый SSE: ошибка обязана стать error-кадром, а не HTTP 502.
-        assert on_reasoning("Синтетическая активность перед terminal done")
-        out = handler._execute(run, on_text, on_trace, on_reasoning, keepalive, tool_stop)
+        if not ctx.get("quiet"):
+            assert on_reasoning("Синтетическая активность перед terminal done")
+        if ctx.get("prelude"):
+            assert on_text(str(ctx["prelude"]))
+        out = handler._execute(run, on_text, on_trace, on_reasoning, keepalive, ctx.get("tool_stop", tool_stop))
         cast(Callable[[_Outcome], None], ctx["finalize_timeout"])(out)
         outcomes.append(out)
         return out
-    handler._run_once = run_once
-    handler._serve_sse({"model": "causal-replay", "emulate_tools": False})
+    handler._run_once_impl = run_once
+    sent: list[tuple[int, object]] = []
+    handler._send = lambda code, body: sent.append((code, body))
+    handler._serve_sse({"model": "causal-replay", "emulate_tools": False} | (options or {}))
     assert len(outcomes) == 1 and run.q.empty()
-    assert frames[-1] == "data: [DONE]\n\n"
+    assert (frames and frames[-1] == "data: [DONE]\n\n") or (not frames and len(sent) == 1 and sent[0][0] == 502)
+    assert bool(sent) == bool(options and options.get("quiet") and outcomes[0]["state"] == "agy_error")
+    frames += ["data: " + json.dumps(sent[0][1])] if sent else []
     chunks = [cast(_Chunk, json.loads(frame[6:])) for frame in frames if frame.startswith("data: ") and frame != "data: [DONE]\n\n"]
     return chunks, outcomes[0]
-
 def _assert_final_preserved(chunks: list[_Chunk], out: _Outcome) -> None:
     """Проверить точный финал и единственное успешное закрытие SSE."""
     content = "".join(chunk["choices"][0]["delta"].get("content", "") for chunk in chunks if "choices" in chunk)
     assert content == out["text"] == _FINAL and "✓ SEAL" in content
     assert (out["state"], out["rc"], out["err"]) == ("done", 0, "") and not any("error" in chunk for chunk in chunks)
     assert sum(choice["finish_reason"] == "stop" for chunk in chunks for choice in chunk.get("choices", ())) == 1
-
-def test_replay_primary(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """EV-06: 8f4d1299, ошибки 218/321 → DONE 370 → stale result ERROR."""
-    _assert_final_preserved(*_serve_replay(bridge := _load_bridge(monkeypatch, tmp_path), _make_run(_make_tail(bridge, (218, 321), 370))))
-
-def test_replay_sister(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """EV-07: 4021b8e2, ошибка 136 → DONE 283, конфиги отсутствуют."""
-    _assert_final_preserved(*_serve_replay(bridge := _load_bridge(monkeypatch, tmp_path), _make_run(_make_tail(bridge, (136,), 283))))
-
-def test_recovered_terminal_has_no_sse_error(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """SSE-финализатор сохраняет ответ, recovery-лог не содержит исходный текст."""
+@pytest.mark.parametrize("steps", (((218, 321), 370), ((136,), 283)))
+def test_recovered_terminal_has_no_sse_error(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, steps: tuple[tuple[int, ...], int]) -> None:
+    """EV-06/07: оба replay сохраняют ответ; recovery-лог не содержит исходный текст."""
     bridge = _load_bridge(monkeypatch, tmp_path)
     messages: list[str] = []
     monkeypatch.setattr(bridge, "_log", messages.append)
-    _assert_final_preserved(*_serve_replay(bridge, _make_run(_make_tail(bridge, (218, 321), 370))))
+    _assert_final_preserved(*_serve_replay(bridge, _make_run(_make_tail(bridge, *steps))))
     logs = [cast(dict[str, object], json.loads(line)) for line in messages if line.startswith("{")]
     assert len(logs) == 1 and logs[0]["reason"] == "causal_echo_recovered"
     assert set(logs[0]) == {"reason", "last_error_seq", "last_completion_seq", "rc"}
     assert _ERROR not in "".join(messages) and _FINAL not in "".join(messages)
-
 @pytest.mark.parametrize("veto", (
     "env", "canonical_env", "json", "canonical_json", "broken", "symlink",
     "master", "signal", "running", "no_proc_running", "open_tool", "unknown_tool",
@@ -211,8 +192,7 @@ def test_recovery_vetoes(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, veto: 
             "json": '{"causal_recovery_enabled": false}',
             "canonical_json": '{"causal_turn_recovery_enabled": false}', "broken": "{"}[veto])
     elif veto in ("signal", "running", "no_proc_running"):
-        proc = None if veto == "no_proc_running" else SimpleNamespace(
-            returncode=-9 if veto == "signal" else None)
+        proc = None if veto == "no_proc_running" else SimpleNamespace(returncode=-9 if veto == "signal" else None)
         monkeypatch.setattr(run, "proc", proc)
         monkeypatch.setattr(run, "process_exited", False, raising=False)
     elif veto in ("open_tool", "unknown_tool"):
@@ -229,7 +209,6 @@ def test_recovery_vetoes(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, veto: 
     chunks, out = _serve_replay(bridge, run, tool_stop)
     assert out["state"] == "agy_error" and out["rc"] != 0 and out["err"]
     assert out["text"] == "" and any("error" in chunk for chunk in chunks)
-
 def test_tool_snapshot_is_read_only(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """Снимок не завершает ход; незакрытый блок и ошибка запрещают recovery."""
     bridge = _load_bridge(monkeypatch, tmp_path)
@@ -247,7 +226,30 @@ def test_tool_snapshot_is_read_only(monkeypatch: pytest.MonkeyPatch, tmp_path: P
     # emulate_tools: снимок до turn_complete() для чистого хода не блокирует recovery
     _assert_final_preserved(*_serve_replay(bridge, _make_run(_make_tail(bridge, (218, 321), 370)), clean.turn_complete))
     assert getattr(clean, "_finished") is False
-
+@pytest.mark.parametrize("mode", ("off", "retry", "rollback", "both"))
+@pytest.mark.parametrize("case", ("clean", "empty", "open", "unknown", "broken", "no_tools"))
+@pytest.mark.parametrize("quiet", (False, True))
+def test_sse_runner_tool_recovery_join(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, mode: str, case: str, quiet: bool) -> None:
+    """Реальный SSE/_run_once/done: recovery либо fail-closed с/без буфера и commit."""
+    bridge = _load_bridge(monkeypatch, tmp_path)
+    monkeypatch.setenv("BRIDGE_STREAM_MIDSTREAM_RETRY_ENABLED", str(mode in ("retry", "both")))
+    monkeypatch.setenv("BRIDGE_STREAM_TOOL_ROLLBACK_ENABLED", str(mode in ("rollback", "both")))
+    if case in ("unknown", "broken"):
+        def snapshot(_self: object) -> str:
+            if mode != "off":
+                raise RuntimeError("snapshot failed")
+            return "unknown"
+        monkeypatch.setattr(bridge._ToolTurn, "recovery_snapshot", None if case == "unknown" else snapshot)
+    run = _make_run(_make_tail(bridge, (218, 321), 370))
+    options: dict[str, object] = dict(emulate_tools=case != "no_tools", quiet=quiet,
+        prelude={"empty": "<tool_call>", "open": '<tool_call>{"name":"unfinished"'}.get(case, ""))
+    chunks, out = _serve_replay(bridge, run, options=options)
+    if case in ("clean", "no_tools"):
+        _assert_final_preserved(chunks, out)
+    else:
+        assert out["state"] == "agy_error" and out["rc"] != 0 and out["text"] == ""
+        assert any("error" in chunk for chunk in chunks) and not out.get("graceful_done")
+        assert _FINAL not in json.dumps(chunks, ensure_ascii=False) and "<tool_call>" not in json.dumps(chunks)
 def test_done_recovery_flag_returns_strict_bools(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """Флаг recovery отдаёт именно True/False: env, JSON, граница размера, не-regular, ELOOP."""
     bridge = _load_bridge(monkeypatch, tmp_path)
@@ -275,10 +277,8 @@ def test_done_recovery_flag_returns_strict_bools(monkeypatch: pytest.MonkeyPatch
     path.unlink()
     path.symlink_to(tmp_path)
     assert enabled() is False
-
 @pytest.mark.parametrize("case", (
-    ({"error": "E" * 600, "status": "ERROR"}, {}, ("E" * 500, "cleared"), "wire",
-     ("E" * 600, "error", "cleared", "wire")),
+    ({"error": "E" * 600, "status": "ERROR"}, {}, ("E" * 500, "cleared"), "wire", ("E" * 600, "error", "cleared", "wire")),
     (None, {"error": "R", "status": " Done "}, ("", ""), None, ("R", "done", "", "")),
     (None, {}, ("fallback", ""), None, ("fallback", "", "", "")),
     ({"error": "P", "status": "ERROR"}, {"error": "R", "status": " Done "}, ("", ""), None, ("R", "done", "", "")),  # request.result_ev приоритетнее payload
