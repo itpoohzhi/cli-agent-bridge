@@ -1684,13 +1684,14 @@ def test_council_r17_truncated_prefix_approval_matches_opens_value() -> None:
         'password=" truncated api_key=" hunter2',
         'password=" truncated api_key=\'" hunter2',
     ):
-        end, approved = _scan_credential_value(line, 9, False, {}, [])
-        # отсечение возвращает начало хвостового префикса и кавычку, разобранную как открывающая значение
+        end, (value_pos, opener) = _scan_credential_value(line, 9, False, {}, [])
+        # отсечение возвращает начало хвостового префикса и кавычки, разобранные как открывающие значение
         assert end == line.index("api_key="), (line, end)
-        assert approved != -1 and line[approved] in ('"', "'"), (line, approved)
+        assert value_pos == end + len("api_key="), (line, value_pos)
+        assert line[opener] == '"' and line[value_pos] in ('"', "'"), (line, opener)
         # пробел перед значением не мешает только в семантике отсечения: без неё значение утекло бы
-        assert _opens_value(line, approved, {}, spaced=True), line
-        assert not _opens_value(line, approved, {}, spaced=False), line
+        assert _opens_value(line, opener, {}, spaced=True), line
+        assert not _opens_value(line, opener, {}, spaced=False), line
 
 
 def test_council_r17_quote_glue_does_not_hide_second_secret() -> None:
@@ -1731,3 +1732,122 @@ def test_council_r17_glued_growth_is_not_superlinear() -> None:
     small, large = timed(20000), timed(80000)
     assert large < 2.0
     assert large < max(small, 0.005) * 8
+
+
+# ---- Cycle 11 (council-r18): закавыченное значение после склейки, одобрение отсечённого префикса ----------
+
+
+# (имя, строка, значения секретов, которые не должны попасть в вывод)
+_R18_CASES: list[tuple[str, str, tuple[str, ...]]] = [
+    (
+        "RW001-quoted-value-semicolon",
+        "password=\" truncated api_key='\"'hunter2;secret2'",
+        ("hunter2", "secret2"),
+    ),
+    (
+        "RW001-quoted-value-space",
+        "password=\" truncated api_key='\"'hunter2 secret2'",
+        ("hunter2", "secret2"),
+    ),
+    (
+        "RW001-quoted-value-mirror",
+        "password=' truncated api_key=\"\\'\"hunter2;secret2\"'",
+        ("hunter2", "secret2"),
+    ),
+    (
+        "RW001-quoted-value-mirror-plain",
+        'password=\' truncated api_key="\'"hunter2;secret2"',
+        ("hunter2", "secret2"),
+    ),
+    (
+        "RW001-second-secret-after-glue",
+        "password=\" truncated api_key='\"'hunter2' secret=' secret2'",
+        ("hunter2", "secret2"),
+    ),
+    (
+        "RW002-enclosing-sq-escaped-glue",
+        "msg='password=\" truncated api_key=\\'\" hunter2",
+        ("hunter2",),
+    ),
+    (
+        "RW002-enclosing-sq-plain-glue",
+        "msg='password=\" truncated api_key='\" hunter2",
+        ("hunter2",),
+    ),
+    (
+        "RW002-enclosing-dq-escaped-glue",
+        'msg="password=\' truncated api_key=\\"\' hunter2"',
+        ("hunter2",),
+    ),
+    (
+        "RW002-enclosing-dq-plain-glue",
+        'msg="password=\' truncated api_key="\' hunter2"',
+        ("hunter2",),
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    ("name", "line", "secrets"), _R18_CASES, ids=[c[0] for c in _R18_CASES]
+)
+def test_council_r18_secrets_are_masked_through_every_entry_point(
+    name: str, line: str, secrets: tuple[str, ...]
+) -> None:
+    from core.log_redaction import redact_log_text
+
+    for out in (
+        mask_credential_context(line),
+        redact_log_text(line),
+        str(capacity_error_body(line)["message"]),
+    ):
+        for secret in secrets:
+            assert secret not in out, (name, out)
+        assert "***" in out, (name, out)
+
+
+def test_council_r18_quoted_value_after_glue_keeps_neighbours_masked() -> None:
+    line = "password=\" truncated api_key='\"'hunter2' secret=' secret2'"
+    out = mask_credential_context(line)
+    assert out.count("***") >= 2 and "hunter2" not in out and "secret2" not in out, out
+
+
+def test_council_r18_empty_pair_does_not_swallow_next_field() -> None:
+    out = mask_credential_context("api_key='' secret='z'")
+    assert out == "api_key='' ***", out
+
+
+def test_council_r18_approval_points_at_value_start_inside_enclosing_string() -> None:
+    from core.log_redaction import _scan_credential_value
+
+    for line in (
+        "msg='password=\" truncated api_key='\" hunter2",
+        'msg="password=\' truncated api_key="\' hunter2"',
+    ):
+        quote = line[line.index("=") + 1]
+        end, (value_pos, opener) = _scan_credential_value(
+            line, line.index("password=") + 9, False, {}, [(quote, 0)]
+        )
+        assert end == line.index("api_key="), (line, end)
+        # значение начинается сразу за префиксом, а не за закрывающей кавычкой пары
+        assert value_pos == end + len("api_key="), (line, value_pos)
+        assert opener == value_pos + 1, (line, opener)
+
+
+@pytest.mark.parametrize("times", [20000, 80000])
+@pytest.mark.parametrize(
+    "unit",
+    [
+        "password=\" trunc api_key='\"'x;y' ",
+        'password=\' trunc api_key="\'"x y" ',
+        "msg='password=\" trunc api_key='\" x",
+        "msg=\"password=' trunc api_key=\\\"' x",
+        "api_key='\"'x api_key='\"'",
+    ],
+)
+def test_council_r18_glue_is_linear_on_hostile_input(unit: str, times: int) -> None:
+    import time
+
+    for head in ("", '{"log": "', "'tis "):
+        started = time.monotonic()
+        mask_credential_context(head + unit * times)
+        assert time.monotonic() - started < 2.0, (head, unit)
