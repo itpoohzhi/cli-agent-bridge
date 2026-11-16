@@ -1,21 +1,24 @@
 {
-  "compiled_at": "2026-11-13T03:30:00+0300",
+  "compiled_at": "2026-11-16T00:00:00Z",
   "compiler_version": 1,
-  "fleet_sha256": "5a2d2dab5494057b9d8393edd1ec7ee017013b72418343038cbe84bb908b565f",
+  "fleet_sha256": "26f7833b7e30e9dd5d41d620941cbd81fd8ced6257c638f431ef7aeddf9518a8",
   "inputs": {
     "discovery_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
     "manifests": {
-      "_fleet.yaml": "eec21c5defed834f19fcea993ca6dc85a123284b584bf275be963f620480b612",
-      "agy.yaml": "69a59d8b7c6fdf579f290f8a3068d2688012afa5f1c6ee2652da3dd696796180",
-      "claude-p.yaml": "04ede88b58e3c43997ab83b6d3d3db314d7e3b67a10ad5f79cd9dfe47e164907",
-      "codex.yaml": "b2d6d64eed288b4b050ffde3d91b2c35e57aa5aa003797a8ce9231f9b36438ab",
-      "droid.yaml": "ad1c4e2a616cdbe6280e2e7600e45421d7b99886d57f211ddb9d8922736ca66b",
-      "muse.yaml": "bbe6d2d3b2d967a6f7a1c794411d07a74e7f1040a1bb4641b5a68385e34af79e",
+      "_fleet.yaml": "eff0416cd144dd33d31198eb132e829fefc0b081594ddbfde4657ddf08c993ee",
+      "agy.yaml": "080b22bf492a28cf9929e8c590f47142022c93fec4f8885ca288768418ca1918",
+      "claude-p.yaml": "cd2b0208bdac758ca6d68186b6eb65790866b6f7e29bd0fcf24ce111529318a4",
+      "codex.yaml": "e7f1a1fe67c877cea6b5d5577d38dd975ef4bb09d2429df3ff3eb61b38a57447",
+      "deepseek-direct.yaml": "5decd8d0524651aa79cf0a5ef0879ee65633afd2394557b0cee8e86a96b262c7",
+      "droid.yaml": "1b5fb0def2d41feb65638161f6a5b9827894eca6c055f361750e5e3001e5177c",
+      "muse.yaml": "610c34e6a064333504b3b6ec7aeed78c597d69526b56d701f6fbd42727ec3b78",
+      "openai-key-2.yaml": "f3a13ea5b5b18353dda5e02e9678fd88aa2c21a18a53e44f4e8f0ce05f9f0fba",
+      "openai-key-3.yaml": "eccc73e68769ab0d742b5ace825af8bbcb2d02f07068e272c608ddefd1b2177e",
       "opencode-go-claude.yaml": "7e63ccd97ae1f20179b4e03136c1b2fb50e9d0d40233df6c9465195a05779f4c",
-      "opencode-go.yaml": "110b75eb68bba08715fc55dfc7fe41d8eda826bef0b5248f81ee3dccfb4810c4",
-      "opencode-zen.yaml": "269c0fa76c1220c6173f371e10c2f246b1575abd6cb3e7f91f8472f6ef72f4fc"
+      "opencode-go.yaml": "8d27372c95fcf802352d38e4e6f3a6c1919030ef6220d3c6c2c5808fe6077f68",
+      "opencode-zen.yaml": "9239b0e1c543c23037f5407b6c64a0db04735d092ba7ccc53d197f83f91d1636"
     },
-    "manifests_sha256": "74936bb32b9ce46ae9e97fd16ce81be25c10a42a457b461b6a46fba6c672723b"
+    "manifests_sha256": "48bc666fd83a3daf77da5ca78e330fd77e312d1159ce5846ebe2805630dc1ecb"
   },
   "models": {
     "beam-free": {
@@ -99,15 +102,19 @@
       "status": "quarantine"
     },
     "deepseek-v4.1-flash": {
-      "alternates": [],
+      "alternates": [
+        {
+          "provider": "opencode-go"
+        }
+      ],
       "efforts_proven": [],
       "family": "DeepSeek",
       "family_source": "exact_map",
       "history": [],
       "in_fleet": true,
-      "provider": "opencode-go",
+      "provider": "deepseek-direct",
       "quorum_eligible": false,
-      "quota_group": "opencode-go",
+      "quota_group": "deepseek-direct",
       "status": "quarantine"
     },
     "deepseek-v4.1-flash-free": {
@@ -209,17 +216,23 @@
     "gpt-6.1-sol": {
       "alternates": [
         {
+          "provider": "codex"
+        },
+        {
+          "provider": "openai-key-3"
+        },
+        {
           "provider": "droid"
         }
       ],
       "efforts_proven": [],
       "family": "OpenAI",
-      "family_source": "prefix",
+      "family_source": "exact_map",
       "history": [],
       "in_fleet": true,
-      "provider": "codex",
+      "provider": "openai-key-2",
       "quorum_eligible": false,
-      "quota_group": "openai-codex",
+      "quota_group": "openai-key-2",
       "status": "quarantine"
     },
     "gpt-6.1-sol-droid": {
@@ -235,15 +248,22 @@
       "status": "quarantine"
     },
     "gpt-6.1-terra": {
-      "alternates": [],
+      "alternates": [
+        {
+          "provider": "codex"
+        },
+        {
+          "provider": "openai-key-3"
+        }
+      ],
       "efforts_proven": [],
       "family": "OpenAI",
-      "family_source": "prefix",
+      "family_source": "exact_map",
       "history": [],
       "in_fleet": true,
-      "provider": "codex",
+      "provider": "openai-key-2",
       "quorum_eligible": false,
-      "quota_group": "openai-codex",
+      "quota_group": "openai-key-2",
       "status": "quarantine"
     },
     "iceman-free": {
@@ -433,25 +453,8 @@
         "type": "cli"
       },
       "enabled": true,
-      "fingerprint_sha256": "",
       "kind": "passthrough",
       "max_concurrent": 128,
-      "params": {
-        "adaptive_whitelist": [
-          "reasoning_effort",
-          "thinking",
-          "temperature",
-          "top_p"
-        ],
-        "effort_field": "reasoning_effort",
-        "effort_map": {},
-        "strip_always": [],
-        "tool_emulation": true
-      },
-      "probe": {
-        "enabled": true,
-        "max_parallel": 1
-      },
       "quota_group": "google-agy",
       "timeout_s": 600.0
     },
@@ -466,24 +469,8 @@
       ],
       "bridge": true,
       "enabled": true,
-      "fingerprint_sha256": "",
       "kind": "passthrough",
       "max_concurrent": 128,
-      "params": {
-        "adaptive_whitelist": [
-          "thinking",
-          "temperature",
-          "top_p"
-        ],
-        "effort_field": "none",
-        "effort_map": {},
-        "strip_always": [],
-        "tool_emulation": true
-      },
-      "probe": {
-        "enabled": true,
-        "max_parallel": 1
-      },
       "quota_group": "anthropic-claude",
       "timeout_s": 180.0
     },
@@ -498,52 +485,33 @@
       ],
       "bridge": true,
       "enabled": true,
-      "fingerprint_sha256": "",
       "kind": "passthrough",
       "max_concurrent": 128,
-      "params": {
-        "adaptive_whitelist": [
-          "reasoning_effort",
-          "thinking",
-          "temperature",
-          "top_p"
-        ],
-        "effort_field": "reasoning_effort",
-        "effort_map": {},
-        "strip_always": [],
-        "tool_emulation": true
-      },
-      "probe": {
-        "enabled": true,
-        "max_parallel": 1
-      },
       "quota_group": "openai-codex",
+      "timeout_s": 180.0
+    },
+    "deepseek-direct": {
+      "allow_base_url": [
+        {
+          "host": "127.0.0.1",
+          "path_prefix": "/sg-deepseek",
+          "port": 10830,
+          "scheme": "http"
+        }
+      ],
+      "bridge": true,
+      "enabled": true,
+      "kind": "passthrough",
+      "max_concurrent": 1,
+      "quota_group": "deepseek-direct",
       "timeout_s": 180.0
     },
     "droid": {
       "allow_base_url": [],
       "bridge": true,
       "enabled": true,
-      "fingerprint_sha256": "",
       "kind": "droid",
       "max_concurrent": 64,
-      "params": {
-        "adaptive_whitelist": [
-          "reasoning_effort",
-          "effort",
-          "thinking",
-          "temperature",
-          "top_p"
-        ],
-        "effort_field": "reasoning_effort",
-        "effort_map": {},
-        "strip_always": [],
-        "tool_emulation": true
-      },
-      "probe": {
-        "enabled": true,
-        "max_parallel": 1
-      },
       "quota_group": "factory-droid",
       "timeout_s": 450.0
     },
@@ -551,24 +519,42 @@
       "allow_base_url": [],
       "bridge": true,
       "enabled": true,
-      "fingerprint_sha256": "",
       "kind": "muse",
       "max_concurrent": 64,
-      "params": {
-        "adaptive_whitelist": [
-          "reasoning_effort"
-        ],
-        "effort_field": "reasoning_effort",
-        "effort_map": {},
-        "strip_always": [],
-        "tool_emulation": true
-      },
-      "probe": {
-        "enabled": true,
-        "max_parallel": 1
-      },
       "quota_group": "meta-muse",
       "timeout_s": 600.0
+    },
+    "openai-key-2": {
+      "allow_base_url": [
+        {
+          "host": "127.0.0.1",
+          "path_prefix": "/sg-openai",
+          "port": 10830,
+          "scheme": "http"
+        }
+      ],
+      "bridge": true,
+      "enabled": true,
+      "kind": "passthrough",
+      "max_concurrent": 1,
+      "quota_group": "openai-key-2",
+      "timeout_s": 180.0
+    },
+    "openai-key-3": {
+      "allow_base_url": [
+        {
+          "host": "127.0.0.1",
+          "path_prefix": "/sg-openai",
+          "port": 10830,
+          "scheme": "http"
+        }
+      ],
+      "bridge": true,
+      "enabled": true,
+      "kind": "passthrough",
+      "max_concurrent": 1,
+      "quota_group": "openai-key-3",
+      "timeout_s": 180.0
     },
     "opencode-go": {
       "allow_base_url": [
@@ -614,28 +600,8 @@
         "type": "http"
       },
       "enabled": true,
-      "fingerprint_sha256": "",
       "kind": "passthrough",
       "max_concurrent": 64,
-      "params": {
-        "adaptive_whitelist": [
-          "thinking"
-        ],
-        "effort_field": "none",
-        "effort_map": {
-          "off": {
-            "thinking": {
-              "type": "disabled"
-            }
-          }
-        },
-        "strip_always": [],
-        "tool_emulation": true
-      },
-      "probe": {
-        "enabled": true,
-        "max_parallel": 1
-      },
       "quota_group": "opencode-go",
       "timeout_s": 180.0
     },
@@ -683,22 +649,8 @@
         "type": "http"
       },
       "enabled": true,
-      "fingerprint_sha256": "",
       "kind": "passthrough",
       "max_concurrent": 64,
-      "params": {
-        "adaptive_whitelist": [
-          "thinking"
-        ],
-        "effort_field": "none",
-        "effort_map": {},
-        "strip_always": [],
-        "tool_emulation": true
-      },
-      "probe": {
-        "enabled": true,
-        "max_parallel": 1
-      },
       "quota_group": "opencode-go-claude",
       "timeout_s": 180.0
     },
@@ -713,25 +665,8 @@
       ],
       "bridge": true,
       "enabled": true,
-      "fingerprint_sha256": "",
       "kind": "passthrough",
       "max_concurrent": 128,
-      "params": {
-        "adaptive_whitelist": [
-          "reasoning_effort",
-          "thinking",
-          "temperature",
-          "top_p"
-        ],
-        "effort_field": "reasoning_effort",
-        "effort_map": {},
-        "strip_always": [],
-        "tool_emulation": true
-      },
-      "probe": {
-        "enabled": true,
-        "max_parallel": 1
-      },
       "quota_group": "opencode-zen",
       "timeout_s": 180.0
     }

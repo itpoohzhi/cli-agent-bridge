@@ -24,35 +24,35 @@ FLEET_FILE = Path(__file__).resolve().parent.parent / "fleet.json"
 _ZEN = ("high", "max")
 _ALL = ("minimal", "low", "medium", "high", "max")
 _LMH = ("low", "medium", "high")
-# Эталон выключенного гейта (модель, бэкенд, efforts, default_effort), независимый от HEAD: прежняя маршрутизация
-# через claude-p/agy; gpt-6.1-sol вне каталога (:2455 её не обслуживает); deepseek-v4.1-flash не принадлежит droid и
-# обслуживается мостом opencode-go независимо от гейта (онбординг 2b7431f).
+# Независимый эталон droid_off: weighted-владельцы по AD-001, defaults по AD-008.
+# Sol скрыта профилем; DeepSeek принадлежит deepseek-direct независимо от флага droid.
 BASE_MODELS = (
-    ("claude-sonnet-5-5", "claude-p", ("high",), "high"),
-    ("gemini-3.8-flash", "agy", _LMH, "high"), ("gemini-4-carbon", "agy", _LMH, "high"), ("muse-ember-1.0", "muse", (*_ALL[:-1], "xhigh", "max"), "high"),
-    ("muse-spark-1.3", "muse", ("max",), "max"),
-    ("muse-spark-1.3-contributor", "muse", ("max",), "max"),
-    ("muse-wonder-1.0", "muse", _ALL, "high"),
-    ("muse-wonder-full-1.0", "muse", _ALL, "high"),
-    ("gpt-6.1-terra", "codex", _LMH, "high"),
-    ("claude-opus-5-5", "claude-p", ("high",), "high"),
-    ("claude-haiku-5-5", "opencode-go-claude", ("high",), "high"),
-    ("gemini-4-argon", "agy", _LMH, "high"),
-    ("deepseek-v4.1-flash", "opencode-go", ("off", "low", "high", "max"), "off"),
+    ("claude-sonnet-5-5", "claude-p", ("high",), "high"), ("gemini-3.8-flash", "agy", _LMH, "high"),
+    ("gemini-3.8-flash-agy", "agy", _LMH, "high"), ("gemini-4-carbon", "agy", ("off",), "off"),
+    ("muse-ember-1.0", "muse", (*_ALL[:-1], "xhigh", "max"), "high"), ("muse-spark-1.3", "muse", ("max",), "max"),
+    ("muse-spark-1.3-contributor", "muse", ("max",), "max"), ("muse-wonder-1.0", "muse", _ALL, "high"),
+    ("muse-wonder-full-1.0", "muse", _ALL, "high"), ("gpt-6.1-terra", "openai-key-2", _LMH, "high"),
+    ("claude-opus-5-5", "claude-p", ("high",), "high"), ("claude-haiku-5-5", "claude-p", ("high",), "high"),
+    ("gemini-4-argon", "agy", _LMH, "high"), ("gemini-4-hydrogen", "agy", (*_LMH, "xhigh"), "high"),
+    ("deepseek-v4.1-flash", "deepseek-direct", ("off", "low", "high", "max"), "off"),
     ("deepseek-v4.1-flash-free", "opencode-zen", _ZEN, "high"),
     ("flint-40b-free", "opencode-zen", _ZEN, "high"),
     ("mimo-v2.6-flash-free", "opencode-zen", _ZEN, "high"),
     ("nemotron-3.5-lightning-free", "opencode-zen", _ZEN, "high"),
     ("nemotron-3.5-super-vl-free", "opencode-zen", _ZEN, "high"),
     ("beam-free", "opencode-zen", _ZEN, "high"),
-    ("big-pickle", "opencode-zen", _ZEN, "high"), ("iceman-free", "opencode-zen", _ZEN, "high"), ("inkling-2-small-free", "opencode-zen", _ALL, "high"), ("longcat-2.5-free", "opencode-zen", _ZEN, "high"), ("minimax-m3.1-flash-free", "opencode-zen", (*_LMH, "xhigh", "max"), "high"),
+    ("big-pickle", "opencode-zen", _ZEN, "high"),
+    ("iceman-free", "opencode-zen", _ZEN, "high"),
+    ("inkling-2-small-free", "opencode-zen", _ALL, "high"),
+    ("longcat-2.5-free", "opencode-zen", _ZEN, "high"),
+    ("minimax-m3.1-flash-free", "opencode-zen", (*_LMH, "xhigh", "max"), "high"),
 )
 # Имена моделей, переключаемых гейтом, при выключенном флаге.
 BASE_NAMES = {
     "claude-sonnet-5-5": "Claude Sonnet 5.5 (Claude-p bridge)",
     "gemini-3.8-flash": "Gemini 3.8 Flash (AGY bridge)",
 }
-BASE_DROID_BACKEND = dict(kind="droid", enabled=False, required=False, owned_by="factory-droid", max_concurrent=32)
+BASE_DROID_BACKEND = dict(kind="droid", enabled=False, owned_by="factory-droid", max_concurrent=64)
 BASE_ALIAS: dict[str, Any] = {}
 
 
@@ -173,7 +173,7 @@ class DroidCatalogFlagTest(unittest.TestCase):
         self.assertEqual(gated, raw)
         self.assertTrue(gated["backends"]["droid"]["enabled"])
         self.assertEqual(list(routes(gated).values()).count("droid"), 4)
-        self.assertEqual(len(gated["aliases"]), 38)
+        self.assertEqual(len(gated["aliases"]), 35)
 
     def test_gate_off_tolerates_malformed_entries(self) -> None:
         raw: dict[str, Any] = {"schema_version": 3, "backends": {"droid": "broken"}, "models": ["broken", {"id": "x"}], "technical_ref": {"droid_off": {"models": {"x": {"backend": "agy"}}}}}
@@ -203,7 +203,7 @@ class DroidCatalogFlagTest(unittest.TestCase):
         self.assertEqual(apply_droid_catalog_gate(no_droid, enabled=False), no_droid)
 
     def test_gate_off_restores_base_catalog_in_full(self) -> None:
-        """F-004/F-010: имена, бэкенды, aliases и `droid` совпадают с базой 5f8f673."""
+        """F-004/F-010: профиль droid_off сохраняет имена, aliases и компактный backend."""
         gated: Any = apply_droid_catalog_gate(raw_fleet(), enabled=False)
         by_id = {m["id"]: m for m in gated["models"]}
         for mid, name in BASE_NAMES.items():
@@ -291,9 +291,9 @@ class DroidCatalogFlagTest(unittest.TestCase):
             with self.subTest(env=sorted(env)), mock.patch.dict(os.environ, env):
                 catalog = srv()._load_fleet()
                 self.assertTrue(catalog["backends"]["droid"]["enabled"])
-                self.assertEqual((catalog["models"]["gpt-6.1-sol"]["backend"], catalog["models"]["gpt-6.1-sol-droid"]["backend"]), ("codex", "droid"))
+                self.assertEqual((catalog["models"]["gpt-6.1-sol"]["backend"], catalog["models"]["gpt-6.1-sol-droid"]["backend"]), ("openai-key-2", "droid"))
                 self.assertIn("gpt-6.1-sol", catalog["models"])
-                self.assertEqual(len(catalog["aliases"]), 38)
+                self.assertEqual(len(catalog["aliases"]), 35)
 
 
 if __name__ == "__main__":

@@ -103,6 +103,7 @@ import tempfile
 import threading
 import time
 import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -146,6 +147,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
+from agy_runtime import midstream_resilience, sse_body_runner, sse_stream_helpers  # noqa: E402
 from core.watchdog import (  # noqa: E402
     IDLE_TIMEOUT_S as _CORE_IDLE_TIMEOUT_S,
     WATCHDOG_INTERVAL_S as _CORE_WATCHDOG_INTERVAL_S,
@@ -164,12 +166,13 @@ from core.agy_capacity_guard import (  # noqa: E402
     summarize_capacity_text,
 )
 from core.chat_key import SOURCES_SESSION_ID, resolve_chat_key  # noqa: E402
-from core.usage_wire import normalize_prompt_cache_details, positive_wire_usage  # noqa: E402
+from core.usage_wire import normalize_prompt_cache_details  # noqa: E402
+from core.cli_rejection import is_deterministic_cli_rejection  # noqa: E402
+from core.effortless_policy import effort_cli_args, resolve_request_effort  # noqa: E402
 from core.proc_groups import spawn_registered  # noqa: E402
 from core.subbridge_lifecycle import SubbridgeHooks, SubbridgeLifecycle  # noqa: E402
 from core.stream_interruption_recovery import (  # noqa: E402
     InterruptionTailState,
-    evaluate_graceful_interruption,
     is_self_healable_error,
     is_transient_stream_interruption,
     resolve_done_turn_outcome,
@@ -201,6 +204,7 @@ FLEET_PATH = Path(os.environ.get("AGY_BRIDGE_FLEET", "") or str(ROOT / "fleet.js
 ENV_MODEL = os.environ.get("AGY_BRIDGE_MODEL", "").strip()
 WORKSPACE = ROOT / "workspace"
 PRINT_TIMEOUT = os.environ.get("AGY_BRIDGE_PRINT_TIMEOUT", "0")
+
 
 def _env_float(name: str, default: float, low: float, high: float) -> float:
     """Float из окружения; пустое/невалидное/неконечное/вне [low, high] -> default."""
@@ -786,14 +790,22 @@ _AGY_AUTH_SIGNATURES: dict[str, tuple[int, int]] = {}
 # Верифицированный (resolved) корень <clean-home>: фиксируется под _AGY_HOME_LOCK
 # при первой успешной проверке; последующая подмена пути отвергается.
 _VERIFIED_CLEAN_HOME: Path | None = None
-CLEAN_HOME_DIR = Path(
-    os.environ.get("AGY_BRIDGE_CLEAN_HOME", "")
-    or str(WORKSPACE / "runtime" / "agy-home")
-).expanduser().resolve()
-BRAIN_DIR = Path(
-    os.environ.get("AGY_BRIDGE_BRAIN", "")
-    or str(CLEAN_HOME_DIR / ".gemini" / "antigravity-cli" / "brain")
-).expanduser().resolve()
+CLEAN_HOME_DIR = (
+    Path(
+        os.environ.get("AGY_BRIDGE_CLEAN_HOME", "")
+        or str(WORKSPACE / "runtime" / "agy-home")
+    )
+    .expanduser()
+    .resolve()
+)
+BRAIN_DIR = (
+    Path(
+        os.environ.get("AGY_BRIDGE_BRAIN", "")
+        or str(CLEAN_HOME_DIR / ".gemini" / "antigravity-cli" / "brain")
+    )
+    .expanduser()
+    .resolve()
+)
 TRANSCRIPT_NAME = "transcript_full.jsonl"
 TRANSCRIPT_FALLBACK_NAME = "transcript.jsonl"
 TRANSCRIPT_POLL_S = get_bridge_config().transcript_poll_s
@@ -802,10 +814,14 @@ TRANSCRIPT_READ_MAX = get_bridge_config().transcript_read_max
 # Живой источник мышления: SQLite-база разговора agy (таблица `steps`, шаг
 # планировщика `step_type=15`, подполе 20.3 `step_payload` растёт в `status=8`).
 # База открывается только на чтение; транскрипт остаётся минимальным источником.
-CONV_DIR = Path(
-    os.environ.get("AGY_BRIDGE_CONVERSATIONS", "")
-    or str(CLEAN_HOME_DIR / ".gemini" / "antigravity-cli" / "conversations")
-).expanduser().resolve()
+CONV_DIR = (
+    Path(
+        os.environ.get("AGY_BRIDGE_CONVERSATIONS", "")
+        or str(CLEAN_HOME_DIR / ".gemini" / "antigravity-cli" / "conversations")
+    )
+    .expanduser()
+    .resolve()
+)
 # Бинарь agy: его идентичность (mtime_ns, size) ключует семантический canary.
 AGY_BIN = os.path.expanduser(os.environ.get("AGY_BRIDGE_AGY_BIN", "")) or str(
     HOME / ".local" / "bin" / "agy.real"
@@ -909,8 +925,8 @@ _SAFE_MCP_TOOL_RE = re.compile(r"mcp_[a-z0-9_-]{1,32}_[a-z0-9_]{1,32}\Z")
 
 # Effort-оси. `--effort` у agy принимает уровни модели из fleet.json (включая xhigh для
 # gemini-4-hydrogen); id модели — база без уровня,
-# уровень всегда уходит отдельным флагом (см. модуль-docstring).
-EFFORT_LEVELS = ("minimal", "low", "medium", "high", "xhigh", "max")
+# уровень всегда уходит отдельным флагом (см. модуль-docstring); `off` — без флага.
+EFFORT_LEVELS = ("off", "minimal", "low", "medium", "high", "xhigh", "max")
 # Уровни, реально объявленные каталогом: вычисляются из `efforts` моделей FLEET сразу после
 # загрузки (см. `_cli_effort_levels`); до загрузки — полный набор EFFORT_LEVELS.
 CLI_EFFORT_LEVELS: tuple[str, ...] = EFFORT_LEVELS
@@ -961,7 +977,14 @@ BUILD_INFO = RuntimeBuildInfo(_REPO_ROOT)
 
 def _runtime_build_fields() -> dict[str, object]:
     """Поля `/health`: git_head_sha, boot_ts, agy_binary_sha256, agy_home."""
-    return BUILD_INFO.snapshot({"agy_binary_sha256": _file_sha256(AGY_BIN) or BUILD_UNKNOWN, "agy_home": str(CLEAN_HOME_DIR)})
+    return BUILD_INFO.snapshot(
+        {
+            "agy_binary_sha256": _file_sha256(AGY_BIN) or BUILD_UNKNOWN,
+            "agy_home": str(CLEAN_HOME_DIR),
+        }
+    )
+
+
 _active: dict = {}
 _active_lock = threading.Lock()
 _account_pool = AccountPool(AccountPoolConfig(max_concurrent=MAX_CONCURRENT, n_floor=1))
@@ -1309,6 +1332,16 @@ def _err_summary(err: Any, limit: int = 200) -> str:
     return text[:limit]
 
 
+def _is_cli_rejection_outcome(out: Mapping[str, object]) -> bool:
+    """Подавляет повтор только при отказе CLI (`agy_error`), не на транспортном `pump_error`."""
+    state = out.get("state")
+    if state == "pump_error":
+        return False
+    return state in ("agy_error", "done") and is_deterministic_cli_rejection(
+        out.get("err")
+    )
+
+
 # Порог неактивности хода (без протокольных событий и без прироста CPU/потомков группы).
 IDLE_TIMEOUT_S = get_bridge_config().idle_timeout_s
 WATCHDOG_INTERVAL_S = get_bridge_config().watchdog_interval_s
@@ -1605,7 +1638,11 @@ def _sync_agy_gemini_files(pairs: tuple[tuple[Path, Path], ...]) -> int:
             # Симлинк на месте копии удаляется (stat пошёл бы по ссылке); файл остаётся 0600.
             if dst_file.is_symlink():
                 dst_file.unlink()
-            if externally_changed or not dst_file.exists() or src.stat().st_mtime >= dst_file.stat().st_mtime:
+            if (
+                externally_changed
+                or not dst_file.exists()
+                or src.stat().st_mtime >= dst_file.stat().st_mtime
+            ):
                 _copy_private_atomic(src, dst_file)
                 copied += 1
             else:
@@ -1661,7 +1698,9 @@ def _prepare_agy_home() -> Path:
         real_cli = real_gemini / "antigravity-cli"
         clean_gemini = CLEAN_HOME_DIR / ".gemini"
         clean_gemini_cli = clean_gemini / "antigravity-cli"
-        auth_pairs = _agy_gemini_files(real_gemini, real_cli, clean_gemini, clean_gemini_cli)
+        auth_pairs = _agy_gemini_files(
+            real_gemini, real_cli, clean_gemini, clean_gemini_cli
+        )
         if _AGY_HOME_INITIALIZED:
             if _env_bool("AGY_AUTH_HOT_RELOAD_ENABLED", True):
                 refreshed = _sync_agy_gemini_files(auth_pairs)
@@ -2450,13 +2489,17 @@ def _render_message(
 def _prompt_budget(reserve_bytes: int = 0) -> int:
     """Бюджет истории: потолок минус резерв обёртки, не ниже `AGY_BRIDGE_PRUNE_MIN_BUDGET_BYTES` (4096)."""
     floor = min(
-        _env_int("AGY_BRIDGE_PRUNE_MIN_BUDGET_BYTES", 4096, 512, PROMPT_MAX_NDJSON_BYTES_HIGH),
+        _env_int(
+            "AGY_BRIDGE_PRUNE_MIN_BUDGET_BYTES", 4096, 512, PROMPT_MAX_NDJSON_BYTES_HIGH
+        ),
         PROMPT_MAX_NDJSON_BYTES,
     )
     return max(PROMPT_MAX_NDJSON_BYTES - max(int(reserve_bytes), 0), floor)
 
 
-def _protocol_reserve_bytes(emulate_tools: bool, tools: list, tool_choice: object) -> int:
+def _protocol_reserve_bytes(
+    emulate_tools: bool, tools: list, tool_choice: object
+) -> int:
     """NDJSON-байты, которые обёртка протокола добавит к промпту истории."""
     probe = "x"
     # Верхняя оценка: формулировка для вложений длиннее базовой.
@@ -2950,7 +2993,9 @@ def _ensure_prompt_fits_ndjson(prompt: str, max_bytes: int | None = None) -> str
 
 
 def _get_resumed_turn_prompt(
-    messages: list, images: list[dict[str, object]] | None = None, reserve_bytes: int = 0
+    messages: list,
+    images: list[dict[str, object]] | None = None,
+    reserve_bytes: int = 0,
 ) -> str:
     """Промпт хода продолжения: сообщения после последнего assistant.
 
@@ -2961,7 +3006,9 @@ def _get_resumed_turn_prompt(
 
 
 def _resumed_turn_prompt(
-    messages: list, images: list[dict[str, object]] | None = None, reserve_bytes: int = 0
+    messages: list,
+    images: list[dict[str, object]] | None = None,
+    reserve_bytes: int = 0,
 ) -> tuple[str, bool]:
     """`(промпт, есть_вложения)`: признак вложений берётся из структуры `images`, не из текста."""
     last_asst = -1
@@ -2971,7 +3018,9 @@ def _resumed_turn_prompt(
             break
     if last_asst >= 0 and last_asst + 1 < len(messages):
         new_msgs = messages[last_asst + 1 :]
-        skipped = len(_collect_image_parts(cast("list[object]", messages[: last_asst + 1])))
+        skipped = len(
+            _collect_image_parts(cast("list[object]", messages[: last_asst + 1]))
+        )
         delta = [
             img
             for img in (images or [])
@@ -2980,7 +3029,9 @@ def _resumed_turn_prompt(
         prompt = _messages_to_prompt(new_msgs, delta, skipped, reserve_bytes)
         if prompt:
             return prompt, bool(delta)
-    return _messages_to_prompt(messages, images, reserve_bytes=reserve_bytes), bool(images)
+    return _messages_to_prompt(messages, images, reserve_bytes=reserve_bytes), bool(
+        images
+    )
 
 
 def _session_key_for(
@@ -3336,7 +3387,16 @@ _supervisor = ProcessSupervisor(
 )
 _group_alive = _supervisor.group_alive
 _kill_group = _supervisor.kill_group
-_LIFECYCLE = SubbridgeLifecycle(hooks=SubbridgeHooks(procs_fn=lambda: list(_active.copy().values()), cleanup_fn=lambda: _supervisor.kill_all([p for p in _active.copy().values() if p.returncode is None]), log_fn=_log), workspace=WORKSPACE)
+_LIFECYCLE = SubbridgeLifecycle(
+    hooks=SubbridgeHooks(
+        procs_fn=lambda: list(_active.copy().values()),
+        cleanup_fn=lambda: _supervisor.kill_all(
+            [p for p in _active.copy().values() if p.returncode is None]
+        ),
+        log_fn=_log,
+    ),
+    workspace=WORKSPACE,
+)
 
 
 # ---- Guardrails SQLite-источника мышления (AD-005, AD-006) -----------------------
@@ -4497,25 +4557,7 @@ class _TranscriptTail(InterruptionTailState):
         # Файл и БД появляются только после первого шага — ждём привязки к разговору,
         # но не дольше, чем ждали бы первого события agy; выход процесса или stop
         # прерывают ожидание сразу (поток не висит до FIRST_TOKEN_TIMEOUT_S).
-        waited = 0.0
-        while not self._ready.wait(timeout=0.05):
-            waited += 0.05
-            if self.stop_event.is_set() or self.done_event.is_set():
-                return
-            if waited >= FIRST_TOKEN_TIMEOUT_S:
-                _log(
-                    f"tail-timeout cid={self._cid8()}: no bind within {FIRST_TOKEN_TIMEOUT_S:g}s"
-                )
-                return
-        started = time.monotonic()
-        while time.monotonic() - started < self.deadline_s:
-            if self.stop_event.is_set():
-                return
-            if self.done_event.is_set():
-                self._drain_post_eof()
-                return
-            self.tick()
-            _ = self.done_event.wait(TRANSCRIPT_POLL_S)
+        return midstream_resilience.run_transcript_tail_loop(self, (FIRST_TOKEN_TIMEOUT_S, TRANSCRIPT_POLL_S, _log))
 
     def _finish(self) -> None:
         """Закрыть соединение, вернуть исход breaker'у и снять владение cid (один раз)."""
@@ -4535,14 +4577,7 @@ class _TranscriptTail(InterruptionTailState):
     # ---- один проход ---------------------------------------------------------------
     def tick(self) -> None:
         """Транскрипт каждый тик; SQLite — не чаще SQLITE_POLL_S (и по токенам bucket)."""
-        self._read_transcript()
-        if self.dead:
-            return
-        _ = self._sqlite_permitted()
-        now = time.monotonic()
-        if self.sqlite_active and now >= self._next_poll_at:
-            self._next_poll_at = now + SQLITE_POLL_S
-            _ = self._poll_sqlite()
+        midstream_resilience.tick_transcript_with_tool_capture(self, SQLITE_POLL_S)
 
     def _sqlite_off(self, reason: str) -> None:
         """Выключить SQLite-опрос до конца хода; транскрипт продолжает работу."""
@@ -5322,7 +5357,10 @@ def _with_tools_protocol(
 ) -> str:
     """Промпт хода эмуляции: секция протокола `<tool_call>` ядра перед историей agy."""
     section = tools_protocol_section(
-        tools, tool_choice, has_attachments=has_attachments, attachment_tool=_attachment_tool()
+        tools,
+        tool_choice,
+        has_attachments=has_attachments,
+        attachment_tool=_attachment_tool(),
     )
     return f"{section}\n\n{prompt}" if prompt else section
 
@@ -5579,8 +5617,7 @@ class Run:
             cli_mode,
             "--model",
             model,
-            "--effort",
-            effort,
+            *effort_cli_args(effort),
             "--print-timeout=" + str(PRINT_TIMEOUT),
             *text_turn_cli_flags(mode),
         ]
@@ -5952,7 +5989,9 @@ class Run:
             self.drain_closed = True
             self._done_put = True
             self.q.put(("capacity_exhausted", summary))
-        _log(f"capacity-exhausted fast-fail pid={self.proc.pid} reason={CAPACITY_REASON}")
+        _log(
+            f"capacity-exhausted fast-fail pid={self.proc.pid} reason={CAPACITY_REASON}"
+        )
         _kill_group(self.proc)
 
     def claim_preamble(self, step_idx: int | None, source: str = "transcript") -> bool:
@@ -6007,8 +6046,7 @@ class Run:
         """
         final_text = ""
         result_ev = {}
-        tool_ordinal = 0
-        tool_ordinal_by_id: dict[str, int] = {}
+        tool_state = midstream_resilience.PumpToolState(_as_int)
         term_kind = "pump_error"
         term_payload: object = "pump terminated"
         try:
@@ -6027,7 +6065,11 @@ class Run:
                 if etype == "init":
                     init = ev.get("init") if isinstance(ev.get("init"), dict) else {}
                     tools_raw = cast(object, init.get("tools"))
-                    tools = cast("list[object]", tools_raw) if isinstance(tools_raw, list) else []
+                    tools = (
+                        cast("list[object]", tools_raw)
+                        if isinstance(tools_raw, list)
+                        else []
+                    )
                     self.q.put(
                         (
                             "init",
@@ -6040,9 +6082,16 @@ class Run:
                     )
                     self._tail.bind(str(ev.get("conversation_id") or ""))
                 elif etype == "step_update":
-                    step = ev.get("step_update") if isinstance(ev.get("step_update"), dict) else {}
+                    step = (
+                        ev.get("step_update")
+                        if isinstance(ev.get("step_update"), dict)
+                        else {}
+                    )
                     kind = step.get("step_type")
                     if kind == "tool":
+                        midstream_resilience.capture_pump_tool_step(
+                            self, step, tool_state
+                        )
                         t_idx = _as_int(step.get("step_index"))
                         if t_idx is not None:
                             tool_steps = getattr(self, "_tool_step_indices", None)
@@ -6116,35 +6165,9 @@ class Run:
                                         _ = self._emit_reasoning(step_idx or 0, suffix)
                                 else:
                                     self.q.put(("text", suffix))
-                    elif kind == "tool" and step.get("state") == "DONE":
-                        step_idx = _as_int(step.get("step_index"))
-                        trace: dict[str, object] = {
-                            "name": str(step.get("tool_name") or "tool"),
-                            "duration_s": step.get("duration_seconds"),
-                            "step_index": step_idx,
-                        }
-                        if step_idx is None:
-                            # Идентичность DONE без step_index: монотонный ordinal хода,
-                            # назначается один раз и переживает повторную доставку события.
-                            raw_id = (
-                                step.get("call_id")
-                                or step.get("tool_call_id")
-                                or step.get("id")
-                            )
-                            call_id = str(raw_id).strip() if isinstance(raw_id, (str, int)) else ""
-                            if call_id:
-                                # Повтор события с тем же call_id получает тот же ordinal.
-                                ord_val = tool_ordinal_by_id.get(call_id)
-                                if ord_val is None:
-                                    tool_ordinal += 1
-                                    ord_val = tool_ordinal
-                                    tool_ordinal_by_id[call_id] = ord_val
-                                trace["fallback_ordinal"] = ord_val
-                                trace["call_id"] = call_id
-                            else:
-                                tool_ordinal += 1
-                                trace["fallback_ordinal"] = tool_ordinal
-                        self.q.put(("tool_trace", trace))
+                    midstream_resilience.emit_done_tool_trace_if_any(
+                        self, step, kind, tool_state
+                    )
                 elif etype == "result":
                     result = (
                         ev.get("result") if isinstance(ev.get("result"), dict) else {}
@@ -6525,7 +6548,9 @@ class Handler(BaseHTTPRequestHandler):
         except (TypeError, IndexError):
             return "-"
 
-    def _send(self, code: int, payload: dict, extra_headers: dict[str, str] | None = None) -> None:
+    def _send(
+        self, code: int, payload: dict, extra_headers: dict[str, str] | None = None
+    ) -> None:
         if self._registry_job is not None:
             return
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -6820,6 +6845,9 @@ class Handler(BaseHTTPRequestHandler):
                         float(TIMEOUT_S),
                     )
                 no_first_event = not run.got_event
+            FIRST_TOKEN_TIMEOUT_S = midstream_resilience.current_first_event_timeout_s(
+                run, _config.first_token_timeout_s
+            )
             if no_first_event and now - run.started > FIRST_TOKEN_TIMEOUT_S:
                 return state(
                     "first_token_timeout",
@@ -6874,7 +6902,11 @@ class Handler(BaseHTTPRequestHandler):
                 run.controller.on_activity(kind)
                 if result_error:
                     if is_self_healable_error(result_error):
-                        cleared_error, result_error, result_error_at = result_error, "", 0.0
+                        cleared_error, result_error, result_error_at = (
+                            result_error,
+                            "",
+                            0.0,
+                        )
             if kind == "init":
                 conversation_id = str(payload.get("conversation_id") or "")
                 _log(
@@ -7172,7 +7204,11 @@ class Handler(BaseHTTPRequestHandler):
                 else:
                     # Флаг и proof могли смениться, пока ход ждал слот: повторная
                     # проверка до mkdir и spawn (universal — только флаг, выше).
-                    gate = None if universal else _image_gate(cast(str, model), cast(str, effort))
+                    gate = (
+                        None
+                        if universal
+                        else _image_gate(cast(str, model), cast(str, effort))
+                    )
                     if gate is not None:
                         self._log_reject(
                             gate.code, cast(str, model), cast(int, ctx["model_len"])
@@ -7412,7 +7448,11 @@ class Handler(BaseHTTPRequestHandler):
                     ctx["hot_resumed"] = False
                     ctx["conversation_id"] = ""
                     ctx["prompt"] = ctx["full_prompt"]
-                    if out["state"] == "agy_error" and not delivered:
+                    if (
+                        out["state"] == "agy_error"
+                        and not delivered
+                        and not _is_cli_rejection_outcome(out)
+                    ):
                         if not _retry_take():
                             _log(f"retry-budget-exhausted state={out['state']} {tag}")
                             break
@@ -7425,6 +7465,7 @@ class Handler(BaseHTTPRequestHandler):
                 transient = (
                     out["state"] in ("agy_error", "pump_error", "done")
                     and not delivered
+                    and not _is_cli_rejection_outcome(out)
                 )
                 if not transient or attempt == 2:
                     break
@@ -7457,7 +7498,12 @@ class Handler(BaseHTTPRequestHandler):
             # Каталог изображений живёт весь ход (все попытки) и уходит до слота.
             if img_registered and img_dir is not None:
                 emitted = ctx.get("tool_calls_emitted")
-                _release_img_dir(img_dir, retain=bool(ctx.get("emulate_tools")) and callable(emitted) and bool(emitted()))
+                _release_img_dir(
+                    img_dir,
+                    retain=bool(ctx.get("emulate_tools"))
+                    and callable(emitted)
+                    and bool(emitted()),
+                )
             _slots.release()
         self._log_done(
             cast(str, ctx["model"]),
@@ -7512,6 +7558,9 @@ class Handler(BaseHTTPRequestHandler):
                 "code": 504,
             }
         if st == "first_token_timeout":
+            FIRST_TOKEN_TIMEOUT_S = midstream_resilience.first_event_timeout_for_result(
+                out, resilience, _config.first_token_timeout_s
+            )
             return {
                 "message": f"first_token_timeout: agy gave no event within "
                 f"{FIRST_TOKEN_TIMEOUT_S:g}s",
@@ -7760,36 +7809,19 @@ class Handler(BaseHTTPRequestHandler):
                 )
                 return
             model = FLEET["models"][model_id]
-            raw_effort = req.get("reasoning_effort")
-            if raw_effort is None:
-                effort = model["default_effort"]
-                effort_source = "default"
-            elif isinstance(raw_effort, str):
-                candidate = raw_effort.strip()
-                if not candidate:
-                    effort = model["default_effort"]
-                    effort_source = "default"
-                elif candidate in model["efforts"]:
-                    effort = candidate
-                    effort_source = "request"
-                else:
-                    self._reject(
-                        400,
-                        "unsupported_reasoning_effort",
-                        "reasoning_effort is not allowed for this model",
-                        model_id,
-                        model_len,
-                    )
-                    return
-            else:
+            decision = resolve_request_effort(
+                req.get("reasoning_effort"), model, EFFORT_LEVELS
+            )
+            if decision.error:
                 self._reject(
                     400,
                     "unsupported_reasoning_effort",
-                    "reasoning_effort must be a string",
+                    decision.error,
                     model_id,
                     model_len,
                 )
                 return
+            effort, effort_source = decision.effort, decision.source
             if "reasoning" in req and req.get("reasoning") is not None:
                 self._reject(
                     400,
@@ -7800,13 +7832,23 @@ class Handler(BaseHTTPRequestHandler):
                 )
                 return
             messages_raw = cast(object, req.get("messages"))
-            messages = cast("list[object]", messages_raw) if isinstance(messages_raw, list) else []
+            messages = (
+                cast("list[object]", messages_raw)
+                if isinstance(messages_raw, list)
+                else []
+            )
             raw_tools = req.get("tools")
-            tools = [t for t in raw_tools if isinstance(t, dict)] if isinstance(raw_tools, list) else []
+            tools = (
+                [t for t in raw_tools if isinstance(t, dict)]
+                if isinstance(raw_tools, list)
+                else []
+            )
             tool_choice = req.get("tool_choice")
             tools_count = 0 if _tool_choice_none(tool_choice) else len(tools)
             # Эмуляция function calling: tools есть и tool_choice != "none".
-            emulate_tools = tools_count > 0 and _new_flag("tool_emulation_enabled", True)
+            emulate_tools = tools_count > 0 and _new_flag(
+                "tool_emulation_enabled", True
+            )
             # Резерв под обёртку протокола: промпт усекается один раз.
             reserve = _protocol_reserve_bytes(emulate_tools, tools, tool_choice)
             # Универсальная политика фиксируется один раз на принятый запрос.
@@ -7891,7 +7933,9 @@ class Handler(BaseHTTPRequestHandler):
             if force_cold or (universal and not images):
                 full_prompt = stripped_full_prompt
             else:
-                full_prompt = _messages_to_prompt(render_messages, images, reserve_bytes=reserve)
+                full_prompt = _messages_to_prompt(
+                    render_messages, images, reserve_bytes=reserve
+                )
                 if universal:
                     stripped_full_prompt = stripped_full_prompt or full_prompt
             full_attached = bool(images) and not force_cold
@@ -7904,7 +7948,9 @@ class Handler(BaseHTTPRequestHandler):
                         stripped_full_prompt, tools, tool_choice, has_attachments=False
                     )
             else:
-                full_prompt = _with_pure_text_protocol(full_prompt, has_attachments=full_attached)
+                full_prompt = _with_pure_text_protocol(
+                    full_prompt, has_attachments=full_attached
+                )
                 if stripped_full_prompt:
                     stripped_full_prompt = _with_pure_text_protocol(
                         stripped_full_prompt, has_attachments=False
@@ -7928,7 +7974,9 @@ class Handler(BaseHTTPRequestHandler):
                             or not os.path.isabs(val)
                             or "\x00" in val
                             or any(
-                                ord(c) < 32 or ord(c) == 127 or 0xD800 <= ord(c) <= 0xDFFF
+                                ord(c) < 32
+                                or ord(c) == 127
+                                or 0xD800 <= ord(c) <= 0xDFFF
                                 for c in val
                             )
                         ):
@@ -8023,13 +8071,17 @@ class Handler(BaseHTTPRequestHandler):
                 if use_cid:
                     conversation_id = use_cid
                     is_resumed = True
-                    prompt, resumed_attached = _resumed_turn_prompt(render_messages, images, reserve)
+                    prompt, resumed_attached = _resumed_turn_prompt(
+                        render_messages, images, reserve
+                    )
                     if emulate_tools:
                         prompt = _with_tools_protocol(
                             prompt, tools, tool_choice, has_attachments=resumed_attached
                         )
                     else:
-                        prompt = _with_pure_text_protocol(prompt, has_attachments=resumed_attached)
+                        prompt = _with_pure_text_protocol(
+                            prompt, has_attachments=resumed_attached
+                        )
             ctx = {
                 "registry_use_cid": use_cid,
                 "registry_owned_cid": owned_cid,
@@ -8269,285 +8321,9 @@ class Handler(BaseHTTPRequestHandler):
             self._reset_flush_window()
 
     def _serve_sse_body(self, ctx: dict) -> None:
-        completion_id = f"chatcmpl-agy-{uuid.uuid4().hex[:12]}"
-        created = int(time.time())
-        shown_model = ctx["model"]
-        resilience = _new_flag("AGY_BRIDGE_STREAM_RESILIENCE_ENABLED", True)
-        ctx["stream_resilience_enabled"] = resilience
-        ctx["stream_committed"] = False
-        disconnected = False
-        self._stream_relay = StreamRelay(getattr(self, "wfile", None))
-
-        def chunk(
-            delta: dict,
-            finish=None,
-            usage: dict | None = None,
-            conversation_id: str = "",
-            error: dict | None = None,
-        ) -> str:
-            body: dict = {
-                "id": completion_id,
-                "object": "chat.completion.chunk",
-                "created": created,
-                "model": shown_model,
-                "choices": [{"index": 0, "delta": delta, "finish_reason": finish}],
-            }
-            if usage is not None:
-                body["usage"] = usage
-            if conversation_id:
-                body["conversation_id"] = conversation_id
-            if error is not None:
-                body["error"] = error
-            return "data: " + json.dumps(body, ensure_ascii=False) + "\n\n"
-
-        def emit(data: str) -> bool:
-            nonlocal disconnected
-            if resilience and disconnected:
-                return False
-            ok = self._emit(data)
-            if resilience and not ok:
-                disconnected = True
-            return ok
-
-        def commit() -> bool:
-            nonlocal disconnected
-            if disconnected:
-                return False
-            if ctx["stream_committed"]:
-                return True
-            try:
-                self.send_response(200)
-                self.send_header("Content-Type", "text/event-stream")
-                self.send_header("Cache-Control", "no-cache")
-                self.send_header("X-Accel-Buffering", "no")
-                self.end_headers()
-            except (BrokenPipeError, ConnectionResetError, OSError):
-                disconnected = True
-                _log("client gone before headers")
-                return False
-            ctx["stream_committed"] = True
-            self.close_connection = True
-            return emit(chunk({"role": "assistant", "content": ""}))
-
-        # Счётчики полезной выдачи растут только после УСПЕШНОЙ записи клиенту
-        # (role-chunk, keepalive и пустые/whitespace-дельты не в счёт).
-        emitted_content = [0]
-        emitted_reasoning_or_tool = [0]
-        emitted_tool_calls = [0]
-        progress = _ToolProgress(
-            str(ctx.get("turn_id") or ""), str(ctx.get("conversation_id") or "")
-        )
-
-        def on_text(value: str) -> bool:
-            if resilience and not value:
-                return not disconnected
-            ok = commit() and emit(chunk({"content": value}))
-            if ok and value.strip():
-                emitted_content[0] += len(value.strip())
-            return ok
-
-        def on_reasoning(value: str) -> bool:
-            # Мышление шага: Harness читает первое непустое из
-            # reasoning_content|reasoning|reasoning_text — отдаём только первое.
-            if resilience and not value:
-                return not disconnected
-            ok = commit() and emit(chunk({"reasoning_content": value}))
-            if ok and value.strip():
-                emitted_reasoning_or_tool[0] += 1
-            return ok
-
-        def on_tool_trace(event: dict) -> bool:
-            if resilience:
-                ctx["tool_activity"] = True
-            # Нативный инструмент agy исполняется внутри CLI и наружу не уходит как
-            # tool_call. Безопасный маркер прогресса — только при emit_tool_trace;
-            # выключенный флаг — полный no-op до любого форматирования строк.
-            if not _new_flag("emit_tool_trace"):
-                return True
-            marker = progress.marker(event, commit=False)
-            if marker is None:
-                return True
-            ok = on_reasoning(marker)
-            if ok:
-                progress.commit()
-            return ok
-
-        tool_turn: _ToolTurn | None = None
-        if ctx.get("emulate_tools"):
-
-            def on_calls(calls: list[dict[str, object]]) -> bool:
-                ok = commit() and emit(chunk({"tool_calls": calls}))
-                if ok:
-                    emitted_reasoning_or_tool[0] += 1
-                    emitted_tool_calls[0] += 1
-                return ok
-
-            tool_turn = _ToolTurn(
-                cast(list, ctx.get("tools") or []), on_text, on_reasoning, on_calls
-            )
-            ctx["tool_stop"] = tool_turn.turn_complete
-            ctx["tool_calls_emitted"] = lambda: bool(tool_turn.calls)
-        stream_text = tool_turn.feed if tool_turn is not None else on_text
-
         def keepalive() -> bool:
-            if not ctx["stream_committed"]:
-                if ctx.get("step_job_id"):
-                    return commit() and emit(": keepalive\n\n")
-                return not disconnected
-            return emit(": keepalive\n\n")
-
-        def close_interrupted(out: dict) -> None:
-            """Мягко закрывает транзиентный обрыв после частичной выдачи (agent-agnostic)."""
-            open_call = tool_turn._normalizer.has_open_tool_call() if tool_turn else False
-            dec = evaluate_graceful_interruption(
-                error_text=out.get("err"),
-                delivered_content=bool(emitted_content[0]),
-                delivered_reasoning=bool(emitted_reasoning_or_tool[0] - emitted_tool_calls[0]),
-                delivered_tool_calls=any((emitted_tool_calls[0], out.get("tool_calls"))),
-                has_unclosed_tool_call=open_call,
-                graceful_enabled=_new_flag("graceful_interruption_on_partial", True),
-            )
-            if dec.should_gracefully_close:
-                self._arm_flush_window(ctx)
-                if tool_turn:
-                    tool_turn.finish()
-                _ = {"content": on_text}.get(dec.target_channel, on_reasoning)(dec.notice_text)
-                out.update(state="done", rc=0, err="", graceful_interruption_closed=True)
-                _log(f"stream-graceful-interruption target={dec.target_channel}")
-
-        def finalize_timeout(out: dict) -> None:
-            """Graceful-финал timeout/idle_timeout после полезной выдачи (идемпотентно).
-
-            Один arbiter-досыл, один notice, один настраиваемый finish_reason
-            (по умолчанию "stop"), один
-            [DONE] — всё в одном окне T_FINAL_FLUSH_S; ошибка записи прекращает записи.
-            """
-            if out.get("graceful_done") or out.get("state") not in (
-                "timeout",
-                "idle_timeout",
-            ):
-                return
-            if not _new_flag("graceful_timeout_on_partial"):
-                return
-            retained = list(out.get("retained_events") or [])
-            retained_text = "".join(str(p) for k, p in retained if k == "text")
-            if not (
-                emitted_content[0] > 0
-                or emitted_reasoning_or_tool[0] > 0
-                or retained_text.strip()
-            ):
-                return  # полная тишина: прежняя ошибка 504
-            self._arm_flush_window(ctx)
-            ok = True
-            for kind, payload in retained:
-                if kind == "text":
-                    ok = stream_text(str(payload))
-                elif kind == "reasoning":
-                    ok = on_reasoning(str(payload))
-                elif kind == "tool_trace":
-                    ok = on_tool_trace(payload)
-                if not ok:
-                    break
-            if ok and tool_turn is not None:
-                # Удержанный хвост — в content; незакрытый <tool_call> отброшен.
-                tool_turn.finish()
-                ok = tool_turn.ok
-            reason = str(out.get("state"))
-            conv_id = str(out.get("conversation_id") or "")
-            if ok:
-                ok = commit() and emit(
-                    chunk({"content": self._graceful_notice(reason, out.get("timeout_limit_s"))})
-                )
-            if ok:
-                ok = emit(chunk({}, _graceful_finish_reason(), conversation_id=conv_id))
-            if ok:
-                _ = emit("data: [DONE]\n\n")
-            out["graceful_done"] = True
-            _log(f"graceful-timeout state={reason} mode=sse ok={int(bool(ok))}")
-
-        def finalize_stream(out: dict) -> None:
-            """Graceful-финал по state: обрыв транспорта либо timeout/idle_timeout."""
-            closers = dict.fromkeys(("agy_error", "pump_error"), close_interrupted)
-            closers.get(str(out.get("state")), finalize_timeout)(out)
-
-        ctx["finalize_timeout"] = finalize_stream
-        if not resilience and not ctx.get("step_job_id") and not commit():
-            return
-
-        def _sse_tool_trace_wrapped(payload: Any) -> bool:
-            if tool_turn is not None:
-                tool_turn.notify_activity()
-            return on_tool_trace(payload)
-
-        stream_reasoning = (
-            tool_turn.feed_reasoning if tool_turn is not None else on_reasoning
-        )
-        out = self._run_once(
-            ctx, stream_text, _sse_tool_trace_wrapped, stream_reasoning, keepalive
-        )
-        if disconnected or out.get("state") == "client_gone":
-            _log("client gone mid-stream, child killed")
-            return
-        finalize_stream(out)  # страховка, если _run_once не вызвал hook
-        if out.get("graceful_done"):
-            return
-        err = self._error_body(out, resilience)
-        finish_reason = "stop"
-        if err is None and tool_turn is not None:
-            tool_turn.finish()
-            if disconnected or not tool_turn.ok:
-                return
-            if tool_turn.error:
-                err = tool_turn.error_body()
-            elif tool_turn.calls:
-                finish_reason = "tool_calls"
-        if (
-            (resilience or ctx.get("step_job_id"))
-            and err is not None
-            and not ctx["stream_committed"]
-        ):
-            self._send(
-                int(err.get("code") or 502) if ctx.get("step_job_id") or err.get("type") == CAPACITY_REASON else 502,
-                {"error": err},
-            )
-            self.close_connection = True
-            return
-        if not commit():
-            return
-        if err is None:
-            conv_id = str(out.get("conversation_id") or "")
-            if (
-                not emit(chunk({}, finish_reason, conversation_id=conv_id))
-                and resilience
-            ):
-                return
-            # Harness считает tok/s и % контекста только из usage в потоке
-            # (dsh-llm-pi-ai toStreamChunks: usage-chunk -> session usage).
-            # Шлём только при ненулевых токенах, чтобы пустой usage от agy
-            # не превращался в ложные «0 tok/s / 0%».
-            usage = self._usage_payload(
-                out.get("usage") or {}, out.get("usage_resolved")
-            )
-            if usage["prompt_tokens"] or usage["completion_tokens"]:
-                if (
-                    not emit(chunk({}, finish_reason, usage, conversation_id=conv_id))
-                    and resilience
-                ):
-                    return
-        else:
-            # Токены закоммиченного потока переживают терминальную ошибку.
-            try:
-                kept_usage = positive_wire_usage(self._usage_payload(out.get("usage") or {}, out.get("usage_resolved")))
-            except (TypeError, ValueError, AttributeError):
-                kept_usage = None
-            error_frame = (
-                chunk({}, "stop", kept_usage, error=err)
-                if resilience
-                else "data: " + json.dumps({"error": err}, ensure_ascii=False) + "\n\n"
-            )
-            if not emit(error_frame) and resilience:
-                return
-        emit("data: [DONE]\n\n")
+            return sse_stream_helpers.keepalive(ctx)
+        return sse_body_runner.serve_sse_body(self, ctx, (_new_flag, _log, _graceful_finish_reason, _ToolTurn))
 
 
 class Server(ThreadingHTTPServer):

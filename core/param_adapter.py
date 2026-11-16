@@ -47,6 +47,10 @@ GLOBAL_WHITELIST: Tuple[str, ...] = (
     "thinking",
     "temperature",
     "top_p",
+    "max_tokens",
+    "max_completion_tokens",
+    "tools",
+    "tool_choice",
 )
 
 # Параметры «думающего» класса: в кворуме их нельзя молча снимать.

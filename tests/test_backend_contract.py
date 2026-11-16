@@ -3,6 +3,7 @@
 Проверяется на фейковом адаптере и на реальных DroidAdapter/MuseAdapter: набор методов,
 маппинг модель -> адаптер, отказ от загрузки кода из конфигурации, изоляция сбоя shutdown.
 """
+
 from __future__ import annotations
 
 import sys
@@ -191,21 +192,24 @@ class TestRegistry(unittest.TestCase):
 class TestRealAdapters(unittest.TestCase):
     """Droid и Muse подчиняются одному контракту; поведение droid-моделей не меняется."""
 
-    def test_server_registry_has_enabled_backends_from_fleet(self):
+    def test_server_registry_has_enabled_backends_from_fleet(self) -> None:
         ids = {a.id: a for a in server.BACKENDS.adapters()}
-        self.assertEqual(
-            set(ids), {"droid", "muse", "codex", "agy", "opencode-zen", "claude-p", "opencode-go", "opencode-go-claude"}
-        )
+        self.assertEqual(set(ids), {
+            "droid", "muse", "codex", "agy", "opencode-zen", "claude-p",
+            "opencode-go", "opencode-go-claude",
+            "openai-key-2", "openai-key-3", "deepseek-direct",
+        })
         self.assertIn("droid", ids)
         self.assertIn("muse", ids)
+        routes = server.FLEET["models"]["claude-haiku-5-5"]["routing"]["routes"]
+        self.assertEqual({r["backend"]: r["priority"] for r in routes}["opencode-go-claude"], 15)
 
-    def test_model_routing(self):
+    def test_model_routing(self) -> None:
         reg = server.BACKENDS
         expected = {
             "claude-sonnet-5-5": "claude-p",
-            "gemini-3.8-flash": "droid",
-            "gemini-3.8-flash-agy": "agy",
-            "gpt-6.1-sol": "codex",
+            "gemini-3.8-flash": "droid", "gemini-3.8-flash-agy": "agy",
+            "gpt-6.1-sol": "openai-key-2",
             "claude-sonnet-5-5-droid": "droid",
             "gemini-3.8-flash-droid": "droid",
             "gpt-6.1-sol-droid": "droid",
@@ -214,9 +218,9 @@ class TestRealAdapters(unittest.TestCase):
             "muse-spark-1.3-contributor": "muse",
             "muse-wonder-1.0": "muse",
             "muse-wonder-full-1.0": "muse",
-            "gpt-6.1-terra": "codex",
+            "gpt-6.1-terra": "openai-key-2",
             "claude-opus-5-5": "claude-p",
-            "claude-haiku-5-5": "opencode-go-claude",
+            "claude-haiku-5-5": "claude-p",
             "gemini-4-argon": "agy",
             "gemini-4-carbon": "agy",
             "gemini-4-hydrogen": "agy",
@@ -231,12 +235,22 @@ class TestRealAdapters(unittest.TestCase):
             "inkling-2-small-free": "opencode-zen",
             "longcat-2.5-free": "opencode-zen",
             "minimax-m3.1-flash-free": "opencode-zen",
-            "deepseek-v4.1-flash": "opencode-go",
+            "deepseek-v4.1-flash": "deepseek-direct",
         }
         self.assertEqual(set(server.FLEET["order"]), set(expected))
         for mid, backend in expected.items():
             self.assertEqual(reg.adapter_for_model(mid).id, backend, mid)
             self.assertEqual(server.FLEET["models"][mid]["backend"], backend)
+
+    def test_compiled_model_owners(self) -> None:
+        catalog = server._load_fleet()
+        expected = {
+            "gpt-6.1-sol": "openai-key-2",
+            "gpt-6.1-terra": "openai-key-2",
+            "deepseek-v4.1-flash": "deepseek-direct",
+        }
+        for mid, backend in expected.items():
+            self.assertEqual(catalog["models"][mid]["backend"], backend, mid)
 
     def test_each_adapter_exposes_contract_and_capabilities(self):
         for adapter in server.BACKENDS.adapters():

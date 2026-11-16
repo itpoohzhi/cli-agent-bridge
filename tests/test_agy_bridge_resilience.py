@@ -2718,7 +2718,9 @@ class ExitLogAndHealthTests(unittest.TestCase):
         with _Fixture() as fx:
             sent: list[tuple[int, dict[str, object]]] = []
 
-            def send(code: int, payload: dict[str, object], extra_headers: object = None) -> None:
+            def send(
+                code: int, payload: dict[str, object], extra_headers: object = None
+            ) -> None:
                 sent.append((code, payload))
 
             def fetch() -> dict[str, object]:
@@ -3751,7 +3753,9 @@ class L2HarnessTests(unittest.TestCase):
             self.assertLessEqual(rss_end, 160 * 1024 * 1024)
             health: list[dict[str, object]] = []
 
-            def send(_code: int, payload: dict[str, object], extra_headers: object = None) -> None:
+            def send(
+                _code: int, payload: dict[str, object], extra_headers: object = None
+            ) -> None:
                 health.append(payload)
 
             with _Sock() as sock:
@@ -6445,7 +6449,12 @@ def _dict_or_empty(value: object) -> dict[str, object]:
 
 # ---- Image input (workspace-read): AD-001..AD-006, F-001..F-010 ---------------------
 
-_IMG_TARGETS = ("gemini-4-hydrogen", "gemini-4-carbon", "gemini-4-argon", "gemini-3.8-flash")
+_IMG_TARGETS = (
+    "gemini-4-hydrogen",
+    "gemini-4-carbon",
+    "gemini-4-argon",
+    "gemini-3.8-flash",
+)
 _IMG_MIMES = ("image/png", "image/jpeg", "image/gif", "image/webp")
 _IMG_MAGIC: dict[str, bytes] = {
     "image/png": b"\x89PNG\r\n\x1a\n",
@@ -10200,9 +10209,7 @@ class UniversalImageFallbackTests(unittest.TestCase):
         gate_spy = mock.patch.object(
             _bridge(), "_image_proof_reason", side_effect=AssertionError("proof")
         )
-        sha_spy = mock.patch.object(
-            _bridge(), "_file_sha256", side_effect=AssertionError("sha")
-        )
+        sha = mock.patch.object(_bridge(), "_file_sha256", side_effect=AssertionError)
         with _UniEnv() as env:
             bridge = _HttpBridge()
             argon = _proof_of("gemini-4-argon")
@@ -10210,7 +10217,7 @@ class UniversalImageFallbackTests(unittest.TestCase):
             try:
                 with (
                     gate_spy,
-                    sha_spy,
+                    sha,
                     mock.patch.dict(argon, broken),
                     mock.patch.dict(
                         _dict(_dict(models["gemini-4-argon"])["images"]),
@@ -10231,10 +10238,11 @@ class UniversalImageFallbackTests(unittest.TestCase):
                                 spawned += 1
                                 rec = env.records()[-1]
                                 self.assertEqual(len(env.records()), spawned)
-                                self.assertEqual(
-                                    _argv_of(rec)[_argv_of(rec).index("--effort") + 1],
-                                    effort,
-                                )
+                                a = _argv_of(rec)
+                                if effort == "off":
+                                    self.assertNotIn("--effort", a)
+                                else:
+                                    self.assertEqual(a[a.index("--effort") + 1], effort)
                                 _expect_files(
                                     self,
                                     rec,

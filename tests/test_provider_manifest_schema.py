@@ -85,16 +85,12 @@ def test_valid_manifest_passes() -> None:
 def test_shipped_manifests_all_valid() -> None:
     loaded = load_manifests(providers_dir(), ADAPTER_KINDS)
     assert dict(loaded.rejected_providers) == {}
-    assert {m.provider_id for m in loaded.manifests} == {
-        "agy",
-        "claude-p",
-        "codex",
-        "droid",
-        "muse",
-        "opencode-go",
-        "opencode-go-claude",
-        "opencode-zen",
-    }
+    assert {m.provider_id for m in loaded.manifests} == set(
+        (
+            "agy claude-p codex deepseek-direct droid muse "
+            "openai-key-2 openai-key-3 opencode-go opencode-go-claude opencode-zen"
+        ).split()
+    )
 
 
 def test_shipped_manifests_pass_json_schema() -> None:

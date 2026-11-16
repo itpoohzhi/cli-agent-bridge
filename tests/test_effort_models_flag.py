@@ -48,7 +48,12 @@ def test_models_list_keeps_legacy_efforts_when_flag_off(
     flag_env.delenv(FLAG, raising=False)
     cards = _cards()
     assert "muse-spark-1.3" in cards and set(ALIASES) <= set(cards)
+    assert any(card.get("supports_thinking") is False for card in cards.values())
     for card in cards.values():
+        if card.get("supports_thinking") is False:
+            assert card["supported_reasoning_efforts"] == ["off"]
+            assert card["default_reasoning_effort"] == "off"
+            continue
         assert card["supported_reasoning_efforts"] == LEGACY
         assert card["default_reasoning_effort"] == "high"
 

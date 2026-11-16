@@ -19,12 +19,7 @@ except ModuleNotFoundError:
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:  # изолированный прогон файла: conftest импортирует `core`
     sys.path.insert(0, str(ROOT))
-GOOGLE_MODELS = (
-    "gemini-4-hydrogen",
-    "gemini-4-carbon",
-    "gemini-4-argon",
-    "gemini-3.8-flash",
-)
+GOOGLE_MODELS = ("gemini-4-hydrogen", "gemini-4-carbon", "gemini-4-argon", "gemini-3.8-flash")
 AGY_MODELS = ("gemini-4-argon", "gemini-3.8-flash")
 GOOGLE_BRIDGES = {
     "cli-agent-bridge": ("http://127.0.0.1:9882/v1", "BRIDGE_KEY"),
@@ -42,18 +37,14 @@ REMOVED_MODELS = {
     "cli-agent-bridge": SUFFIX_ALIASES,
     "claude-p-bridge": {"claude-opus-5-5-high", "claude-sonnet-5-5-xhigh"},
 }
-AGY_EFFORTS = {
-    "off": None,
-    "low": "low",
-    "medium": "medium",
-    "high": "high",
-    "xhigh": "high",
-    "max": "high",
-}
+AGY_EFFORTS = {"off": None, "low": "low", "medium": "medium", "high": "high", "xhigh": "high", "max": "high"}
 HYDROGEN_EFFORTS = {**AGY_EFFORTS, "xhigh": "xhigh", "max": "xhigh"}
+EFFORTLESS_EFFORTS = {e: None for e in ("off", "low", "medium", "high", "xhigh", "max")}
 
 
 def _expected_efforts(model_id: str) -> dict:
+    if model_id == "gemini-4-carbon":
+        return EFFORTLESS_EFFORTS
     return HYDROGEN_EFFORTS if model_id == "gemini-4-hydrogen" else AGY_EFFORTS
 
 
@@ -99,10 +90,10 @@ def _assert_google_models(entries: dict, *, check_allowed: bool) -> None:
             assert model["contextWindow"] == GOOGLE_CONTEXT_WINDOW, (name, model_id)
             assert model["maxTokens"] == GOOGLE_MAX_TOKENS, (name, model_id)
             assert "image" in model["input"], (name, model_id)
-            assert model["reasoningEfforts"] == _expected_efforts(model_id), (
-                name,
-                model_id,
-            )
+            assert model["reasoningEfforts"] == _expected_efforts(model_id), (name, model_id)
+            if model_id == "gemini-4-carbon":
+                assert model.get("reasoning") is False, (name, model_id)
+                assert "defaultReasoningEffort" not in model, (name, model_id)
     assert [
         model["id"] for model in providers["agy-bridge"]["models"]
     ].count("gemini-4-hydrogen") == 1
@@ -178,10 +169,11 @@ def test_dsh_profile_parser_fixture() -> None:
             input: [text, image]
             reasoningEfforts: {off: null, low: low, medium: medium, high: high, xhigh: xhigh, max: xhigh}
           - id: gemini-4-carbon
+            reasoning: false
             contextWindow: 1048576
             maxTokens: 65536
             input: [text, image]
-            reasoningEfforts: {off: null, low: low, medium: medium, high: high, xhigh: high, max: high}
+            reasoningEfforts: {off: null, low: null, medium: null, high: null, xhigh: null, max: null}
           - id: gemini-4-argon
             contextWindow: 1048576
             maxTokens: 65536
@@ -202,10 +194,11 @@ def test_dsh_profile_parser_fixture() -> None:
             input: [text, image]
             reasoningEfforts: {off: null, low: low, medium: medium, high: high, xhigh: xhigh, max: xhigh}
           - id: gemini-4-carbon
+            reasoning: false
             contextWindow: 1048576
             maxTokens: 65536
             input: [text, image]
-            reasoningEfforts: {off: null, low: low, medium: medium, high: high, xhigh: high, max: high}
+            reasoningEfforts: {off: null, low: null, medium: null, high: null, xhigh: null, max: null}
           - id: gemini-4-argon
             contextWindow: 1048576
             maxTokens: 65536
@@ -299,9 +292,12 @@ def _contract_profile_entries() -> dict:
         top = item["efforts"][-1]
         ladder = {"off": None, **{e: e for e in item["efforts"]}}
         ladder.update({e: top for e in ("xhigh", "max") if e not in ladder})
+        if item["efforts"] == ["off"]:
+            ladder = dict(EFFORTLESS_EFFORTS)
         models.append(
             {
                 "id": model_id,
+                "reasoning": item["efforts"] != ["off"],
                 "contextWindow": item["context_window"],
                 "maxTokens": item["max_tokens"],
                 "input": list(item["input"]),
@@ -337,7 +333,8 @@ def test_dsh_provider_contract_is_host_independent() -> None:
         by_id = {m["id"]: m for m in provider["models"]}
         assert by_id["gemini-4-hydrogen"]["reasoningEfforts"]["xhigh"] == "xhigh"
         assert by_id["gemini-4-hydrogen"]["reasoningEfforts"]["max"] == "xhigh"
-        for sibling in ("gemini-4-carbon", "gemini-4-argon", "gemini-3.8-flash"):
+        assert by_id["gemini-4-carbon"]["reasoningEfforts"] == EFFORTLESS_EFFORTS
+        for sibling in ("gemini-4-argon", "gemini-3.8-flash"):
             assert by_id[sibling]["reasoningEfforts"]["xhigh"] == "high", sibling
             assert by_id[sibling]["reasoningEfforts"]["max"] == "high", sibling
 
@@ -359,6 +356,7 @@ def test_dsh_provider_contract_detects_drift() -> None:
 def test_root_fleet_agy_models_efforts() -> None:
     fleet = json.loads((ROOT / "fleet.json").read_text(encoding="utf-8"))
     models = {item["id"]: item for item in fleet["models"]}
+    assert models["gemini-4-carbon"]["efforts"] == ["off"]
     for model in AGY_MODELS:
         assert models[model]["efforts"] == ["low", "medium", "high"]
 

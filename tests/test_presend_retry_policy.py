@@ -1,10 +1,11 @@
-"""Regression tests for retrying explicit pre-send proxy failures."""
+"""Регрессии запрета локального replay и передачи HTTP-отказов маршрутизатору."""
 
 from __future__ import annotations
 
 import json
 import sys
 import threading
+from http.client import HTTPConnection
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Callable
@@ -19,7 +20,7 @@ from adapters.passthrough_adapter import (
     PassthroughLimits,
     ResponseSink,
 )
-from core.backend_adapter import PreSendTransientError
+from core.passthrough_adapter_runtime import PassthroughRouteRefusal
 from core.presend_retry_policy import (
     ENV_PRESEND_MAX_RETRIES,
     ENV_PRESEND_RETRY_DELAY_S,
@@ -28,10 +29,11 @@ from core.presend_retry_policy import (
     is_retryable_presend_payload,
     resolve_presend_response,
 )
+from core.route_attempts import DEFAULT_ROUTE_FAILOVER_STATUSES
 
 
 class _Upstream:
-    """Small local HTTP upstream driven by a per-request callback."""
+    """Локальный HTTP-сервер со счётчиком физических запросов."""
 
     def __init__(self, respond: Callable[[BaseHTTPRequestHandler, int], None]) -> None:
         self.requests = 0
@@ -107,85 +109,68 @@ def _adapter(port: int) -> PassthroughAdapter:
     )
 
 
-def _call(adapter: PassthroughAdapter) -> _Sink:
-    sink = _Sink()
+def _call(
+    adapter: PassthroughAdapter, sink: _Sink | None = None, stream: bool = False
+) -> _Sink:
+    sink = _Sink() if sink is None else sink
     adapter.handle(
-        path="/v1/chat/completions",
-        raw_body=b"{}",
-        request={},
-        headers={},
-        sink=sink,
+        path="/v1/chat/completions", raw_body=json.dumps({"stream": stream}).encode(),
+        request={"stream": stream}, headers={}, sink=sink,
     )
     return sink
 
 
-@pytest.fixture(autouse=True)
-def _fast_retry(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv(ENV_PRESEND_RETRY_DELAY_S, "0.001")
-    monkeypatch.setenv(ENV_PRESEND_RETRY_MAX_DELAY_S, "0.001")
-
-
 @pytest.mark.parametrize(
-    ("content_type", "success_body"),
+    ("content_type", "failure"),
     [
-        ("application/json", b'{"ok":true}'),
-        (
-            "text/event-stream",
-            b'data: {"choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n',
-        ),
+        ("application/json", b'{"type":"proxy_connect_failed","retryable":true}'),
+        ("text/event-stream", b'data: {"type":"proxy_connect_failed","retryable":true}\n\n'),
     ],
 )
-def test_retryable_502_retries_and_only_sends_success(
-    content_type: str, success_body: bytes
+def test_retryable_502_is_forwarded_verbatim_without_replay(
+    content_type: str, failure: bytes
 ) -> None:
-    failure = json.dumps(
-        {
-            "type": "proxy_connect_failed",
-            "message": "cannot connect to opencode.ai:443 via http://127.0.0.1:10815: ConnectionRefusedError",
-            "retryable": True,
-        }
-    ).encode()
-
     def respond(handler: BaseHTTPRequestHandler, attempt: int) -> None:
-        _send(handler, 502, failure) if attempt == 1 else _send(
-            handler, 200, success_body, content_type
+        _send(
+            handler, 502 if attempt == 1 else 200,
+            failure if attempt == 1 else b'{"ok":true}', content_type,
         )
 
     upstream = _Upstream(respond)
     adapter = _adapter(upstream.port)
     try:
-        sink = _call(adapter)
-        assert upstream.requests == 2
-        assert sink.status == 200
-        assert sink.body == success_body
-        assert failure not in sink.body
+        sink = _call(adapter, stream=content_type == "text/event-stream")
+        assert upstream.requests == 1
+        assert sink.status == 502
+        assert sink.body == failure
+        assert ("Content-Type", content_type) in sink.headers
     finally:
         adapter.shutdown()
         upstream.close()
 
 
-def test_retryable_503_honors_retry_after_and_succeeds(
-    monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize("status", [401, 429, 503])
+def test_route_refusal_propagates_without_sleep_or_replay(
+    monkeypatch: pytest.MonkeyPatch, status: int
 ) -> None:
     failure = b'{"error":{"type":"proxy_unavailable","retryable":true}}'
     sleeps: list[float] = []
     monkeypatch.setenv(ENV_PRESEND_RETRY_MAX_DELAY_S, "2")
-    monkeypatch.setattr("core.presend_retry_policy.time.sleep", sleeps.append)
-
-    def respond(handler: BaseHTTPRequestHandler, attempt: int) -> None:
-        if attempt == 1:
-            _send(handler, 503, failure, headers=(("Retry-After", "1.25"),))
-        else:
-            _send(handler, 200, b'{"ok":true}')
-
-    upstream = _Upstream(respond)
+    monkeypatch.setattr("adapters.passthrough_adapter.time.sleep", sleeps.append)
+    upstream = _Upstream(lambda h, _: _send(h, status, failure, headers=(("Retry-After", "1.25"),)))
     adapter = _adapter(upstream.port)
+    sink = _Sink()
+    sink.accepts_presend_errors = True
     try:
-        sink = _call(adapter)
-        assert upstream.requests == 2
-        assert sink.status == 200
-        assert sink.body == b'{"ok":true}'
-        assert sleeps == [pytest.approx(1.25)]
+        with pytest.raises(PassthroughRouteRefusal) as raised:
+            _call(adapter, sink)
+        assert upstream.requests == 1
+        assert raised.value.status_code == status
+        assert raised.value.response_body == failure
+        assert ("Retry-After", "1.25") in raised.value.response_headers
+        assert sleeps == []
+        assert sink.status is None
+        assert sink.body == b""
     finally:
         adapter.shutdown()
         upstream.close()
@@ -211,45 +196,41 @@ def test_non_retryable_502_is_forwarded_without_retry(failure: bytes) -> None:
         upstream.close()
 
 
-def test_retry_exhaustion_forwards_final_502(
+def test_retry_setting_does_not_allow_502_replay(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv(ENV_PRESEND_MAX_RETRIES, "2")
 
     def respond(handler: BaseHTTPRequestHandler, attempt: int) -> None:
-        body = json.dumps(
-            {
-                "type": "proxy_connect_failed",
-                "retryable": True,
-                "attempt": attempt,
-            }
-        ).encode()
+        body = json.dumps({"type": "proxy_connect_failed", "retryable": True, "attempt": attempt}).encode()
         _send(handler, 502, body)
 
     upstream = _Upstream(respond)
     adapter = _adapter(upstream.port)
     try:
         sink = _call(adapter)
-        assert upstream.requests == 3
+        assert upstream.requests == 1
         assert sink.status == 502
-        assert json.loads(sink.body)["attempt"] == 3
+        assert json.loads(sink.body)["attempt"] == 1
     finally:
         adapter.shutdown()
         upstream.close()
 
 
+@pytest.mark.parametrize(("status", "expected"), [(401, True), (429, True), (503, True),
+                                                (502, False), (500, False)])
 @pytest.mark.parametrize(
-    ("status", "body", "expected"),
+    "body",
     [
-        (502, b'{"retryable":true}', True),
-        (503, b'{"error":{"type":"proxy_unavailable"}}', True),
-        (502, b'{"retryable":false,"type":"proxy_connect_failed"}', False),
-        (500, b'{"retryable":true}', False),
-        (502, b"[]", False),
-        (502, b"", False),
+        b'{"retryable":true}',
+        b'{"error":{"type":"proxy_unavailable"}}',
+        b'{"retryable":false,"type":"proxy_connect_failed"}',
+        b'{"retryable":true,"type":"proxy_connect_failed"}',
+        b"[]", b"",
     ],
 )
 def test_retryable_payload_classifier(status: int, body: bytes, expected: bool) -> None:
+    assert DEFAULT_ROUTE_FAILOVER_STATUSES == frozenset({401, 429, 503})
     assert is_retryable_presend_payload(status, (), body) is expected
 
 
@@ -262,20 +243,40 @@ def test_retry_delay_uses_retry_after_floor_and_exponential_cap() -> None:
     assert compute_presend_retry_delay(headers, 0, env) == 3
     assert compute_presend_retry_delay(headers, 1, env) == 6
     assert compute_presend_retry_delay(headers, 2, env) == 8
+    assert compute_presend_retry_delay((("Retry-After", "1"),), 0, env) == 2.2
 
 
-def test_sink_accepting_presend_errors_gets_original_response() -> None:
+@pytest.mark.parametrize("status", [401, 429, 503])
+def test_sink_accepting_presend_errors_gets_original_response(status: int) -> None:
     body = b'{"type":"proxy_connect_failed","retryable":true}'
-    response = _Response(502, body)
+    response = _Response(status, body)
     sink = _Sink()
     sink.accepts_presend_errors = True
     adapter = _PolicyAdapter()
-    with pytest.raises(PreSendTransientError) as raised:
+    with pytest.raises(PassthroughRouteRefusal) as raised:
         resolve_presend_response(
-            adapter, _Connection(), response, sink, lambda: pytest.fail("retried")
+            adapter, HTTPConnection("127.0.0.1"), response, sink, lambda: pytest.fail("retried")
         )
-    assert raised.value.status_code == 502
+    assert raised.value.status_code == status
     assert raised.value.response_body == body
+    assert raised.value.response_headers == (*response.getheaders(), ("Content-Length", str(len(body))))
+    assert adapter.reads == 1
+
+
+@pytest.mark.parametrize(("status", "accepts"), [
+    (401, False), (429, False), (503, False), (502, False), (500, False),
+    (502, True), (500, True), (200, True),
+])
+def test_response_without_route_refusal_is_not_read_or_replayed(status: int, accepts: bool) -> None:
+    conn = HTTPConnection("127.0.0.1")
+    response, sink = _Response(status, b'{"retryable":true}'), _Sink()
+    sink.accepts_presend_errors = accepts
+    adapter = _PolicyAdapter()
+    result = resolve_presend_response(
+        adapter, conn, response, sink, lambda: pytest.fail("retried")
+    )
+    assert result == (conn, response, False)
+    assert adapter.reads == 0
 
 
 class _Response:
@@ -284,16 +285,15 @@ class _Response:
         self.body = body
 
     def getheaders(self) -> list[tuple[str, str]]:
-        return [("Content-Type", "application/json")]
-
-
-class _Connection:
-    def close(self) -> None:
-        return
+        return [("Content-Type", "application/json"), ("Retry-After", "1.25")]
 
 
 class _PolicyAdapter:
+    def __init__(self) -> None:
+        self.reads = 0
+
     def _read_presend_body(self, response: _Response) -> bytes:
+        self.reads += 1
         return response.body
 
     def _response_headers(self, response: _Response) -> list[tuple[str, str]]:

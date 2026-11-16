@@ -77,10 +77,18 @@ from agent_browser import (  # noqa: E402,F401  - единый loopback-конт
     is_loopback_cdp_url,
 )
 from tools.receipt_schema import (  # noqa: E402,F401
-    RECEIPT_PROBES as RECEIPT_PROBES, RECEIPT_SCHEMA, RPC_API_VERSION, SETTINGS_PROFILE as SETTINGS_PROFILE,
-    TOOLS_POLICY as TOOLS_POLICY, ReceiptV3, catalog_tool_ids, receipt_gate_problem,
-    settings_profile_digest as settings_profile_digest, tools_policy_digest as tools_policy_digest,
-    validate_model_catalog, validate_receipt_components,
+    RECEIPT_PROBES as RECEIPT_PROBES,
+    RECEIPT_SCHEMA,
+    RPC_API_VERSION,
+    SETTINGS_PROFILE as SETTINGS_PROFILE,
+    TOOLS_POLICY as TOOLS_POLICY,
+    ReceiptV3,
+    catalog_tool_ids,
+    receipt_gate_problem,
+    settings_profile_digest as settings_profile_digest,
+    tools_policy_digest as tools_policy_digest,
+    validate_model_catalog,
+    validate_receipt_components,
 )
 
 from adapters import ADAPTER_KINDS  # noqa: E402  - реестр видов адаптеров задан в коде
@@ -105,6 +113,7 @@ from core.backend_adapter import (  # noqa: E402
     strip_bridge_secrets,
 )
 from core import context_resilience as ctxres  # noqa: E402
+from core import passthrough_facade as _transport_facade  # noqa: E402
 from core.resilience import (  # noqa: E402
     ResilienceError,
     ResilienceLease,
@@ -120,8 +129,14 @@ from core.lifecycle import (  # noqa: E402,F401 - сохраняем прежн�
     get_qos_manager,
     has_live_parent,
 )
-from core.prompt_prefix_stability import compute_tools_budget_overhead  # noqa: E402
-from core.log_redaction import mask_credential_context, mask_long_tokens, safe_log_tokens  # noqa: E402
+from core.prompt_prefix_stability import (  # noqa: E402
+    compute_tools_budget_overhead as compute_tools_budget_overhead,
+)
+from core.log_redaction import (  # noqa: E402
+    mask_credential_context,
+    mask_long_tokens,
+    safe_log_tokens,
+)
 from core.runtime_build_info import RuntimeBuildInfo  # noqa: E402
 from core.tool_emulation import (  # noqa: E402,F401  - общая эмуляция tools (MB-REQ-007), реэкспорт имён
     TOOL_CALL_CLOSE,
@@ -160,9 +175,9 @@ from core.turn_session_manager import (  # noqa: E402
     validate_turn_id,
 )
 from core.chat_key import (  # noqa: E402
-    SOURCES_CACHE_KEY_ONLY,
+    SOURCES_CACHE_KEY_ONLY as SOURCES_CACHE_KEY_ONLY,
     digest_of,
-    resolve_chat_key,
+    resolve_chat_key as resolve_chat_key,
 )
 from core.usage_wire import normalize_prompt_cache_details, positive_wire_usage  # noqa: E402
 from core.watchdog import (  # noqa: E402,F401
@@ -178,25 +193,37 @@ from core.cli_runtime_config import (  # noqa: E402 - импорт после н
     cli_label,
     cli_number,
 )
-from core.liveness_registry import get_registry, new_passthrough_turn_id  # noqa: E402
-from core.liveness_signals import FLAG_TELEMETRY, passthrough_window  # noqa: E402
+from core.liveness_registry import (  # noqa: E402
+    get_registry,
+    new_passthrough_turn_id as new_passthrough_turn_id,
+)
+from core.liveness_signals import (  # noqa: E402
+    FLAG_TELEMETRY,
+    passthrough_window as passthrough_window,
+)
 from core.runtime_env import DynamicFlagSource, flag_enabled  # noqa: E402
 from core.request_telemetry import RequestTelemetryStore  # noqa: E402
-from core.telemetry_hooks import TelemetryHooksMixin, known_model, resolve_backend_topology, telemetry_note, telemetry_tail  # noqa: E402
+from core.telemetry_hooks import (  # noqa: E402
+    TelemetryHooksMixin,
+    known_model,
+    resolve_backend_topology,
+    telemetry_note,
+    telemetry_tail,
+)
 from core.gateway_execution_policy import (  # noqa: E402
     AUTONOMY_LEVELS as AUTONOMY_LEVELS,
     AUTONOMY_OFF as AUTONOMY_OFF,
-    AutonomyViolation,
+    AutonomyViolation as AutonomyViolation,
     RpcError as RpcError,
     RpcPermissionDenied as RpcPermissionDenied,
     allow_high_autonomy,
     default_autonomy,
-    denied_subagent,
+    denied_subagent as denied_subagent,
     permission_event,
     permission_frame,
     require,
-    resolve_autonomy_decision,
-    validate_autonomy_request,
+    resolve_autonomy_decision as resolve_autonomy_decision,
+    validate_autonomy_request as validate_autonomy_request,
     validate_boolean_flags,
 )
 from core.catalog_flags import (  # noqa: E402
@@ -207,20 +234,40 @@ from core.catalog_flags import (  # noqa: E402
     sidecar_allowlist,
 )
 from core.passthrough_autonomy import (  # noqa: E402
-    passthrough_autonomy_validation_enabled,
-    prepare_passthrough_request,
-    resolve_target_model,
-    strip_passthrough_request as _strip_passthrough_env,
+    PassthroughOptions as PassthroughOptions,
+    passthrough_autonomy_validation_enabled as passthrough_autonomy_validation_enabled,
+    prepare_passthrough_request as prepare_passthrough_request,
+    resolve_target_model as resolve_target_model,
+    strip_passthrough_request as _strip_passthrough_env,  # noqa: F401 - поздний host-порт
 )
 from core import gated_registry as greg, quarantine_gate as qgate  # noqa: E402
-from core.droid_session_gate import ToolsGateError, admit_model, plan_tools_disable, verify_tools_disabled  # noqa: E402
+from core.droid_session_gate import (  # noqa: E402
+    ToolsGateError,
+    admit_model,
+    plan_tools_disable,
+    verify_tools_disabled,
+)
 from core.effort_policy import (  # noqa: E402
-    DEFAULT_LOG_EFFORT_MAX_CHARS, EFFORT_ORDER, FLAG_EFFORT_CATALOG as FLAG_EFFORT_CATALOG, ModelEffortSpec,
-    catalog_effort_specs, clamp_effort_downward, describe_clamp, resolve_alias_effort,
+    DEFAULT_LOG_EFFORT_MAX_CHARS,
+    EFFORT_ORDER,
+    FLAG_EFFORT_CATALOG as FLAG_EFFORT_CATALOG,
+    ModelEffortSpec,
+    catalog_effort_specs,
+    clamp_effort_downward as clamp_effort_downward,
+    describe_clamp as describe_clamp,
+    resolve_alias_effort,
     resolve_model_effort_fields,
 )
+from core.effortless_policy import (  # noqa: E402
+    EffortValidationError as EffortValidationError,
+    card_effort_fields,
+    effortless_specs,
+)
+
 CLI_CFG = CliRuntimeConfig.from_env()
-REQUEST_TELEMETRY = RequestTelemetryStore()  # DuckDB/sqlite3, неблокирующая запись, BRIDGE_TELEMETRY_* (core/defaults.py)
+REQUEST_TELEMETRY = (
+    RequestTelemetryStore()
+)  # DuckDB/sqlite3, неблокирующая запись, BRIDGE_TELEMETRY_* (core/defaults.py)
 
 
 def build_cli_model_selection(ctx: dict) -> str:
@@ -720,15 +767,14 @@ def _effort_specs() -> dict[str, ModelEffortSpec]:
 
 def _advertise_efforts(card: dict[str, Any], mid: str, specs: dict[str, ModelEffortSpec]) -> None:
     if fields := resolve_model_effort_fields(mid, specs):
-        card["supported_reasoning_efforts"] = list(fields.supported_efforts)
-        card["default_reasoning_effort"] = fields.default_effort
+        card.update(card_effort_fields(fields))
 
 
 def _build_models_list(
     owner_tuple: tuple[str, ...] | None = None,
 ) -> list[dict[str, Any]]:
     published = _get_published_models()
-    specs = _effort_specs() if flag_enabled(FLAG_EFFORT_CATALOG) else {}
+    specs = _effort_specs() if flag_enabled(FLAG_EFFORT_CATALOG) else effortless_specs(_effort_specs())
     order = []
     if MODEL_ID in published:
         order.append(MODEL_ID)
@@ -1030,7 +1076,9 @@ def _env_int_nonneg(name: str, default: int) -> int:
         return default
 
 
-_LOG_EFFORT_MAX = _env_limit("BRIDGE_LOG_EFFORT_MAX_CHARS", DEFAULT_LOG_EFFORT_MAX_CHARS)
+_LOG_EFFORT_MAX = _env_limit(
+    "BRIDGE_LOG_EFFORT_MAX_CHARS", DEFAULT_LOG_EFFORT_MAX_CHARS
+)
 FORWARD_ENV_MAX_KEYS = _env_limit("BRIDGE_FORWARD_ENV_MAX_KEYS", 64)
 FORWARD_ENV_MAX_VALUE = _env_limit("BRIDGE_FORWARD_ENV_MAX_VALUE", 32768)
 _FORWARD_KEY = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,127}")
@@ -5470,142 +5518,10 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
         )
         return True
 
-    def _handle_quarantine_post(self):
-        import math
+    def _handle_quarantine_post(self) -> None:
+        from core.quarantine_http import handle_quarantine_post
 
-        # Ограничиваем административный JSON-запрос до чтения тела.
-        max_body_bytes = 64 * 1024
-
-        if self.headers.get("Transfer-Encoding") is not None:
-            self.close_connection = True
-            self._reject(400, "invalid_request", "Transfer-Encoding is not supported")
-            return
-
-        lengths = self.headers.get_all("Content-Length", [])
-        if len(lengths) != 1:
-            self.close_connection = True
-            self._reject(400, "invalid_request", "A single Content-Length is required")
-            return
-
-        raw_length = lengths[0].strip()
-        if not raw_length.isascii() or not raw_length.isdecimal():
-            self.close_connection = True
-            self._reject(400, "invalid_request", "Invalid Content-Length")
-            return
-
-        try:
-            length = int(raw_length)
-        except ValueError:
-            self.close_connection = True
-            self._reject(400, "invalid_request", "Invalid Content-Length")
-            return
-
-        if length > max_body_bytes:
-            self.close_connection = True
-            self._reject(413, "invalid_request", "Request body is too large")
-            return
-
-        raw_body = self.rfile.read(length)
-        if len(raw_body) != length:
-            self.close_connection = True
-            self._reject(400, "invalid_request", "Incomplete request body")
-            return
-
-        try:
-            body = json.loads(raw_body)
-        except (ValueError, UnicodeError, RecursionError):
-            self._reject(400, "invalid_request", "Invalid JSON body")
-            return
-
-        if not isinstance(body, dict):
-            self._reject(400, "invalid_request", "JSON body must be an object")
-            return
-
-        action = body.get("action")
-
-        if action == "set_enabled":
-            enabled = body.get("enabled", True)
-            if not isinstance(enabled, bool):
-                self._reject(400, "invalid_request", "enabled must be a boolean")
-                return
-
-            res = _PENALTY_TRACKER.set_enabled(enabled)
-            self._send(
-                200,
-                {
-                    "ok": True,
-                    "action": "set_enabled",
-                    "enabled": res,
-                    "max_start_fails": _PENALTY_TRACKER.max_start_fails,
-                },
-            )
-            return
-
-        if action in ("unban", "ban"):
-            model = body.get("model")
-            if (
-                not isinstance(model, str)
-                or not model.strip()
-                or model.strip().lower() == "_meta"
-            ):
-                self._reject(
-                    400,
-                    "invalid_request",
-                    "model must be a nonempty string other than '_meta'",
-                )
-                return
-
-            if action == "unban":
-                _PENALTY_TRACKER.unpenalize_model(model)
-                self._send(200, {"ok": True, "action": "unban", "model": model})
-                return
-
-            raw_duration = body.get("duration_s", 300.0)
-            try:
-                if isinstance(raw_duration, bool):
-                    raise ValueError("boolean duration")
-                duration_s = float(raw_duration)
-                if not math.isfinite(duration_s) or duration_s < 0:
-                    raise ValueError("invalid duration")
-            except (TypeError, ValueError, OverflowError):
-                self._reject(
-                    400,
-                    "invalid_request",
-                    "duration_s must be finite and nonnegative",
-                )
-                return
-
-            try:
-                st = _PENALTY_TRACKER.manually_penalize(model, duration_s)
-            except ValueError as exc:
-                self._reject(400, "invalid_request", str(exc))
-                return
-
-            self._send(
-                200,
-                {
-                    "ok": True,
-                    "action": "ban",
-                    "model": model,
-                    "status": st,
-                },
-            )
-            return
-
-        if action == "clear_all":
-            _PENALTY_TRACKER.reset_all()
-            self._send(200, {"ok": True, "action": "clear_all"})
-            return
-
-        self._send(
-            400,
-            {
-                "error": {
-                    "message": f"unknown action: {action}",
-                    "type": "invalid_request",
-                }
-            },
-        )
+        return handle_quarantine_post(self, _auth_ok, _PENALTY_TRACKER, BACKENDS)
 
     def _handle_models_refresh(self) -> None:
         """POST /v1/models/refresh: Auth-First, rate-limit, single-flight, stale-while-revalidate."""
@@ -6646,7 +6562,7 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
                 "type": "proxy_error",
                 "code": 502,
             }
-        if out.get("rc") != 0 or not (out.get("text") or out.get("tool_calls")):
+        if out.get("rc") != 0:
             return {
                 "message": f"{label} exec exited rc={out.get('rc')}",
                 "detail": str(out.get("err"))[:500],
@@ -6787,7 +6703,9 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
 
     # ---- HTTP --------------------------------------------------------------------
     def do_GET(self) -> None:  # noqa: N802
-        self._trace = self._req_started_mono = None  # GET-ответы (_send) в телеметрию запросов не попадают
+        self._trace = self._req_started_mono = (
+            None  # GET-ответы (_send) в телеметрию запросов не попадают
+        )
         path = self.path.split("?", 1)[0]
         if path in ("/health", "/v1/health"):
             # Контракт из семи ключей прежний (расширять запрещено); ok = AND по обязательным
@@ -6993,728 +6911,7 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
         self._send(200, snap)
 
     def do_POST(self) -> None:  # noqa: N802
-        self._headers_already_sent = False
-        self._trace = None
-        self._response_status = 0
-        self._telemetry_begin()
-        path = self.path.split("?", 1)[0]
-        m_cancel = (
-            re.fullmatch(r"/v1/turns/([^/]+)/cancel", path)
-            if _is_detached_enabled()
-            else None
-        )
-        hub_auth_ok = _auth_ok(self)
-        deferred_passthrough_auth = False
-        if not hub_auth_ok:
-            if (
-                self.client_address[0] in _LOOPBACK_PEERS
-                and urlparse(self.path).path in _CHAT_PATHS
-                and PASSTHROUGH_AUTH_FLAG_SOURCE.enabled()
-                and any(
-                    isinstance(adapter, PassthroughAdapter)
-                    and adapter.validate_client_token(_extract_auth_token(self))
-                    for adapter in BACKENDS.adapters()
-                )
-            ):
-                deferred_passthrough_auth = True
-            else:
-                self.close_connection = True
-                self._send(
-                    401,
-                    {
-                        "error": {
-                            "message": "unauthorized",
-                            "type": "auth_error",
-                            "code": 401,
-                        }
-                    },
-                )
-                return
-        if not m_cancel and (
-            _shutting_down or (_is_drain_enabled() and LIFECYCLE.is_draining())
-        ):
-            is_sub = self._is_subagent_request()
-            hold_ok = False
-            if not _shutting_down:
-                hold_ok = LIFECYCLE.wait_for_drain_hold(is_subagent=is_sub)
-            if _shutting_down or not hold_ok or LIFECYCLE.is_draining():
-                code, drain_headers, drain_body = LIFECYCLE.draining_response(
-                    is_subagent=is_sub
-                )
-                err = drain_body.get("error", {})
-                self._reject(
-                    code,
-                    err.get("type", "overloaded"),
-                    err.get("message", "bridge is shutting down"),
-                    extra_headers=drain_headers,
-                )
-                return
-        if urlparse(self.path).path in (
-            "/v1/models/refresh",
-            "/models/refresh",
-        ) or re.match(
-            r"^/v1/providers/[^/]+/v1/models/refresh$", urlparse(self.path).path
-        ):
-            self._handle_models_refresh()
-            return
-        if path == "/v1/quarantine":
-            if not _auth_ok(self):
-                self._send(
-                    401,
-                    {
-                        "error": {
-                            "message": "unauthorized",
-                            "type": "auth_error",
-                            "code": 401,
-                        }
-                    },
-                )
-                return
-            self._handle_quarantine_post()
-            return
-        self._trace = None
-        self._response_status = 0
-        _enforce_forward_kill_switch()
-        self._active_managed_turn = None
-        self._context_pruned = None
-        managed_turn: ManagedTurn | None = None
-        attached_existing = False
-
-        # (1) framing: Transfer-Encoding не поддерживаем, Content-Length строго числовой.
-        if self.headers.get_all("Transfer-Encoding") is not None:
-            self._reject(400, "invalid_request", "Transfer-Encoding is not supported")
-            return
-        content_lengths = self.headers.get_all("Content-Length")
-        length = 0
-        if content_lengths is not None:
-            values = [str(v).strip() for v in content_lengths]
-            if len(set(values)) != 1 or not re.fullmatch(r"[0-9]+", values[0]):
-                self._reject(400, "invalid_request", "invalid Content-Length")
-                return
-            length = int(values[0])
-        # (2) длина тела: 413 до чтения.
-        if length > int((FLEET.get("image_limits") or {}).get("max_body_bytes") or 0):
-            self._reject(
-                413, "payload_too_large", "request body exceeds the bridge limit"
-            )
-            return
-        # (3) admission: резерв байт по заявленному Content-Length до чтения тела.
-        reserved = 0
-        budget = _budget
-        if budget is not None and length:
-            if not budget.reserve(length):
-                self._reject(
-                    503, "overloaded", "bridge overloaded: body budget exhausted"
-                )
-                return
-            reserved = length
-        try:
-            raw = self.rfile.read(length) if length else b""
-            # (4) короткое тело.
-            if len(raw) < length:
-                self._reject(400, "invalid_request", "request body truncated")
-                return
-            if m_cancel is not None:
-                turn_id = m_cancel.group(1)
-                if not validate_turn_id(turn_id):
-                    self._reject(400, "invalid_request", "invalid turn_id")
-                    return
-                owner_hash = _owner_token_hash(self)
-                try:
-                    TURN_MANAGER.cancel_turn(turn_id, owner_token_hash=owner_hash)
-                    snap = TURN_MANAGER.get_turn_snapshot(
-                        turn_id, owner_token_hash=owner_hash
-                    )
-                except KeyError:
-                    self.close_connection = True
-                    self._send(
-                        404,
-                        {
-                            "error": {
-                                "message": f"turn not found: {turn_id}",
-                                "type": "not_found",
-                                "code": 404,
-                            }
-                        },
-                    )
-                    return
-                except PermissionError:
-                    self.close_connection = True
-                    self._send(
-                        403,
-                        {
-                            "error": {
-                                "message": "turn belongs to another token",
-                                "type": "forbidden",
-                                "code": 403,
-                            }
-                        },
-                    )
-                    return
-                self._send(200, snap)
-                return
-            # (5) JSON и (6) JSON-объект.
-            try:
-                req = json.loads(raw.decode("utf-8"))
-            except (ValueError, UnicodeDecodeError):
-                self._reject(400, "invalid_request", "invalid json")
-                return
-            if not isinstance(req, dict):
-                self._reject(400, "invalid_request", "request must be a JSON object")
-                return
-            self._parsed_req = req
-            self._telemetry_meta_request(req)
-            if REQUEST_ATTRIBUTION_ENABLED:
-                self._trace = _resolve_trace(dict(self.headers.items()), req)
-            else:
-                self._trace = None
-            # (7) путь.
-            m_provider_chat = _PROVIDER_CHAT_RE.match(path)
-            provider_id = m_provider_chat.group(1) if m_provider_chat else None
-            if m_provider_chat is not None:
-                if not _auth_ok(self):
-                    self.close_connection = True
-                    self._send(
-                        401,
-                        {
-                            "error": {
-                                "message": "unauthorized",
-                                "type": "auth_error",
-                                "code": 401,
-                            }
-                        },
-                    )
-                    return
-                if provider_id not in PROVIDER_SCOPES:
-                    self._reply_error(404, "Unknown provider", "invalid_request_error")
-                    return
-                path = "/v1/chat/completions"
-                self.path = "/v1/chat/completions"
-
-            if path not in ("/v1/chat/completions", "/chat/completions"):
-                self.close_connection = True
-                self._send(
-                    404,
-                    {
-                        "error": {
-                            "message": f"not found: {path}",
-                            "type": "not_found",
-                            "code": 404,
-                        }
-                    },
-                )
-                return
-            if __import__("core.fallback_http_hook", fromlist=["dispatch"]).dispatch(self, req, sys.modules[__name__], lambda a, r, s: a.handle(path=self.path, raw_body=json.dumps(r).encode("utf-8"), request=r, headers=dict(self.headers.items()), sink=s), provider_id):
-                return
-            raw_model = req.get("model")
-            model_len = len(raw_model) if isinstance(raw_model, str) else 0
-            if raw_model is None:
-                model_id = MODEL_ID
-            elif isinstance(raw_model, str):
-                candidate = raw_model.strip()
-                model_id = candidate if candidate else MODEL_ID
-            else:
-                self._reject(
-                    400,
-                    "model_not_allowed",
-                    "model must be a string from the catalogue",
-                    "unknown",
-                    model_len,
-                )
-                return
-
-            idempotency_key = (self.headers.get("X-Idempotency-Key") or "").strip()
-            if idempotency_key and req.get("step_job_id") != idempotency_key:
-                req["step_job_id"] = idempotency_key
-                raw = json.dumps(req, ensure_ascii=False).encode("utf-8")
-            if self.headers.get(
-                "X-Bypass-Model-Filter"
-            ) != "1" and _MODEL_NOTES_FILTER.is_blocked(model_id):
-                self._send(
-                    503,
-                    {
-                        "error": {
-                            "message": "Model temporarily blocked by operational limits",
-                            "type": "model_limit_blocked",
-                            "code": 503,
-                        }
-                    },
-                )
-                return
-
-            fleet_models = FLEET.get("models", {}) if isinstance(FLEET, dict) else {}
-            alias = _resolve_model_alias(model_id, fleet_models)
-            alias_effort = None
-            if alias is not None:
-                resolved_id = alias[0] if isinstance(alias, (tuple, list)) else alias
-                alias_effort = (
-                    alias[1]
-                    if isinstance(alias, (tuple, list)) and len(alias) > 1
-                    else None
-                )
-            else:
-                resolved_id = model_id
-
-            # Изоляция внутренних моделей (Auth-First / Secret Isolation)
-            internal_key = getattr(
-                sys.modules[__name__], "_INTERNAL_SERVICE_KEY", None
-            ) or os.environ.get("INTERNAL_SERVICE_KEY", "")
-            if bool(internal_key) and (
-                raw_model in INTERNAL_MODEL_IDS
-                or model_id in INTERNAL_MODEL_IDS
-                or resolved_id in INTERNAL_MODEL_IDS
-            ):
-                supplied = self.headers.get("X-Internal-Service-Key", "")
-                if not hmac.compare_digest(
-                    supplied.encode("utf-8"), internal_key.encode("utf-8")
-                ):
-                    self._reject(
-                        403,
-                        "internal_model_forbidden",
-                        "Model reserved for internal review",
-                        "unknown",
-                        model_len,
-                    )
-                    return
-
-            # Проверка штрафа модели (Fail-Fast 503) по каноническому идентификатору
-            canonical_pen_id = (resolved_id or model_id).strip().lower()
-            stat = _PENALTY_TRACKER.get_model_status(canonical_pen_id)
-            if stat["is_penalized"]:
-                retry_after_s = max(1, math.ceil(stat["remaining_cooldown"]))
-                pen_until = int(stat["penalized_until"])
-                self._send(
-                    503,
-                    {
-                        "error": {
-                            "message": (
-                                f"Model '{model_id}' is temporarily penalized due to start failures. "
-                                f"Cooldown active for {retry_after_s}s."
-                            ),
-                            "type": "model_penalized",
-                            "code": 503,
-                            "penalized_until": pen_until,
-                        }
-                    },
-                    extra_headers={"Retry-After": str(retry_after_s)},
-                )
-                return
-
-            # Проверка скоупа провайдера для чата
-            if provider_id is not None:
-                owner = PROVIDER_SCOPES[provider_id]
-                owner_tuple = (owner,) if isinstance(owner, str) else owner
-                published = _get_published_models()
-                if resolved_id not in published:
-                    self._reject(
-                        404,
-                        "model_not_found",
-                        "model is not in the catalogue",
-                        "unknown",
-                        model_len,
-                    )
-                    return
-                a, m = published[resolved_id]
-                owned_by = (
-                    getattr(a, "owned_by", "")
-                    if a is not None
-                    else (
-                        getattr(m, "owned_by", "")
-                        or (m.get("owned_by", "") if isinstance(m, dict) else "")
-                    )
-                )
-                if owned_by not in owner_tuple:
-                    self._reply_error(
-                        400,
-                        f"Model '{raw_model}' is not available for provider '{provider_id}'",
-                        code="model_not_in_provider_scope",
-                    )
-                    return
-
-            if (
-                resolved_id != model_id
-                and self.headers.get("X-Bypass-Model-Filter") != "1"
-                and _MODEL_NOTES_FILTER.is_blocked(resolved_id)
-            ):
-                self._send(
-                    503,
-                    {
-                        "error": {
-                            "message": "Model temporarily blocked by operational limits",
-                            "type": "model_limit_blocked",
-                            "code": 503,
-                        }
-                    },
-                )
-                return
-
-            model_id = resolved_id
-            self._telemetry_meta(model=model_id)
-            if model_id not in fleet_models:
-                self._reject(404, "model_not_found", "model is not in the catalogue", "unknown", model_len)
-                return
-            model = fleet_models[model_id]
-            is_droid = str(model.get("backend") or "").strip().lower() == "droid"
-            # denied: объединение raw-заголовка и trace (заголовок/extra_body/body), чтобы
-            # роль судьи нельзя было провести альтернативным источником идентификатора.
-            raw_subagent_id = str(self.headers.get("X-Subagent-Id") or "")
-            # Прочие backend не платят за разбор trace; при выключенной атрибуции
-            # self._trace пуст, поэтому для droid он строится здесь же, иначе запрет
-            # судьям стал бы fail-open и обходился через extra_body/body.
-            trace_subagent_id = None
-            if is_droid:
-                trace = getattr(self, "_trace", None) or _resolve_trace(
-                    dict(self.headers.items()), req
-                )
-                trace_subagent_id = trace.subagent_id
-            denied_role = is_droid and denied_subagent(
-                "DROID", raw_subagent_id, trace_subagent_id
-            )
-            if denied_role:
-                return self._reject(
-                    403,
-                    "droid_forbidden_for_role",
-                    "droid route is forbidden for this subagent role",
-                    model_id,
-                    model_len,
-                )
-            denial = _quarantine_denial(model_id, self.headers.get("X-Subagent-Id"))
-            if denial is not None:
-                self._log_reject(denial.reason, model_id, model_len)
-                self.close_connection = True
-                self._send(denial.http, denial.body())
-                return
-            if deferred_passthrough_auth:
-                selected = BACKENDS.get(model["backend"])
-                if not isinstance(
-                    selected, PassthroughAdapter
-                ) or not selected.validate_client_token(_extract_auth_token(self)):
-                    self.close_connection = True
-                    self._send(
-                        401,
-                        {
-                            "error": {
-                                "message": "unauthorized",
-                                "type": "auth_error",
-                                "code": 401,
-                            }
-                        },
-                    )
-                    return
-            # (8a) passthrough (AD-003/AD-007): raw-шов ДО effort-клампа, транскрипции и контекста —
-            # model/reasoning_effort/tools/Authorization уходят upstream дословно.
-            passthrough = BACKENDS.get(model["backend"])
-            if passthrough_autonomy_validation_enabled(
-                isinstance(passthrough, PassthroughAdapter)
-            ):
-                try:
-                    _ = validate_autonomy_request(req.get("autonomy"))
-                except AutonomyViolation as exc:
-                    self._reject(400, exc.reason, str(exc), model_id, model_len)
-                    return
-            if isinstance(passthrough, PassthroughAdapter):
-                if raw_model != model_id and alias is None:
-                    self._reject(
-                        400,
-                        "model_not_allowed",
-                        "passthrough requires an exact model id",
-                    )
-                    return
-                effort_on = flag_enabled(FLAG_EFFORT_CATALOG)
-                req, pt_effort = prepare_passthrough_request(
-                    req, model, model_id, alias, alias_effort, effort_on
-                )
-                target_model = resolve_target_model(model, model_id)
-                if pt_effort.apply or target_model != model_id or alias:
-                    if pt_effort.clamped_from is not None:
-                        _log(describe_clamp("passthrough reasoning_effort", pt_effort.clamped_from, pt_effort.value, model_id, _LOG_EFFORT_MAX))
-                    raw = json.dumps(req, ensure_ascii=False).encode("utf-8")
-                _log(
-                    f"chat route=passthrough model={model_id} alias={model_id + '-' + alias[1] if alias else '-'} {self._trace_log_fields()}"
-                )
-                self._serve_resilient(
-                    model["backend"],
-                    lambda _h=hub_auth_ok: self._serve_passthrough(
-                        passthrough, raw, req, model_id, _hub_auth_ok=_h
-                    ),
-                )
-                return
-            # (9) effort: строковый вне каталога клампится вниз к allowed модели.
-            raw_effort = req.get("reasoning_effort")
-            effort_from_alias = raw_effort is None and alias_effort is not None
-            if effort_from_alias:
-                raw_effort = alias_effort
-            if raw_effort is None:
-                effort = model["default_effort"]
-                effort_source = "default"
-            elif isinstance(raw_effort, str):
-                candidate = raw_effort.strip()
-                if not candidate:
-                    effort = model["default_effort"]
-                    effort_source = "default"
-                else:
-                    effort, clamped = clamp_effort_downward(
-                        candidate, model["efforts"], model["default_effort"]
-                    )
-                    effort_source = "alias" if effort_from_alias else "request"
-                    if clamped:
-                        _log(describe_clamp("reasoning_effort", candidate, effort, model_id, _LOG_EFFORT_MAX))
-            else:
-                self._reject(
-                    400,
-                    "unsupported_reasoning_effort",
-                    "reasoning_effort must be a string",
-                    model_id,
-                    model_len,
-                )
-                return
-            # (9a) autonomy: low|medium|high|off -> `autonomyLevel` RPC
-            # (off — read-only droid); дефолт конфигурируемый, fail-closed off.
-            autonomy, autonomy_source = req.get("autonomy"), "request"
-            if is_droid:
-                try:
-                    decision = resolve_autonomy_decision(
-                        req.get("autonomy"),
-                        "DROID",
-                        subagent_id=raw_subagent_id or None,
-                        require_subagent=True,
-                    )
-                    autonomy, autonomy_source = decision.value, decision.source
-                except AutonomyViolation as exc:
-                    self._reject(400, exc.reason, str(exc), model_id, model_len)
-                    return
-            else:
-                # Не-Droid маршруты сохраняют прежнюю базовую проверку формата: тип и
-                # значение low|medium|high|off проверяются без Droid-ограничений роли.
-                try:
-                    _ = validate_autonomy_request(req.get("autonomy"))
-                except AutonomyViolation as exc:
-                    self._reject(400, exc.reason, str(exc), model_id, model_len)
-                    return
-            # (10) reasoning-объект не поддерживаем.
-            if "reasoning" in req and req.get("reasoning") is not None:
-                self._reject(
-                    400,
-                    "unsupported_parameter",
-                    "reasoning parameter is not supported",
-                    model_id,
-                    model_len,
-                )
-                return
-            # (10a) отказоустойчивость контекста: история вмещается в окно модели до всего прочего.
-            gated = self._context_gate(req, model_id, model, model_len)
-            if gated is None:
-                return
-            req, self._context_pruned = gated
-            # (11) изображения (C-08…C-11).
-            try:
-                images = _collect_images(req, model, effort)
-            except ImageReject as exc:
-                self._reject(
-                    400,
-                    exc.reason,
-                    f"image rejected: {exc.reason}",
-                    model_id,
-                    model_len,
-                )
-                return
-            # (12) бэкенд модели: допуск/лончер проверяются до SSE и до любого запуска.
-            adapter = BACKENDS.get(model["backend"])
-            ok, why = (
-                (False, "backend_disabled") if adapter is None else adapter.preflight()
-            )
-            if not ok:
-                self._reject(
-                    503,
-                    "launcher_unavailable",
-                    "canonical launcher is missing or not executable"
-                    if why == "launcher_unavailable"
-                    else f"backend {model['backend']} is unavailable: {why}",
-                    model_id,
-                    model_len,
-                )
-                return
-            raw_messages = req.get("messages")
-            messages = raw_messages if isinstance(raw_messages, list) else []
-            raw_tools = req.get("tools")
-            tools = (
-                [t for t in raw_tools if isinstance(t, dict)]
-                if isinstance(raw_tools, list)
-                else []
-            )
-            tool_choice = req.get("tool_choice")
-            emulate_tools = bool(tools) and not _tool_choice_none(tool_choice)
-            extra = (
-                req.get("extra_body") if isinstance(req.get("extra_body"), dict) else {}
-            )
-            cwd = str(extra.get("cwd") or "")
-            fwd_env = self._forwarded_env(extra, model_id, model_len)
-            if fwd_env is False:
-                return
-            req_turn_id = (
-                self.headers.get("X-Turn-Id") or str(extra.get("turn_id") or "")
-            ).strip()
-            resume_turn_id = (
-                self.headers.get("X-Resume-Turn-Id")
-                or str(extra.get("resume_turn_id") or "")
-            ).strip()
-            for candidate_tid in (req_turn_id, resume_turn_id):
-                if candidate_tid and not validate_turn_id(candidate_tid):
-                    self._reject(
-                        400,
-                        "invalid_request",
-                        "invalid turn_id",
-                        model_id,
-                        model_len,
-                    )
-                    return
-            # Маршрут хода и b_guard ДО сериализации промпта (CARD-W2-04: однопроходный рендер).
-            # Осознанное исключение из единого набора источников: фасад DSH читает только
-            # prompt_cache_key и в «мягком» режиме (прежнее поведение: ключ с пробелами/
-            # контролами шёл в keyed по длине). Невалидный ключ — маршрут nokey, как во всех мостах.
-            chat = resolve_chat_key(
-                req,
-                namespace=RPC_NAMESPACE,
-                sources=SOURCES_CACHE_KEY_ONLY,
-                lenient=True,
-            )
-            raw_key = chat.value if chat.keyed else req.get("prompt_cache_key")
-            keyed = chat.keyed
-            route = chat.route
-            if images or _is_title_request(messages, tools, req):
-                route = "image" if images else "title"
-            t_over = compute_tools_budget_overhead(tools, tool_choice, bool(images))
-            self._instr_truncated = False
-            instr = self._prompt_guard(
-                messages, route, raw_key, cwd, model_id, model_len, adapter, t_over
-            )
-            if instr is None:
-                return
-            prompt = _messages_to_prompt(messages, tools, tool_choice, images)
-            transcript = _transcribe(messages, tools, tool_choice, images)
-            if not transcript["runnable"]:
-                if route not in ("image", "title"):
-                    route = "fallback"
-                transcript = {
-                    "system": None,
-                    "runnable": True,
-                    "items": [
-                        {"role": "user", "text": prompt, "digest": _digest(prompt)}
-                    ],
-                }
-            is_legacy_muse_sleep = (
-                model["backend"] == "muse"
-                and not req_turn_id
-                and not resume_turn_id
-                and not keyed
-                and (Path(getattr(adapter, "wrapper", "")).parent / "mode").is_file()
-                and (Path(getattr(adapter, "wrapper", "")).parent / "mode")
-                .read_text(encoding="utf-8", errors="ignore")
-                .strip()
-                == "sleep"
-            )
-            detach_on_disconnect = (
-                _is_detached_enabled()
-                and (
-                    _client_gone is _DEFAULT_CLIENT_GONE
-                    or bool(req_turn_id or resume_turn_id)
-                )
-                and not is_legacy_muse_sleep
-            )
-            managed_turn: ManagedTurn | None = None
-            attached_existing = False
-            if _is_detached_enabled():
-                try:
-                    managed_turn, attached_existing = (
-                        TURN_MANAGER.create_or_attach_turn(
-                            model=model_id,
-                            backend=model["backend"],
-                            cwd=cwd,
-                            messages=messages,
-                            session_id=raw_key if keyed else "",
-                            owner_token_hash=_owner_token_hash(self),
-                            requested_turn_id=req_turn_id or None,
-                            resume_turn_id=resume_turn_id or None,
-                            stream=bool(req.get("stream")),
-                            emulate_tools=emulate_tools,
-                            idle_timeout_s=self._effective_idle_timeout_s(),
-                            safety_cap_s=self._effective_safety_cap_s(),
-                        )
-                    )
-                except PermissionError:
-                    self._reject(
-                        403,
-                        "forbidden",
-                        "turn belongs to another token",
-                        model_id,
-                        model_len,
-                    )
-                    return
-                except ValueError as exc:
-                    self._reject(400, "invalid_request", str(exc), model_id, model_len)
-                    return
-            self._active_managed_turn = managed_turn
-            if managed_turn is not None:
-                managed_turn.is_subagent = self._is_subagent_request()
-                managed_turn.subagent_id = self._subagent_id()
-            ctx = {
-                "request_id": self._trace.request_id if self._trace else None,
-                "subagent_id": self._trace.subagent_id if self._trace else None,
-                "route": route,
-                "key_hash": _key_hash(raw_key)
-                if (route == "keyed" and isinstance(raw_key, str))
-                else "",
-                "rpc": transcript,
-                "instr": instr if route in ("keyed", "nokey") else (0, "-", 0),
-                "model": model_id,
-                "target_model": resolve_target_model(model, model_id),
-                "backend": model["backend"],
-                "model_len": model_len,
-                "effort": effort,
-                "effort_source": effort_source,
-                "autonomy": autonomy,
-                "autonomy_source": autonomy_source,
-                "prompt": prompt,
-                "images": images,
-                "cwd": cwd,
-                "fwd_env": fwd_env,
-                "emulate_tools": emulate_tools,
-                "tool_schemas": build_tool_schemas(raw_tools),
-                "tag": (
-                    f"client={self._client_tag()} "
-                    f"ua={(self.headers.get('User-Agent') or '-')[:60]}"
-                ),
-                "stream": bool(req.get("stream")),
-                "turn_id": managed_turn.turn_id if managed_turn is not None else "",
-                "managed_turn": managed_turn,
-                "detach_on_disconnect": detach_on_disconnect,
-                "attached_existing": attached_existing,
-            }
-            _log(
-                f"chat route=cli model={model_id} alias={model_id + '-' + alias[1] if alias else '-'} {self._trace_log_fields()}"
-            )
-            serve = (
-                (lambda: self._serve_sse(ctx))
-                if ctx["stream"]
-                else (lambda: self._serve_json(ctx))
-            )
-            if attached_existing:
-                # Присоединение к уже идущему ходу нового вызова бэкенда не создаёт: допуск не нужен.
-                serve()
-            else:
-                self._serve_resilient(model["backend"], serve)
-        finally:
-            if (
-                managed_turn is not None
-                and not attached_existing
-                and managed_turn.is_active
-            ):
-                TURN_MANAGER.finalize_abandoned_turn(managed_turn)
-            self._active_managed_turn = None
-            if reserved and budget is not None:
-                budget.release(reserved)
-            _DELIVERY_BUDGET.release(self._delivery_reserved)
-            self._delivery_reserved = 0
+        return _transport_facade.handle_post(self, sys.modules[__name__])
 
     def _forwarded_env(
         self, extra: Any, model_id: str, model_len: int
@@ -8213,99 +7410,10 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
         finally:
             qos.release_slot(is_interactive=is_interactive)
 
-    def _serve_passthrough(
-        self,
-        adapter: PassthroughAdapter,
-        raw: bytes,
-        req: dict,
-        model_id: str,
-        _hub_auth_ok: bool = False,
-    ) -> None:
+    def _serve_passthrough(self, adapter: PassthroughAdapter, raw: bytes, req: dict, model_id: str, _hub_auth_ok: bool = False) -> None:
         """Passthrough-маршрут: шов пишет ответ клиенту сам (значения заголовков в журнал не идут)."""
-        lease = self._current_lease()
-        started = time.monotonic()
-        self._telemetry_meta(route_mode="passthrough", backend_id=adapter.id, model=model_id)
-        _log(f"passthrough route model={model_id} backend={adapter.id} {self._trace_log_fields()}")
-        raw, req = _strip_passthrough_env(raw, req)
-        headers = {key: value for key, value in self.headers.items()}
-        trace_headers = _trace_headers(self._trace)
-        if REQUEST_ATTRIBUTION_ENABLED:
-            names = {REQUEST_ID_HEADER.lower(), SUBAGENT_ID_HEADER.lower()}
-            headers = {
-                key: value for key, value in headers.items() if key.lower() not in names
-            }
-            headers.update(trace_headers)
-        if _hub_auth_ok and not getattr(adapter, "_upstream_key", None):
-            headers = {
-                key: value
-                for key, value in headers.items()
-                if key.lower()
-                not in {"authorization", "x-api-key", "x-turn-owner-token"}
-            }
-        live_id = new_passthrough_turn_id() if flag_enabled(FLAG_TELEMETRY) else ""
-        window = passthrough_window(adapter.limits, self.path, req) if live_id else None
-        sink = _HandlerSink(
-            self,
-            extra_headers=[*trace_headers, ("X-Turn-Id", live_id)]
-            if live_id
-            else trace_headers,
-        )
-        try:
-            extra = {"window": window} if live_id else {}
-            if live_id:
-                get_registry().register(live_id, _owner_token_hash(self), window)
-            adapter.handle(
-                path=self.path,
-                raw_body=raw,
-                request=req,
-                headers=headers,
-                sink=sink,
-                **extra,
-            )
-            fleet_models = FLEET.get("models", {}) if isinstance(FLEET, dict) else {}
-            canonical_model_id = (
-                _resolve_model_alias(model_id, fleet_models)[0]
-                if _resolve_model_alias(model_id, fleet_models)
-                else model_id
-            )
-            # Исход фиксируется явно (ADR-0020 §3.2): обрыв клиента нейтрален, 5xx — сбой бэкенда.
-            # Таймаут шага (504) и оборванный стрим — тоже нейтральны: это не отказ апстрима.
-            error_type_fn = getattr(sink, "error_type", None)
-            error_type = error_type_fn() if callable(error_type_fn) else ""
-            discard_reason = _passthrough_discard_reason(
-                sink.status, error_type
-            )
-            if sink._client_gone_flag:
-                lease.record_discard("client_disconnected")
-            elif discard_reason:
-                lease.record_discard(discard_reason)
-            elif sink.status == 429 or sink.status in (402, 408):
-                # 429 / 402 / 408: модель исчерпала квоту/лимит/таймаут старта
-                lease.record_success()
-                _PENALTY_TRACKER.record_start_failure(
-                    canonical_model_id, f"http_{sink.status}"
-                )
-            elif 200 <= sink.status < 300 and error_type:
-                lease.record_failure()
-                _PENALTY_TRACKER.record_start_failure(
-                    canonical_model_id, error_type
-                )
-            elif 200 <= sink.status < 300:
-                # 2xx: реальный успешный ответ модели
-                lease.record_success()
-                _PENALTY_TRACKER.record_start_success(canonical_model_id)
-            elif 400 <= sink.status < 500:
-                # Клиентские ошибки (400, 401, 403, 404, 422 и т.д.): нейтральны к здоровью модели
-                lease.record_success()
-            else:
-                lease.record_failure()
-                _PENALTY_TRACKER.record_start_failure(
-                    canonical_model_id, f"http_{sink.status}"
-                )
-        finally:
-            get_registry().finish(live_id)
-            self._telemetry_passthrough_done(sink.status)
-            _log(f"done route=passthrough status={sink.status} {self._trace_log_fields()} elapsed_ms={int((time.monotonic() - started) * 1000)}")
+        call = _transport_facade.PassthroughCall(adapter, raw, req, model_id, _hub_auth_ok)
+        return _transport_facade.serve_passthrough(self, sys.modules[__name__], call)
 
     def _serve_json(self, ctx: dict) -> None:
         started = time.monotonic()
@@ -8609,14 +7717,20 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
                     sink_closed.set()
         except Exception as exc:  # noqa: BLE001 - RW-211: клиенту нужен конверт, а не сырой сбой
             if self._client_write_dead:
-                _log(f"client_write_dead: dispatch error suppressed err={_err_summary(repr(exc), 160)!r}")
+                _log(
+                    f"client_write_dead: dispatch error suppressed err={_err_summary(repr(exc), 160)!r}"
+                )
                 lease.record_discard("client_disconnected")
                 return
             if not live_sent[0]:
                 raise
             _log(f"live_dispatch_failed err={_err_summary(repr(exc), 160)!r}")
             lease.record_failure(exc)
-            emit(stream_error_frame(str(exc)[:500] or exc.__class__.__name__, finish_reason=None))
+            emit(
+                stream_error_frame(
+                    str(exc)[:500] or exc.__class__.__name__, finish_reason=None
+                )
+            )
             emit("data: [DONE]\n\n")
             return
         if self._client_write_dead:
@@ -8728,8 +7842,15 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
                 )
             except (TypeError, ValueError, AttributeError):
                 kept_usage = None
-            if err.get("type") == "live_prefix_invalidated" or out.get("backend_kind") == "droid":
-                emit(stream_error_frame(str(err["message"]), finish_reason=None, usage=kept_usage))
+            if (
+                err.get("type") == "live_prefix_invalidated"
+                or out.get("backend_kind") == "droid"
+            ):
+                emit(
+                    stream_error_frame(
+                        str(err["message"]), finish_reason=None, usage=kept_usage
+                    )
+                )
             else:
                 emit(
                     stream_error_frame(

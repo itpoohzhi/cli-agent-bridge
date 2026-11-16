@@ -11,6 +11,7 @@ from __future__ import annotations
 import os
 import re
 from collections.abc import Iterable, Mapping
+from types import MappingProxyType
 from typing import Final
 
 SAFE_TOKENS_ENV: Final[str] = "BRIDGE_LOG_SAFE_TOKENS"
@@ -67,10 +68,10 @@ _CREDENTIAL_PREFIX_RE: Final[re.Pattern[str]] = re.compile(
 )
 _BACKSLASHES_RE: Final[re.Pattern[str]] = re.compile(r"\\*")
 _ESCAPE_OR_DQ_RE: Final[re.Pattern[str]] = re.compile(r"[\\\"]")
-_QUOTED_STOP_RE: Final[dict[str, re.Pattern[str]]] = {
+_QUOTED_STOP_RE: Final[Mapping[str, re.Pattern[str]]] = MappingProxyType({
     '"': re.compile(r"[\\\"]"),
     "'": re.compile(r"[\\']"),
-}
+})
 # Префикс секрета, которым заканчивается содержимое пары кавычек (`" truncated api_key="`): закрывающая
 # кавычка пары на деле открывает значение этого префикса. `\Z` учитывает `endpos` поиска. Префикс вместе с
 # кавычкой другого типа (`password='`) тоже хвостовой: кавычка уже открыла значение следующего секрета.

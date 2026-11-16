@@ -15,6 +15,7 @@ from types import SimpleNamespace
 from typing import Any, Mapping, cast
 import unittest
 import unittest.mock
+from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -437,10 +438,7 @@ def test_injected_is_hub_key_false_and_missing_forward_credentials() -> None:
                 adapter,
                 {"authorization": "bearer client-key", "x-api-key": "client-x-api-key"},
             )
-            assert sorted(_credential_values(upstream.requests[-1]["headers"])) == [
-                "bearer client-key",
-                "client-x-api-key",
-            ]
+            assert _credential_values(upstream.requests[-1]["headers"]) == []
     finally:
         for adapter in adapters:
             adapter.shutdown()
@@ -476,6 +474,10 @@ def test_host_is_hub_key_callback_strips_mixed_credentials(monkeypatch) -> None:
 
 
 def test_constructor_is_hub_key_overrides_host_callback() -> None:
+    _assert_constructor_callback_is_not_upstream_auth()
+
+
+def _assert_constructor_callback_is_not_upstream_auth() -> None:
     upstream = FakeUpstream()
     upstream.respond = lambda handler, body: FakeUpstream.json(handler, {"ok": True})
     config = {
@@ -483,38 +485,30 @@ def test_constructor_is_hub_key_overrides_host_callback() -> None:
         "base_url": "http://127.0.0.1:%d/v1" % upstream.port,
         "max_concurrent": 4,
     }
-    adapters = [
-        PassthroughAdapter(
-            "codex",
-            config,
-            lambda: {},
-            SimpleNamespace(is_hub_key=lambda tok: True),
-            limits=PassthroughLimits(),
-            sanitize=True,
-            is_hub_key=lambda tok: False,
-        ),
-        PassthroughAdapter(
-            "codex",
-            config,
-            lambda: {},
-            SimpleNamespace(is_hub_key=lambda tok: False),
-            limits=PassthroughLimits(),
-            sanitize=True,
-            is_hub_key=lambda tok: tok == "hub-key",
-        ),
-    ]
     try:
-        _call_passthrough(adapters[0], {"Authorization": "Bearer hub-key"})
-        assert _credential_values(upstream.requests[-1]["headers"]) == [
-            "Bearer hub-key"
-        ]
-        _call_passthrough(
-            adapters[1], {"Authorization": "Bearer hub-key", "x-api-key": "own-key"}
-        )
-        assert _credential_values(upstream.requests[-1]["headers"]) == []
+        for result in (False, True):
+            callback = unittest.mock.Mock(return_value=result)
+            host_callback = unittest.mock.Mock(return_value=not result)
+            adapter = PassthroughAdapter(
+                "codex",
+                config,
+                dict,
+                SimpleNamespace(is_hub_key=host_callback),
+                limits=PassthroughLimits(),
+                sanitize=True,
+                is_hub_key=callback,
+            )
+            try:
+                assert adapter._is_hub_key is callback
+                _call_passthrough(
+                    adapter, {"Authorization": "Bearer hub-key", "x-api-key": "own-key"}
+                )
+                assert _credential_values(upstream.requests[-1]["headers"]) == []
+                callback.assert_not_called()
+                host_callback.assert_not_called()
+            finally:
+                adapter.shutdown()
     finally:
-        for adapter in adapters:
-            adapter.shutdown()
         upstream.close()
 
 
@@ -565,8 +559,8 @@ def test_connection_pool_reuses_socket_and_isolates_headers(monkeypatch) -> None
     adapter = make_adapter(upstream.port)
     try:
         for headers in (
-            {"Authorization": "Bearer first", "X-Subagent-Id": "first"},
-            {"Authorization": "Bearer second", "X-Subagent-Id": "second"},
+            {"Authorization": "Bearer first", "X-Custom": "first"},
+            {"Authorization": "Bearer second", "X-Custom": "second"},
             {},
         ):
             sink = CollectSink()
@@ -579,21 +573,22 @@ def test_connection_pool_reuses_socket_and_isolates_headers(monkeypatch) -> None
             )
             assert sink.status == 200
         assert sockets[0] is sockets[1] is sockets[2]
-        assert upstream.requests[0]["headers"]["Authorization"] == "Bearer first"
-        assert upstream.requests[1]["headers"]["Authorization"] == "Bearer second"
-        assert upstream.requests[1]["headers"]["X-Subagent-Id"] == "second"
-        assert "Authorization" not in upstream.requests[2]["headers"]
-        assert "X-Subagent-Id" not in upstream.requests[2]["headers"]
+        assert upstream.requests[0]["headers"]["X-Custom"] == "first"
+        assert upstream.requests[1]["headers"]["X-Custom"] == "second"
+        assert "X-Custom" not in upstream.requests[2]["headers"]
+        assert all(not _credential_values(r["headers"]) for r in upstream.requests)
     finally:
         adapter.shutdown()
         upstream.close()
 
 
 def test_parallel_requests_do_not_share_inflight_connection_or_headers(
-    monkeypatch,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from concurrent.futures import ThreadPoolExecutor
+    _assert_parallel_header_isolation(monkeypatch)
 
+
+def _assert_parallel_header_isolation(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         server, "TOKEN_CACHE", SimpleNamespace(is_valid=lambda tok: False)
     )
@@ -603,7 +598,7 @@ def test_parallel_requests_do_not_share_inflight_connection_or_headers(
     barrier = threading.Barrier(4)
     sockets = []
 
-    def respond(handler, body):
+    def respond(handler: Any, body: bytes) -> None:
         sockets.append(handler.connection)
         barrier.wait(timeout=5)
         FakeUpstream.json(
@@ -611,21 +606,16 @@ def test_parallel_requests_do_not_share_inflight_connection_or_headers(
             {
                 "auth": handler.headers.get("Authorization"),
                 "subagent": handler.headers.get("X-Subagent-Id"),
+                "custom": handler.headers.get("X-Custom"),
             },
         )
 
-    def call(index):
+    def call(index: int) -> None:
         key = str(index)
-        sink = CollectSink()
-        adapter.handle(
-            path="/v1/chat/completions",
-            raw_body=b"{}",
-            request={},
-            headers={"Authorization": key, "X-Subagent-Id": key},
-            sink=sink,
+        sink = _call_passthrough(
+            adapter, {"Authorization": key, "X-Subagent-Id": key, "X-Custom": key}
         )
-        assert sink.status == 200
-        assert json.loads(sink.body) == {"auth": key, "subagent": key}
+        assert json.loads(sink.body) == {"auth": None, "subagent": None, "custom": key}
 
     upstream.respond = respond
     try:
@@ -1006,23 +996,37 @@ def test_pool_rejects_readable_idle_socket(peek, monkeypatch) -> None:
     new.close()
 
 
-@pytest.mark.parametrize(
-    "method,error,expected_status,expected_get_count,expected_fresh",
-    [
-        ("request", BrokenPipeError, 502, 1, False),
-        ("request", ConnectionResetError, 502, 1, False),
-        ("request", http.client.CannotSendRequest, 200, 2, True),
-    ],
+_REQUEST_SEND_ERRORS = (
+    BrokenPipeError,
+    ConnectionResetError,
+    http.client.CannotSendRequest,
 )
+
+
+@pytest.mark.parametrize("error", _REQUEST_SEND_ERRORS)
 def test_reused_connection_race_retries_once_on_fresh_socket(
-    method, error, expected_status, expected_get_count, expected_fresh
+    error: type[Exception],
 ) -> None:
+    _assert_request_failure_never_replays(error)
+
+
+def _assert_request_failure_never_replays(error: type[Exception]) -> None:
     upstream = FakeUpstream(keep_alive=True)
     upstream.respond = lambda handler, body: FakeUpstream.json(handler, {"ok": True})
     adapter = make_adapter(upstream.port)
     try:
-
-        def call(status=200):
+        _call_passthrough(adapter, {})
+        old, reused = adapter._pool.get_connection("127.0.0.1", upstream.port, 2)
+        assert reused
+        adapter._pool.release_connection("127.0.0.1", upstream.port, old)
+        with (
+            unittest.mock.patch.object(
+                old, "request", side_effect=error("stale")
+            ) as failed,
+            unittest.mock.patch.object(
+                adapter._pool, "get_connection", wraps=adapter._pool.get_connection
+            ) as get,
+        ):
             sink = CollectSink()
             adapter.handle(
                 path="/v1/chat/completions",
@@ -1031,24 +1035,11 @@ def test_reused_connection_race_retries_once_on_fresh_socket(
                 headers={},
                 sink=sink,
             )
-            assert sink.status == status
-
-        call()
-        old, reused = adapter._pool.get_connection("127.0.0.1", upstream.port, 2)
-        assert reused
-        adapter._pool.release_connection("127.0.0.1", upstream.port, old)
-        with (
-            unittest.mock.patch.object(
-                old, method, side_effect=error("stale")
-            ) as failed,
-            unittest.mock.patch.object(
-                adapter._pool, "get_connection", wraps=adapter._pool.get_connection
-            ) as get,
-        ):
-            call(expected_status)
+            assert sink.status == 502
             failed.assert_called_once()
-            assert get.call_count == expected_get_count
-            assert get.call_args.kwargs["fresh"] is expected_fresh
+            assert get.call_count == 1
+            assert get.call_args.kwargs["fresh"] is False
+        assert len(upstream.requests) == 1
         assert old.sock is None
     finally:
         adapter.shutdown()
@@ -1288,6 +1279,22 @@ class SeamCase(unittest.TestCase):
 
 
 class TestSeamNonStream(SeamCase):
+    def setUp(self) -> None:
+        super().setUp()
+        environment = pytest.MonkeyPatch()
+        self.addCleanup(environment.undo)
+        environment.setenv("TEST_PASSTHROUGH_UPSTREAM_KEY", "upstream-key")
+
+    def _auth_adapter(self, config: dict[str, str]) -> PassthroughAdapter:
+        adapter = PassthroughAdapter(
+            "test",
+            {"base_url": f"http://127.0.0.1:{self.upstream.port}/v1", **config},
+            dict,
+            sanitize=True,
+        )
+        self.addCleanup(adapter.shutdown)
+        return adapter
+
     def completion(self, args):
         return {
             "id": "x",
@@ -1314,7 +1321,7 @@ class TestSeamNonStream(SeamCase):
             ],
         }
 
-    def test_request_forwarded_verbatim_and_response_sanitized(self):
+    def test_request_forwarded_verbatim_and_response_sanitized(self) -> None:
         self.upstream.respond = lambda h, b: FakeUpstream.json(
             h, self.completion({"prompt": "p", "provider": ""})
         )
@@ -1327,7 +1334,8 @@ class TestSeamNonStream(SeamCase):
         raw = json.dumps(request, indent=2).encode(
             "utf-8"
         )  # нестандартная сериализация: байты не пересобираются
-        sink = self.call(request, raw=raw)
+        adapter = self._auth_adapter({"api_key_env": "TEST_PASSTHROUGH_UPSTREAM_KEY"})
+        sink = self.call(request, raw=raw, adapter=adapter)
         sent = self.upstream.requests[0]
         self.assertEqual(sent["body"], raw)
         self.assertEqual(sent["path"], "/v1/chat/completions")
@@ -1359,85 +1367,76 @@ class TestSeamNonStream(SeamCase):
         self.assertEqual(headers["accept-encoding"], "identity")
 
     def test_upstream_auth_override(self) -> None:
+        self._check_auth_overrides()
+
+    def _check_auth_overrides(self) -> None:
+        env_config = {"api_key_env": "TEST_UPSTREAM_KEY"}
+        combined = {**env_config, "api_key": "config-key"}
+        for config, environ, expected in (
+            (env_config, {"TEST_UPSTREAM_KEY": "env-key"}, "env-key"),
+            ({"api_key": "config-key"}, {}, "config-key"),
+            (combined, {"TEST_UPSTREAM_KEY": "env-key"}, "env-key"),
+        ):
+            self._check_auth_matrix(config, environ, expected)
+        for value in (None, "", "bad key", "bad\nkey"):
+            environ = {} if value is None else {"TEST_UPSTREAM_KEY": value}
+            self._check_auth_matrix(combined, environ, None)
+        self._check_auth_matrix(
+            {"api_key_env": "INVALID-ENV", "api_key": "config-key"},
+            {"INVALID-ENV": "env-key"},
+            None,
+        )
+
+    def _check_auth_matrix(
+        self, config: dict[str, str], environ: dict[str, str], expected: str | None
+    ) -> None:
         self.upstream.respond = lambda handler, body: FakeUpstream.json(
             handler, {"ok": True}
         )
-        cases = (
-            (
-                {"api_key_env": "TEST_UPSTREAM_KEY"},
-                {"TEST_UPSTREAM_KEY": "env-key"},
-                "env-key",
-            ),
-            ({"api_key": "config-key"}, {}, "config-key"),
-            (
-                {"api_key_env": "TEST_UPSTREAM_KEY", "api_key": "config-key"},
-                {"TEST_UPSTREAM_KEY": "env-key"},
-                "env-key",
-            ),
-            (
-                {"api_key_env": "TEST_UPSTREAM_KEY", "api_key": "config-key"},
-                {},
-                "config-key",
-            ),
-        )
-        for config, environ, expected in cases:
+        with pytest.MonkeyPatch.context() as environment:
+            environment.delenv("TEST_UPSTREAM_KEY", raising=False)
+            for name, value in environ.items():
+                environment.setenv(name, value)
             for header in ("Authorization", "authorization", "AUTHORIZATION"):
                 for api_key_header in ("x-api-key", "X-Api-Key", "X-API-KEY"):
-                    with (
-                        self.subTest(
-                            config=config,
-                            header=header,
-                            api_key_header=api_key_header,
-                        ),
-                        unittest.mock.patch.dict(os.environ, environ, clear=True),
-                    ):
-                        adapter = PassthroughAdapter(
-                            "test",
-                            {
-                                "base_url": f"http://127.0.0.1:{self.upstream.port}/v1",
-                                **config,
-                            },
-                            dict,
-                        )
-                        headers = {
-                            header: "Bearer client-key",
-                            api_key_header: "client-x-api-key",
-                            "X-Custom": "keep",
-                        }
-                        sink = self.call(
-                            {"model": "m"}, adapter=adapter, headers=headers
-                        )
-                        sent = self.upstream.requests[-1]["headers"]
-                        self.assertEqual(sink.status, 200)
-                        self.assertEqual(
-                            [
-                                v
-                                for k, v in sent.items()
-                                if k.lower() == "authorization"
-                            ],
-                            [f"Bearer {expected}"],
-                        )
-                        self.assertEqual(
-                            [v for k, v in sent.items() if k.lower() == "x-api-key"],
-                            [],
-                        )
-                        self.assertEqual(sent["X-Custom"], "keep")
-                        self.assertEqual(headers[header], "Bearer client-key")
-                        self.assertEqual(headers[api_key_header], "client-x-api-key")
+                    headers = {
+                        header: "Bearer client-key",
+                        api_key_header: "client-x-api-key",
+                        "X-Custom": "keep",
+                    }
+                    with self.subTest(config=config, environ=environ, headers=headers):
+                        self._assert_upstream_auth(config, headers, expected)
+
+    def _assert_upstream_auth(
+        self, config: dict[str, str], headers: dict[str, str], expected: str | None
+    ) -> None:
+        original = dict(headers)
+        before = len(self.upstream.requests)
+        adapter = self._auth_adapter(config)
+        sink = self.call({"model": "m"}, adapter=adapter, headers=headers)
+        if expected is None:
+            self.assertEqual(sink.status, 503)
+            self.assertEqual(
+                json.loads(sink.body)["error"]["type"], "route_unavailable"
+            )
+            self.assertEqual(json.loads(sink.body)["error"]["code"], 503)
+            self.assertEqual(len(self.upstream.requests), before)
+        else:
+            self.assertEqual(sink.status, 200)
+            self.assertEqual(len(self.upstream.requests), before + 1)
+            sent = self.upstream.requests[-1]["headers"]
+            self.assertEqual(
+                _credential_values(sent), [f"Bearer {expected}"] if expected else []
+            )
+            self.assertEqual(sent["X-Custom"], "keep")
+        self.assertEqual(headers, original)
 
     def test_upstream_auth_override_without_client_authorization_and_with_streaming(
         self,
     ) -> None:
         events = content("hello") + finish(0, "stop") + DONE
         self.upstream.respond = lambda handler, body: FakeUpstream.sse(handler, events)
-        adapter = PassthroughAdapter(
-            "test",
-            {
-                "base_url": f"http://127.0.0.1:{self.upstream.port}/v1",
-                "api_key": "config-key",
-            },
-            dict,
-        )
+        adapter = self._auth_adapter({"api_key_env": "TEST_PASSTHROUGH_UPSTREAM_KEY"})
         sink = self.call(
             {"model": "m", "stream": True},
             adapter=adapter,
@@ -1445,53 +1444,23 @@ class TestSeamNonStream(SeamCase):
         )
         self.assertEqual((sink.status, sink.body), (200, events))
         self.assertEqual(
-            self.upstream.requests[-1]["headers"]["Authorization"], "Bearer config-key"
+            self.upstream.requests[-1]["headers"]["Authorization"],
+            "Bearer upstream-key",
         )
 
     def test_upstream_auth_unconfigured_preserves_own_client_authorization(
         self,
     ) -> None:
-        self.upstream.respond = lambda handler, body: FakeUpstream.json(
-            handler, {"ok": True}
-        )
-        cases = (
-            ({}, {}),
-            ({"api_key_env": "TEST_UPSTREAM_KEY"}, {}),
-            ({"api_key_env": "TEST_UPSTREAM_KEY"}, {"TEST_UPSTREAM_KEY": ""}),
-            ({"api_key": ""}, {}),
-        )
-        for config, environ in cases:
-            for api_key_header in ("x-api-key", "X-Api-Key", "X-API-KEY"):
-                with (
-                    self.subTest(config=config, api_key_header=api_key_header),
-                    unittest.mock.patch.dict(os.environ, environ, clear=True),
-                ):
-                    adapter = PassthroughAdapter(
-                        "test",
-                        {
-                            "base_url": f"http://127.0.0.1:{self.upstream.port}/v1",
-                            **config,
-                        },
-                        dict,
-                    )
-                    sink = self.call(
-                        {"model": "m"},
-                        adapter=adapter,
-                        headers={
-                            "authorization": "Bearer client-key",
-                            api_key_header: "client-x-api-key",
-                        },
-                    )
-                    self.assertEqual(sink.status, 200)
-                    sent = self.upstream.requests[-1]["headers"]
-                    self.assertEqual(
-                        sorted(
-                            v
-                            for k, v in sent.items()
-                            if k.lower() in ("authorization", "x-api-key")
-                        ),
-                        ["Bearer client-key", "client-x-api-key"],
-                    )
+        self._check_unconfigured_client_auth()
+
+    def _check_unconfigured_client_auth(self) -> None:
+        for config, environ, expected in (
+            ({}, {}, ""),
+            ({"api_key_env": "TEST_UPSTREAM_KEY"}, {}, None),
+            ({"api_key_env": "TEST_UPSTREAM_KEY"}, {"TEST_UPSTREAM_KEY": ""}, None),
+            ({"api_key": ""}, {}, ""),
+        ):
+            self._check_auth_matrix(config, environ, expected)
 
     def test_unconfigured_hub_credential_is_hidden_from_upstream(self) -> None:
         self.upstream.respond = lambda handler, body: FakeUpstream.json(
@@ -1526,16 +1495,17 @@ class TestSeamNonStream(SeamCase):
         with unittest.mock.patch.object(
             server, "TOKEN_CACHE", SimpleNamespace(is_valid=is_valid)
         ):
-            with self.assertRaisesRegex(RuntimeError, "token check boom"):
-                self.call(
-                    {"model": "m"},
-                    headers={
-                        "Authorization": "Bearer client-key",
-                        "x-api-key": "client-x-api-key",
-                    },
-                )
-        is_valid.assert_called_once_with("client-key")
-        self.assertEqual(self.upstream.requests, [])
+            sink = self.call(
+                {"model": "m"},
+                headers={
+                    "Authorization": "Bearer client-key",
+                    "x-api-key": "client-x-api-key",
+                },
+            )
+        is_valid.assert_not_called()
+        self.assertEqual(sink.status, 200)
+        self.assertEqual(len(self.upstream.requests), 1)
+        self.assertEqual(_credential_values(self.upstream.requests[0]["headers"]), [])
 
     def test_injected_is_hub_key_error_does_not_leak_credentials_upstream(self) -> None:
         self.upstream.respond = lambda handler, body: FakeUpstream.json(
@@ -1543,17 +1513,19 @@ class TestSeamNonStream(SeamCase):
         )
         is_hub_key = unittest.mock.Mock(side_effect=RuntimeError("token check boom"))
         adapter = make_adapter(self.upstream.port, sanitize=True, is_hub_key=is_hub_key)
-        with self.assertRaisesRegex(RuntimeError, "token check boom"):
-            self.call(
-                {"model": "m"},
-                adapter=adapter,
-                headers={
-                    "Authorization": "Bearer client-key",
-                    "x-api-key": "client-x-api-key",
-                },
-            )
-        is_hub_key.assert_called_once_with("client-key")
-        self.assertEqual(self.upstream.requests, [])
+        self.addCleanup(adapter.shutdown)
+        sink = self.call(
+            {"model": "m"},
+            adapter=adapter,
+            headers={
+                "Authorization": "Bearer client-key",
+                "x-api-key": "client-x-api-key",
+            },
+        )
+        is_hub_key.assert_not_called()
+        self.assertEqual(sink.status, 200)
+        self.assertEqual(len(self.upstream.requests), 1)
+        self.assertEqual(_credential_values(self.upstream.requests[0]["headers"]), [])
 
     def test_abort_before_getresponse_and_late_socket_cleanup(self) -> None:
         self.upstream.respond = lambda h, b: FakeUpstream.json(h, {"ok": True})

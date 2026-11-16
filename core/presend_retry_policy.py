@@ -1,15 +1,35 @@
-"""Политика повторов явных HTTP-ошибок до отправки ответа клиенту."""
+"""Совместимые policy-порты без локального повтора отправленного POST."""
 
 from __future__ import annotations
 
-import json
 import math
 import os
-import time
 from collections.abc import Callable, Mapping, Sequence
-from typing import Any
+from http.client import HTTPConnection, HTTPResponse
+from typing import Protocol
 
-from core.backend_adapter import PreSendTransientError
+from core.passthrough_adapter_runtime import PassthroughRouteRefusal
+from core.route_attempts import DEFAULT_ROUTE_FAILOVER_STATUSES
+
+RetryOpen = Callable[[], tuple[HTTPConnection, HTTPResponse]]
+PresendResult = tuple[HTTPConnection, HTTPResponse, bool]
+
+
+class PresendAdapter(Protocol):
+    """Порты адаптера, нужные для передачи отказа владельцу попытки."""
+
+    def _client_gone_exc(self) -> Exception: ...
+
+    def _read_presend_body(self, resp: HTTPResponse) -> bytes: ...
+
+    def _response_headers(self, resp: HTTPResponse) -> Sequence[tuple[str, str]]: ...
+
+
+class PresendSink(Protocol):
+    """Неблокирующий порт отмены ответа клиентом."""
+
+    def client_gone(self) -> bool: ...
+
 
 ENV_PRESEND_MAX_RETRIES = "BRIDGE_PASSTHROUGH_PRESEND_MAX_RETRIES"
 ENV_PRESEND_RETRY_DELAY_S = "BRIDGE_PASSTHROUGH_PRESEND_RETRY_DELAY_S"
@@ -20,17 +40,6 @@ DEFAULT_PRESEND_MAX_RETRIES = 2
 DEFAULT_PRESEND_RETRY_DELAY_S = 2.2
 DEFAULT_PRESEND_RETRY_MAX_DELAY_S = 8.0
 DEFAULT_PRESEND_MIN_REMAINING_S = 0.5
-_RETRYABLE_TYPES = frozenset({"proxy_connect_failed", "proxy_unavailable"})
-
-
-def _bounded_int(
-    environ: Mapping[str, str], name: str, default: int, low: int, high: int
-) -> int:
-    try:
-        value = int(str(environ.get(name, "")).strip())
-    except ValueError:
-        return default
-    return value if low <= value <= high else default
 
 
 def _positive_float(environ: Mapping[str, str], name: str, default: float) -> float:
@@ -41,31 +50,20 @@ def _positive_float(environ: Mapping[str, str], name: str, default: float) -> fl
     return value if math.isfinite(value) and value > 0 else default
 
 
+def _safe_refusal(status: int) -> bool:
+    """Распознаёт разрешённый HTTP-отказ, но не выдаёт право локального replay.
+
+    Отсутствие commit проверяет владелец попытки. Произвольный proxy payload
+    не доказывает, что POST не исполнялся, и не может разрешить повтор 502.
+    """
+    return status in DEFAULT_ROUTE_FAILOVER_STATUSES
+
+
 def is_retryable_presend_payload(
     status: int, headers: Sequence[tuple[str, str]], body: bytes
 ) -> bool:
-    """Распознаёт только явно повторяемые proxy-ошибки 502/503."""
-    _ = headers
-    if status not in (502, 503) or not body:
-        return False
-    try:
-        data = json.loads(body.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError):
-        return False
-    if not isinstance(data, dict):
-        return False
-    nested = data.get("error")
-    nested = nested if isinstance(nested, dict) else {}
-    retryable = data.get("retryable")
-    nested_retryable = nested.get("retryable")
-    if retryable is False or nested_retryable is False:
-        return False
-    return (
-        retryable is True
-        or nested_retryable is True
-        or data.get("type") in _RETRYABLE_TYPES
-        or nested.get("type") in _RETRYABLE_TYPES
-    )
+    """Совместимый классификатор: payload не доказывает отсутствие исполнения."""
+    return _safe_refusal(status)
 
 
 def compute_presend_retry_delay(
@@ -96,57 +94,31 @@ def compute_presend_retry_delay(
     return min(max_delay, delay * (2 ** max(0, attempt)))
 
 
-def _has_retry_budget(sink: Any, delay: float, environ: Mapping[str, str]) -> bool:
-    deadline = getattr(sink, "presend_deadline", None)
-    if not isinstance(deadline, (int, float)) or not math.isfinite(deadline):
-        return True
-    minimum = _positive_float(
-        environ, ENV_PRESEND_MIN_REMAINING_S, DEFAULT_PRESEND_MIN_REMAINING_S
-    )
-    return deadline - time.monotonic() >= delay + minimum
+def _resolve_response(
+    adapter: PresendAdapter,
+    conn: HTTPConnection,
+    resp: HTTPResponse,
+    sink: PresendSink,
+) -> PresendResult:
+    """Передаёт отказ общему runner без собственного replay.
 
-
-def resolve_presend_response(
-    adapter: Any,
-    conn: Any,
-    resp: Any,
-    sink: Any,
-    retry_open_fn: Callable[[], tuple[Any, Any]],
-) -> tuple[Any, Any, bool]:
-    """Повторяет явный proxy-отказ или отправляет уже прочитанный ответ."""
-    if resp.status not in (502, 503):
+    Отсутствие commit обеспечивает caller. Терминальные ответы
+    остаются непрочитанными, чтобы обычный response-путь передал их дословно.
+    """
+    if not _safe_refusal(resp.status):
         return conn, resp, False
+    if not getattr(sink, "accepts_presend_errors", False):
+        return conn, resp, False
+    if sink.client_gone():
+        raise adapter._client_gone_exc()
     body = adapter._read_presend_body(resp)
-    if getattr(sink, "accepts_presend_errors", False):
-        headers = adapter._response_headers(resp)
-        raise PreSendTransientError(
-            "transient upstream HTTP status",
-            status_code=resp.status,
-            response_headers=tuple(headers + [("Content-Length", str(len(body)))]),
-            response_body=body,
-        )
-    env = os.environ
-    max_retries = _bounded_int(
-        env, ENV_PRESEND_MAX_RETRIES, DEFAULT_PRESEND_MAX_RETRIES, 0, 10
+    headers = tuple(adapter._response_headers(resp)) + (
+        ("Content-Length", str(len(body))),
     )
-    for attempt in range(max_retries):
-        if not is_retryable_presend_payload(resp.status, resp.getheaders(), body):
-            break
-        delay = compute_presend_retry_delay(resp.getheaders(), attempt, env)
-        if sink.client_gone():
-            raise adapter._client_gone_exc()
-        if not _has_retry_budget(sink, delay, env):
-            break
-        try:
-            conn.close()
-        except Exception:
-            pass
-        time.sleep(delay)
-        conn, resp = retry_open_fn()
-        if resp.status not in (502, 503):
-            return conn, resp, False
-        body = adapter._read_presend_body(resp)
-    out_headers = adapter._response_headers(resp) + [("Content-Length", str(len(body)))]
-    sink.start(resp.status, out_headers)
-    sink.write(body)
-    return conn, resp, True
+    raise PassthroughRouteRefusal(resp.status, headers, body)
+
+
+# Callback сохранён только для совместимости прежних positional/keyword вызовов.
+def resolve_presend_response(adapter: PresendAdapter, conn: HTTPConnection, resp: HTTPResponse,
+                             sink: PresendSink, retry_open_fn: RetryOpen) -> PresendResult:
+    return _resolve_response(adapter, conn, resp, sink)

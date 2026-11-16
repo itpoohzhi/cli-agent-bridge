@@ -14,6 +14,14 @@
     "required": {"type": "boolean", "default": false},
     "owned_by": {"type": "string", "minLength": 1},
     "priority": {"type": "integer", "minimum": 0, "maximum": 1000, "default": 100},
+    "routing": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["weight"],
+      "properties": {
+        "weight": {"type": "integer", "minimum": 0, "maximum": 10000}
+      }
+    },
     "transport": {
       "type": "object",
       "additionalProperties": false,
