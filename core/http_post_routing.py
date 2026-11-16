@@ -131,11 +131,16 @@ def _provider_allowed(route: PostRoute) -> bool:
         return True
     host = route.host
     published = host._get_published_models()
-    if route.model_id not in published:
-        route.handler._reject(404, "model_not_found",
-                              "model is not in the catalogue", "unknown", route.model_len)
-        return False
-    adapter, model = published[route.model_id]
+    lookup_id = route.model_id
+    if lookup_id not in published:
+        alias = host._resolve_model_alias(lookup_id, published)
+        if alias is not None:
+            lookup_id = alias[0] if isinstance(alias, (tuple, list)) else alias
+        else:
+            route.handler._reject(404, "model_not_found",
+                                  "model is not in the catalogue", "unknown", route.model_len)
+            return False
+    adapter, model = published[lookup_id]
     owner = getattr(adapter, "owned_by", "") if adapter is not None else (
         getattr(model, "owned_by", "")
         or (model.get("owned_by", "") if isinstance(model, dict) else "")

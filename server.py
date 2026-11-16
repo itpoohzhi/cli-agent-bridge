@@ -35,7 +35,6 @@ BRIDGE_KEY и DROID_DSH_BRIDGE_KEY; ротация файла отзывает �
 без интерактивного логина) наследуется потомком как есть — его подкладывает
 start.sh из ~/.zshenv; `droid exec` читает его из окружения сам.
 """
-
 from __future__ import annotations
 
 import base64
@@ -90,7 +89,7 @@ from tools.receipt_schema import (  # noqa: E402,F401
     validate_model_catalog,
     validate_receipt_components,
 )
-
+from core.http_accept import AdmissionBudget, configure_accepted_socket  # noqa: E402
 from adapters import ADAPTER_KINDS  # noqa: E402  - реестр видов адаптеров задан в коде
 from adapters.passthrough_adapter import (  # noqa: E402
     ClientGone,
@@ -5310,14 +5309,10 @@ class _ByteBudget:
     def release(self, amount: int) -> None:
         with self._lock:
             self._used = max(0, self._used - int(amount))
-
-
 _DELIVERY_BUDGET = _ByteBudget(MAX_DELIVERY_BYTES)
-
 
 class _LiveBudgetExceeded(Exception):
     """RW-011 в живом ходе: очередной кусок live-доставки не влез в бюджет памяти."""
-
 
 def release_turn_slot(handler: Any, t_held: bool, t_released: list[bool]) -> None:
     """Освобождает слоты хода под _qos_lock с оповещением ожидающих запросов."""
@@ -5330,7 +5325,6 @@ def release_turn_slot(handler: Any, t_held: bool, t_released: list[bool]) -> Non
                 _subagent_slots.release()
             _qos_lock.notify_all()
 
-
 class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     timeout = 300
@@ -5341,6 +5335,10 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
     _context_pruned: str | None = None  # X-DSH-Context-Pruned запроса (CD-003)
     _trace: RequestTrace | None = None
     _response_status = 0
+
+    def setup(self) -> None:
+        super().setup()
+        configure_accepted_socket(self.connection)
 
     def end_headers(self) -> None:
         if LIFECYCLE.is_draining():
@@ -6694,7 +6692,7 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
         for frame in TURN_MANAGER.iter_sse_stream(
             turn,
             from_seq=from_seq,
-            keepalive_interval_s=min(10.0, KEEPALIVE_S),
+            keepalive_interval_s=KEEPALIVE_S,
             client_gone_fn=lambda: _client_gone(self.connection),
         ):
             if not self._emit(frame):
@@ -7590,7 +7588,7 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
             for frame in TURN_MANAGER.iter_sse_stream(
                 managed_turn,
                 from_seq=from_seq,
-                keepalive_interval_s=min(10.0, KEEPALIVE_S),
+                keepalive_interval_s=KEEPALIVE_S,
                 client_gone_fn=lambda: _client_gone(self.connection),
             ):
                 if not self._emit(frame):
@@ -7865,9 +7863,7 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
             emit("data: " + json.dumps({"error": err}, ensure_ascii=False) + "\n\n")
         emit("data: [DONE]\n\n")
 
-
 BridgeHandler = Handler
-
 
 def is_so_reuseport_enabled() -> bool:
     """Проверяет включение совместного bind через BRIDGE_SO_REUSEPORT_ENABLED."""
@@ -7878,14 +7874,18 @@ def is_so_reuseport_enabled() -> bool:
         "on",
     )
 
-
 class Server(ThreadingHTTPServer):
-    """HTTP-сервер с семафором числа соединений на уровне приёма (C-11)."""
+    """HTTP-сервер с бюджетом допуска соединений на уровне приёма (C-11)."""
 
     # ThreadingMixIn отслеживает non-daemon потоки: выход main не обрывает SSE.
     daemon_threads = False
     request_queue_size = 64
     allow_reuse_address = True
+
+    def get_request(self) -> tuple[Any, Any]:
+        sock, addr = super().get_request()
+        configure_accepted_socket(sock)
+        return sock, addr
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         self._listener_close_lock = threading.Lock()
@@ -7894,9 +7894,8 @@ class Server(ThreadingHTTPServer):
         self._connections: dict[socket.socket, bool] = {}
         self._closing_connections = False
         super().__init__(*args, **kwargs)
-        self._conn_sem = threading.BoundedSemaphore(
-            int(FLEET["admission"]["max_http_connections"])
-        )
+        # admission_limit и резервы UI/заголовков — из BridgeIOConfig/BRIDGE_*
+        self._admission_budget = AdmissionBudget()
 
     def server_bind(self) -> None:
         """Разрешает совместный bind до привязки сокета, если ОС поддерживает его."""
@@ -7960,7 +7959,8 @@ class Server(ThreadingHTTPServer):
         request.sendall(head + body)
 
     def process_request(self, request: Any, client_address: Any) -> None:
-        if not self._conn_sem.acquire(blocking=False):
+        ticket = str(id(request))
+        if not self._admission_budget.acquire(ticket):
             try:
                 peer = f"{client_address[0]}:{client_address[1]}"
             except (TypeError, IndexError):
@@ -7980,7 +7980,7 @@ class Server(ThreadingHTTPServer):
         except Exception:
             with self._connections_lock:
                 self._connections.pop(request, None)
-            self._conn_sem.release()
+            self._admission_budget.release(ticket)
             self.shutdown_request(request)
             raise
 
@@ -7990,7 +7990,7 @@ class Server(ThreadingHTTPServer):
         finally:
             with self._connections_lock:
                 self._connections.pop(request, None)
-            self._conn_sem.release()
+            self._admission_budget.release(str(id(request)))
 
 
 def _sweep_workspace(cutoff_s: float = 3600.0) -> None:

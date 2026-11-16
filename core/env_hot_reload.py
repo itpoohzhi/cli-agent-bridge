@@ -30,6 +30,15 @@ _LOGGER = logging.getLogger(__name__)
 _INLINE_COMMENT_RE: Final[re.Pattern[str]] = re.compile(r"\s+#")
 
 
+def file_signature(path: Path) -> tuple[int, int] | None:
+    """`(st_mtime_ns, st_size)` файла; нет файла или ошибка stat — None."""
+    try:
+        st = path.stat() if path.is_file() else None
+    except OSError:
+        return None
+    return (st.st_mtime_ns, st.st_size) if st else None
+
+
 def resolve_env_file_path(environ: Mapping[str, str] | None = None) -> Path:
     """Путь к `.env` из `BRIDGE_ENV_FILE_PATH` (пусто — дефолт)."""
     src = os.environ if environ is None else environ
