@@ -20,6 +20,8 @@ def error_identity_digest(text: str | None) -> str:
 _SAFETY_MARKERS: tuple[str, ...] = (
     "content safety", "safety filter", "safety: request rejected", "content policy",
     "policy violation", "policy rejection", "safety policy", "safety violation",
+    "policy_violation", "content_policy_violation", "safety_violation",
+    "content_filter", "safety_check", "safety_policy",
 )
 
 

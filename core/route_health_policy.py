@@ -12,6 +12,7 @@ from decimal import ROUND_FLOOR, Decimal
 from enum import Enum
 from typing import Final
 from core.url_secret_redaction import redact_url_secrets
+from core.turn_outcome_policy import is_fatal_safety_error
 class EffortLevel(str, Enum):  # noqa: UP042
     LOW = "low"; MEDIUM = "medium"; HIGH = "high"
 class FailureCategory(str, Enum):  # noqa: UP042
@@ -169,7 +170,7 @@ def is_diagnostic_source(source: object) -> bool:
 def is_transient_stream_interruption(text: str | None, *, source: str = "cli_error") -> bool:
     """Транзиентен ли транспортный обрыв: фатальный статус или категория закрывают повтор."""
     transient = False
-    if isinstance(text, str) and is_diagnostic_source(source) and not OBFUSCATED_ENCODING_RE.search(text):
+    if isinstance(text, str) and not is_fatal_safety_error(text) and is_diagnostic_source(source) and not OBFUSCATED_ENCODING_RE.search(text):
         normalized = normalize_diagnostic_text(text, max_len=1048576, fail_closed=False)
         statuses = extract_failure_statuses(normalized)
         transient = not (statuses - TRANSIENT_STATUS_CODES or FATAL_REQUEST_PHRASE_RE.search(normalized)

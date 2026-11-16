@@ -147,11 +147,11 @@ def test_recovered_terminal_has_no_sse_error(monkeypatch: pytest.MonkeyPatch, tm
     assert len(logs) == 1 and logs[0]["reason"] == "causal_echo_recovered"
     assert set(logs[0]) == {"reason", "last_error_seq", "last_completion_seq", "rc"}
     assert _ERROR not in "".join(messages) and _FINAL not in "".join(messages)
-@pytest.mark.parametrize("veto", ("env", "canonical_env", "json", "canonical_json", "broken", "symlink", "master", "signal", "running", "no_proc_running", "open_tool", "unknown_tool", "live_producer", "incomplete_drain", "fatal", "attempt", "missing_attempt", "unindexed"))
+@pytest.mark.parametrize("veto", ("env", "canonical_env", "json", "canonical_json", "broken", "symlink", "master", "signal", "running", "no_proc_running", "open_tool", "unknown_tool", "live_producer", "incomplete_drain", "fatal", "attempt", "missing_attempt", "unindexed", "Policy violation: connection reset by peer", "content_policy_violation: connection closed", "safety_policy: connection reset"))
 def test_recovery_vetoes(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, veto: str) -> None:
     bridge = _load_bridge(monkeypatch, tmp_path)
-    run = _make_run(_make_tail(bridge, (218, 321), 370))
-    tool_stop = None
+    monkeypatch.setattr(sys.modules[__name__], "_ERROR", veto if ": connection" in veto else _ERROR)
+    run, tool_stop = _make_run(_make_tail(bridge, (218, 321), 370)), None
     if veto in ("env", "canonical_env", "master"):
         name = {"env": "AGY_CAUSAL_RECOVERY_ENABLED", "canonical_env": "BRIDGE_CAUSAL_TURN_RECOVERY_ENABLED", "master": "AGY_SELF_HEAL_INTERRUPTED_TURN"}[veto]
         monkeypatch.setenv(name, "false")
@@ -170,8 +170,8 @@ def test_recovery_vetoes(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, veto: 
         assert tool.feed('<tool_call>{"name":"unfinished"')
         assert tool.recovery_snapshot() == "open"
         tool_stop = tool.turn_complete if veto == "open_tool" else _accept
-    elif veto == "fatal":
-        monkeypatch.setattr(run, "has_fatal_error", True, raising=False)
+    elif veto == "fatal" or ": connection" in veto:
+        monkeypatch.setattr(run, "has_fatal_error", veto == "fatal", raising=False)
     elif veto == "live_producer":
         monkeypatch.setattr(cast(_Tail, getattr(run, "_tail")), "thread", SimpleNamespace(is_alive=lambda: True))
     elif veto in ("attempt", "missing_attempt"):
@@ -182,7 +182,7 @@ def test_recovery_vetoes(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, veto: 
     else:
         cast(_Tail, getattr(run, "_tail")).drain_outcome = "timeout"
     chunks, out = _serve_replay(bridge, run, tool_stop)
-    assert out["state"] == "agy_error" and out["rc"] != 0 and out["err"] and out["text"] == "" and any("error" in chunk for chunk in chunks)
+    assert out["state"] == "agy_error" and out["rc"] != 0 and out["err"] and out["text"] == "" and any("error" in chunk for chunk in chunks) and (": connection" not in veto or out["err"] == veto)
 def _assert_attempt_sequence(runner: _Runner, job: bool, fail: bool) -> None:
     """Повторные прямые и job-попытки восстанавливают scope даже при исключении."""
     for index in (2, 3):

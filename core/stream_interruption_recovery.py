@@ -167,7 +167,6 @@ class _TurnFacts:
     causal_input: causal.CausalOutcomeInput | None = None
 
 _DONE_REASONS: Final[tuple[str, ...]] = ("clean_done", SELF_HEALED_REASON)
-
 def _heal_blocker(f: _TurnFacts, transient_error: bool) -> str:
     """Первая причина, запрещающая самоисцеление (пусто — разрешено)."""
     checks = (("self_heal_disabled", not f.self_heal_enabled), ("non_transient_result_error", bool(f.result_error) and not transient_error),
@@ -180,10 +179,11 @@ def _is_recovered(f: _TurnFacts) -> bool:
     has_body = bool(f.final_text.strip() or f.emitted_text.strip())
     later = f.last_completion_seq > max(f.last_error_seq, -1)
     return f.completion_done_without_tools and later and has_body
-
 def resolve_done_turn_outcome(**kw: object) -> TurnOutcomeResolution:
     """Сохраняет legacy kwargs `_TurnFacts`; неизвестный аргумент даёт TypeError."""
     f = _TurnFacts(**kw)  # pyright: ignore[reportArgumentType]  # Legacy kwargs сохраняются без Any.
+    if causal.is_fatal_safety_error(f.result_error):
+        return TurnOutcomeResolution(ERROR_STATE, 1, f.result_error, False, "fatal_safety_error", True)
     transient = is_transient_stream_interruption(f.result_error)
     if f.result_error and not transient and f.causal_input is not None:
         decision = evaluate_done_causal_recovery(f.causal_input, f.result_error)
