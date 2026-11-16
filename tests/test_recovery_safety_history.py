@@ -202,7 +202,7 @@ def test_planner_safety_blocks_replay(monkeypatch: pytest.MonkeyPatch, tmp_path:
     assert (out["state"], out["rc"], out["text"]) == ("agy_error", 1, "")
 
 
-@pytest.mark.parametrize("value", ("none-other", "null/blocked"))
+@pytest.mark.parametrize("value", ("none-other", "null/blocked", "none other", "none+other", "null, blocked"))
 def test_nonempty_block_reason_with_neutral_prefix_is_safety(value: str) -> None:
     assert is_fatal_safety_error(json.dumps({"blockReason": value}))
 
@@ -218,12 +218,25 @@ def test_planner_free_prose_is_not_safety_metadata(text: str, field: str) -> Non
 
 
 @pytest.mark.parametrize("idx", (3, None))
-def test_planner_safety_prevents_live_delivery(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, idx: int | None) -> None:
+@pytest.mark.parametrize("metadata", ({"finishReason": "SAFETY"}, {"promptFeedback": {"blockReason": "OTHER"}}, {"candidates": [{"finishReason": "SAFETY"}]}, {"details": {"blockReason": "OTHER"}}))
+def test_planner_safety_prevents_live_delivery(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, idx: int | None, metadata: dict[str, object]) -> None:
     bridge = flow._load_bridge(monkeypatch, tmp_path)
     tail = flow._make_tail(bridge, (1,), 2)
     delivered: list[tuple[object, ...]] = []
     monkeypatch.setattr(tail, "emit_content", lambda *args: delivered.append(args) or True)
-    tail._emit_record(json.dumps(dict(type="PLANNER_RESPONSE", step_index=idx, content="Blocked answer", finishReason="SAFETY")).encode())
+    tail._emit_record(json.dumps(dict(type="PLANNER_RESPONSE", step_index=idx, content="Blocked answer", **metadata)).encode())
     assert delivered == []
     assert getattr(tail, "had_safety_error", False)
     assert not getattr(tail, "final_planner", False)
+
+
+def test_safety_veto_is_sticky_across_planner_records() -> None:
+    tail = recovery.InterruptionTailState()
+    tail.note_planner_record({"content": "Previous final"}, 0)
+    tail.note_planner_record({"content": "Blocked", "promptFeedback": {"blockReason": "OTHER"}}, 1)
+    assert tail.had_safety_error
+    tail.note_planner_record({"content": "Later final"}, 2)
+    assert tail.had_safety_error
+    assert not tail.final_planner
+    assert tail.final_planner_content == ""
+    assert tail.has_open_planner_after_completion

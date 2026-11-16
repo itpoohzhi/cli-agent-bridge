@@ -1,9 +1,6 @@
 """Чистый agent-agnostic фасад транзиентного и доказанного каузального восстановления."""
-
 from __future__ import annotations
-
 from dataclasses import dataclass, replace
-import json
 from typing import Final, cast
 import core.turn_outcome_policy as causal
 from core.route_health_policy import (
@@ -24,6 +21,14 @@ TRANSIENT_RETRY_REASON: Final[str] = "transient_pre_delivery_retry"
 DEFAULT_INTERRUPTION_NOTICE: Final[str] = "\n\n[⚠️ Поток прерван транзиентным сбоем транспорта; показан частичный ответ.]"
 DEFAULT_RETRY_CONFIG: Final[RetryBudgetConfig] = RetryBudgetConfig(max_attempts=2)
 MAX_ELAPSED_S: Final[float] = 1e308
+def _safety_meta_items(obj: object, depth: int = 0) -> list[tuple[str, object]]:
+    """Собрать вложенные причины остановки, исключая свободную прозу и инструменты."""
+    if depth > 4 or not isinstance(obj, (dict, list)):
+        return []
+    pairs = obj.items() if isinstance(obj, dict) else (("", elem) for elem in obj)
+    return [item for k, v in pairs if str(k).lower() not in ("content", "thinking", "tool_calls")
+            for item in ([(str(k), v)] if str(k).lower() in ("block_reason", "blockreason", "finish_reason", "finishreason", "stop_reason", "stopreason")
+                         else _safety_meta_items(v, depth + 1))]
 
 class InterruptionTailState:
     """Факты о финальном planner-шаге и транзиентных обрывах."""
@@ -48,11 +53,8 @@ class InterruptionTailState:
             if isinstance(rec, dict):
                 texts = (rec.get(key) for key in ("content", "message", "error"))
                 text = next(filter(None, texts), "")
-                struct_safety = any(
-                    causal.is_fatal_safety_error(f"{k}: {v}")
-                    for k, v in rec.items()
-                    if str(k).lower() in ("block_reason", "blockreason", "finish_reason", "finishreason", "stop_reason", "stopreason", "reason", "error", "message") and v is not None
-                ) or causal.is_fatal_safety_error(json.dumps(rec, default=str))
+                metadata = _safety_meta_items(rec) + [(k, v) for k, v in rec.items() if str(k).lower() in ("reason", "error", "message") and v is not None]
+                struct_safety = any(causal.is_fatal_safety_error(f"{k}: {v}") for k, v in metadata) or causal.is_fatal_safety_error(str(text))
             text = str(text)
             seq = rtype if isinstance(rtype, int) else idx if idx is not None else -1
             self.final_planner, self.final_planner_content = False, ""
@@ -69,14 +71,14 @@ class InterruptionTailState:
 
     def note_planner_record(self, rec: dict[str, object], idx: int, *, attempt: int | None = None) -> None:
         """Непустой DONE без tools завершает шаг; любой новый открытый шаг отменяет финал."""
+        if self.had_safety_error:
+            self.final_planner, self.final_planner_content = False, ""
+            self.has_open_planner_after_completion = True
+            return
         content = rec.get("content")
         has_tools = bool(rec.get("tool_calls"))
         text = content if isinstance(content, str) else ""
-        struct_safety = any(
-            causal.is_fatal_safety_error(f"{k}: {v}")
-            for k, v in rec.items()
-            if str(k).lower() in ("block_reason", "blockreason", "finish_reason", "finishreason", "stop_reason", "stopreason", "reason", "error", "message") and v is not None
-        )
+        struct_safety = any(causal.is_fatal_safety_error(f"{k}: {v}") for k, v in _safety_meta_items(rec))
         if struct_safety:
             self.had_safety_error = True
             self.final_planner, self.final_planner_content = False, ""
@@ -115,11 +117,9 @@ def evaluate_done_causal_recovery(causal_input: causal.CausalOutcomeInput, error
         echo = replace(causal_input.error, result_error_sha256=causal.error_identity_digest(error))
         causal_input = replace(causal_input, error=echo, config=replace(causal_input.config, is_fatal_safety=causal_input.config.is_fatal_safety or causal.is_fatal_safety_error(error)))
     return causal.evaluate_causal_turn_recovery(causal_input)
-
 def settle_error(error: str, cleared: str, status: str) -> str:
     """Вернуть ошибку хода на done."""
     return error or (cleared if status == ERROR_STATUS else "")
-
 def trusted_final_text(final_text: str, error: str, tail: object, causal_input: causal.CausalOutcomeInput | None = None) -> str:
     """Текст для reconcile: при неснятой ошибке — только финальный planner хвоста."""
     if getattr(tail, "had_safety_error", False) or causal.is_fatal_safety_error(error):

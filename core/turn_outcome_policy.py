@@ -68,10 +68,11 @@ def is_fatal_safety_error(text: str | None) -> bool:
         if html.unescape(cur) != cur or re.search(r"%[0-9a-fA-F]{2}|&#x?[0-9a-fA-F]+;|\\+[uUx0-7]", cur):
             return True  # Неразрешённое остаточное кодирование: fail-closed.
     lowered = cur.replace("+", " ").casefold()
-    has_block = bool(re.search(
-        r"""\b(?:block_reason|blockreason)\b["\x27]?\s*[:=]\s*(?!["\x27]?(?:null|none)["\x27]?(?:[\s,;}\]]|$)|""|\x27\x27|\[\s*\]|\{\s*\})[^\s,;}\]]""",
-        lowered,
-    ))
+    neutral_pattern = r"""^\s*(?:"(?:null|none|unspecified|block_reason_unspecified)?"|\x27(?:null|none|unspecified|block_reason_unspecified)?\x27|null|none|\[\s*\]|\{\s*\})(?:\s*[,;}\]]|\s*$)"""
+    has_block = any(
+        not re.match(neutral_pattern, lowered[m.end():])
+        for m in re.finditer(r"""\b(?:block_reason|blockreason)\b["\x27]?\s*[:=]\s*""", lowered)
+    )
     finish_reasons = re.findall(r"""\b(?:finish_reason|finishreason|stop_reason|stopreason)\b["']?\s*[:=]\s*["']?([\w-]+)""", lowered)
     return (
         any(marker in lowered for marker in _SAFETY_MARKERS)

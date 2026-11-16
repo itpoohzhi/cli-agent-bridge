@@ -99,7 +99,7 @@ def _make_tail(bridge: _Bridge, error_steps: tuple[int, ...], final_step: int) -
     tail.stop_event.set()
     tail.drain_outcome = "complete"
     tail._finish()
-    assert (tail.last_error_step_index, tail.last_planner_step_index, tail.final_planner_content) == (error_steps[-1], final_step, _FINAL)
+    assert (tail.last_error_step_index, tail.last_planner_step_index, tail.final_planner_content) == (error_steps[-1], *((-1, "") if getattr(tail, "had_safety_error", False) else (final_step, _FINAL)))
     return tail
 def _make_run(tail: _Tail) -> _Run:
     events: queue.Queue[tuple[str, object]] = queue.Queue()
