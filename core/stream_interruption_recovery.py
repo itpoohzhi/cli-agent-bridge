@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+import json
 from typing import Final, cast
-
 import core.turn_outcome_policy as causal
 from core.route_health_policy import (
     TRANSIENT_STREAM_INTERRUPTION_RE as TRANSIENT_STREAM_INTERRUPTION_RE,
@@ -49,10 +49,10 @@ class InterruptionTailState:
                 texts = (rec.get(key) for key in ("content", "message", "error"))
                 text = next(filter(None, texts), "")
                 struct_safety = any(
-                    causal.is_fatal_safety_error(str(v))
+                    causal.is_fatal_safety_error(f"{k}: {v}")
                     for k, v in rec.items()
                     if k in ("block_reason", "finish_reason", "reason", "error", "message") and v is not None
-                )
+                ) or causal.is_fatal_safety_error(json.dumps(rec))
             text = str(text)
             seq = rtype if isinstance(rtype, int) else idx if idx is not None else -1
             self.final_planner, self.final_planner_content = False, ""

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from hashlib import sha256
+import html
 import re
 from urllib.parse import unquote_plus
 
@@ -26,6 +27,7 @@ _SAFETY_MARKERS: tuple[str, ...] = (
     "content_filter", "safety_check", "safety_policy",
     "content_safety", "safety_filter", "prohibited_content", "recitation", "fatal_safety_error",
 )
+_BENIGN_FINISH_REASONS = ("null", "none", "stop", "length", "tool_calls", "end_turn", "tool_use", "max_tokens", "stop_sequence")
 
 
 def is_fatal_safety_error(text: str | None) -> bool:
@@ -41,12 +43,15 @@ def is_fatal_safety_error(text: str | None) -> bool:
     else:
         if re.search(r"%[0-9a-fA-F]{2}", cur):
             return True  # Неразрешённое остаточное кодирование: fail-closed.
+    cur = html.unescape(cur)
+    if "\\u" in cur or "\\U" in cur:
+        cur = re.sub(r"\\u([0-9a-fA-F]{4})", lambda m: chr(int(m.group(1), 16)), cur)
     lowered = cur.replace("+", " ").casefold()
     reasons: list[str] = re.findall(r"""\b(?:block_reason|finish_reason)\b["']?\s*[:=]\s*["']?([\w-]+)""", lowered)
     return (
         any(marker in lowered for marker in _SAFETY_MARKERS)
         or bool(re.search(r"(?<![\w-])safety(?![\w-])", lowered))
-        or any(reason not in ("null", "none", "stop", "length", "tool_calls") for reason in reasons)
+        or any(reason not in _BENIGN_FINISH_REASONS for reason in reasons)
     )
 
 

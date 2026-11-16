@@ -29,7 +29,7 @@ def _config_value(data: object) -> bool | None:
     if not isinstance(data, dict):
         return False
     flags = cast(dict[str, object], data)
-    present = tuple(flags[key] for key in (_FLAG, "causal_turn_recovery_enabled", "causal_recovery_enabled") if key in flags)
+    present = tuple(flags[key] for key in (_FLAG, "causal_turn_recovery_enabled", "causal_recovery_enabled", "self_heal_interrupted_turn") if key in flags)
     return all(value is True for value in present) if present else None
 
 def _read_config_flag(path: Path, max_bytes: int) -> bool | None:
