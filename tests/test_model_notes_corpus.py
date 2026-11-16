@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import ast
 import dataclasses
 import importlib
 import json
+import os
 import sys
 from collections import Counter
 from collections.abc import Mapping
@@ -107,9 +109,7 @@ def test_corpus_metadata_and_coverage() -> None:
     """Проверяет независимый от наличия C1-N контракт переносимой фикстуры."""
     metadata = CORPUS["metadata"]
     assert metadata["case_count"] == len(CASES)
-    assert metadata["positive_count"] == sum(
-        "error" not in c["expected"] for c in CASES
-    )
+    assert metadata["positive_count"] == sum("error" not in c["expected"] for c in CASES)
     assert metadata["negative_count"] == sum("error" in c["expected"] for c in CASES)
     assert metadata["tag_counts"] == _count_tags(CASES)
     assert REQUIRED_TAGS <= set(metadata["tag_counts"])
@@ -169,9 +169,7 @@ def _projection(value: Any) -> dict[str, Any]:
 
 
 @pytest.mark.parametrize("case", CASES, ids=[case["id"] for case in CASES])
-def test_canonical_parser_corpus(
-    case: dict[str, Any], parser_module: ModuleType
-) -> None:
+def test_canonical_parser_corpus(case: dict[str, Any], parser_module: ModuleType) -> None:
     """Сверяет весь результат; просроченная строка не равна ошибке документа."""
     now = datetime.fromisoformat(case["now_dt"])
     expected = case["expected"]
@@ -194,8 +192,107 @@ def test_corpus_and_function_size_budgets() -> None:
     violations = {
         name: metrics(node)
         for name, node in functions(source).items()
-        if any(
-            value > cap for value, cap in zip(metrics(node), (40, 5, 10), strict=True)
-        )
+        if any(value > cap for value, cap in zip(metrics(node), (40, 5, 10), strict=True))
     }
     assert not violations, violations
+
+
+def test_parser_portability_and_budgets(parser_module: ModuleType) -> None:
+    """Проверяет переносимость и каждый лимит исходного модуля."""
+    from tests.test_transport_modularity import exceeds, functions, metrics
+
+    source = Path(str(parser_module.__file__)).read_bytes()
+    assert len(source.splitlines()) <= 200
+    assert not {n: metrics(f) for n, f in functions(source).items() if exceeds(metrics(f))}
+    roots = {
+        name.name.split(".")[0]
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.Import)
+        for name in node.names
+    }
+    roots |= {
+        (node.module or "").split(".")[0]
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.ImportFrom)
+    }
+    assert roots <= sys.stdlib_module_names
+
+
+@pytest.mark.parametrize("payload", [b"", b"a", "я".encode(), b"x" * 1048576])
+def test_bounded_reader_edges(payload: bytes, tmp_path: Path, parser_module: ModuleType) -> None:
+    """Лимит считается в байтах, включая точную границу и UTF-8."""
+    path = tmp_path / "notes.md"
+    path.write_bytes(payload)
+    size = max(1, len(payload))
+    assert parser_module.read_model_notes_file(path, max_bytes=size) == payload.decode()
+    assert parser_module.read_model_notes_file(path) == payload.decode()
+    path.write_bytes(payload + b"xx")
+    with pytest.raises(parser_module.BlocklistParseError):
+        parser_module.read_model_notes_file(path, max_bytes=size)
+    path.write_bytes(b"\xff")
+    with pytest.raises(parser_module.BlocklistParseError):
+        parser_module.read_model_notes_file(path, max_bytes=size)
+
+
+def test_reader_rejects_nonfiles_and_bad_limits(tmp_path: Path, parser_module: ModuleType) -> None:
+    """FIFO без писателя не блокирует, отсутствующий источник не скрывается."""
+    fifo = tmp_path / "fifo"
+    os.mkfifo(fifo)
+    for path in (tmp_path, fifo, tmp_path / "missing"):
+        with pytest.raises(parser_module.BlocklistParseError):
+            parser_module.read_model_notes_file(path)
+    for limit in (0, -1, True, 1.5):
+        with pytest.raises(parser_module.BlocklistParseError):
+            parser_module.read_model_notes_file(fifo, max_bytes=limit)
+
+
+@pytest.mark.parametrize(
+    "replacement",
+    [
+        "| model-a / codex / droid | TEMP OFF | quota |",
+        "| model-a, | TEMP OFF | quota |",
+        "| | ACTIVE | quota |",
+        "| model-a | `TEMP OFF | quota |",
+        "| model-a | ACTIVE / BANNED | quota |",
+        "| model-a | TEMP OFF до 18:00 MSK до 19:00 MSK | quota |",
+    ],
+)
+def test_ambiguous_rows_fail_closed(replacement: str, parser_module: ModuleType) -> None:
+    """Неоднозначность не превращается в молчаливое расширение или снятие бана."""
+    case = next(c for c in CASES if c["id"] == "legacy-temp-off-bare")
+    text = case["text"].replace("| model-a | TEMP-OFF | quota |", replacement)
+    with pytest.raises(parser_module.BlocklistParseError):
+        parser_module.parse_model_notes(text, now_dt=_aware(case["now_dt"]))
+
+
+@pytest.mark.parametrize("payload", [b"a", b"xxx", b"\xff"])
+def test_reader_growth_check_and_descriptor_cleanup(
+    payload: bytes, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, parser_module: ModuleType
+) -> None:
+    """Повторная проверка ловит рост после fstat; fd закрывается на всех выходах."""
+    path = tmp_path / "growing.md"
+    path.write_bytes(payload)
+    opened: list[int] = []
+    real_open, real_fstat = os.open, os.fstat
+
+    def track_open(source: str | os.PathLike[str], flags: int) -> int:
+        fd = real_open(source, flags)
+        opened.append(fd)
+        return fd
+
+    def stale_size(fd: int) -> os.stat_result:
+        fields = list(real_fstat(fd))
+        fields[6] = 0
+        return os.stat_result(fields)
+
+    with monkeypatch.context() as scoped:
+        scoped.setattr(os, "open", track_open)
+        scoped.setattr(os, "fstat", stale_size)
+        if payload == b"a":
+            assert parser_module.read_model_notes_file(path, max_bytes=2) == "a"
+        else:
+            with pytest.raises(parser_module.BlocklistParseError):
+                parser_module.read_model_notes_file(path, max_bytes=2)
+    assert len(opened) == 1
+    with pytest.raises(OSError):
+        real_fstat(opened[0])
