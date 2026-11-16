@@ -19,13 +19,13 @@ BRIDGE, RUNNER = "bridges/agy-bridge/server.py", "bridges/agy-bridge/agy_runtime
 CORE = ("core/turn_outcome_policy.py", "core/stream_interruption_recovery.py", "core/turn_finalization.py")
 STAGES = (("W0", ("tests/test_causal_turn_recovery_flow.py", "tests/test_causal_recovery_architecture.py")),
           ("W1-A", (CORE[0], "tests/test_causal_turn_recovery.py")), ("W1-B", (CORE[1],)), ("W1-C", (CORE[2],)),
-          ("W2", (BRIDGE, RUNNER)), ("W3", ("tests/test_route_health_policy.py", "core/route_health_policy.py")))
-NEW = frozenset((CORE[0], CORE[2], *STAGES[0][1], "tests/test_causal_turn_recovery.py"))
+          ("W2", (BRIDGE, RUNNER)), ("W3", ("tests/test_route_health_policy.py", "core/route_health_policy.py", "tests/test_recovery_safety_history.py")))
+NEW = frozenset((CORE[0], CORE[2], *STAGES[0][1], "tests/test_causal_turn_recovery.py", "tests/test_recovery_safety_history.py"))
 RHP = "core/route_health_policy.py"
 OWNED = NEW | {CORE[1]}
 INTEGRATION = ("main", "master", "dev")
 PURE = frozenset((*CORE[:2], RHP))
-LIBS = frozenset(("__future__", "dataclasses", "hashlib", "re", "typing", "collections.abc"))
+LIBS = frozenset(("__future__", "dataclasses", "hashlib", "re", "typing", "collections.abc", "urllib.parse"))
 RHP_LIBS = frozenset(("decimal", "enum", "html", "math", "core.url_secret_redaction"))
 EXPECTED = """self._finish_done(
     run, DoneRequest(payload, result_ev, (result_error, cleared_error)),

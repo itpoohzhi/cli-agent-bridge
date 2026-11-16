@@ -32,6 +32,7 @@ class InterruptionTailState:
     last_planner_step_index: int = -1
     last_error_step_index: int = -1
     had_transient_error: bool = False
+    had_safety_error: bool = False
     last_error_sha256: str = ""
     last_error_length: int = 0
     last_error_attempt: int = -1
@@ -51,6 +52,7 @@ class InterruptionTailState:
             self.final_planner, self.final_planner_content = False, ""
             self.has_open_planner_after_completion = self.last_planner_step_index >= 0
             self.had_transient_error |= is_transient_stream_interruption(text)
+            self.had_safety_error |= causal.is_fatal_safety_error(text)
             if seq < 0 or seq >= self.last_error_step_index:
                 self.last_error_step_index = seq
                 self.last_error_sha256 = causal.error_identity_digest(text)
@@ -113,6 +115,8 @@ def settle_error(error: str, cleared: str, status: str) -> str:
 
 def trusted_final_text(final_text: str, error: str, tail: object, causal_input: causal.CausalOutcomeInput | None = None) -> str:
     """Текст для reconcile: при неснятой ошибке — только финальный planner хвоста."""
+    if getattr(tail, "had_safety_error", False) or causal.is_fatal_safety_error(error):
+        return ""
     if error and not is_transient_stream_interruption(error):
         snapshot = tail_causal_facts(tail)
         if causal_input is None:
@@ -138,6 +142,7 @@ def tail_turn_facts(tail: object, cleared_error: str = "") -> dict[str, object]:
         "last_error_seq": getattr(tail, "last_error_step_index", -1),
         "drain_complete": getattr(tail, "drain_outcome", "") != "timeout",
         "had_transient_error": bool(getattr(tail, "had_transient_error", False)) or bool(cleared_error),
+        "had_safety_error": bool(getattr(tail, "had_safety_error", False)),
     }
 
 @dataclass(frozen=True)
@@ -162,6 +167,7 @@ class _TurnFacts:
     last_error_seq: int = -1
     drain_complete: bool = False
     had_transient_error: bool = False
+    had_safety_error: bool = False
     has_unclosed_tool_call: bool = False
     self_heal_enabled: bool = True
     causal_input: causal.CausalOutcomeInput | None = None
@@ -182,8 +188,9 @@ def _is_recovered(f: _TurnFacts) -> bool:
 def resolve_done_turn_outcome(**kw: object) -> TurnOutcomeResolution:
     """Сохраняет legacy kwargs `_TurnFacts`; неизвестный аргумент даёт TypeError."""
     f = _TurnFacts(**kw)  # pyright: ignore[reportArgumentType]  # Legacy kwargs сохраняются без Any.
-    if causal.is_fatal_safety_error(f.result_error):
-        return TurnOutcomeResolution(ERROR_STATE, 1, f.result_error, False, "fatal_safety_error", True)
+    if f.had_safety_error or causal.is_fatal_safety_error(f.result_error) or (f.causal_input is not None and f.causal_input.config.is_fatal_safety):
+        error = f.result_error if causal.is_fatal_safety_error(f.result_error) else f"fatal_safety_error: {f.result_error}"
+        return TurnOutcomeResolution(ERROR_STATE, 1, error, False, "fatal_safety_error", True)
     transient = is_transient_stream_interruption(f.result_error)
     if f.result_error and not transient and f.causal_input is not None:
         decision = evaluate_done_causal_recovery(f.causal_input, f.result_error)
@@ -204,7 +211,6 @@ def resolve_done_turn_outcome(**kw: object) -> TurnOutcomeResolution:
     ok_out, fail_out = (DONE_STATE, 0, ""), (ERROR_STATE, f.rc if f.rc else 1, error)
     state, rc, err = ok_out if reason in _DONE_REASONS else fail_out
     return TurnOutcomeResolution(state, rc, err, healed, reason, healed or bool(f.result_error))
-
 @dataclass(frozen=True)
 class RetryDecision:
     """Решение о повторе запроса после обрыва стрима."""
@@ -212,9 +218,7 @@ class RetryDecision:
     keep_hot_session: bool
     reason: str
     attempt_budget_s: float = 0.0
-
 RETRY_BLOCKED: Final[RetryDecision] = RetryDecision(False, False, RETRY_BLOCKED_REASON)
-
 @dataclass(frozen=True)
 class _RetryFacts:
     error_text: str
@@ -225,7 +229,6 @@ class _RetryFacts:
     source: str = CLI_ERROR_SOURCE
     elapsed_s: float = 0.0
     budget_config: RetryBudgetConfig | None = None
-
 def _valid_retry_facts(f: _RetryFacts) -> bool:
     """Проверить типы аргументов legacy-контракта; границы проверяет бюджетный контроллер."""
     typed = ((f.attempt, int), (f.elapsed_s, (int, float)), (f.delivered, bool), (f.had_tool_side_effects, bool),
@@ -233,7 +236,6 @@ def _valid_retry_facts(f: _RetryFacts) -> bool:
     exact = all(isinstance(value, expected) for value, expected in typed)
     checks = (0.0 <= f.elapsed_s <= MAX_ELAPSED_S, 0 <= f.attempt, not isinstance(f.attempt, bool), not isinstance(f.elapsed_s, bool), not isinstance(f.max_attempts, bool))
     return exact and all(checks)
-
 def _resolve_retry_cfg(f: _RetryFacts) -> RetryBudgetConfig | None:
     """Проверить конфигурацию повтора; явный legacy-лимит только сужает типизированный бюджет."""
     try:
@@ -242,7 +244,6 @@ def _resolve_retry_cfg(f: _RetryFacts) -> RetryBudgetConfig | None:
         return validate_retry_config(narrowed)
     except (ValueError, TypeError):
         return None
-
 def _retry_with_budget(f: _RetryFacts) -> RetryDecision:
     """Повтор разрешён только в пределах бюджета, суженного legacy-лимитом."""
     cfg = _resolve_retry_cfg(f)
@@ -255,7 +256,6 @@ def _retry_with_budget(f: _RetryFacts) -> RetryDecision:
         else:
             result = RetryDecision(True, True, TRANSIENT_RETRY_REASON, decision.attempt_budget_s) if decision.allow_retry else result
     return result
-
 def evaluate_stream_retry_eligibility(**kw: object) -> RetryDecision:
     """Оценить допустимость повтора стрима; горячая сессия живёт при тихом транзиентном обрыве."""
     try:

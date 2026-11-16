@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from hashlib import sha256
+from urllib.parse import unquote_plus
 
 
 def normalize_error_identity(text: str | None) -> str:
@@ -22,12 +23,13 @@ _SAFETY_MARKERS: tuple[str, ...] = (
     "policy violation", "policy rejection", "safety policy", "safety violation",
     "policy_violation", "content_policy_violation", "safety_violation",
     "content_filter", "safety_check", "safety_policy",
+    "safety", "block_reason", "prohibited_content", "recitation",
 )
 
 
 def is_fatal_safety_error(text: str | None) -> bool:
     """Распознаёт отказ защитных механизмов: такой ход не восстанавливается."""
-    lowered = (text or "").casefold()
+    lowered = unquote_plus(text or "").casefold()
     return any(marker in lowered for marker in _SAFETY_MARKERS)
 
 

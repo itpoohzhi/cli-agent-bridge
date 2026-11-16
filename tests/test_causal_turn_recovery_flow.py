@@ -147,13 +147,13 @@ def test_recovered_terminal_has_no_sse_error(monkeypatch: pytest.MonkeyPatch, tm
     assert len(logs) == 1 and logs[0]["reason"] == "causal_echo_recovered"
     assert set(logs[0]) == {"reason", "last_error_seq", "last_completion_seq", "rc"}
     assert _ERROR not in "".join(messages) and _FINAL not in "".join(messages)
-@pytest.mark.parametrize("veto", ("env", "canonical_env", "json", "canonical_json", "broken", "symlink", "master", "signal", "running", "no_proc_running", "open_tool", "unknown_tool", "live_producer", "incomplete_drain", "fatal", "attempt", "missing_attempt", "unindexed", "Policy violation: connection reset by peer", "content_policy_violation: connection closed", "safety_policy: connection reset"))
+@pytest.mark.parametrize("veto", ("env", "canonical_env", "json", "canonical_json", "broken", "symlink", "signal", "running", "no_proc_running", "open_tool", "unknown_tool", "live_producer", "incomplete_drain", "fatal", "attempt", "missing_attempt", "unindexed", "Policy violation: connection reset by peer", "content_policy_violation: connection closed", "safety_policy: connection reset"))
 def test_recovery_vetoes(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, veto: str) -> None:
     bridge = _load_bridge(monkeypatch, tmp_path)
     monkeypatch.setattr(sys.modules[__name__], "_ERROR", veto if ": connection" in veto else _ERROR)
     run, tool_stop = _make_run(_make_tail(bridge, (218, 321), 370)), None
-    if veto in ("env", "canonical_env", "master"):
-        name = {"env": "AGY_CAUSAL_RECOVERY_ENABLED", "canonical_env": "BRIDGE_CAUSAL_TURN_RECOVERY_ENABLED", "master": "AGY_SELF_HEAL_INTERRUPTED_TURN"}[veto]
+    if veto in ("env", "canonical_env"):
+        name = {"env": "AGY_CAUSAL_RECOVERY_ENABLED", "canonical_env": "BRIDGE_CAUSAL_TURN_RECOVERY_ENABLED"}[veto]
         monkeypatch.setenv(name, "false")
     elif veto == "symlink":
         _ = (tmp_path / "target.json").write_text("{}")

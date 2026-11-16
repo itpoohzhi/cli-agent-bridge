@@ -162,7 +162,7 @@ def _causal_input(snapshot: DoneSnapshot, enabled: bool, error: str) -> causal.C
     complete = meta.outcome == "complete"
     return causal.CausalOutcomeInput(
         causal.CausalRecoveryConfig(snapshot.recovery.self_heal_enabled, enabled, result.attempt,
-                                    causal.is_fatal_safety_error(error)),
+                                    bool(getattr(snapshot.recovery.tail, "had_safety_error", False)) or causal.is_fatal_safety_error(error)),
         causal.CausalErrorFacts(proof.error, proof.error_from_structured_record,
                                 result.result_status, causal.error_identity_digest(error)),
         proof.completion,

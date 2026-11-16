@@ -6705,7 +6705,7 @@ class Handler(BaseHTTPRequestHandler):
             DoneDeliveryFacts(bool(getattr(run, "content_streaming", False)), not ports.state("", 0).get("text"),
                               getattr(run, "reconcile_result", lambda text: text),
                               lambda: bool(getattr(getattr(run, "_arbiter", None), "last_result_diverged", False))),
-            DoneRecoveryFacts(bool(_new_flag("self_heal_interrupted_turn", False)) and _done_recovery_aliases_enabled(),
+            DoneRecoveryFacts(_done_recovery_aliases_enabled(),
                               tail, DoneDrainFacts(str(getattr(tail, "drain_outcome", "")), stopped), tool_status),
         )
 
