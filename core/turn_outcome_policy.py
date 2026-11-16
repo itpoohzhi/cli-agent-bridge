@@ -17,6 +17,18 @@ def error_identity_digest(text: str | None) -> str:
     return sha256(normalized.encode("utf-8")).hexdigest() if normalized else ""
 
 
+_SAFETY_MARKERS: tuple[str, ...] = (
+    "content safety", "safety filter", "safety: request rejected", "content policy",
+    "policy violation", "policy rejection", "safety policy", "safety violation",
+)
+
+
+def is_fatal_safety_error(text: str | None) -> bool:
+    """Распознаёт отказ защитных механизмов: такой ход не восстанавливается."""
+    lowered = (text or "").casefold()
+    return any(marker in lowered for marker in _SAFETY_MARKERS)
+
+
 @dataclass(frozen=True)
 class CausalErrorIdentity:
     """Скалярная идентичность ошибки без хранения исходного текста."""
@@ -29,11 +41,12 @@ class CausalErrorIdentity:
 
 @dataclass(frozen=True)
 class CausalRecoveryConfig:
-    """Явные переключатели и метка текущего вызова, без чтения окружения."""
+    """Переключатели, метка вызова и признак невосстановимого отказа защиты."""
 
     master_self_heal: bool
     causal_recovery_enabled: bool
     attempt: int
+    is_fatal_safety: bool = False
 
 
 @dataclass(frozen=True)
@@ -121,6 +134,7 @@ def _causal_blocker(facts: CausalOutcomeInput) -> str:
     terminal = facts.terminal
     drain, process = terminal.drain, terminal.process
     checks = (
+        ("fatal_safety_error", config.is_fatal_safety is True),
         ("self_heal_disabled", config.master_self_heal is not True),
         ("causal_recovery_disabled", config.causal_recovery_enabled is not True),
         ("missing_structured_error", identity.seq < 0),

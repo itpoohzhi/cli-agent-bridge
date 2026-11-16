@@ -156,7 +156,8 @@ from core.stream_interruption_recovery import (  # noqa: E402
 )
 from core.turn_finalization import (  # noqa: E402
     DoneConfig, DoneDeliveryFacts, DoneDrainFacts, DonePorts, DoneRecoveryFacts, DoneRequest,
-    DoneResultFacts, DoneRuntimePorts, DoneSnapshot, DoneTextFacts, finalize_done, read_recovery_switch,
+    DoneResultFacts, DoneRuntimePorts, DoneSnapshot, DoneTextFacts, RecoveryAliases, finalize_done,
+    read_recovery_switch,
 )
 from core.tool_emulation import (  # noqa: E402
     LiveParserError, RepetitionLoopDetected, StreamNormalizer,
@@ -6265,9 +6266,12 @@ def _terminal_state(name: str, err: str = "") -> dict[str, object]:
     }
 
 
+_DONE_RECOVERY_ALIASES = RecoveryAliases(("AGY_CAUSAL_RECOVERY_ENABLED",))
+
+
 def _done_recovery_aliases_enabled() -> bool:
     """Свежий общий opt-in, включая локальные имена флагов и запреты."""
-    return read_recovery_switch(DYNAMIC_CONFIG_PATH, DYNAMIC_CONFIG_MAX_BYTES)
+    return read_recovery_switch(DYNAMIC_CONFIG_PATH, DYNAMIC_CONFIG_MAX_BYTES, aliases=_DONE_RECOVERY_ALIASES)
 
 
 @_LIFECYCLE.install
@@ -6715,7 +6719,8 @@ class Handler(BaseHTTPRequestHandler):
             lambda: self._snapshot_done(run, request, ports),
             (lambda: list(drain(T_DRAIN_MAX_S))) if callable(drain) else None, stderr)
         config = DoneConfig(DYNAMIC_CONFIG_PATH, DYNAMIC_CONFIG_MAX_BYTES,
-                            bool(getattr(run, "content_streaming", False)), bool(getattr(run, "usage_enabled", False)))
+                            bool(getattr(run, "content_streaming", False)), bool(getattr(run, "usage_enabled", False)),
+                            _DONE_RECOVERY_ALIASES)
         return cast(dict, finalize_done(request, ports, runtime, config, _log))
 
     @staticmethod

@@ -104,7 +104,7 @@ def evaluate_done_causal_recovery(causal_input: causal.CausalOutcomeInput, error
     """Одно решение разрешает reconcile и снятие ошибки; эхо берётся целиком."""
     if error is not None:
         echo = replace(causal_input.error, result_error_sha256=causal.error_identity_digest(error))
-        causal_input = replace(causal_input, error=echo)
+        causal_input = replace(causal_input, error=echo, config=replace(causal_input.config, is_fatal_safety=causal_input.config.is_fatal_safety or causal.is_fatal_safety_error(error)))
     return causal.evaluate_causal_turn_recovery(causal_input)
 
 def settle_error(error: str, cleared: str, status: str) -> str:

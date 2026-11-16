@@ -15,6 +15,15 @@ _FLAG = "BRIDGE_CAUSAL_TURN_RECOVERY_ENABLED"
 _FALSE = ("0", "false", "no", "off")
 _TRUE = ("1", "true", "yes", "on")
 
+@dataclass(frozen=True)
+class RecoveryAliases:
+    """Дополнительные имена флагов транспорта: ядро остаётся вендор-нейтральным."""
+    switch_vars: tuple[str, ...] = ()
+
+def _flag_values(values: Mapping[str, str], names: tuple[str, ...]) -> tuple[str, ...]:
+    """Нормализовать значения всех объявленных имён флагов и записать в регистр."""
+    return tuple(values.get(name, "").strip().lower() for name in names)
+
 def _config_value(data: object) -> bool | None:
     """Отличить отсутствие ключей от явного opt-in и запретов."""
     if not isinstance(data, dict):
@@ -54,13 +63,13 @@ def _recovery_config_flags(local_path: Path | None, max_bytes: int, values: Mapp
 
 def read_recovery_switch(
     local_path: Path | None, max_bytes: int, env: Mapping[str, str] | None = None,
-    global_path: Path | None = None,
+    global_path: Path | None = None, aliases: RecoveryAliases | None = None,
 ) -> bool:
-    """Нужен явный opt-in; любой false или сломанный источник имеет право вето."""
+    """Прозрачный opt-in: любой включённый источник включает, любой запрет — вето."""
     values = os.environ if env is None else env
-    master = values.get("AGY_SELF_HEAL_INTERRUPTED_TURN", "").strip().lower()
-    switches = tuple(values.get(key, "").strip().lower() for key in (_FLAG, "AGY_CAUSAL_RECOVERY_ENABLED"))
-    if any(value not in ("", *_TRUE) for value in (master, *switches)):
+    extra = aliases if aliases is not None else RecoveryAliases()
+    switches = _flag_values(values, (_FLAG, *extra.switch_vars))
+    if any(value not in ("", *_TRUE) for value in switches):
         return False
     if type(max_bytes) is not int or max_bytes <= 0:
         return False
@@ -137,6 +146,7 @@ class DoneConfig:
     max_bytes: int
     content_streaming: bool = False
     usage_enabled: bool = False
+    aliases: RecoveryAliases | None = None
 
 @dataclass(frozen=True)
 class DoneRuntimePorts:
@@ -151,7 +161,8 @@ def _causal_input(snapshot: DoneSnapshot, enabled: bool, error: str) -> causal.C
     result, meta = snapshot.result, snapshot.recovery.drain_meta
     complete = meta.outcome == "complete"
     return causal.CausalOutcomeInput(
-        causal.CausalRecoveryConfig(snapshot.recovery.self_heal_enabled, enabled, result.attempt),
+        causal.CausalRecoveryConfig(snapshot.recovery.self_heal_enabled, enabled, result.attempt,
+                                    causal.is_fatal_safety_error(error)),
         causal.CausalErrorFacts(proof.error, proof.error_from_structured_record,
                                 result.result_status, causal.error_identity_digest(error)),
         proof.completion,
@@ -238,7 +249,7 @@ def finalize_done(
     if (config.content_streaming or config.usage_enabled) and runtime.drain is not None:
         ports.deliver(runtime.drain())
     snapshot = runtime.snapshot()
-    enabled = read_recovery_switch(config.local_path, config.max_bytes)
+    enabled = read_recovery_switch(config.local_path, config.max_bytes, aliases=config.aliases)
     resolution = _resolve_done(snapshot, enabled, request.payload[0])
     if resolution.state == "done":
         _emit_result(snapshot, ports)

@@ -12,12 +12,12 @@ from core import stream_interruption_recovery as facade
 from core import turn_finalization as done
 from core.route_health_policy import RetryBudgetConfig
 from core.stream_interruption_recovery import tail_turn_facts as extract_tail_facts
-from core.turn_outcome_policy import CausalCompletionFacts, CausalDrainFacts, CausalErrorFacts, CausalErrorIdentity, CausalOutcomeDecision, CausalOutcomeInput, CausalProcessFacts, CausalRecoveryConfig, CausalTerminalFacts, error_identity_digest, evaluate_causal_turn_recovery, normalize_error_identity
+from core.turn_outcome_policy import CausalCompletionFacts, CausalDrainFacts, CausalErrorFacts, CausalErrorIdentity, CausalOutcomeDecision, CausalOutcomeInput, CausalProcessFacts, CausalRecoveryConfig, CausalTerminalFacts, error_identity_digest, evaluate_causal_turn_recovery, is_fatal_safety_error, normalize_error_identity
 _LONG_ERROR = "PT_AT_ERROR " + "x" * 600
-_FLAG = "BRIDGE_CAUSAL_TURN_RECOVERY_ENABLED"
+_FLAG, _ALIAS = "BRIDGE_CAUSAL_TURN_RECOVERY_ENABLED", "AGY_CAUSAL_RECOVERY_ENABLED"
 def _facts(error_seq: int = 321, completion_seq: int = 370, returncode: int | None = 1, text: str = _LONG_ERROR) -> CausalOutcomeInput:
     normalized, digest = normalize_error_identity(text), error_identity_digest(text)
-    return CausalOutcomeInput(CausalRecoveryConfig(True, True, 0), CausalErrorFacts(CausalErrorIdentity(error_seq, 0, digest, len(normalized)), True, "ERROR", digest), CausalCompletionFacts(completion_seq, 0, True, True), CausalTerminalFacts(CausalDrainFacts(True, True, True), CausalProcessFacts(True, returncode, False), "closed", False))
+    return CausalOutcomeInput(CausalRecoveryConfig(True, True, 0, is_fatal_safety_error(text)), CausalErrorFacts(CausalErrorIdentity(error_seq, 0, digest, len(normalized)), True, "ERROR", digest), CausalCompletionFacts(completion_seq, 0, True, True), CausalTerminalFacts(CausalDrainFacts(True, True, True), CausalProcessFacts(True, returncode, False), "closed", False))
 def _changed(group: str, **changes: object) -> CausalOutcomeInput:
     facts = _facts()
     if group == "identity":
@@ -38,10 +38,10 @@ def test_primary_and_sister_exact_echo(error_seq: int, completion_seq: int) -> N
     decision = evaluate_causal_turn_recovery(facts)
     assert (decision.recovered, decision.allow_reconcile, decision.clear_error) == (True,) * 3
     assert (decision.outcome_mode, decision.reason) == ("causal_echo_only", "causal_echo_recovered")
-@pytest.mark.parametrize("returncode,mode", ((1, "causal_echo_only"), (0, "causal_echo_zero_rc")))
-def test_content_safety_echo(returncode: int, mode: str) -> None:
-    decision = evaluate_causal_turn_recovery(_facts(returncode=returncode, text="Content safety: request rejected"))
-    assert decision.recovered and decision.allow_reconcile and decision.clear_error and decision.outcome_mode == mode
+@pytest.mark.parametrize("text", ("Content safety: request rejected", "Safety filter blocked the request", "Policy violation detected"))
+def test_safety_rejection_is_never_recovered(text: str) -> None:
+    decision = evaluate_causal_turn_recovery(_facts(returncode=1, text=text))
+    assert (decision.recovered, decision.allow_reconcile, decision.clear_error, decision.reason) == (False, False, False, "fatal_safety_error")
 @pytest.mark.parametrize("group,field,value,reason", (("config", "master_self_heal", False, "self_heal_disabled"), ("config", "causal_recovery_enabled", False, "causal_recovery_disabled"), *(("config", "attempt", attempt, "attempt_mismatch") for attempt in (-1, 9)), *(("error", "result_status", status, "non_error_result_status") for status in ("", "DONE", "RUNNING")), ("completion", "completion_attempt", 1, "attempt_mismatch"), ("identity", "seq", -1, "missing_structured_error"), ("error", "error_from_structured_record", False, "unstructured_error"), ("identity", "sha256", "", "missing_error_identity"), ("completion", "last_completion_seq", 321, "completion_not_after_error"), ("completion", "last_completion_seq", 320, "completion_not_after_error"),
     ("identity", "attempt", 1, "attempt_mismatch"), ("completion", "completion_attempt", -1, "attempt_mismatch"), ("error", "result_error_sha256", "", "error_identity_mismatch"), ("error", "result_error_sha256", "other", "error_identity_mismatch"), ("completion", "completion_done_without_tools", False, "completion_has_tools"), ("completion", "has_final_text", False, "missing_final_text"), ("terminal", "has_late_error_or_open_step", True, "late_error_or_open_step"), ("process", "has_fatal_error", True, "fatal_error"), ("drain", "explicit_drain_complete", False, "drain_not_explicit"), ("drain", "drain_complete", False, "drain_incomplete"),
     ("drain", "producer_stopped", False, "producer_not_stopped"), ("terminal", "tool_status", "open", "tools_not_closed"), ("terminal", "tool_status", "unknown", "tools_not_closed"), ("terminal", "tool_status", "malformed", "tools_not_closed"), ("process", "process_exited", False, "process_not_exited"), *(("process", "returncode", rc, "unsupported_returncode") for rc in (None, -11, 139, 128, 2)),))
@@ -193,7 +193,7 @@ def test_recovery_switch_veto(tmp_path: Path, env_value: str, json_value: bool |
     if json_value is not None:
         _ = path.write_text(json.dumps({_FLAG: json_value}))
     assert done.read_recovery_switch(path, 256, {_FLAG: env_value}, tmp_path / "absent") is expected
-    assert done.read_recovery_switch(path, 256, {"AGY_SELF_HEAL_INTERRUPTED_TURN": "false"}) is False
+    assert done.read_recovery_switch(path, 256, {_ALIAS: "false"}, tmp_path / "absent", done.RecoveryAliases((_ALIAS,))) is False
     for limit in (0, True):
         assert done.read_recovery_switch(path, limit, {}, tmp_path / "absent") is False
 @pytest.mark.parametrize("body", (b"{", b"[]", b"[true]", b"\xff", b" " * 257, b'{"BRIDGE_CAUSAL_TURN_RECOVERY_ENABLED":1}', b'{"BRIDGE_CAUSAL_TURN_RECOVERY_ENABLED":"true"}', b'{"causal_turn_recovery_enabled":null}'))
