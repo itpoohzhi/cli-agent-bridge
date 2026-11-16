@@ -317,7 +317,7 @@
         ]
       },
       "per_request_headers": {
-        "x-opencode-session": "{uuid4}"
+        "x-opencode-session": "{session_affinity}"
       },
       "default_body_extra": {
         "thinking": {
@@ -345,7 +345,7 @@
         ]
       },
       "per_request_headers": {
-        "x-opencode-session": "{uuid4}"
+        "x-opencode-session": "{session_affinity}"
       }
     },
     "deepseek-direct": {

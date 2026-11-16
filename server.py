@@ -178,7 +178,7 @@ from core.chat_key import (  # noqa: E402
     digest_of,
     resolve_chat_key as resolve_chat_key,
 )
-from core.usage_wire import normalize_prompt_cache_details, positive_wire_usage  # noqa: E402
+from core.usage_wire import build_wire_usage, extract_cache_read_tokens, normalize_prompt_cache_details, positive_wire_usage  # noqa: E402
 from core.watchdog import (  # noqa: E402,F401
     DEFAULT_IDLE_TIMEOUT_S,
     DEFAULT_SAFETY_CAP_S,
@@ -3746,7 +3746,7 @@ def _map_usage(token_usage: Any) -> dict:
         "input_tokens": num("inputTokens"),
         "output_tokens": num("outputTokens"),
         "cache_creation_tokens": opt_num("cacheCreationTokens"),
-        "cache_read_tokens": opt_num("cacheReadTokens"),
+        "cache_read_tokens": extract_cache_read_tokens(tu),
         "thinking_tokens": num("thinkingTokens"),
     }
 
@@ -3762,16 +3762,9 @@ def _wire_usage(
     prompt_tokens: Any, completion_tokens: Any, cache_read_tokens: Any
 ) -> dict:
     """Wire-`usage` OpenAI-контракта: `prompt_tokens_details` — только при известном кэше."""
-    wire = {
-        "prompt_tokens": prompt_tokens,
-        "completion_tokens": completion_tokens,
-        "total_tokens": prompt_tokens + completion_tokens,
-    }
-    details, inconsistent = normalize_prompt_cache_details(
-        prompt_tokens, cache_read_tokens
+    wire, inconsistent = build_wire_usage(
+        prompt_tokens, completion_tokens, cache_read_tokens, input_includes_cache=True
     )
-    if details is not None:
-        wire["prompt_tokens_details"] = details
     if inconsistent:
         _log(
             "usage_cache_inconsistent prompt_tokens=%r cache_read_tokens=%r"
