@@ -33,6 +33,15 @@ _FATAL_FINISH_REASONS: frozenset[str] = frozenset(
 )
 
 
+def _normalize_safety_unicode(text: str) -> str:
+    """Убрать Unicode-маскировку, не нормализуя ASCII-дампы."""
+    if text.isascii():
+        return text
+    text = unicodedata.normalize("NFKD", text)
+    text = "".join(c for c in text if unicodedata.category(c) not in ("Mn", "Mc", "Me", "Cf"))
+    return unicodedata.normalize("NFKC", text)
+
+
 def is_fatal_safety_error(text: str | None) -> bool:
     """Распознаёт отказ защитных механизмов: такой ход не восстанавливается."""
     cur = text or ""
@@ -52,9 +61,7 @@ def is_fatal_safety_error(text: str | None) -> bool:
             cur = re.sub(r"\\+x([0-9a-fA-F]{2})", lambda m: chr(int(m.group(1), 16)), cur)
             cur = re.sub(r"\\+([0-7]{3})", lambda m: chr(int(m.group(1), 8)), cur)
             cur = cur.replace('\\"', '"').replace("\\'", "'")
-        cur = unicodedata.normalize("NFKD", cur)
-        cur = "".join(c for c in cur if unicodedata.category(c) not in ("Mn", "Mc", "Me", "Cf"))
-        cur = unicodedata.normalize("NFKC", cur)
+        cur = _normalize_safety_unicode(cur)
         if cur == prev:
             break
     else:
@@ -62,7 +69,7 @@ def is_fatal_safety_error(text: str | None) -> bool:
             return True  # Неразрешённое остаточное кодирование: fail-closed.
     lowered = cur.replace("+", " ").casefold()
     has_block = bool(re.search(
-        r"""\b(?:block_reason|blockreason)\b["\x27]?\s*[:=]\s*(?!["\x27]?(?:null|none)["\x27]?(?:\b|[^\w])|""|\x27\x27|\[\s*\]|\{\s*\})[^\s,;}]""",
+        r"""\b(?:block_reason|blockreason)\b["\x27]?\s*[:=]\s*(?!["\x27]?(?:null|none)["\x27]?(?:[\s,;}\]]|$)|""|\x27\x27|\[\s*\]|\{\s*\})[^\s,;}\]]""",
         lowered,
     ))
     finish_reasons = re.findall(r"""\b(?:finish_reason|finishreason|stop_reason|stopreason)\b["']?\s*[:=]\s*["']?([\w-]+)""", lowered)

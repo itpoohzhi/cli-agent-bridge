@@ -76,14 +76,14 @@ class InterruptionTailState:
             causal.is_fatal_safety_error(f"{k}: {v}")
             for k, v in rec.items()
             if str(k).lower() in ("block_reason", "blockreason", "finish_reason", "finishreason", "stop_reason", "stopreason", "reason", "error", "message") and v is not None
-        ) or causal.is_fatal_safety_error(text) or causal.is_fatal_safety_error(json.dumps(rec, default=str))
+        )
         if struct_safety:
             self.had_safety_error = True
             self.final_planner, self.final_planner_content = False, ""
             self.has_open_planner_after_completion = True
             return
         done = str(rec.get("status", DONE_STATUS)).upper() == DONE_STATUS
-        self.final_planner = bool(text.strip()) and not has_tools and done
+        self.final_planner = idx >= 0 and bool(text.strip()) and not has_tools and done
         self.has_open_planner_after_completion = not self.final_planner
         self.final_planner_content = text if self.final_planner else ""
         if self.final_planner:

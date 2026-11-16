@@ -180,8 +180,7 @@ def test_empty_block_reason_is_neutral(value: str) -> None:
 
 @pytest.mark.parametrize("metadata", (
     {"finishReason": "SAFETY"}, {"blockReason": {"code": "OTHER"}},
-    {"block_reason": ["OTHER"]}, {"details": {"finishReason": "SAFETY"}},
-    {"content": "sa\u0301fety: request rejected"},
+    {"block_reason": ["OTHER"]},
 ))
 def test_planner_safety_invalidates_previous_completion(metadata: dict[str, object]) -> None:
     tail = recovery.InterruptionTailState()
@@ -201,3 +200,30 @@ def test_planner_safety_blocks_replay(monkeypatch: pytest.MonkeyPatch, tmp_path:
     assert getattr(tail, "had_safety_error", False)
     _, out = flow._serve_replay(bridge, flow._make_run(tail))
     assert (out["state"], out["rc"], out["text"]) == ("agy_error", 1, "")
+
+
+@pytest.mark.parametrize("value", ("none-other", "null/blocked"))
+def test_nonempty_block_reason_with_neutral_prefix_is_safety(value: str) -> None:
+    assert is_fatal_safety_error(json.dumps({"blockReason": value}))
+
+
+@pytest.mark.parametrize("text", ("Rust ensures memory safety at compile time", "safety policy overview", "refusal", "recitation", "sa\u0301fety: request rejected"))
+@pytest.mark.parametrize("field", ("content", "thinking"))
+def test_planner_free_prose_is_not_safety_metadata(text: str, field: str) -> None:
+    tail = recovery.InterruptionTailState()
+    tail.note_planner_record({"content": "Final answer", "status": "DONE", field: text}, 1)
+    assert not tail.had_safety_error
+    assert tail.final_planner
+    assert tail.final_planner_content == (text if field == "content" else "Final answer")
+
+
+@pytest.mark.parametrize("idx", (3, None))
+def test_planner_safety_prevents_live_delivery(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, idx: int | None) -> None:
+    bridge = flow._load_bridge(monkeypatch, tmp_path)
+    tail = flow._make_tail(bridge, (1,), 2)
+    delivered: list[tuple[object, ...]] = []
+    monkeypatch.setattr(tail, "emit_content", lambda *args: delivered.append(args) or True)
+    tail._emit_record(json.dumps(dict(type="PLANNER_RESPONSE", step_index=idx, content="Blocked answer", finishReason="SAFETY")).encode())
+    assert delivered == []
+    assert getattr(tail, "had_safety_error", False)
+    assert not getattr(tail, "final_planner", False)

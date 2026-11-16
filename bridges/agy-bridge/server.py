@@ -4556,8 +4556,23 @@ class _TranscriptTail(InterruptionTailState):
         if rtype != "PLANNER_RESPONSE":
             self.note_error_record(rtype, rec, idx)
             return
+        self._emit_planner_record(rec, idx)
+
+    def _emit_planner_record(self, rec: dict[str, object], idx: int | None) -> None:
+        """Проверить метаданные до отправки и фиксации planner-шагa."""
         if self.usage_enabled:
             self._record_usage(rec)
+        self.note_planner_record(rec, idx if idx is not None else -1)
+        if getattr(self, "had_safety_error", False):
+            return
+        self._emit_planner_content(rec, idx)
+        if idx is None:
+            return
+        thinking = rec.get("thinking")
+        self._apply_final(idx, thinking if isinstance(thinking, str) else "")
+
+    def _emit_planner_content(self, rec: dict[str, object], idx: int | None) -> None:
+        """Передать проверенный planner-контент с прежней изоляцией преамбул."""
         content = rec.get("content")
         emit_content = self.emit_content
         has_tools = bool(rec.get("tool_calls"))
@@ -4569,29 +4584,26 @@ class _TranscriptTail(InterruptionTailState):
         isolate_tools = getattr(self, "isolate_tool_preambles", False)
         if emit_content is not None and isinstance(content, str) and content.strip():
             if has_tools and isolate_tools:
-                run_ref = getattr(self, "run_ref", None)
-                claimed = False
-                if run_ref is not None and hasattr(run_ref, "claim_preamble"):
-                    claimed = run_ref.claim_preamble(idx, source="transcript")
-                else:
-                    preambles = getattr(self, "_preambles_emitted", None)
-                    if preambles is None:
-                        preambles = self._preambles_emitted = set()
-                    key_idx = idx if idx is not None else -1
-                    if key_idx not in preambles:
-                        _add_preamble_bounded(preambles, key_idx)
-                        claimed = True
-                if claimed:
+                if self._claim_planner_preamble(idx):
                     _ = self.emit(idx if idx is not None else 0, content + "\n\n", None)
             else:
                 _ = emit_content(
                     idx, content
                 )  # live planner-текст, независимо от tool_calls
-        if idx is None:
-            return
-        self.note_planner_record(rec, idx)
-        thinking = rec.get("thinking")
-        self._apply_final(idx, thinking if isinstance(thinking, str) else "")
+
+    def _claim_planner_preamble(self, idx: int | None) -> bool:
+        """Зарегистрировать преамбулу ровно один раз перед отправкой."""
+        run_ref = getattr(self, "run_ref", None)
+        if run_ref is not None and hasattr(run_ref, "claim_preamble"):
+            return run_ref.claim_preamble(idx, source="transcript")
+        preambles = getattr(self, "_preambles_emitted", None)
+        if preambles is None:
+            preambles = self._preambles_emitted = set()
+        key_idx = idx if idx is not None else -1
+        if key_idx in preambles:
+            return False
+        _add_preamble_bounded(preambles, key_idx)
+        return True
 
     # ---- состояние шагов -----------------------------------------------------------
     def _state(self, idx: int) -> _StepState:
