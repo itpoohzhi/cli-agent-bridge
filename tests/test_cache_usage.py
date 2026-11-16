@@ -181,6 +181,20 @@ class TestCacheUsageHttp(BridgeCase):
         return frames
 
     # -- normal JSON ------------------------------------------------------
+    def test_new_cache_aliases_json_and_sse(self):
+        for cache in ({"prompt_cache_hit_tokens": 40}, {"cached_tokens": 40},
+                      {"prompt_tokens_details": {"cached_tokens": 40}}):
+            for streaming in (False, True):
+                with self.subTest(cache=cache, streaming=streaming):
+                    self._scenario({"inputTokens": 100, "outputTokens": 5, **cache})
+                    status, raw = self._post(self._body(stream=streaming))
+                    self.assertEqual(status, 200)
+                    payloads = self._sse_frames(raw) if streaming else [json.loads(raw)]
+                    usage = next(item["usage"] for item in payloads if isinstance(item, dict) and item.get("usage"))
+                    self.assertEqual(usage["prompt_tokens"], 100)
+                    self.assertEqual(usage["prompt_tokens_details"]["cached_tokens"], 40)
+                    self.assertNotIn("cached_tokens", usage)
+
     def test_http_normal_cache_usage(self):
         self._scenario({"inputTokens": 100, "outputTokens": 5, "cacheReadTokens": 40})
         status, body = self._post_json(self._body())
@@ -188,6 +202,7 @@ class TestCacheUsageHttp(BridgeCase):
         assert body is not None
         self.assertEqual(body["usage"]["prompt_tokens"], 100)
         self.assertEqual(body["usage"]["prompt_tokens_details"], {"cached_tokens": 40})
+        self.assertNotIn("cached_tokens", body["usage"])
 
     def test_http_normal_absent_cache(self):
         self._scenario({"inputTokens": 100, "outputTokens": 5})
@@ -196,6 +211,7 @@ class TestCacheUsageHttp(BridgeCase):
         assert body is not None
         # Нет данных кэша — ключ отсутствует, ноль не синтезируется.
         self.assertNotIn("prompt_tokens_details", body["usage"])
+        self.assertNotIn("cached_tokens", body["usage"])
 
     def test_http_normal_zero_cache(self):
         self._scenario({"inputTokens": 100, "outputTokens": 5, "cacheReadTokens": 0})
@@ -203,6 +219,7 @@ class TestCacheUsageHttp(BridgeCase):
         self.assertEqual(status, 200)
         assert body is not None
         self.assertEqual(body["usage"]["prompt_tokens_details"], {"cached_tokens": 0})
+        self.assertNotIn("cached_tokens", body["usage"])
 
     def test_http_normal_equal_cache(self):
         self._scenario({"inputTokens": 100, "outputTokens": 5, "cacheReadTokens": 100})
@@ -210,6 +227,7 @@ class TestCacheUsageHttp(BridgeCase):
         self.assertEqual(status, 200)
         assert body is not None
         self.assertEqual(body["usage"]["prompt_tokens_details"], {"cached_tokens": 100})
+        self.assertNotIn("cached_tokens", body["usage"])
 
     def test_inconsistent_cache_usage_logged(self):
         self._scenario({"inputTokens": 10, "outputTokens": 5, "cacheReadTokens": 50})
@@ -218,6 +236,7 @@ class TestCacheUsageHttp(BridgeCase):
         self.assertEqual(status, 200)
         assert body is not None
         self.assertNotIn("prompt_tokens_details", body["usage"])
+        self.assertNotIn("cached_tokens", body["usage"])
         self.assertTrue(
             any("usage_cache_inconsistent" in line for line in lines), lines
         )
@@ -238,6 +257,7 @@ class TestCacheUsageHttp(BridgeCase):
         self.assertNotIn("cache_creation", wire)
         self.assertNotIn("cacheCreation", wire)
         self.assertEqual(body["usage"]["prompt_tokens_details"], {"cached_tokens": 40})
+        self.assertNotIn("cached_tokens", body["usage"])
 
     def test_creation_alone_yields_no_details(self):
         self._scenario(
@@ -272,6 +292,7 @@ class TestCacheUsageHttp(BridgeCase):
         self.assertEqual(
             usage_frames[0]["usage"]["prompt_tokens_details"], {"cached_tokens": 40}
         )
+        self.assertNotIn("cached_tokens", usage_frames[0]["usage"])
 
     def test_http_sse_absent_cache(self):
         self._scenario({"inputTokens": 100, "outputTokens": 5})
@@ -283,6 +304,7 @@ class TestCacheUsageHttp(BridgeCase):
         ]
         self.assertEqual(len(usage_frames), 1)
         self.assertNotIn("prompt_tokens_details", usage_frames[0]["usage"])
+        self.assertNotIn("cached_tokens", usage_frames[0]["usage"])
 
     def test_http_sse_inconsistent_cache_logged(self):
         self._scenario({"inputTokens": 10, "outputTokens": 5, "cacheReadTokens": 50})
@@ -295,6 +317,7 @@ class TestCacheUsageHttp(BridgeCase):
         ]
         self.assertEqual(len(usage_frames), 1)
         self.assertNotIn("prompt_tokens_details", usage_frames[0]["usage"])
+        self.assertNotIn("cached_tokens", usage_frames[0]["usage"])
         self.assertTrue(
             any("usage_cache_inconsistent" in line for line in lines), lines
         )
@@ -344,6 +367,7 @@ class BuildWireUsageTests(unittest.TestCase):
                 "prompt_tokens_details": {"cached_tokens": 40},
             },
         )
+        self.assertNotIn("cached_tokens", wire)
 
     def test_input_includes_cache_does_not_double_count(self) -> None:
         wire, bad = build_wire_usage(100, 5, 40, 7, input_includes_cache=True)
@@ -351,24 +375,29 @@ class BuildWireUsageTests(unittest.TestCase):
         self.assertEqual(wire["prompt_tokens"], 100)
         self.assertEqual(wire["total_tokens"], 105)
         self.assertEqual(wire["prompt_tokens_details"], {"cached_tokens": 40})
+        self.assertNotIn("cached_tokens", wire)
 
     def test_inconsistent_cache_is_dropped_without_clamp(self) -> None:
         wire, bad = build_wire_usage(10, 5, 50, input_includes_cache=True)
         self.assertTrue(bad)
         self.assertNotIn("prompt_tokens_details", wire)
+        self.assertNotIn("cached_tokens", wire)
         self.assertEqual(wire["prompt_tokens"], 10)
 
     def test_zero_policy_explicit_zero_emitted_unknown_suppressed(self) -> None:
         for includes in (True, False):
             wire, _ = build_wire_usage(10, 1, 0, input_includes_cache=includes)
             self.assertEqual(wire["prompt_tokens_details"], {"cached_tokens": 0})
+            self.assertNotIn("cached_tokens", wire)
             wire, _ = build_wire_usage(10, 1, None, input_includes_cache=includes)
             self.assertNotIn("prompt_tokens_details", wire)
+            self.assertNotIn("cached_tokens", wire)
 
     def test_creation_counts_even_without_cache_read(self) -> None:
         wire, _ = build_wire_usage(3, 2, None, 7, input_includes_cache=False)
         self.assertEqual(wire["prompt_tokens"], 10)
         self.assertNotIn("prompt_tokens_details", wire)
+        self.assertNotIn("cached_tokens", wire)
 
     def test_bad_types_become_zero(self) -> None:
         wire, _ = build_wire_usage(True, "x", None, input_includes_cache=False)
@@ -399,6 +428,7 @@ class BuildWireUsageTests(unittest.TestCase):
         self.assertEqual(wire["completion_tokens"], 4)
         self.assertEqual(wire["total_tokens"], 48896)
         self.assertEqual(wire["prompt_tokens_details"], {"cached_tokens": 12609})
+        self.assertNotIn("cached_tokens", wire)
         self.assertNotIn("cache_creation", json.dumps(wire))
 
     def test_excludes_cache_branch_has_no_cached_gt_prompt_check(self) -> None:
@@ -407,6 +437,7 @@ class BuildWireUsageTests(unittest.TestCase):
         self.assertFalse(bad)
         self.assertEqual(wire["prompt_tokens"], 12611)
         self.assertEqual(wire["prompt_tokens_details"], {"cached_tokens": 12609})
+        self.assertNotIn("cached_tokens", wire)
 
     def test_excludes_cache_branch_garbage_is_inconsistent(self) -> None:
         for bad_value in (-5, "40", 1.5, True):
@@ -416,16 +447,20 @@ class BuildWireUsageTests(unittest.TestCase):
                 )
                 self.assertTrue(bad)
                 self.assertNotIn("prompt_tokens_details", wire)
+                self.assertNotIn("cached_tokens", wire)
                 self.assertEqual(wire["prompt_tokens"], 3)
 
     def test_includes_cache_branch_checks_read_le_input(self) -> None:
         wire, bad = build_wire_usage(100, 5, 100, input_includes_cache=True)
         self.assertFalse(bad)
         self.assertEqual(wire["prompt_tokens_details"], {"cached_tokens": 100})
+        self.assertNotIn("cached_tokens", wire)
         wire, bad = build_wire_usage(100, 5, 101, input_includes_cache=True)
         self.assertTrue(bad)
         self.assertNotIn("prompt_tokens_details", wire)
+        self.assertNotIn("cached_tokens", wire)
         self.assertEqual(wire["prompt_tokens"], 100)
         wire, bad = build_wire_usage(100, 5, -1, input_includes_cache=True)
         self.assertTrue(bad)
         self.assertNotIn("prompt_tokens_details", wire)
+        self.assertNotIn("cached_tokens", wire)

@@ -1,12 +1,13 @@
 {
-  "compiled_at": "2026-11-16T00:00:00Z",
+  "compiled_at": "2026-11-16T19:28:45+0300",
   "compiler_version": 1,
-  "fleet_sha256": "26f7833b7e30e9dd5d41d620941cbd81fd8ced6257c638f431ef7aeddf9518a8",
+  "fleet_sha256": "536c2d67c85b16fa135e4d2c38549580657d250920aadc1657a43cc37c772704",
   "inputs": {
     "discovery_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
     "manifests": {
       "_fleet.yaml": "eff0416cd144dd33d31198eb132e829fefc0b081594ddbfde4657ddf08c993ee",
-      "agy.yaml": "080b22bf492a28cf9929e8c590f47142022c93fec4f8885ca288768418ca1918",
+      "agy-passthrough.yaml": "6186c9c4477ddcef24abd14daf6937c194729b9264ebba91f17faab6a2df2cd9",
+      "agy.yaml": "53b2f891eb0ce7ad91a97cc282f11f1bfa54f7128ec4c983a2c92ec944a5cc55",
       "claude-p.yaml": "cd2b0208bdac758ca6d68186b6eb65790866b6f7e29bd0fcf24ce111529318a4",
       "codex.yaml": "e7f1a1fe67c877cea6b5d5577d38dd975ef4bb09d2429df3ff3eb61b38a57447",
       "deepseek-direct.yaml": "5decd8d0524651aa79cf0a5ef0879ee65633afd2394557b0cee8e86a96b262c7",
@@ -18,7 +19,7 @@
       "opencode-go.yaml": "8d27372c95fcf802352d38e4e6f3a6c1919030ef6220d3c6c2c5808fe6077f68",
       "opencode-zen.yaml": "9239b0e1c543c23037f5407b6c64a0db04735d092ba7ccc53d197f83f91d1636"
     },
-    "manifests_sha256": "48bc666fd83a3daf77da5ca78e330fd77e312d1159ce5846ebe2805630dc1ecb"
+    "manifests_sha256": "c29a6c76abba67dcd937a72f74fc92bccdbe0cc47738de2087b080da62542231"
   },
   "models": {
     "beam-free": {
@@ -142,7 +143,11 @@
       "status": "quarantine"
     },
     "gemini-3.8-flash": {
-      "alternates": [],
+      "alternates": [
+        {
+          "provider": "agy-passthrough"
+        }
+      ],
       "efforts_proven": [],
       "family": "Google",
       "family_source": "exact_map",
@@ -178,7 +183,11 @@
       "status": "quarantine"
     },
     "gemini-4-argon": {
-      "alternates": [],
+      "alternates": [
+        {
+          "provider": "agy-passthrough"
+        }
+      ],
       "efforts_proven": [],
       "family": "Google",
       "family_source": "prefix",
@@ -190,7 +199,11 @@
       "status": "quarantine"
     },
     "gemini-4-carbon": {
-      "alternates": [],
+      "alternates": [
+        {
+          "provider": "agy-passthrough"
+        }
+      ],
       "efforts_proven": [],
       "family": "Google",
       "family_source": "prefix",
@@ -202,7 +215,11 @@
       "status": "quarantine"
     },
     "gemini-4-hydrogen": {
-      "alternates": [],
+      "alternates": [
+        {
+          "provider": "agy-passthrough"
+        }
+      ],
       "efforts_proven": [],
       "family": "Google",
       "family_source": "prefix",
@@ -453,6 +470,52 @@
         "type": "cli"
       },
       "enabled": true,
+      "kind": "stdio_resident",
+      "max_concurrent": 128,
+      "quota_group": "google-agy",
+      "timeout_s": 600.0
+    },
+    "agy-passthrough": {
+      "allow_base_url": [
+        {
+          "host": "127.0.0.1",
+          "path_prefix": "/v1",
+          "port": 9887,
+          "scheme": "http"
+        }
+      ],
+      "bridge": true,
+      "direct": {
+        "argv_by_executable": {
+          "~/.config/agy-launch/agy-cli.sh": [
+            "-p",
+            "{prompt}",
+            "--model",
+            "{slot}",
+            "--output-format",
+            "text"
+          ],
+          "~/.local/bin/agy.real": [
+            "--model",
+            "{slot}",
+            "--effort",
+            "{effort}",
+            "--disable-slash-commands",
+            "--output-format",
+            "text"
+          ]
+        },
+        "executables": [
+          "~/.config/agy-launch/agy-cli.sh",
+          "~/.local/bin/agy.real"
+        ],
+        "output": {
+          "format": "text"
+        },
+        "prompt_via": "argv",
+        "type": "cli"
+      },
+      "enabled": false,
       "kind": "passthrough",
       "max_concurrent": 128,
       "quota_group": "google-agy",

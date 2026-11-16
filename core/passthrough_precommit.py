@@ -160,17 +160,22 @@ def _validate(adapter: Any, sink: PrecommitSink) -> None:
         except ValueError as exc:
             raise_error(OSError(redact_diagnostic_text(str(exc))))
 def open_response( adapter: Any, sink: PrecommitSink, slide: SlidingDeadline,
-    transport: tuple[str, bytes, Mapping[str, str]], controls: tuple[
+    transport: tuple[str, bytes, Mapping[str, str]]
+    | tuple[str, bytes, Mapping[str, str], Mapping[str, str] | None],
+    controls: tuple[
         float, Callable[[socket.socket], None], Callable[[bool], None], bool ],
 ) -> tuple[http.client.HTTPConnection, http.client.HTTPResponse]:
     """Сохраняет контракт открытия, таймаут сокета и закрытие при любом отказе."""
     _validate(adapter, sink)
-    path, body, headers = transport
+    path = transport[0]
+    body = transport[1]
+    headers = transport[2]
+    upstream_headers = transport[3] if len(transport) > 3 else None
     deadline, on_socket, on_pooling, internal = controls
     conn = cast( http.client.HTTPConnection, adapter._open( path, body, headers,
             deadline=deadline, on_socket=on_socket,
             presend_deadline=getattr(sink, "presend_deadline", None),
-            on_pooling=on_pooling, ), )
+            on_pooling=on_pooling, upstream_headers=upstream_headers, ), )
     try:
         if sink.client_gone():
             raise_error(adapter._client_gone_exc())
