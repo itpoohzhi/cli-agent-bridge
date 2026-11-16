@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from core.http_post_context import PostRequestContext
-from core.http_post_ingress import begin_post, read_post_request
+from core.http_post_dispatch_guard import begin_post, enforce_ingress, read_post_request
 from core.http_post_routing import (
     PostRoute, PreparedPostBody, log_route, native_autonomy, native_effort,
     prepare_post_body, prepare_route_request, resolve_post_route, selected_route_allowed,
@@ -68,10 +68,8 @@ def _native_parameters(route: PostRoute) -> dict[str, Any] | None:
         "target_model": route.host.resolve_target_model(route.model, route.model_id),
         "backend": route.model["backend"],
         "model_len": route.model_len,
-        "effort": effort[0],
-        "effort_source": effort[1],
-        "autonomy": autonomy[0],
-        "autonomy_source": autonomy[1],
+        "effort": effort[0], "effort_source": effort[1],
+        "autonomy": autonomy[0], "autonomy_source": autonomy[1],
     }
 
 
@@ -243,7 +241,10 @@ def _serve_native(route: PostRoute, ctx: dict[str, Any]) -> None:
 
 def dispatch_route(route: PostRoute, body: PreparedPostBody | None = None) -> None:
     """Разделяет raw passthrough и CLI, не повторяя исполненный POST."""
-    if not selected_route_allowed(route):
+    if not enforce_ingress(
+        route.ingress, route.model_id, route.model.get("backend"),
+        route.request.get("reasoning_effort", route.alias_effort), route.request,
+    ) or not selected_route_allowed(route):
         return
     adapter = route.host.BACKENDS.get(route.model["backend"])
     if isinstance(adapter, route.host.PassthroughAdapter):
@@ -260,7 +261,7 @@ def dispatch_route(route: PostRoute, body: PreparedPostBody | None = None) -> No
             _serve_native(route, ctx)
     finally:
         managed = ctx.get("managed_turn")
-        if managed is not None and not ctx["attached_existing"] and managed.is_active:
+        if getattr(managed, "is_active", False) and not ctx["attached_existing"]:
             route.host.TURN_MANAGER.finalize_abandoned_turn(managed)
 
 
@@ -278,6 +279,8 @@ def _cleanup_post(context: PostRequestContext) -> None:
 def dispatch_post(context: PostRequestContext) -> None:
     """Владеет общим cleanup принятого тела, в том числе при раннем отказе."""
     try:
+        if not read_post_request(context):
+            return
         route = resolve_post_route(context)
         if route is not None:
             dispatch_route(route)
@@ -288,13 +291,5 @@ def dispatch_post(context: PostRequestContext) -> None:
 def handle_post(handler: Any, host: Any) -> None:
     """Точка композиции для короткого do_POST, без обратного импорта server."""
     context = begin_post(handler, host)
-    if context is None:
-        return
-    accepted = False
-    try:
-        accepted = read_post_request(context)
-        if accepted:
-            dispatch_post(context)
-    finally:
-        if not accepted:
-            _cleanup_post(context)
+    if context is not None:
+        dispatch_post(context)
