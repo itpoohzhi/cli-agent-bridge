@@ -16,6 +16,7 @@ from core.catalog_routes import (
     _identifier as _identifier,  # pyright: ignore[reportPrivateUsage]
     _priority as _priority,  # pyright: ignore[reportPrivateUsage]
     canonical_routes_bytes as canonical_routes_bytes,
+    compile_routing_tuple as compile_routing_tuple,
     parse_route as parse_route,
     parse_routes as parse_routes,
     route_order_key as route_order_key,
@@ -79,3 +80,26 @@ def validate_model_routing(raw: object, backends: Collection[str]) -> RoutingDoc
         disabled_backend=_identifier(doc["disabled_backend"]),
         routes=routes,
     )
+
+
+def normalize_model_routing(
+    model: Mapping[str, object],
+    backends: Collection[str],
+    primary_provider_id: str,
+) -> RoutingDocument | None:
+    """Нормализует routing только в памяти и сверяет внутренний owner tuple.
+
+    Отсутствующий routing остаётся singleton без синтетических полей.
+    canonical_owner, если задан, обязан совпадать с backend; owned_by —
+    независимый HTTP-атрибут, не источник внутренней идентичности.
+    Входная модель, вложенные маршруты и сохранённый каталог не меняются.
+    """
+    projection = dict(model)
+    routing = None
+    if "routing" in model:
+        routing = validate_model_routing(model["routing"], backends)
+        projection["routing"] = routing
+    backend, _, _, _ = compile_routing_tuple(projection, primary_provider_id)
+    if backend not in backends:
+        raise ValueError("routing_backend_unknown")
+    return routing

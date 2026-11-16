@@ -9,10 +9,9 @@ from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, field
 from typing import Any, TypeAlias, Unpack
 
-from core import compile_model_records as records
+from core import compile_model_records as records, routing_schema as schema
 from core.backend_adapter import FleetViolation, build_catalog
 from core.catalog_routes import compile_model_routing, provider_route, provider_routing
-from core.routing_schema import RoutingDocument, route_owner_key
 
 Candidate: TypeAlias = tuple[records.ManifestLike, Mapping[str, Any]]
 
@@ -88,9 +87,13 @@ def _check(state: CompileState, backends: Mapping[str, Any], models: list[Any]) 
     synthetic = dict(state.header, backends=dict(backends), models=models)
     synthetic["default_model"] = models[0]["id"] if models else "-"
     try:
+        for model in models:
+            _ = schema.normalize_model_routing(model, backends, model["backend"])
         build_catalog(synthetic, state.kinds, mode="strict", image_probe=False)
     except FleetViolation as violation:
         return violation.reason
+    except ValueError as error:
+        return str(error)
     return ""
 
 
@@ -140,13 +143,15 @@ def _history_max(options: records.CompileOptions) -> int:
 def _weighted_source(enabled: list[Candidate]) -> Candidate | None:
     """Выбирает владельца независимо от сериализации singleton routing."""
     if enabled and any(provider_routing(p).weight is not None for p, _ in enabled):
-        return min(enabled, key=lambda item: route_owner_key(provider_route(item[0])))
+        return min(
+            enabled, key=lambda item: schema.route_owner_key(provider_route(item[0]))
+        )
     return None
 
 
 def _select(
     providers: list[Candidate],
-) -> tuple[records.ManifestLike, Candidate | None, RoutingDocument | None]:
+) -> tuple[records.ManifestLike, Candidate | None, schema.RoutingDocument | None]:
     bridged = [item for item in providers if item[0].transport.bridge is not None]
     primary = next((p for p, _ in providers if p.enabled), providers[0][0])
     enabled = [item for item in bridged if item[0].enabled]
@@ -155,7 +160,6 @@ def _select(
     routing = None
     if weighted is not None:
         fleet_source = weighted
-        primary = fleet_source[0]
         if len(enabled) > 1:
             routing = compile_model_routing(
                 [provider for provider, _ in enabled], bridged[0][0].provider_id
@@ -166,22 +170,23 @@ def _select(
 def _compile_model(state: CompileState, model_id: str, history_max: int) -> None:
     providers = state.candidates[model_id]
     owner, fleet_source, routing = _select(providers)
+    owner = fleet_source[0] if fleet_source is not None else owner
     proof = records.model_proof(
         owner, model_id, state.fingerprints[owner.provider_id], state.options
     )
     if fleet_source is not None:
         manifest, meta = fleet_source
-        record = records.model_record(
-            manifest, model_id, meta, proof.receipt if manifest is owner else None
-        )
+        record = records.model_record(manifest, model_id, meta, proof.receipt)
         backend = dict(state.backends[manifest.provider_id], enabled=True)
-        reason = _check(state, {manifest.provider_id: backend}, [record])
+        if routing is not None:
+            record["routing"] = routing
+        reason = _check(
+            state, {**state.backends, manifest.provider_id: backend}, [record]
+        )
         if reason:
             state.rejected[model_id] = reason
             state.rejected_by[model_id] = manifest.provider_id
             return
-        if routing is not None:
-            record["routing"] = routing
         state.models[model_id] = record
         state.owners[model_id] = manifest.provider_id
     alternates = [{"provider": p.provider_id} for p, _ in providers if p is not owner]
