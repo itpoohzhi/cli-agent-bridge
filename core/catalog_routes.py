@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import importlib
 import json
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
@@ -169,6 +170,11 @@ class RouteProvider(Protocol):
     def routing(self) -> RoutingWeight: ...
 
 
+class _Availability(Protocol):
+    @property
+    def reason(self) -> str: ...
+
+
 def provider_routing(provider: RouteProvider) -> RoutingConfig:
     """Поддерживает старый DTO без routing, но не маскирует плохой вес."""
     declared: RoutingWeight = getattr(provider, "routing", RoutingConfig())
@@ -191,6 +197,44 @@ def provider_route(provider: RouteProvider) -> RouteRecord:
     )
 
 
+def compile_routing_tuple(
+    model: Mapping[str, object], primary_provider_id: str
+) -> tuple[str, str, str, str]:
+    """Сверяет (backend, canonical_owner, legacy_backend, primary_provider_id).
+
+    При отсутствии routing singleton сохраняет внутренний backend. Проверка
+    принадлежности делегирована C1-3 без actual edges: отсутствие доступных
+    рёбер не меняет идентичность каталога и не запускает healing/policy.
+    """
+    # Предикаты зависят от validate_weight; обратный шов разрешается при вызове.
+    eligibility = importlib.import_module("core.route_eligibility")
+    result = cast(
+        _Availability,
+        eligibility.aggregate_model_availability(model, (), primary_provider_id),
+    )
+    if result.reason == "owner_mismatch":
+        raise ValueError("owner_mismatch")
+    backend = _identifier(model.get("backend"))
+    legacy_backend = backend
+    routing = model.get("routing")
+    if routing is not None:
+        if not isinstance(routing, Mapping):
+            raise ValueError("routing_invalid")
+        document = cast(Mapping[str, object], routing)
+        routes = parse_routes(document.get("routes"))
+        if not routes:
+            raise ValueError("routing_routes_empty")
+        legacy_backend = _identifier(document.get("legacy_backend"))
+        if backend not in {route["backend"] for route in routes}:
+            raise ValueError("routing_owner_unknown")
+    return (
+        backend,
+        _identifier(model.get("canonical_owner", backend)),
+        legacy_backend,
+        _identifier(primary_provider_id),
+    )
+
+
 def compile_model_routing(
     providers: Iterable[RouteProvider], legacy_backend: str
 ) -> RoutingDocument:
@@ -210,7 +254,7 @@ def compile_model_routing(
     owner = min(routes, key=route_owner_key)["backend"]
     backends = {route["backend"] for route in routes}
     disabled_backend = legacy_backend if legacy_backend in backends else owner
-    return RoutingDocument(
+    routing = RoutingDocument(
         algorithm=ROUTING_ALGORITHM,
         enabled=any(
             provider_routing(provider).weight is not None for provider in eligible
@@ -220,3 +264,5 @@ def compile_model_routing(
         disabled_backend=disabled_backend,
         routes=routes,
     )
+    _ = compile_routing_tuple({"backend": owner, "routing": routing}, owner)
+    return routing
