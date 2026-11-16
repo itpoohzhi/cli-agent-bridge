@@ -15,6 +15,7 @@ from core.activity_window import ActivityWindow as W
 from core.effort_policy import resolve_alias_effort as e
 from core.route_health_policy import AttemptDecision as A, CanonDigestResult as D, FailureCategory as F, HealthReason as H, NormalizedModelRoute as M, RetryBudgetConfig as C, RetryReason as R, RouteHealthStatus as S, advance_sliding_deadline as d, classify_provider_failure as c, compute_attempt_decision as a, detect_effective_env_drift as v, evaluate_route_health as h, inspect_canon_payload as k, normalize_model_route as n, redact_diagnostic_text as x, validate_retry_config as y
 from core.stream_interruption_recovery import evaluate_stream_retry_eligibility as r, is_transient_stream_interruption as t
+import core.stream_interruption_recovery as recovery
 
 U = "403 OAuth refresh rejected: token refresh failed"
 T = "per_attempt_upper duration_s=18.288681"
@@ -118,6 +119,92 @@ def test_retry_filter() -> None:
     stricter = r(error_text=P, delivered=False, attempt=1, max_attempts=3, budget_config=C(max_attempts=1))
     assert stricter.can_retry is False and stricter.keep_hot_session is True
 
+@pytest.mark.parametrize("kw,can,hot", (
+    ({"error_text": P, "delivered": False, "attempt": 0, "max_attempts": 1}, True, True),
+    ({"error_text": P, "delivered": False, "attempt": 1, "max_attempts": 1}, False, True),
+    ({"error_text": P, "delivered": False, "attempt": 1, "max_attempts": 5}, True, True),
+    ({"error_text": P, "delivered": False, "attempt": 2, "max_attempts": 5}, False, True),
+    ({"error_text": P, "delivered": False, "attempt": 0, "max_attempts": 0}, False, True),
+    ({"error_text": P, "delivered": False, "attempt": 0, "max_attempts": -1}, False, True),
+    ({"error_text": P, "delivered": False, "budget_config": C(max_attempts=0)}, False, True),
+    ({"error_text": P, "delivered": True, "budget_config": C(max_attempts=0)}, False, True),
+    ({"error_text": P, "delivered": False, "had_tool_side_effects": True, "budget_config": C(max_attempts=0)}, False, False),
+    ({"error_text": "ordinary message", "delivered": False, "max_attempts": 0}, False, False),
+    ({"error_text": P, "delivered": False, "max_attempts": 0, "source": "MODEL_CONTENT"}, False, False),
+    ({"error_text": P, "delivered": False, "max_attempts": 0, "elapsed_s": float("nan")}, False, False),
+    ({"error_text": P, "delivered": False, "max_attempts": 0, "attempt": True}, False, False),
+    ({"error_text": P, "delivered": False, "max_attempts": 0, "budget_config": "bad"}, False, False),
+))
+def test_retry_narrowing_and_hot_session(kw: dict[str, object], can: bool, hot: bool) -> None:
+    decision = r(**kw)
+    assert (decision.can_retry, decision.keep_hot_session, decision.reason) == (can, hot, "transient_pre_delivery_retry" if can else "retry_blocked")
+
+@pytest.mark.parametrize("mode,hot", (("deny", True), ("value", False), ("type", False), ("overflow", False)))
+def test_retry_budget_denial_and_exception(monkeypatch: pytest.MonkeyPatch, mode: str, hot: bool) -> None:
+    def compute(config: C, attempt_index: int, elapsed_s: float) -> A:
+        if mode == "deny":
+            return A(False, 0.0, R.BUDGET_EXHAUSTED)
+        raise {"value": ValueError, "type": TypeError, "overflow": OverflowError}[mode]("Некорректный бюджет")
+    monkeypatch.setattr(recovery, "compute_attempt_decision", compute)
+    assert r(error_text=P, delivered=False) == recovery.RetryDecision(False, hot, "retry_blocked", 0.0)
+
+@pytest.mark.parametrize("changes,hot", (
+    ({"delivered": True}, True), ({"had_tool_side_effects": True}, False),
+    ({"source": "model_content"}, False), ({"budget_config": C(max_attempts=0)}, True),
+    ({"max_attempts": 0}, True), ({"max_attempts": True}, False),
+    ({"error_text": 123}, False), ({"delivered": 1}, False),
+))
+def test_blocked_retry_does_not_consult_budget(monkeypatch: pytest.MonkeyPatch, changes: dict[str, object], hot: bool) -> None:
+    def unexpected(config: C, attempt_index: int, elapsed_s: float) -> A:
+        raise AssertionError("Заблокированный повтор не должен запрашивать бюджет")
+    monkeypatch.setattr(recovery, "compute_attempt_decision", unexpected)
+    facts: dict[str, object] = {"error_text": P, "delivered": False}
+    facts.update(changes)
+    assert r(**facts) == recovery.RetryDecision(False, hot, "retry_blocked", 0.0)
+
+def test_resolved_falsey_budget_is_not_absent(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FalseyBudget(C):
+        def __bool__(self) -> bool:
+            return False
+    def resolve(facts: object) -> C:
+        return FalseyBudget(max_attempts=1)
+    monkeypatch.setattr(recovery, "_resolve_retry_cfg", resolve)
+    decision = r(error_text=P, delivered=False, attempt=0)
+    assert decision.can_retry is True and decision.keep_hot_session is True and decision.attempt_budget_s > 0.0
+
+@pytest.mark.parametrize("text,expected", (
+    (P + "; HTTP 408 Request Timeout", True),
+    (P + "; HTTP 425 Too Early", True),
+    (P + "; HTTP 429 Too Many Requests", True),
+    (P + "; HTTP 503 Service Unavailable", True),
+    (P + "; HTTP 500 Internal Server Error", False),
+    (P + "; HTTP 502 Bad Gateway", True),
+    (P + "; HTTP 402 Payment Required", False),
+    (P + "; HTTP 410 Gone", False),
+    (P + "; HTTP 422 Unprocessable Entity", False),
+    (P + "; got status 401", False),
+    (P + "; Error code: 400", False),
+    (P + "; status 413 Payload Too Large", False),
+    ("402 Payment Required: server disconnected", False),
+    ("eof occurred in violation of protocol", True),
+    (P + " TLS handshake timeout", False),
+    ("no such route available", False),
+    (P + "; https://example.com/a%20b", True),
+    ("connection reset; C:\\work\\logs", True),
+    ("connection reset; %2541", False),
+    ("connection reset; %252541", False),
+    ("connection reset; \\x1b[31m", False),
+    ("connection reset; \\u0031", False),
+    ("connection reset\x00", False),
+))
+def test_transient_classification_matrix(text: str, expected: bool) -> None:
+    assert t(text) is expected
+
+def test_transient_source_and_length_contract() -> None:
+    assert t(P) is True and t(P, source="cli_error") is True and t(P, source="stderr") is True and t(P, source="transport_stderr") is True
+    assert t(P, source="model_content") is False and t(P, source="MODEL_CONTENT") is False and t(P, source=" ") is False
+    assert t(None) is False and t("") is False and t(P + "; " + " ".join(["trace line"] * 700)) is True
+
 @pytest.mark.parametrize("case", ((0.0, 0.0, (), True, H.READY), (5.001, 5.0, (), False, H.STALE_HEALTH_PROBE), (-0.001, 5.0, (), False, H.STALE_HEALTH_PROBE), (1.0, 5.0, ("Z", "A"), False, H.ENV_DRIFT_DETECTED)))
 def test_health_limits(case: tuple[float, float, tuple[str, ...], bool, H]) -> None:
     age, limit, changed, available, reason = case
@@ -187,4 +274,4 @@ def test_frozen_result() -> None:
     assert c(403, U).category is F.AUTH_REFRESH_EXHAUSTED
     z = n("m")
     with pytest.raises(FrozenInstanceError): setattr(z, "canonical_model", "changed")  # noqa: B010
-    assert (ep := __import__("core.effort_policy", fromlist=["*"])) and ep.clamp_effort_downward("high", ("low", "high"), "low") == ("high", False) and ep.clamp_effort_downward("medium", ("low", "high"), "low") == ("low", True) and ep.clamp_effort_downward("unknown", ("low", "high"), "low") == ("low", True) and (spec := ep.ModelEffortSpec.from_catalog_entry({"efforts": ["LOW", "high", "bad"], "default_effort": "HIGH"})) == ep.ModelEffortSpec(("low", "high"), "high") and spec.pinned_to("medium") == ep.ModelEffortSpec(("low",), "low") and ep.resolve_model_effort_fields("m", {"m": spec}) == ep.ModelEffortCardFields("high", ("low", "high")) and ep.resolve_model_effort_fields("x", {}) is None and ep.catalog_effort_specs({"m": {"efforts": ["low", "high"], "default_effort": "high"}, "n": {}}, {"m-high": ("m", "high"), "n-high": ("n", "high")}) == {"m": spec, "m-high": ep.ModelEffortSpec(("high",), "high")} and ep.resolve_passthrough_effort("medium", None, spec, enabled=True) == ep.EffortResolution("low", True, "medium") and ep.resolve_passthrough_effort(None, "high", spec, enabled=True) == ep.EffortResolution("high", True) and ep.resolve_passthrough_effort("LOW", None, spec, enabled=True) == ep.EffortResolution("low", True) and ep.resolve_passthrough_effort("high", None, spec, enabled=True) == ep.EffortResolution() and ep.resolve_passthrough_effort(None, "high", spec, enabled=False) == ep.EffortResolution("high", True) and ep.resolve_passthrough_effort("low", "high", spec, enabled=False) == ep.EffortResolution() and ep.sanitize_effort_for_log("a\x00b", 2) == "ab" and ep.describe_clamp("effort", "high", "low", "model", 8) == "clamp effort 'high' -> 'low' for model model" and isinstance(pytest.raises(ValueError, W, 1.0, 2.0, attempt_budget_s=0.0).value, ValueError) and isinstance(pytest.raises(ValueError, W, 1.0, 2.0, attempt_budget_s=float("nan")).value, ValueError) and W(5.0, 20.0, clock=iter((10.0, 11.0)).__next__).expired is False and W(5.0, 20.0, clock=iter((10.0, 16.0)).__next__).expired is True and W(5.0, 20.0, clock=iter((10.0, 30.0)).__next__).touch() == 15.0 and W(5.0, 20.0, clock=iter((10.0, 29.0)).__next__).touch() == 30.0 and (backward := W(5.0, 20.0, clock=iter((10.0, 12.0, 11.0)).__next__)) and backward.touch() == 17.0 and backward.touch() == 17.0 and (rp := __import__("core.route_health_policy", fromlist=["*"])) and rp._decode_escape(rp._ESCAPE_TOKEN_RE.match(r"\u0009")) == " " and rp._decode_escape(rp._ESCAPE_TOKEN_RE.match(r"\uD800")) == "" and rp._decode_pct(rp._PCT_RUN_RE.match("%00")) == "" and rp._normalize_diagnostic_text("abc", max_len=10, fail_closed=False) == "abc" and rp._is_auth_failure(0, "HTTP 403: plain") is False and rp._is_auth_failure(200, "http 403: oauth") is False and rp._is_auth_failure(0, "http 403: oauth refresh") is True and rp._route_targets(M("m", "high", False)) == ("m", frozenset(("m", "m-high"))) and isinstance(pytest.raises(ValueError, h, M("m", "bad effort", False), (), 0.0, 1.0).value, ValueError) and isinstance(pytest.raises(ValueError, k, "x", "").value, ValueError) and (sr := __import__("core.stream_interruption_recovery", fromlist=["*"])) and t("connection reset; %2541") is False and t("ordinary") is False and sr.settle_error("", "old", "ERROR") == "old" and sr.settle_error("new", "old", "ERROR") == "new" and (tail := sr.InterruptionTailState()) and tail.note_error_record("ERROR_MESSAGE", {"content": P}, 2) is None and tail.note_planner_record({"content": "done", "status": "DONE"}, 3) is None and sr.trusted_final_text("", "error", tail) == "done" and sr.tail_turn_facts(tail) == {"completion_done_without_tools": True, "last_completion_seq": 3, "last_error_seq": 2, "drain_complete": True, "had_transient_error": True} and sr.resolve_done_turn_outcome(rc=0, result_error="", result_status="DONE", final_text="done", emitted_text="done").reason == "clean_done" and sr.resolve_done_turn_outcome(rc=1, result_error=P, result_status="ERROR", final_text="done", emitted_text="", completion_done_without_tools=True, last_completion_seq=3, last_error_seq=2, drain_complete=True).state == "done" and sr.resolve_done_turn_outcome(rc=1, result_error=P, result_status="ERROR", final_text="done", emitted_text="", completion_done_without_tools=True, last_completion_seq=3, last_error_seq=2, drain_complete=True).self_healed is True and sr.resolve_done_turn_outcome(rc=1, result_error="fatal", result_status="ERROR", final_text="", emitted_text="", drain_complete=True).reason == "non_transient_result_error" and r(error_text=P, delivered=False, unknown=True).can_retry is False and sr.evaluate_graceful_interruption(error_text=P, delivered_content=True).reason == "graceful_partial_close" and sr.evaluate_graceful_interruption(error_text=P, delivered_content=True, delivered_tool_calls=True).reason == "graceful_blocked"  # pyright: ignore[reportAny]
+    assert (ep := __import__("core.effort_policy", fromlist=["*"])) and ep.clamp_effort_downward("high", ("low", "high"), "low") == ("high", False) and ep.clamp_effort_downward("medium", ("low", "high"), "low") == ("low", True) and ep.clamp_effort_downward("unknown", ("low", "high"), "low") == ("low", True) and (spec := ep.ModelEffortSpec.from_catalog_entry({"efforts": ["LOW", "high", "bad"], "default_effort": "HIGH"})) == ep.ModelEffortSpec(("low", "high"), "high") and spec.pinned_to("medium") == ep.ModelEffortSpec(("low",), "low") and ep.resolve_model_effort_fields("m", {"m": spec}) == ep.ModelEffortCardFields("high", ("low", "high")) and ep.resolve_model_effort_fields("x", {}) is None and ep.catalog_effort_specs({"m": {"efforts": ["low", "high"], "default_effort": "high"}, "n": {}}, {"m-high": ("m", "high"), "n-high": ("n", "high")}) == {"m": spec, "m-high": ep.ModelEffortSpec(("high",), "high")} and ep.resolve_passthrough_effort("medium", None, spec, enabled=True) == ep.EffortResolution("low", True, "medium") and ep.resolve_passthrough_effort(None, "high", spec, enabled=True) == ep.EffortResolution("high", True) and ep.resolve_passthrough_effort("LOW", None, spec, enabled=True) == ep.EffortResolution("low", True) and ep.resolve_passthrough_effort("high", None, spec, enabled=True) == ep.EffortResolution() and ep.resolve_passthrough_effort(None, "high", spec, enabled=False) == ep.EffortResolution("high", True) and ep.resolve_passthrough_effort("low", "high", spec, enabled=False) == ep.EffortResolution() and ep.sanitize_effort_for_log("a\x00b", 2) == "ab" and ep.describe_clamp("effort", "high", "low", "model", 8) == "clamp effort 'high' -> 'low' for model model" and isinstance(pytest.raises(ValueError, W, 1.0, 2.0, attempt_budget_s=0.0).value, ValueError) and isinstance(pytest.raises(ValueError, W, 1.0, 2.0, attempt_budget_s=float("nan")).value, ValueError) and W(5.0, 20.0, clock=iter((10.0, 11.0)).__next__).expired is False and W(5.0, 20.0, clock=iter((10.0, 16.0)).__next__).expired is True and W(5.0, 20.0, clock=iter((10.0, 30.0)).__next__).touch() == 15.0 and W(5.0, 20.0, clock=iter((10.0, 29.0)).__next__).touch() == 30.0 and (backward := W(5.0, 20.0, clock=iter((10.0, 12.0, 11.0)).__next__)) and backward.touch() == 17.0 and backward.touch() == 17.0 and (rp := __import__("core.route_health_policy", fromlist=["*"])) and rp._decode_escape(rp._ESCAPE_TOKEN_RE.match(r"\u0009")) == " " and rp._decode_escape(rp._ESCAPE_TOKEN_RE.match(r"\uD800")) == "" and rp._decode_pct(rp._PCT_RUN_RE.match("%00")) == "" and rp._normalize_diagnostic_text("abc", max_len=10, fail_closed=False) == "abc" and rp._is_auth_failure(0, "HTTP 403: plain") is False and rp._is_auth_failure(200, "http 403: oauth") is False and rp._is_auth_failure(0, "http 403: oauth refresh") is True and rp._route_targets(M("m", "high", False)) == ("m", frozenset(("m", "m-high"))) and isinstance(pytest.raises(ValueError, h, M("m", "bad effort", False), (), 0.0, 1.0).value, ValueError) and isinstance(pytest.raises(ValueError, k, "x", "").value, ValueError) and (sr := __import__("core.stream_interruption_recovery", fromlist=["*"])) and t("connection reset; %2541") is False and t("ordinary") is False and sr.settle_error("", "old", "ERROR") == "old" and sr.settle_error("new", "old", "ERROR") == "new" and (tail := sr.InterruptionTailState()) and tail.note_error_record("ERROR_MESSAGE", {"content": P}, 2) is None and tail.note_planner_record({"content": "done", "status": "DONE"}, 3) is None and sr.trusted_final_text("", P, tail) == "done" and sr.trusted_final_text("", "error", tail) == "" and sr.tail_turn_facts(tail) == {"completion_done_without_tools": True, "last_completion_seq": 3, "last_error_seq": 2, "drain_complete": True, "had_transient_error": True} and sr.resolve_done_turn_outcome(rc=0, result_error="", result_status="DONE", final_text="done", emitted_text="done").reason == "clean_done" and sr.resolve_done_turn_outcome(rc=1, result_error=P, result_status="ERROR", final_text="done", emitted_text="", completion_done_without_tools=True, last_completion_seq=3, last_error_seq=2, drain_complete=True).state == "done" and sr.resolve_done_turn_outcome(rc=1, result_error=P, result_status="ERROR", final_text="done", emitted_text="", completion_done_without_tools=True, last_completion_seq=3, last_error_seq=2, drain_complete=True).self_healed is True and sr.resolve_done_turn_outcome(rc=1, result_error="fatal", result_status="ERROR", final_text="", emitted_text="", drain_complete=True).reason == "non_transient_result_error" and r(error_text=P, delivered=False, unknown=True).can_retry is False and sr.evaluate_graceful_interruption(error_text=P, delivered_content=True).reason == "graceful_partial_close" and sr.evaluate_graceful_interruption(error_text=P, delivered_content=True, delivered_tool_calls=True).reason == "graceful_blocked"  # pyright: ignore[reportAny]

@@ -122,18 +122,9 @@ from agy_runtime.stream_relay import StreamRelay  # noqa: E402 # pyright: ignore
 from agy_runtime.arbiter_types import _StepState  # noqa: E402 # pyright: ignore[reportImplicitRelativeImport]
 from agy_runtime.content_arbiter import _ContentArbiter  # noqa: E402 # pyright: ignore[reportImplicitRelativeImport]
 from agy_runtime.media_normalizer import (  # noqa: E402 # pyright: ignore[reportImplicitRelativeImport]
-    _IMAGE_OMITTED,
-    _lower_keys,
-    _classify_part,
-    _part_text,
-    _content_items,
-    _image_part_canonical,
-    _media_part_counts,
-    _collect_image_parts_universal,
-    _json_copy,
-    _flatten_content_stripped,
-    _strip_media_from_messages,
-    _universal_render_messages,
+    _IMAGE_OMITTED, _lower_keys, _classify_part, _part_text, _content_items,
+    _image_part_canonical, _media_part_counts, _collect_image_parts_universal,
+    _json_copy, _flatten_content_stripped, _strip_media_from_messages, _universal_render_messages,
 )
 from agy_runtime.tool_progress import (  # noqa: E402 # pyright: ignore[reportImplicitRelativeImport]
     _ToolProgress,
@@ -162,19 +153,15 @@ from core.subbridge_lifecycle import SubbridgeHooks, SubbridgeLifecycle  # noqa:
 from core.stream_interruption_recovery import (  # noqa: E402
     InterruptionTailState,
     is_transient_stream_interruption,
-    resolve_done_turn_outcome,
-    settle_error,
-    tail_turn_facts,
-    trusted_final_text,
+)
+from core.turn_finalization import (  # noqa: E402
+    DoneConfig, DoneDeliveryFacts, DoneDrainFacts, DonePorts, DoneRecoveryFacts, DoneRequest,
+    DoneResultFacts, DoneRuntimePorts, DoneSnapshot, DoneTextFacts, finalize_done,
 )
 from core.tool_emulation import (  # noqa: E402
-    LiveParserError,
-    RepetitionLoopDetected,
-    StreamNormalizer,
+    LiveParserError, RepetitionLoopDetected, StreamNormalizer,
     _messages_to_prompt as _core_messages_to_prompt,
-    _tool_choice_none,
-    build_tool_schemas,
-    sanitize_tool_call,
+    _tool_choice_none, build_tool_schemas, sanitize_tool_call,
 )
 
 ROOT = Path(__file__).resolve().parent
@@ -5303,6 +5290,13 @@ class _ToolTurn:
         except LiveParserError as exc:
             self.error = str(exc) or type(exc).__name__
 
+    def recovery_snapshot(self) -> str:
+        """Снять статус без побочных эффектов завершения хода."""
+        try:
+            return "open" if self.error or self._normalizer.has_open_tool_call() else "closed"
+        except Exception:
+            return "unknown"
+
     def turn_complete(self) -> bool:
         """Завершить ход при ошибке или после тишины вне блока вызова."""
         if self.error:
@@ -6268,6 +6262,31 @@ def _terminal_state(name: str, err: str = "") -> dict[str, object]:
     }
 
 
+def _done_recovery_aliases_enabled() -> bool:
+    """Перевести локальные имена флагов agy в запрет recovery, без кэша."""
+    env = os.environ.get("AGY_CAUSAL_RECOVERY_ENABLED", "").strip().lower()
+    if env and env not in _ENV_TRUE:
+        return False
+    try:
+        fd = os.open(DYNAMIC_CONFIG_PATH, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except (FileNotFoundError, NotADirectoryError):
+        return True
+    except OSError:
+        return False
+    try:
+        try:
+            if (os.fstat(fd).st_mode & 0o170000) != 0o100000:
+                return False
+            raw = os.read(fd, DYNAMIC_CONFIG_MAX_BYTES + 1)
+        finally:
+            os.close(fd)
+        data = json.loads(raw) if len(raw) <= DYNAMIC_CONFIG_MAX_BYTES else None
+        return isinstance(data, dict) and all(data.get(key, True) is True for key in (
+            "causal_recovery_enabled", "causal_turn_recovery_enabled", "BRIDGE_CAUSAL_TURN_RECOVERY_ENABLED"))
+    except (OSError, ValueError, RecursionError):
+        return False
+
+
 @_LIFECYCLE.install
 class Handler(BaseHTTPRequestHandler):
     _registry_job: _Job | None = None
@@ -6447,7 +6466,7 @@ class Handler(BaseHTTPRequestHandler):
         deadline = time.monotonic() + TIMEOUT_S
         policy = getattr(run, "policy", None)
         content_streaming = bool(getattr(run, "content_streaming", False))
-        usage_enabled = bool(getattr(run, "usage_enabled", False))
+        usage_enabled = bool(getattr(run, "usage_enabled", False))  # noqa: F841 — frozen AST; done читает флаг через run.
         gone = [False]
 
         def state(name: str, rc: int, err: str = "") -> dict:
@@ -6668,69 +6687,53 @@ class Handler(BaseHTTPRequestHandler):
             elif kind == "pump_error":
                 return finish("pump_error", 1, str(payload))
             elif kind == "done":
-                rc, final_text, raw_result = payload
-                if not result_ev and raw_result:
-                    result_ev = raw_result
-                status = str(result_ev.get("status", "")).upper()
-                tail = getattr(run, "_tail", None)
-                result_error = settle_error(result_error, cleared_error, status)
-                if content_streaming or usage_enabled:
-                    # Хвост транскрипта, записанный прямо перед done, дренируется
-                    # ДО reconcile: result.response — агрегат, досылается лишь недостающее.
-                    # При usage_enabled тот же drain — барьер счётчиков шагов (единый
-                    # дедлайн попытки <= T_DRAIN_MAX_S, второго окна нет).
-                    drain = getattr(run, "terminal_drain", None)
-                    if callable(drain):
-                        deliver(list(drain(T_DRAIN_MAX_S)))
-                final_text = trusted_final_text(final_text, result_error, tail)
-                if content_streaming:
-                    delta = run.reconcile_result(final_text)
-                    if delta:
-                        add_content(delta)
-                    elif final_text and getattr(
-                        run._arbiter, "last_result_diverged", False
-                    ):
-                        full_emitted = "".join(pieces)
-                        sep = (
-                            "\n\n"
-                            if full_emitted and not full_emitted.endswith("\n")
-                            else (
-                                "\n"
-                                if full_emitted and not full_emitted.endswith("\n\n")
-                                else ""
-                            )
-                        )
-                        _log(
-                            f"content-reconcile-fallback "
-                            f"turn={getattr(run, 'turn_id', '')[:8] or '-'} "
-                            f"len={len(final_text)}"
-                        )
-                        add_content(sep + final_text if full_emitted else final_text)
-                elif not pieces and final_text:
-                    add_content(final_text)
-                res = resolve_done_turn_outcome(
-                    rc=rc,
-                    result_error=result_error,
-                    result_status=status,
-                    final_text=final_text,
-                    emitted_text="".join(pieces),
-                    self_heal_enabled=_new_flag("self_heal_interrupted_turn", True),
-                    **tail_turn_facts(tail, cleared_error),
+                return self._finish_done(
+                    run, DoneRequest(payload, result_ev, (result_error, cleared_error)),
+                    DonePorts(state, add_content, deliver, lambda: gone[0], turn_complete),
                 )
-                if res.final:
-                    _log(f"turn-resolved reason={res.reason} state={res.state}")
-                    return state(res.state, res.rc, res.error)
-                if gone[0]:
-                    return state("client_gone", 1)
-                time.sleep(0.05)
-                err = "".join(run.err_box).strip()
-                if rc != 0 and (status == "ERROR" or not pieces):
-                    return state(
-                        "agy_error",
-                        rc,
-                        (str(result_ev.get("error") or "") or err)[:500],
-                    )
-                return state("done", rc, err)
+
+    def _snapshot_done(self, run: Run, request: DoneRequest, ports: DonePorts) -> DoneSnapshot:
+        """Собрать факты после drain, не вызывая завершающий tool-hook."""
+        rc, final_text, payload_result_ev = request.payload
+        result_ev = request.result_ev or payload_result_ev
+        full_error = str((result_ev or {}).get("error") or request.errors[0] or "")
+        proc = getattr(run, "proc", None)
+        proc_rc = getattr(proc, "returncode", None)
+        actual_rc = proc_rc if isinstance(proc_rc, int) else int(rc)
+        exited = proc_rc is not None if proc is not None else bool(getattr(run, "process_exited", False))
+        tail = getattr(run, "_tail", None)
+        thread = getattr(tail, "thread", None)
+        stopped = thread is not None and not thread.is_alive()
+        owner = getattr(ports.turn_complete, "__self__", None)
+        snap_fn = getattr(owner, "recovery_snapshot", None)
+        try:
+            tool_status = str(snap_fn()) if callable(snap_fn) else ("closed" if ports.turn_complete is None else "unknown")
+        except Exception:
+            tool_status = "unknown"
+        return DoneSnapshot(
+            DoneTextFacts(final_text, str(getattr(run, "_content_emitted_wire", "") or ""), full_error, request.errors[1]),
+            DoneResultFacts(str((result_ev or {}).get("status") or "").strip().lower(),
+                            actual_rc, exited, getattr(self, "_attempt", getattr(run, "attempt", 0)),
+                            bool(getattr(run, "has_fatal_error", False))),
+            DoneDeliveryFacts(bool(getattr(run, "content_streaming", False)), not ports.state("", 0).get("text"),
+                              getattr(run, "reconcile_result", lambda text: text),
+                              lambda: bool(getattr(getattr(run, "_arbiter", None), "last_result_diverged", False))),
+            DoneRecoveryFacts(bool(_new_flag("self_heal_interrupted_turn", True)) and _done_recovery_aliases_enabled(),
+                              tail, DoneDrainFacts(str(getattr(tail, "drain_outcome", "")), stopped), tool_status),
+        )
+
+    def _finish_done(self, run: Run, request: DoneRequest, ports: DonePorts) -> dict:
+        """Делегировать общий порядок drain → решение → выдача ядру."""
+        def stderr() -> str:
+            time.sleep(0.05)
+            return "".join(run.err_box).strip()
+        drain = getattr(run, "terminal_drain", None)
+        runtime = DoneRuntimePorts(
+            lambda: self._snapshot_done(run, request, ports),
+            (lambda: list(drain(T_DRAIN_MAX_S))) if callable(drain) else None, stderr)
+        config = DoneConfig(DYNAMIC_CONFIG_PATH, DYNAMIC_CONFIG_MAX_BYTES,
+                            bool(getattr(run, "content_streaming", False)), bool(getattr(run, "usage_enabled", False)))
+        return cast(dict, finalize_done(request, ports, runtime, config, _log))
 
     @staticmethod
     def _attach_resolved_usage(run: object, out: dict, model: object) -> None:

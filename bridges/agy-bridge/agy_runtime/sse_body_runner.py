@@ -3,11 +3,9 @@
 # Фасад передаёт динамические callbacks; доступ к ledger — контракт извлечения.
 # pyright: reportAny=false, reportExplicitAny=false, reportPrivateUsage=false
 from __future__ import annotations
-
 import json
 import threading
 from typing import Any, final
-
 from agy_runtime.midstream_resilience import AgyToolTraceCollector, _owner_time
 from agy_runtime.sse_stream_helpers import SseStreamSession
 from core.route_health_policy import redact_diagnostic_text
@@ -17,8 +15,6 @@ from core.stream_resilience_policy import (
     is_uncommitted_step,
 )
 from core.stream_resilience_runtime import MidstreamReplayOrchestrator
-
-
 def _defer_finalization(_out: dict[str, Any]) -> None:
     pass
 @final
@@ -26,14 +22,14 @@ class _SseBodyRunner:
     def __init__(self, session: SseStreamSession) -> None:
         self.s = session
         self.time = _owner_time(session.handler)
-        self.replay = MidstreamReplayOrchestrator(
-            session.config, clock=self.time.monotonic, sleeper=self.time.sleep )
+        self.replay = MidstreamReplayOrchestrator(session.config, clock=self.time.monotonic, sleeper=self.time.sleep)
         self.replay.buffer = session.buffer
         self.collector = AgyToolTraceCollector(session.ledger)
         self.buffering = False
         self.deadline = float("inf")
         self.cid = str(next(filter(None, (session.ctx.get("conversation_id"),)), ""))
         self.last_out: dict[str, Any] = {}
+        self.stop: Any = None
     def stage(self, value: str, channel: str = "content") -> bool:
         ok = False
         if not self.cancelled():
@@ -81,8 +77,17 @@ class _SseBodyRunner:
             s.stream_text = s.tool_turn.feed
             s.stream_reasoning = s.tool_turn.feed_reasoning
             s.ctx["tool_stop"] = s.tool_turn.turn_complete
+    def tool_stop(self) -> bool:
+        return self.expired() or bool(self.stop and self.stop())
+    def recovery_snapshot(self) -> str:
+        owner = getattr(self.stop, "__self__", None)
+        snapshot = getattr(owner, "recovery_snapshot", None)
+        try:
+            return str(snapshot()) if callable(snapshot) else ("closed" if self.stop is None else "unknown")
+        except Exception:
+            return "unknown"
     def attempt(self, index: int, budget: float) -> dict[str, Any]:
-        s, ctx = self.s, self.s.ctx
+        s, ctx, prev_stop = self.s, self.s.ctx, self.stop
         if self.buffering:
             s.buffer.rollback_uncommitted()
             self.prepare_buffer()
@@ -90,17 +95,13 @@ class _SseBodyRunner:
                 conversation_id=self.cid, attempt_budget_s=budget, attempt_index=index )
             if s.config.flag_enabled("midstream_retry_enabled"):
                 self.deadline = self.time.monotonic() + budget
-        stop = ctx.get("tool_stop")
+        self.stop = stop = ctx.get("tool_stop")
         if self.buffering:
-            def tool_stop() -> bool:
-                stopped = self.expired()
-                if not stopped:
-                    stopped = bool(stop() if stop else False)
-                return stopped
-            ctx["tool_stop"] = tool_stop
+            ctx["tool_stop"] = self.tool_stop
         try:
             out = self._invoke()
         finally:
+            self.stop = prev_stop
             if not is_present(stop):
                 _ = ctx.pop("tool_stop", None)
             else:
@@ -108,8 +109,7 @@ class _SseBodyRunner:
         if all((self.expired(), not self.cancelled())):
             out.update( state="timeout", rc=124, err="retry_budget_exhausted",
                 timeout_limit_s=budget, )
-        self.deadline = float("inf")
-        self.last_out = out
+        self.deadline, self.last_out = float("inf"), out
         if self.buffering:
             self.reconcile_trace(out)
         return out
