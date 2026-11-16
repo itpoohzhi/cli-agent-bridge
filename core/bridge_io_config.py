@@ -71,7 +71,12 @@ def load_bridge_io_config() -> BridgeIOConfig:
         header_headroom=int(
             os.environ.get("BRIDGE_HEADER_HEADROOM", str(defaults.header_headroom))
         ),
-        keepalive_s=float(os.environ.get("KEEPALIVE_S", str(defaults.keepalive_s))),
+        keepalive_s=float(
+            os.environ.get("DROID_DSH_BRIDGE_KEEPALIVE_S")
+            or os.environ.get("BRIDGE_KEEPALIVE_S")
+            or os.environ.get("KEEPALIVE_S")
+            or str(defaults.keepalive_s)
+        ),
         read_timeout_s=_env_timeout("BRIDGE_READ_TIMEOUT_S"),
         write_timeout_s=_env_timeout("BRIDGE_WRITE_TIMEOUT_S"),
     )
