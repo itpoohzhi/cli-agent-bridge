@@ -27,17 +27,13 @@ _LMH = ("low", "medium", "high")
 # Независимый эталон droid_off: weighted-владельцы по AD-001, defaults по AD-008.
 # Sol скрыта профилем; DeepSeek принадлежит deepseek-direct независимо от флага droid.
 BASE_MODELS = (
-    ("claude-sonnet-5-5", "claude-p", ("high",), "high"),
-    ("gemini-3.8-flash", "agy", _LMH, "high"), ("gemini-4-carbon", "agy", ("off",), "off"), ("muse-ember-1.0", "muse", (*_ALL[:-1], "xhigh", "max"), "high"),
-    ("muse-spark-1.3", "muse", ("max",), "max"),
-    ("muse-spark-1.3-contributor", "muse", ("max",), "max"),
-    ("muse-wonder-1.0", "muse", _ALL, "high"),
-    ("muse-wonder-full-1.0", "muse", _ALL, "high"),
-    ("gpt-6.1-terra", "openai-key-2", _LMH, "high"),
-    ("claude-opus-5-5", "claude-p", ("high",), "high"),
-    ("claude-haiku-5-5", "claude-p", ("high",), "high"),
-    ("gemini-4-argon", "agy", _LMH, "high"),
-    ("gemini-4-hydrogen", "agy", (*_LMH, "xhigh"), "high"),
+    ("claude-sonnet-5-5", "claude-p", ("high",), "high"), ("gemini-3.8-flash", "agy", _LMH, "high"),
+    ("gemini-3.8-flash-agy", "agy", _LMH, "high"), ("gemini-4-carbon", "agy", ("off",), "off"),
+    ("muse-ember-1.0", "muse", (*_ALL[:-1], "xhigh", "max"), "high"), ("muse-spark-1.3", "muse", ("max",), "max"),
+    ("muse-spark-1.3-contributor", "muse", ("max",), "max"), ("muse-wonder-1.0", "muse", _ALL, "high"),
+    ("muse-wonder-full-1.0", "muse", _ALL, "high"), ("gpt-6.1-terra", "openai-key-2", _LMH, "high"),
+    ("claude-opus-5-5", "claude-p", ("high",), "high"), ("claude-haiku-5-5", "claude-p", ("high",), "high"),
+    ("gemini-4-argon", "agy", _LMH, "high"), ("gemini-4-hydrogen", "agy", (*_LMH, "xhigh"), "high"),
     ("deepseek-v4.1-flash", "deepseek-direct", ("off", "low", "high", "max"), "off"),
     ("deepseek-v4.1-flash-free", "opencode-zen", _ZEN, "high"),
     ("flint-40b-free", "opencode-zen", _ZEN, "high"),
@@ -45,7 +41,11 @@ BASE_MODELS = (
     ("nemotron-3.5-lightning-free", "opencode-zen", _ZEN, "high"),
     ("nemotron-3.5-super-vl-free", "opencode-zen", _ZEN, "high"),
     ("beam-free", "opencode-zen", _ZEN, "high"),
-    ("big-pickle", "opencode-zen", _ZEN, "high"), ("iceman-free", "opencode-zen", _ZEN, "high"), ("inkling-2-small-free", "opencode-zen", _ALL, "high"), ("longcat-2.5-free", "opencode-zen", _ZEN, "high"), ("minimax-m3.1-flash-free", "opencode-zen", (*_LMH, "xhigh", "max"), "high"),
+    ("big-pickle", "opencode-zen", _ZEN, "high"),
+    ("iceman-free", "opencode-zen", _ZEN, "high"),
+    ("inkling-2-small-free", "opencode-zen", _ALL, "high"),
+    ("longcat-2.5-free", "opencode-zen", _ZEN, "high"),
+    ("minimax-m3.1-flash-free", "opencode-zen", (*_LMH, "xhigh", "max"), "high"),
 )
 # Имена моделей, переключаемых гейтом, при выключенном флаге.
 BASE_NAMES = {
@@ -172,8 +172,8 @@ class DroidCatalogFlagTest(unittest.TestCase):
         gated: Any = apply_droid_catalog_gate(raw, enabled=True)
         self.assertEqual(gated, raw)
         self.assertTrue(gated["backends"]["droid"]["enabled"])
-        self.assertEqual(list(routes(gated).values()).count("droid"), 3)
-        self.assertEqual(len(gated["aliases"]), 32)
+        self.assertEqual(list(routes(gated).values()).count("droid"), 4)
+        self.assertEqual(len(gated["aliases"]), 35)
 
     def test_gate_off_tolerates_malformed_entries(self) -> None:
         raw: dict[str, Any] = {"schema_version": 3, "backends": {"droid": "broken"}, "models": ["broken", {"id": "x"}], "technical_ref": {"droid_off": {"models": {"x": {"backend": "agy"}}}}}
@@ -293,7 +293,7 @@ class DroidCatalogFlagTest(unittest.TestCase):
                 self.assertTrue(catalog["backends"]["droid"]["enabled"])
                 self.assertEqual((catalog["models"]["gpt-6.1-sol"]["backend"], catalog["models"]["gpt-6.1-sol-droid"]["backend"]), ("openai-key-2", "droid"))
                 self.assertIn("gpt-6.1-sol", catalog["models"])
-                self.assertEqual(len(catalog["aliases"]), 32)
+                self.assertEqual(len(catalog["aliases"]), 35)
 
 
 if __name__ == "__main__":

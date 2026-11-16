@@ -325,6 +325,94 @@ class PrepareAgyHomeTests(CleanHomeFixture):
         self.assertEqual(external.read_text(encoding="utf-8"), "external")
         self.assertEqual(_mode(external), 0o644)
 
+    def _switch_account(self, src: Path, body: str, older_than: Path) -> None:
+        """Подменить файл источника другим профилем с меньшим mtime, чем у копии в <clean-home>."""
+        _ = src.write_text(body, encoding="utf-8")
+        past = older_than.stat().st_mtime - 1000
+        os.utime(src, (past, past))
+
+    def test_external_account_switch_overwrites_newer_clean_home_copy(self) -> None:
+        _ = self.srv._prepare_agy_home()
+        token = self.gemini / "jetski-standalone-oauth-token"
+        src = self.real_home / ".gemini" / "jetski-standalone-oauth-token"
+        # agy сам обновил токен Account A в <clean-home>
+        _ = token.write_text("account-a-refreshed", encoding="utf-8")
+        future = src.stat().st_mtime + 500
+        os.utime(token, (future, future))
+        self.srv._AGY_AUTH_SIGNATURES[str(src)] = self.srv._file_signature(src)
+        # в ~/.gemini переключили Account B; его mtime меньше, чем у копии
+        self._switch_account(src, "account-b-token", token)
+        _ = self.srv._prepare_agy_home()
+        self.assertEqual(token.read_text(encoding="utf-8"), "account-b-token")
+        self.assertEqual(_mode(token), 0o600)
+        self.assertEqual(self.srv._AGY_AUTH_SIGNATURES[str(src)], self.srv._file_signature(src))
+        # повторный ход без изменений источника не затирает новый токен, обновлённый agy
+        _ = token.write_text("account-b-refreshed", encoding="utf-8")
+        _ = self.srv._prepare_agy_home()
+        self.assertEqual(token.read_text(encoding="utf-8"), "account-b-refreshed")
+
+    def test_initial_sync_keeps_newer_copy_but_remembers_source_signature(self) -> None:
+        self.gemini.mkdir(parents=True)
+        token = self.gemini / "jetski-standalone-oauth-token"
+        src = self.real_home / ".gemini" / "jetski-standalone-oauth-token"
+        _ = token.write_text("fresh-refreshed-token", encoding="utf-8")
+        future = src.stat().st_mtime + 100
+        os.utime(token, (future, future))
+        _ = self.srv._prepare_agy_home()
+        self.assertEqual(token.read_text(encoding="utf-8"), "fresh-refreshed-token")
+        self.assertEqual(self.srv._AGY_AUTH_SIGNATURES[str(src)], self.srv._file_signature(src))
+        # внешнее переключение после старта моста обнаруживается и перезаписывает копию
+        self._switch_account(src, "account-b-token", token)
+        _ = self.srv._prepare_agy_home()
+        self.assertEqual(token.read_text(encoding="utf-8"), "account-b-token")
+
+    def test_signature_not_recorded_when_external_copy_fails(self) -> None:
+        _ = self.srv._prepare_agy_home()
+        src = self.real_home / ".gemini" / "projects.json"
+        old_sig = self.srv._AGY_AUTH_SIGNATURES[str(src)]
+        _ = src.write_text('{"projects": {"b": 1}}', encoding="utf-8")
+        with mock.patch.object(self.srv, "_copy_private_atomic", side_effect=OSError("boom")):
+            _ = self.srv._prepare_agy_home()
+        self.assertEqual(self.srv._AGY_AUTH_SIGNATURES[str(src)], old_sig)
+        _ = self.srv._prepare_agy_home()  # повтор после сбоя доставляет новую подпись и содержимое
+        self.assertEqual((self.gemini / "projects.json").read_text(encoding="utf-8"), '{"projects": {"b": 1}}')
+        self.assertEqual(self.srv._AGY_AUTH_SIGNATURES[str(src)], self.srv._file_signature(src))
+
+    def test_source_removal_deletes_clean_home_copy(self) -> None:
+        _ = self.srv._prepare_agy_home()
+        copy = self.gemini / "projects.json"
+        src = self.real_home / ".gemini" / "projects.json"
+        self.assertTrue(copy.is_file())
+        src.unlink()
+        _ = self.srv._prepare_agy_home()
+        self.assertFalse(copy.exists())
+        self.assertNotIn(str(src), self.srv._AGY_AUTH_SIGNATURES)
+        # возврат файла в источник восстанавливает копию
+        _ = src.write_text('{"projects": {"c": 1}}', encoding="utf-8")
+        _ = self.srv._prepare_agy_home()
+        self.assertEqual(copy.read_text(encoding="utf-8"), '{"projects": {"c": 1}}')
+
+    def test_source_removal_deletes_symlink_copy_without_touching_target(self) -> None:
+        _ = self.srv._prepare_agy_home()
+        copy = self.gemini / "projects.json"
+        src = self.real_home / ".gemini" / "projects.json"
+        external = self.tmp / "external-projects"
+        _ = external.write_text("external", encoding="utf-8")
+        copy.unlink()
+        os.symlink(external, copy)
+        src.unlink()
+        _ = self.srv._prepare_agy_home()
+        self.assertFalse(copy.exists() or copy.is_symlink())
+        self.assertEqual(external.read_text(encoding="utf-8"), "external")
+
+    def test_agy_written_state_without_real_source_is_not_deleted(self) -> None:
+        (self.real_home / ".gemini" / "antigravity-cli" / "jetski_state.pbtxt").unlink()
+        _ = self.srv._prepare_agy_home()
+        state = self.cli / "jetski_state.pbtxt"
+        _ = state.write_text("agy-owned", encoding="utf-8")
+        _ = self.srv._prepare_agy_home()
+        self.assertEqual(state.read_text(encoding="utf-8"), "agy-owned")
+
     def test_copy_failure_leaves_no_tmp_file(self) -> None:
         dst_dir = self.tmp / "dst"
         dst_dir.mkdir()
@@ -338,10 +426,15 @@ class PrepareAgyHomeTests(CleanHomeFixture):
         _ = self.srv._prepare_agy_home()
         marker = self.gemini / "projects.json"
         marker.unlink()
-        _ = self.srv._prepare_agy_home()
+        # Горячая синхронизация auth-файлов восстанавливает удалённую копию; без неё
+        # повторный вызов ничего не переинициализирует.
+        with mock.patch.dict(os.environ, {"AGY_AUTH_HOT_RELOAD_ENABLED": "0"}):
+            _ = self.srv._prepare_agy_home()
         self.assertFalse(
             marker.exists(), "повторный вызов не должен переинициализировать"
         )
+        _ = self.srv._prepare_agy_home()
+        self.assertTrue(marker.is_file(), "hot-reload восстанавливает удалённую auth-копию")
 
     def test_threadsafe_concurrent_calls(self) -> None:
         workers = 16

@@ -62,6 +62,7 @@ class SseStreamSession:
                 next(filter(None, (ctx.get("tools"),)), list[dict[str, Any]]()),
                 self.on_text, self.on_reasoning, self.on_calls, )
             ctx["tool_stop"] = self.tool_turn.turn_complete
+            ctx["tool_calls_emitted"] = lambda: bool(self.tool_turn.calls)
         self.stream_text = self.tool_turn.feed if self.tool_turn else self.on_text
         self.stream_reasoning = (
             self.tool_turn.feed_reasoning if self.tool_turn else self.on_reasoning )
@@ -231,12 +232,12 @@ class SseStreamSession:
             self.close_interrupted(out)
         else:
             self.finalize_timeout(out)
-    def error_chunk(self, error: dict[str, Any]) -> str:
+    def error_chunk(self, error: dict[str, Any], usage: dict[str, Any] | None = None) -> str:
         clean = { k: redact_diagnostic_text(v) if isinstance(v, str) else v
             for k, v in error.items() }
         data = "data: " + json.dumps({"error": clean}, ensure_ascii=False) + "\n\n"
         if self.resilience:
-            data = self.chunk({}, "stop", error=clean)
+            data = self.chunk({}, "stop", error=clean, usage=usage)
         return data
 
 
