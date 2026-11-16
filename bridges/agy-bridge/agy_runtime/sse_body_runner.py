@@ -148,6 +148,9 @@ class _SseBodyRunner:
         s = self.s
         if is_present(s.tool_turn):
             s.tool_turn.finish()
+            if s.tool_turn.error:
+                s.buffer.rollback_uncommitted()
+                return True
         callbacks = dict(content=s.on_text, reasoning_content=s.on_reasoning)
         pending = s.buffer.commit_fragments()
         ok = True
@@ -211,7 +214,7 @@ class _SseBodyRunner:
         proceed = True
         if all(((not is_present(err)), (is_present(s.tool_turn)))):
             s.tool_turn.finish()
-            proceed = not any((self.cancelled(), not s.tool_turn.ok))
+            proceed = not any((self.cancelled(), not any((s.tool_turn.ok, s.tool_turn.error))))
             if s.tool_turn.error:
                 err = s.tool_turn.error_body()
             elif s.tool_turn.calls:

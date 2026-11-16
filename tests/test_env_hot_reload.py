@@ -141,17 +141,23 @@ def test_passthrough_adapter_reads_rotated_key_per_request(tmp_path: Path, monke
     assert adapter._upstream_key == "explicit"
 
 
-def test_passthrough_adapter_static_api_key_fallback(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+@pytest.mark.parametrize("declare_env", [False, True])
+def test_passthrough_adapter_static_key_only_without_declared_env(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, declare_env: bool
+) -> None:
     from adapters.passthrough_adapter import PassthroughAdapter
 
     monkeypatch.setenv("BRIDGE_ENV_FILE_PATH", str(tmp_path / "none.env"))
     monkeypatch.delenv("PT_NOENV_KEY", raising=False)
-    adapter = PassthroughAdapter(
-        "pt-test2",
-        {"base_url": "http://127.0.0.1:9999/v1", "api_key_env": "PT_NOENV_KEY", "api_key": "static"},
-        lambda: {"models": []},
-    )
-    assert adapter._upstream_key == "static"
+    config = {"base_url": "http://127.0.0.1:9999/v1", "api_key": "static"}
+    if declare_env:
+        config["api_key_env"] = "PT_NOENV_KEY"
+    adapter = PassthroughAdapter("pt-test2", config, lambda: {"models": []})
+    try:
+        assert adapter._upstream_key == ("" if declare_env else "static")
+        assert adapter.validate_client_token("static") is (not declare_env)
+    finally:
+        adapter.shutdown()
 
 
 def test_explicit_empty_value_revokes_stale_environment(tmp_path: Path) -> None:

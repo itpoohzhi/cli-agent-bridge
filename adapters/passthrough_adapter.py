@@ -58,7 +58,7 @@ from core.tool_emulation import (
     sanitize_tool_call,
 )
 from core.cli_runtime_config import NonstreamConfig
-from core.env_hot_reload import get_hot_env_value
+from core.transport_credentials import resolve_credential
 from core.liveness_signals import SIGNAL_S, LivenessWindow, SseProgress, parse_sse_json
 from core.liveness_signals import passthrough_window as passthrough_window
 from core.nonstream_aggregator import NonstreamError, aggregate_events, choice_index
@@ -575,6 +575,8 @@ def _normalize_message(
         updated[key] = (updated.get(key) or "") + tail
     calls = _merge_parsed_calls(raw_calls, text.calls)
     if sanitize and calls:
+        if has_any_unnamed_call(calls, max_parallel_depth=limits.max_parallel_depth):
+            raise LiveParserError("tool call has empty function name")
         updated["tool_calls"] = sanitize_choice_calls(calls, schemas, limits)
     if "content" in message:
         updated.setdefault("content", "")
@@ -1160,8 +1162,6 @@ class PassthroughAdapter(BackendAdapter):
     ) -> None:
         """Инициализирует прежние ресурсы адаптера без дополнительного пула."""
         self._is_hub_key = is_hub_key
-        api_key = self.config.get("api_key")
-        self._static_upstream_key = api_key if isinstance(api_key, str) else ""
         self._limits = limits
         initial_limits = self.limits
         self._pool: PassthroughConnectionPool = PassthroughConnectionPool(
@@ -1199,16 +1199,10 @@ class PassthroughAdapter(BackendAdapter):
 
     @property
     def _upstream_key(self) -> str:
-        """Актуальный ключ upstream (`api_key_env` из горячего `.env`)."""
+        """Единый живой credential: ref → env → literal без обхода отзыва."""
         if (override := getattr(self, "_upstream_key_override", None)) is not None:
             return override
-        env_name = self.config.get("api_key_env")
-        live = (
-            get_hot_env_value(env_name)
-            if isinstance(env_name, str) and env_name
-            else ""
-        )
-        return live or self._static_upstream_key
+        return resolve_credential(self.config)
 
     @_upstream_key.setter
     def _upstream_key(self, value: Optional[str]) -> None:
@@ -1225,9 +1219,16 @@ class PassthroughAdapter(BackendAdapter):
     # -- контракт BackendAdapter ---------------------------------------------------------
     def validate_client_token(self, token: str) -> bool:
         """Проверяет клиентский токен по собственному настроенному ключу upstream."""
-        if not self._upstream_key or not token:
+        key = self._upstream_key
+        # Локальная UTF-8 аутентификация не ограничена ASCII HTTP-заголовка.
+        if getattr(self, "_upstream_key_override", None) is None and all(
+            self.config.get(field) in (None, "") for field in ("api_key_ref", "api_key_env")
+        ):
+            literal = self.config.get("api_key")
+            key = literal if isinstance(literal, str) else ""
+        if not key or not token:
             return False
-        return hmac.compare_digest(token.encode("utf-8"), self._upstream_key.encode("utf-8"))
+        return hmac.compare_digest(token.encode("utf-8"), key.encode("utf-8"))
 
     def get_models(self) -> list[BackendModel]:
         return self._catalog_models()
@@ -1256,16 +1257,8 @@ class PassthroughAdapter(BackendAdapter):
 
     # -- upstream-параметры шва (api_key_ref / headers_from_json / per_request_headers) ----
     def _read_key_ref(self) -> str:
-        """Токен из `api_key_ref` (`file:<путь>`); читается на каждый запрос (ротация ключа)."""
-        ref = self.config.get("api_key_ref")
-        if not isinstance(ref, str) or not ref.startswith("file:"):
-            return ""
-        try:
-            with open(os.path.expanduser(ref[len("file:") :]), encoding="utf-8") as fh:
-                return fh.read().strip()
-        except OSError:
-            self._log("passthrough api_key_ref unreadable")
-            return ""
+        """Совместимый вход чтения ref через общий ограниченный resolver."""
+        return resolve_credential({"api_key_ref": self.config.get("api_key_ref")})
 
     def _read_json_headers(self) -> dict[str, str]:
         """Заголовки `headers_from_json`: узел `json_path` файла, ключи из `pick` (без регистра)."""
@@ -1629,8 +1622,10 @@ class PassthroughAdapter(BackendAdapter):
             "completion_id": last.get("id"),
             "created": last.get("created"),
             "choice_indices": sorted(unfinished) if unfinished is not None else [0],
+            "usage": outcome.last_usage,
         }
-        sink.write(format_stream_error_sse(**error_options).encode("utf-8"))
+        chunk = format_sse_event(build_stream_error_chunk(**error_options))
+        sink.write((chunk + format_sse_event("[DONE]")).encode("utf-8"))
         return False
 
     def _stream_success(self, outcome: StreamOutcome) -> bool:
