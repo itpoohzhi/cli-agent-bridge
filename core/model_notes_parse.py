@@ -6,7 +6,7 @@ import os
 import re
 import stat
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 
 
 class BlocklistParseError(ValueError):
@@ -33,13 +33,13 @@ def _time(value: str, now: datetime) -> datetime:
     if match is None:
         raise BlocklistParseError("Некорректный срок или часовой пояс")
     day, clock, zone = match.groups()
-    tz = timezone(timedelta(hours=3)) if zone == "MSK" else timezone.utc
+    tz = timezone(timedelta(hours=3)) if zone == "MSK" else UTC
     day = day or now.astimezone(tz).date().isoformat()
     return datetime.fromisoformat(f"{day}T{clock}").replace(tzinfo=tz)
 
 
 def _metadata(text: str, key: str) -> str | None:
-    values = []
+    values: list[str] = []
     for match in re.finditer(r"<!--\s*" + key + r"\b[^\n]*", text):
         field = re.fullmatch(r"<!--\s*" + key + r":\s*(.*?)\s*-->\s*", match[0])
         if field is None:
@@ -135,7 +135,7 @@ def _cells(body: str, section: str) -> list[list[str]]:
 
 def _table(body: str, section: str, now: datetime) -> list[ModelNotesRule]:
     header, _, *rows = _cells(body, section)
-    rules = []
+    rules: list[ModelNotesRule] = []
     for cells in rows:
         if (
             len(cells) != len(header)
@@ -162,7 +162,7 @@ def _document(text: str, now: datetime) -> ModelNotes:
 
 def parse_model_notes(text: str, now_dt: datetime | None = None) -> ModelNotes:
     """Разбирает §1/§2; ошибки и истёкший документ закрывают доступ."""
-    now = now_dt if now_dt is not None else datetime.now(timezone.utc)
+    now = now_dt if now_dt is not None else datetime.now(UTC)
     if now.utcoffset() is None:
         raise BlocklistParseError("now_dt должен содержать часовой пояс")
     try:
