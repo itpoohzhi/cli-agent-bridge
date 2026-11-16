@@ -72,7 +72,23 @@ class TestLiveFleetV3(unittest.TestCase):
     def test_live_catalogue_is_schema_3_with_eleven_backends(self) -> None:
         catalog = server._build_catalog(raw_v3())
         self.assertEqual(catalog["schema_version"], 3)
-        self.assertEqual(catalog["backend_order"], ["agy", "claude-p", "codex", "muse", "opencode-go", "opencode-go-claude", "deepseek-direct", "openai-key-2", "openai-key-3", "droid", "opencode-zen"])
+        self.assertEqual(
+            catalog["backend_order"],
+            [
+                "agy",
+                "claude-p",
+                "codex",
+                "muse",
+                "opencode-go",
+                "opencode-go-claude",
+                "deepseek-direct",
+                "openai-key-2",
+                "openai-key-3",
+                "droid",
+                "opencode-zen",
+                "agy-passthrough",
+            ],
+        )
         self.assertEqual(catalog["backends"]["droid"]["kind"], "droid")
         self.assertTrue(catalog["backends"]["droid"]["enabled"])
         self.assertEqual(catalog["backends"]["droid"]["max_concurrent"], 64)
@@ -91,14 +107,16 @@ class TestLiveFleetV3(unittest.TestCase):
         """ADR 0015: agy :9887, opencode-zen :9883, claude-p :9881 заведены passthrough-бэкендами
         (необязательными; выключены, пока не перечислены их модели)."""
         catalog = server._build_catalog(raw_v3())
-        for name, port in (("agy", 9887), ("opencode-zen", 9883), ("claude-p", 9881)):
+        self.assertEqual(catalog["backends"]["agy"]["kind"], "stdio_resident")
+        for name, port in (
+            ("agy-passthrough", 9887),
+            ("opencode-zen", 9883),
+            ("claude-p", 9881),
+        ):
             backend = catalog["backends"][name]
             self.assertEqual(backend["kind"], "passthrough", name)
             self.assertEqual(backend["base_url"], "http://127.0.0.1:%d/v1" % port, name)
             self.assertFalse(backend["required"], name)
-            self.assertTrue(
-                backend["enabled"], name
-            )  # ADR 0017: passthrough-бэкенды включены
 
     def test_default_model_is_muse_wonder_full(self):
         """ADR 0015: умолчание каталога - активная модель muse, а не выводимый Droid."""

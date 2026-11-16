@@ -1,14 +1,14 @@
 # Провайдер agy: локальный мост AGY (Google Gemini), passthrough к :9887.
 manifest_version: 1
 provider_id: agy
-kind: passthrough
+kind: stdio_resident
 enabled: true
 required: false
 priority: 10
 routing: {weight: 100}
 owned_by: agy-bridge
 transport:
-  bridge: {base_url: 'http://127.0.0.1:9887/v1', api_key_env: AGY_BRIDGE_KEY}
+  bridge: {}
   direct:
     type: cli
     cli:
@@ -37,7 +37,7 @@ models_overrides:
     default_effort: high
     context_window: 1048576
     max_tokens: 65536
-    input: [text, tools]
+    input: [text]
     images: {cli_registry: implicit_supported, status: unverified, method: null, proof: null}
   gemini-4-argon:
     name: Gemini 4 Argon (AGY bridge)
@@ -45,7 +45,7 @@ models_overrides:
     default_effort: high
     context_window: 1048576
     max_tokens: 65536
-    input: [text, tools]
+    input: [text]
     images: {cli_registry: implicit_supported, status: unverified, method: null, proof: null}
   gemini-4-carbon:
     name: Gemini 4 Carbon (AGY)
@@ -53,7 +53,7 @@ models_overrides:
     default_effort: 'off'
     context_window: 1048576
     max_tokens: 65536
-    input: [text, tools]
+    input: [text]
     images: {cli_registry: implicit_supported, status: unverified, method: null, proof: null}
   gemini-4-hydrogen:
     name: Gemini 4 Hydrogen (AGY)
@@ -61,7 +61,7 @@ models_overrides:
     default_effort: high
     context_window: 1048576
     max_tokens: 65536
-    input: [text, tools]
+    input: [text]
     images: {cli_registry: implicit_supported, status: unverified, method: null, proof: null}
 params:
   effort_field: reasoning_effort
