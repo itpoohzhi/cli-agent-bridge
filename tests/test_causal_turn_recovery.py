@@ -41,8 +41,7 @@ def test_primary_and_sister_exact_echo(error_seq: int, completion_seq: int) -> N
 @pytest.mark.parametrize("returncode,mode", ((1, "causal_echo_only"), (0, "causal_echo_zero_rc")))
 def test_content_safety_echo(returncode: int, mode: str) -> None:
     decision = evaluate_causal_turn_recovery(_facts(returncode=returncode, text="Content safety: request rejected"))
-    assert decision.recovered and decision.allow_reconcile and decision.clear_error
-    assert decision.outcome_mode == mode
+    assert decision.recovered and decision.allow_reconcile and decision.clear_error and decision.outcome_mode == mode
 @pytest.mark.parametrize("group,field,value,reason", (("config", "master_self_heal", False, "self_heal_disabled"), ("config", "causal_recovery_enabled", False, "causal_recovery_disabled"), *(("config", "attempt", attempt, "attempt_mismatch") for attempt in (-1, 9)), *(("error", "result_status", status, "non_error_result_status") for status in ("", "DONE", "RUNNING")), ("completion", "completion_attempt", 1, "attempt_mismatch"), ("identity", "seq", -1, "missing_structured_error"), ("error", "error_from_structured_record", False, "unstructured_error"), ("identity", "sha256", "", "missing_error_identity"), ("completion", "last_completion_seq", 321, "completion_not_after_error"), ("completion", "last_completion_seq", 320, "completion_not_after_error"),
     ("identity", "attempt", 1, "attempt_mismatch"), ("completion", "completion_attempt", -1, "attempt_mismatch"), ("error", "result_error_sha256", "", "error_identity_mismatch"), ("error", "result_error_sha256", "other", "error_identity_mismatch"), ("completion", "completion_done_without_tools", False, "completion_has_tools"), ("completion", "has_final_text", False, "missing_final_text"), ("terminal", "has_late_error_or_open_step", True, "late_error_or_open_step"), ("process", "has_fatal_error", True, "fatal_error"), ("drain", "explicit_drain_complete", False, "drain_not_explicit"), ("drain", "drain_complete", False, "drain_incomplete"),
     ("drain", "producer_stopped", False, "producer_not_stopped"), ("terminal", "tool_status", "open", "tools_not_closed"), ("terminal", "tool_status", "unknown", "tools_not_closed"), ("terminal", "tool_status", "malformed", "tools_not_closed"), ("process", "process_exited", False, "process_not_exited"), *(("process", "returncode", rc, "unsupported_returncode") for rc in (None, -11, 139, 128, 2)),))
@@ -56,12 +55,10 @@ def test_same_500_character_prefix_is_not_identity() -> None:
     assert first[:500] == second[:500]
     facts = _facts(text=first)
     facts = replace(facts, error=replace(facts.error, result_error_sha256=error_identity_digest(second)))
-    assert evaluate_causal_turn_recovery(facts).reason == "error_identity_mismatch"
-    assert not evaluate_causal_turn_recovery(facts).recovered
+    assert evaluate_causal_turn_recovery(facts).reason == "error_identity_mismatch" and not evaluate_causal_turn_recovery(facts).recovered
 @pytest.mark.parametrize("text,expected", ((None, ""), ("", ""), (" \t\r\n ", ""), (" \tError\r\nNext\rEnd \n", "Error\nNext\nEnd"), ("Error  Next", "Error  Next"), ("ERROR", "ERROR")))
 def test_exact_normalization(text: str | None, expected: str) -> None:
-    assert normalize_error_identity(text) == expected
-    assert error_identity_digest(text) == error_identity_digest(expected)
+    assert normalize_error_identity(text) == expected and error_identity_digest(text) == error_identity_digest(expected)
 def test_digest_known_sha256_and_empty_identity() -> None:
     assert error_identity_digest(" abc\r\n") == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
     assert error_identity_digest(None) == error_identity_digest(" \r\n") == ""
@@ -88,11 +85,12 @@ def test_decision_flags_are_derived_and_immutable() -> None:
     assert decision.allow_reconcile and decision.clear_error
     with pytest.raises(FrozenInstanceError):
         setattr(decision, "clear_error", False)
-@pytest.mark.parametrize("case,returncode", [(case, rc) for case in ("exact", "suffix", "attempt", "unstructured", "missing", "open", "tools", "late_error") for rc in (0, 1)])
+@pytest.mark.parametrize("case,returncode", [(case, rc) for case in ("exact", "suffix", "attempt", "unstructured", "missing", "unindexed", "late_unindexed", "open", "tools", "late_error") for rc in (0, 1)])
 def test_tail_causal_facade_agrees_on_text_and_error(case: str, returncode: int) -> None:
     tail = facade.InterruptionTailState()
+    tail.attempt = 0
     if case != "missing":
-        tail.note_error_record("ERROR_MESSAGE", {"content": _LONG_ERROR}, 321)
+        tail.note_error_record("ERROR_MESSAGE", {"content": _LONG_ERROR}, None if case == "unindexed" else 321)
     tail.note_planner_record({"content": "Финал", "status": "DONE"}, 370)
     if case == "attempt":
         tail.last_error_attempt = 1
@@ -102,24 +100,24 @@ def test_tail_causal_facade_agrees_on_text_and_error(case: str, returncode: int)
         tail.note_planner_record({"content": "Продолжаю", "status": "RUNNING", "tool_calls": ["call"] if case == "tools" else []}, 371)
     if case == "late_error":
         tail.note_error_record(371, text=_LONG_ERROR)
+    if case == "late_unindexed":
+        tail.note_error_record("ERROR_MESSAGE", {"content": _LONG_ERROR})
+        tail.note_planner_record({"content": "Финал"}, 372)
     snapshot, facts = facade.tail_causal_facts(tail), _tail_facts(tail, returncode)
     error = _LONG_ERROR + (" suffix" if case == "suffix" else "")
     result = facade.resolve_done_turn_outcome(rc=returncode, result_error=error, result_status="ERROR", final_text="Финал", emitted_text="", causal_input=facts, **facade.tail_turn_facts(tail))
     trusted = facade.trusted_final_text("Финал", error, tail, causal_input=facts)
     assert result.self_healed is (case == "exact")
-    assert result.rc == (0 if case == "exact" else 1)
-    assert bool(trusted) is result.self_healed
-    assert (result.error == "") is result.self_healed
+    assert result.rc == (0 if case == "exact" else 1) and (case not in ("unindexed", "late_unindexed") or snapshot.error.seq == -1)
+    assert bool(trusted) is result.self_healed and (result.error == "") is result.self_healed
     assert snapshot.error.sha256 == error_identity_digest("" if case == "missing" else _LONG_ERROR)
-    assert snapshot.error.length == (0 if case == "missing" else len(_LONG_ERROR))
-    assert snapshot.completion.completion_attempt == 0
+    assert snapshot.error.length == (0 if case == "missing" else len(_LONG_ERROR)) and snapshot.completion.completion_attempt == 0
     assert facade.tail_turn_facts(tail)["last_error_seq"] == snapshot.error.seq
     with pytest.raises(FrozenInstanceError):
         setattr(snapshot, "has_late_error_or_open_step", False)
     if case == "open":
         tail.note_planner_record({"content": "Новый финал", "status": "DONE"}, 372)
-        assert not facade.tail_causal_facts(tail).has_late_error_or_open_step
-        assert snapshot.has_late_error_or_open_step
+        assert not facade.tail_causal_facts(tail).has_late_error_or_open_step and snapshot.has_late_error_or_open_step
 def test_tail_facts_missing_transient_error_defaults_false() -> None:
     tail = SimpleNamespace(final_planner=False, last_planner_step_index=-1, last_error_step_index=-1, drain_outcome="done")
     assert extract_tail_facts(tail, "")["had_transient_error"] is False
@@ -171,6 +169,7 @@ def _tail_facts(tail: facade.InterruptionTailState, returncode: int = 1) -> Caus
     return replace(facts, error=replace(facts.error, identity=snapshot.error, error_from_structured_record=snapshot.error_from_structured_record), completion=snapshot.completion, terminal=replace(facts.terminal, has_late_error_or_open_step=snapshot.has_late_error_or_open_step))
 def test_zero_indices_strict_order_and_drain() -> None:
     tail = facade.InterruptionTailState()
+    tail.attempt = 0
     tail.note_planner_record({"content": "Начало", "status": "DONE"}, 0)
     assert tail.last_planner_step_index == 0
     tail.note_error_record("ERROR_MESSAGE", {"content": _LONG_ERROR}, 0)
@@ -188,7 +187,7 @@ def test_zero_indices_strict_order_and_drain() -> None:
         setattr(tail, "drain_outcome", outcome)
         assert facade.tail_turn_facts(tail)["drain_complete"] is (outcome == "ok")
 @pytest.mark.parametrize("env_value,json_value,expected", (
-    ("", None, True), ("true", True, True), ("false", True, False), ("true", False, False), ("0", True, False), ("NO", True, False), (" off ", True, False), ("invalid", True, False),))
+    ("", None, False), ("true", None, True), ("", True, True), ("true", True, True), ("false", True, False), ("true", False, False), ("0", True, False), ("NO", True, False), (" off ", True, False), ("invalid", True, False),))
 def test_recovery_switch_veto(tmp_path: Path, env_value: str, json_value: bool | None, expected: bool) -> None:
     path = tmp_path / "local.json"
     if json_value is not None:
@@ -207,32 +206,32 @@ def test_recovery_switch_paths_freshness_and_io(tmp_path: Path, monkeypatch: pyt
     _ = path.write_text("{}")
     _ = other.write_text(json.dumps({_FLAG: False}))
     assert not done.read_recovery_switch(path, 256, {}, other)
-    assert done.read_recovery_switch(other, 256, {"BRIDGE_DYNAMIC_CONFIG_PATH": str(path)})
+    assert not done.read_recovery_switch(other, 256, {"BRIDGE_DYNAMIC_CONFIG_PATH": str(path), _FLAG: "true"})
     _ = path.write_text(json.dumps({"causal_turn_recovery_enabled": False}))
     assert not done.read_recovery_switch(path, 256, {}, tmp_path / "absent")
     _ = path.write_text("{}")
-    assert done.read_recovery_switch(path, 2, {}, tmp_path / "absent") is True
+    assert done.read_recovery_switch(path, 2, {_FLAG: "true"}, tmp_path / "absent") is True
     assert done.read_recovery_switch(path, 1, {}, tmp_path / "absent") is False
     assert done._read_config_flag(path, 1) is False  # pyright: ignore[reportPrivateUsage]
     with monkeypatch.context() as patch:
         patch.setattr(os, "fstat", lambda _fd=0: os.stat_result((stat.S_IFDIR, 0, 0, 0, 0, 0, 0, 0, 0, 0)))
         assert done.read_recovery_switch(path, 2, {}, tmp_path / "absent") is False
         assert done._read_config_flag(path, 2) is False  # pyright: ignore[reportPrivateUsage]
-    assert done.read_recovery_switch(None, 256, {}, tmp_path / "absent")
+    assert not done.read_recovery_switch(None, 256, {}, tmp_path / "absent")
     read = os.read
     def swap(fd: int, size: int) -> bytes:
         _ = path.rename(tmp_path / "old")
         _ = path.write_text(json.dumps({_FLAG: False}))
         return read(fd, size)
     monkeypatch.setattr(os, "read", swap)
-    assert done.read_recovery_switch(path, 256, {}, tmp_path / "absent")
+    assert done.read_recovery_switch(path, 256, {_FLAG: "true"}, tmp_path / "absent")
     monkeypatch.setattr(os, "read", read)
     link.symlink_to(path)
     assert not done.read_recovery_switch(link, 256, {}, tmp_path / "absent")
     os.mkfifo(tmp_path / "fifo")
     assert not done.read_recovery_switch(tmp_path / "fifo", 256, {}, tmp_path / "absent")
     assert not done.read_recovery_switch(tmp_path, 256, {}, tmp_path / "absent")
-    assert done.read_recovery_switch(path / "missing", 256, {}, path / "other")
+    assert not done.read_recovery_switch(path / "missing", 256, {}, path / "other")
     def denied(*_args: object) -> int:
         raise PermissionError
     monkeypatch.setattr(os, "open", denied)
@@ -244,6 +243,7 @@ def test_finalize_done_orders_and_redacts(tmp_path: Path, monkeypatch: pytest.Mo
     monkeypatch.delenv(_FLAG, raising=False)
     monkeypatch.delenv("AGY_SELF_HEAL_INTERRUPTED_TURN", raising=False)
     tail = facade.InterruptionTailState()
+    tail.attempt = 0
     error = _LONG_ERROR + (" suffix" if case == "suffix" else "")
     def drain() -> list[object]:
         events.append("drain")

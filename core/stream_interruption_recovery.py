@@ -38,28 +38,28 @@ class InterruptionTailState:
     error_from_structured_record: bool = False
     last_completion_attempt: int = -1
     has_open_planner_after_completion: bool = False
-
+    attempt: int = -1
     def note_error_record(self, rtype: str | int, rec: dict[str, object] | str = "", idx: int | None = None, **kw: object) -> None:
-        """Принимает legacy (rtype, rec, idx) либо (seq, text=..., attempt=0)."""
+        """Без реального attempt или step_index каузальность не доказана."""
         if isinstance(rtype, int) or rtype == "ERROR_MESSAGE":
             text = kw.get("text", rec)
             if isinstance(rec, dict):
                 texts = (rec.get(key) for key in ("content", "message", "error"))
                 text = next(filter(None, texts), "")
             text = str(text)
-            seq = rtype if isinstance(rtype, int) else idx or 0
+            seq = rtype if isinstance(rtype, int) else idx if idx is not None else -1
             self.final_planner, self.final_planner_content = False, ""
             self.has_open_planner_after_completion = self.last_planner_step_index >= 0
             self.had_transient_error |= is_transient_stream_interruption(text)
-            if seq >= self.last_error_step_index:
+            if seq < 0 or seq >= self.last_error_step_index:
                 self.last_error_step_index = seq
                 self.last_error_sha256 = causal.error_identity_digest(text)
                 self.last_error_length = len(causal.normalize_error_identity(text))
-                attempt = kw.get("attempt", 0)
+                attempt = kw.get("attempt", self.attempt)
                 self.last_error_attempt = attempt if type(attempt) is int else -1
-                self.error_from_structured_record = True
+                self.error_from_structured_record = seq >= 0
 
-    def note_planner_record(self, rec: dict[str, object], idx: int, *, attempt: int = 0) -> None:
+    def note_planner_record(self, rec: dict[str, object], idx: int, *, attempt: int | None = None) -> None:
         """Непустой DONE без tools завершает шаг; любой новый открытый шаг отменяет финал."""
         content = rec.get("content")
         has_tools = bool(rec.get("tool_calls"))
@@ -70,7 +70,7 @@ class InterruptionTailState:
         self.final_planner_content = text if self.final_planner else ""
         if self.final_planner:
             self.last_planner_step_index = max(self.last_planner_step_index, idx)
-            self.last_completion_attempt = attempt
+            self.last_completion_attempt = self.attempt if attempt is None else attempt
 
 @dataclass(frozen=True)
 class TailCausalFacts:

@@ -15,13 +15,21 @@ _FLAG = "BRIDGE_CAUSAL_TURN_RECOVERY_ENABLED"
 _FALSE = ("0", "false", "no", "off")
 _TRUE = ("1", "true", "yes", "on")
 
-def _read_config_flag(path: Path, max_bytes: int) -> bool:
-    """Читает ограниченный regular JSON по единственному no-follow дескриптору."""
+def _config_value(data: object) -> bool | None:
+    """Отличить отсутствие ключей от явного opt-in и запретов."""
+    if not isinstance(data, dict):
+        return False
+    flags = cast(dict[str, object], data)
+    present = tuple(flags[key] for key in (_FLAG, "causal_turn_recovery_enabled", "causal_recovery_enabled") if key in flags)
+    return all(value is True for value in present) if present else None
+
+def _read_config_flag(path: Path, max_bytes: int) -> bool | None:
+    """Отсутствие opt-in нейтрально, некорректный источник запрещает recovery."""
     try:
         # NONBLOCK не меняет regular file, но позволяет отвергнуть FIFO без зависания.
         fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
     except (FileNotFoundError, NotADirectoryError):
-        return True
+        return None
     except OSError:
         return False
     try:
@@ -33,29 +41,31 @@ def _read_config_flag(path: Path, max_bytes: int) -> bool:
             os.close(fd)
         if len(raw) > max_bytes:
             return False
-        data = cast(object, json.loads(raw.decode("utf-8")))
-        if not isinstance(data, dict):
-            return False
-        flags = cast(dict[str, object], data)
-        return all(flags.get(key, True) is True for key in (_FLAG, "causal_turn_recovery_enabled"))
+        return _config_value(cast(object, json.loads(raw.decode("utf-8"))))
     except (OSError, ValueError, RecursionError):
         return False
+
+def _recovery_config_flags(local_path: Path | None, max_bytes: int, values: Mapping[str, str], global_path: Path | None) -> tuple[bool | None, ...]:
+    """Прочитать общий и локальный источники без обхода локального вето."""
+    override = values.get("BRIDGE_DYNAMIC_CONFIG_PATH", "").strip()
+    default = global_path if global_path is not None else Path.home() / ".config/cli-agent-bridge/dynamic_config.json"
+    paths = (Path(override), local_path) if override else (default, local_path)
+    return tuple(_read_config_flag(path, max_bytes) for path in paths if path is not None)
 
 def read_recovery_switch(
     local_path: Path | None, max_bytes: int, env: Mapping[str, str] | None = None,
     global_path: Path | None = None,
 ) -> bool:
-    """Любой false или сломанный источник запрещает recovery; отсутствие нейтрально."""
+    """Нужен явный opt-in; любой false или сломанный источник имеет право вето."""
     values = os.environ if env is None else env
     master = values.get("AGY_SELF_HEAL_INTERRUPTED_TURN", "").strip().lower()
-    if master in _FALSE or values.get(_FLAG, "").strip().lower() not in ("", *_TRUE):
+    switches = tuple(values.get(key, "").strip().lower() for key in (_FLAG, "AGY_CAUSAL_RECOVERY_ENABLED"))
+    if any(value not in ("", *_TRUE) for value in (master, *switches)):
         return False
     if type(max_bytes) is not int or max_bytes <= 0:
         return False
-    override = values.get("BRIDGE_DYNAMIC_CONFIG_PATH", "").strip()
-    default = global_path if global_path is not None else Path.home() / ".config/cli-agent-bridge/dynamic_config.json"
-    paths = (Path(override),) if override else (default, local_path)
-    return all(_read_config_flag(path, max_bytes) for path in paths if path is not None)
+    flags = _recovery_config_flags(local_path, max_bytes, values, global_path)
+    return False not in flags and (True in flags or any(value in _TRUE for value in switches))
 
 @dataclass(frozen=True)
 class DoneRequest:

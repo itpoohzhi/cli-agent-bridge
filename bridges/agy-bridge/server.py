@@ -156,7 +156,7 @@ from core.stream_interruption_recovery import (  # noqa: E402
 )
 from core.turn_finalization import (  # noqa: E402
     DoneConfig, DoneDeliveryFacts, DoneDrainFacts, DonePorts, DoneRecoveryFacts, DoneRequest,
-    DoneResultFacts, DoneRuntimePorts, DoneSnapshot, DoneTextFacts, finalize_done,
+    DoneResultFacts, DoneRuntimePorts, DoneSnapshot, DoneTextFacts, finalize_done, read_recovery_switch,
 )
 from core.tool_emulation import (  # noqa: E402
     LiveParserError, RepetitionLoopDetected, StreamNormalizer,
@@ -3301,7 +3301,7 @@ class _RuntimeFlags(NamedTuple):
     stream_resilience_enabled: bool = True
     isolate_tool_preambles_to_reasoning: bool = True
     tool_emulation_enabled: bool = True
-    self_heal_interrupted_turn: bool = True
+    self_heal_interrupted_turn: bool = False
     graceful_interruption_on_partial: bool = True
     graceful_timeout_finish_reason: str = "stop"
 
@@ -4288,6 +4288,9 @@ class _TranscriptTail(InterruptionTailState):
 
     # ---- жизненный цикл ----------------------------------------------------------
     def start(self) -> None:
+        self.attempt = sse_body_runner.current_attempt_index()
+        if self.run_ref is not None:
+            self.run_ref.attempt = self.attempt
         self.thread.start()
 
     def _cid8(self) -> str:
@@ -6263,28 +6266,8 @@ def _terminal_state(name: str, err: str = "") -> dict[str, object]:
 
 
 def _done_recovery_aliases_enabled() -> bool:
-    """Перевести локальные имена флагов agy в запрет recovery, без кэша."""
-    env = os.environ.get("AGY_CAUSAL_RECOVERY_ENABLED", "").strip().lower()
-    if env and env not in _ENV_TRUE:
-        return False
-    try:
-        fd = os.open(DYNAMIC_CONFIG_PATH, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-    except (FileNotFoundError, NotADirectoryError):
-        return True
-    except OSError:
-        return False
-    try:
-        try:
-            if (os.fstat(fd).st_mode & 0o170000) != 0o100000:
-                return False
-            raw = os.read(fd, DYNAMIC_CONFIG_MAX_BYTES + 1)
-        finally:
-            os.close(fd)
-        data = json.loads(raw) if len(raw) <= DYNAMIC_CONFIG_MAX_BYTES else None
-        return isinstance(data, dict) and all(data.get(key, True) is True for key in (
-            "causal_recovery_enabled", "causal_turn_recovery_enabled", "BRIDGE_CAUSAL_TURN_RECOVERY_ENABLED"))
-    except (OSError, ValueError, RecursionError):
-        return False
+    """Свежий общий opt-in, включая локальные имена флагов и запреты."""
+    return read_recovery_switch(DYNAMIC_CONFIG_PATH, DYNAMIC_CONFIG_MAX_BYTES)
 
 
 @_LIFECYCLE.install
@@ -6713,12 +6696,12 @@ class Handler(BaseHTTPRequestHandler):
         return DoneSnapshot(
             DoneTextFacts(final_text, str(getattr(run, "_content_emitted_wire", "") or ""), full_error, request.errors[1]),
             DoneResultFacts(str((result_ev or {}).get("status") or "").strip().lower(),
-                            actual_rc, exited, getattr(self, "_attempt", getattr(run, "attempt", 0)),
+                            actual_rc, exited, getattr(run, "attempt", -1),
                             bool(getattr(run, "has_fatal_error", False))),
             DoneDeliveryFacts(bool(getattr(run, "content_streaming", False)), not ports.state("", 0).get("text"),
                               getattr(run, "reconcile_result", lambda text: text),
                               lambda: bool(getattr(getattr(run, "_arbiter", None), "last_result_diverged", False))),
-            DoneRecoveryFacts(bool(_new_flag("self_heal_interrupted_turn", True)) and _done_recovery_aliases_enabled(),
+            DoneRecoveryFacts(bool(_new_flag("self_heal_interrupted_turn", False)) and _done_recovery_aliases_enabled(),
                               tail, DoneDrainFacts(str(getattr(tail, "drain_outcome", "")), stopped), tool_status),
         )
 
@@ -6771,57 +6754,74 @@ class Handler(BaseHTTPRequestHandler):
             job.cancelled.is_set() if job is not None else _client_gone(self.connection)
         )
 
-    def _run_once(
-        self, ctx: dict, on_text, on_tool_trace, on_reasoning, keepalive
-    ) -> dict:
+    @staticmethod
+    def _run_once_callbacks(on_text, on_tool_trace, on_reasoning, keepalive) -> tuple:
+        """Сохранить позиционную и именованную форму четырёх legacy callbacks."""
+        return on_text, on_tool_trace, on_reasoning, keepalive
+
+    def _run_once(self, ctx: dict, *callbacks, **named_callbacks) -> dict:
+        """Сохранить legacy-вызов, делегируя владение job отдельному координатору."""
+        return self._run_registered_attempt(ctx, self._run_once_callbacks(*callbacks, **named_callbacks))
+
+    def _run_registered_attempt(self, ctx: dict, callbacks: tuple) -> dict:
+        """Исполнить попытку напрямую либо подписаться на producer общего job."""
         key = str(ctx.get("step_job_id") or "")
         if not key:
-            return self._run_once_impl(
-                ctx, on_text, on_tool_trace, on_reasoning, keepalive
-            )
-        registry = _JOB_REGISTRY
+            return self._run_once_impl(ctx, *callbacks)
         try:
-            job, owner = registry.attach(
+            job, owner = _JOB_REGISTRY.attach(
                 key, str(ctx["model"]), str(ctx["full_prompt"])
             )
         except JobConflict:
             return {"state": "job_conflict", "text": "", "rc": 1}
         if owner:
-            worker = copy.copy(self)
-            worker._registry_job = job
-            worker_ctx = dict(ctx)
-            worker_ctx.pop("finalize_timeout", None)
+            self._start_job_producer(ctx, job)
+        return self._read_job_events(job, callbacks)
 
-            def produce() -> None:
-                try:
-                    out = worker._run_once_impl(
+    def _start_job_producer(self, ctx: dict, job: _Job) -> None:
+        """Зафиксировать контекст попытки до отделения producer от подписчика."""
+        registry = _JOB_REGISTRY
+        worker = copy.copy(self)
+        worker._registry_job = job
+        worker_ctx = dict(ctx)
+        worker_ctx.pop("finalize_timeout", None)
+        def produce() -> None:
+            try:
+                out = sse_body_runner.invoke_at_attempt(
+                    worker_ctx.get("attempt_index", -1),
+                    lambda: worker._run_once_impl(
                         worker_ctx,
                         lambda value: registry.publish(job, "text", value),
                         lambda value: registry.publish(job, "tool_trace", value),
                         lambda value: registry.publish(job, "reasoning", value),
                         lambda: not job.cancelled.is_set(),
-                    )
-                except Exception as exc:
-                    _log(f"job-producer-error err={type(exc).__name__}")
-                    out = {"state": "pump_error", "text": "", "rc": 1}
-                try:
-                    registry.finish(job, out)
-                finally:
-                    use_cid = str(worker_ctx.get("registry_use_cid") or "")
-                    if use_cid:
-                        with _session_store_lock:
-                            _in_flight_cids.discard(use_cid)
-                    _cid_release(
-                        use_cid or str(worker_ctx.get("registry_owned_cid") or ""),
-                        str(worker_ctx.get("turn_id") or ""),
-                    )
-
-            ctx["job_owns_cid"] = True
+                    ),
+                )
+            except Exception as exc:
+                _log(f"job-producer-error err={type(exc).__name__}")
+                out = {"state": "pump_error", "text": "", "rc": 1}
             try:
-                threading.Thread(target=produce, daemon=True, name="agy-job").start()
-            except RuntimeError:
-                ctx["job_owns_cid"] = False
-                registry.finish(job, {"state": "pump_error", "text": "", "rc": 1})
+                registry.finish(job, out)
+            finally:
+                use_cid = str(worker_ctx.get("registry_use_cid") or "")
+                if use_cid:
+                    with _session_store_lock:
+                        _in_flight_cids.discard(use_cid)
+                _cid_release(
+                    use_cid or str(worker_ctx.get("registry_owned_cid") or ""),
+                    str(worker_ctx.get("turn_id") or ""),
+                )
+        ctx["job_owns_cid"] = True
+        try:
+            threading.Thread(target=produce, daemon=True, name="agy-job").start()
+        except RuntimeError:
+            ctx["job_owns_cid"] = False
+            registry.finish(job, {"state": "pump_error", "text": "", "rc": 1})
+
+    def _read_job_events(self, job: _Job, callbacks: tuple) -> dict:
+        """Доставить события подписчику, сохраняя heartbeat и гарантированный detach."""
+        on_text, on_tool_trace, on_reasoning, keepalive = callbacks
+        registry = _JOB_REGISTRY
         offset = 0
         heartbeat = _env_float(
             "BRIDGE_SSE_HEARTBEAT_INTERVAL_S", 12.0, 0.001, float("inf")
