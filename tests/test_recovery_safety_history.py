@@ -70,7 +70,7 @@ def test_safety_history_blocks_terminal_recovery(monkeypatch: pytest.MonkeyPatch
     assert any("error" in chunk for chunk in chunks)
 
 
-@pytest.mark.parametrize("field,value", (("block_reason", "OTHER"), ("block_reason", "SAFETY"), ("finish_reason", "SAFETY"), ("reason", "SAFETY"), ("error", "content_filter"), ("message", "Policy violation"), ("details", {"block_reason": "OTHER"})))
+@pytest.mark.parametrize("field,value", (("block_reason", "OTHER"), ("block_reason", "SAFETY"), ("finish_reason", "SAFETY"), ("reason", "SAFETY"), ("error", "content_filter"), ("message", "Policy violation"), ("details", {"block_reason": "OTHER"}), ("blockReason", "OTHER"), ("stop_reason", "refusal"), ("finishReason", "OTHER"), ("promptFeedback", {"blockReason": "OTHER"})))
 def test_structured_record_safety_blocks_recovery(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, field: str, value: str | dict[str, str]) -> None:
     bridge = flow._load_bridge(monkeypatch, tmp_path)
     monkeypatch.setattr(flow, "_ERROR", "connection reset by peer")
@@ -119,3 +119,20 @@ def test_json_self_heal_kill_switch(tmp_path: Path, canonical: bool) -> None:
         local, 4096, env={"BRIDGE_CAUSAL_TURN_RECOVERY_ENABLED": "true"},
         global_path=tmp_path / "missing.json",
     )
+
+
+@pytest.mark.parametrize("marker", ("&amp;#x73;afety: request rejected; connection reset by peer", r"\U00000073afety", r"\u0026amp;#x73;afety; connection reset", "&amp;" + "amp;" * 35 + "#x73;afety; connection reset"))
+def test_composite_encoding_safety_veto(marker: str) -> None:
+    assert is_fatal_safety_error(marker)
+    assert not recovery.is_transient_stream_interruption(marker)
+
+
+def test_normalized_safety_veto() -> None:
+    assert not recovery.is_transient_stream_interruption("sa\u200bfety; connection reset by peer")
+
+
+@pytest.mark.parametrize("reason", ("OTHER", "NONE"))
+def test_non_json_error_metadata(reason: str) -> None:
+    tail = recovery.InterruptionTailState()
+    tail.note_error_record("ERROR_MESSAGE", {"blockReason": reason, "content": "connection reset by peer", "metadata": object()}, idx=1)
+    assert tail.had_safety_error is (reason == "OTHER")

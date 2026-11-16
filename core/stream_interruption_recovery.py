@@ -51,8 +51,8 @@ class InterruptionTailState:
                 struct_safety = any(
                     causal.is_fatal_safety_error(f"{k}: {v}")
                     for k, v in rec.items()
-                    if k in ("block_reason", "finish_reason", "reason", "error", "message") and v is not None
-                ) or causal.is_fatal_safety_error(json.dumps(rec))
+                    if str(k).lower() in ("block_reason", "blockreason", "finish_reason", "finishreason", "stop_reason", "stopreason", "reason", "error", "message") and v is not None
+                ) or causal.is_fatal_safety_error(json.dumps(rec, default=str))
             text = str(text)
             seq = rtype if isinstance(rtype, int) else idx if idx is not None else -1
             self.final_planner, self.final_planner_content = False, ""

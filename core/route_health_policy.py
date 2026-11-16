@@ -172,6 +172,7 @@ def is_transient_stream_interruption(text: str | None, *, source: str = "cli_err
     transient = False
     if isinstance(text, str) and not is_fatal_safety_error(text) and is_diagnostic_source(source) and not OBFUSCATED_ENCODING_RE.search(text):
         normalized = normalize_diagnostic_text(text, max_len=1048576, fail_closed=False)
+        if is_fatal_safety_error(normalized): return False
         statuses = extract_failure_statuses(normalized)
         transient = not (statuses - TRANSIENT_STATUS_CODES or FATAL_REQUEST_PHRASE_RE.search(normalized)
                          or not TRANSIENT_STREAM_INTERRUPTION_RE.search(normalized)

@@ -24,7 +24,7 @@ _SAFETY_MARKERS: tuple[str, ...] = (
     "content safety", "safety filter", "safety: request rejected", "content policy",
     "policy violation", "policy rejection", "safety policy", "safety violation",
     "policy_violation", "content_policy_violation", "safety_violation",
-    "content_filter", "safety_check", "safety_policy",
+    "content_filter", "safety_check", "safety_policy", "refusal",
     "content_safety", "safety_filter", "prohibited_content", "recitation", "fatal_safety_error",
 )
 _BENIGN_FINISH_REASONS = ("null", "none", "stop", "length", "tool_calls", "end_turn", "tool_use", "max_tokens", "stop_sequence")
@@ -34,20 +34,24 @@ def is_fatal_safety_error(text: str | None) -> bool:
     """Распознаёт отказ защитных механизмов: такой ход не восстанавливается."""
     cur = text or ""
     for _ in range(32):
-        if "%" not in cur:
+        prev = cur
+        if "%" in cur:
+            cur = unquote_plus(cur)
+        if "&" in cur:
+            cur = html.unescape(cur)
+        if "\\u" in cur:
+            cur = re.sub(r"\\u([0-9a-fA-F]{4})", lambda m: chr(int(m.group(1), 16)), cur)
+        if "\\U" in cur:
+            if any(int(code, 16) > 0x10FFFF for code in re.findall(r"\\U([0-9a-fA-F]{8})", cur)):
+                return True
+            cur = re.sub(r"\\U([0-9a-fA-F]{8})", lambda m: chr(int(m.group(1), 16)), cur)
+        if cur == prev:
             break
-        dec = unquote_plus(cur)
-        if dec == cur:
-            break
-        cur = dec
     else:
-        if re.search(r"%[0-9a-fA-F]{2}", cur):
+        if html.unescape(cur) != cur or re.search(r"%[0-9a-fA-F]{2}|&#x?[0-9a-fA-F]+;|\\[uU][0-9a-fA-F]{4}", cur):
             return True  # Неразрешённое остаточное кодирование: fail-closed.
-    cur = html.unescape(cur)
-    if "\\u" in cur or "\\U" in cur:
-        cur = re.sub(r"\\u([0-9a-fA-F]{4})", lambda m: chr(int(m.group(1), 16)), cur)
     lowered = cur.replace("+", " ").casefold()
-    reasons: list[str] = re.findall(r"""\b(?:block_reason|finish_reason)\b["']?\s*[:=]\s*["']?([\w-]+)""", lowered)
+    reasons: list[str] = re.findall(r"""\b(?:block_reason|blockreason|finish_reason|finishreason|stop_reason|stopreason)\b["']?\s*[:=]\s*["']?([\w-]+)""", lowered)
     return (
         any(marker in lowered for marker in _SAFETY_MARKERS)
         or bool(re.search(r"(?<![\w-])safety(?![\w-])", lowered))
