@@ -1,18 +1,8 @@
-"""Сквозной OpenAI-совместимый passthrough хаба (ADR 0011, AD-003/AD-005/AD-007).
+"""Универсальный OpenAI passthrough: raw HTTP, режимы инструментов и SSE.
 
-Отдельный raw HTTP-шов вне `TurnContext`/`TurnResult`: запрос уходит upstream (`base_url`
-из `fleet.json`, например `codex-lb` на `127.0.0.1:2455`) дословно, ответ возвращается с
-единственной нормализацией — санитизацией `tool_calls` общим ядром `core.tool_emulation`.
-Модуль не знает ни об одном конкретном upstream, клиенте или модели; для скрытия мастер-ключа хаба проверка токена инжектируется callback'ом `is_hub_key` (параметр конструктора или host), модуль `server` не импортируется.
-
-Стриминг: `content`/`reasoning` идут без задержки; дельты `tool_calls` копятся по составному
-ключу `(choice.index, tool_call.index)` и выпускаются только вместе с терминальным
-`finish_reason` своей choice. Конец потока без `finish_reason` (обрыв upstream, RW-002)
-сбрасывает буфер choice: недособранные вызовы downstream не уходят, клиент получает
-терминальный error-chunk без `[DONE]`.
-
-Лимиты не зашиты в код: чтение env — здесь (адаптер, не ядро; BND-001), значения по
-умолчанию — параметры `PassthroughLimits`, ядру они передаются аргументами.
+Запрос сохраняется; общий нормализатор и санитайзер ядра обрабатывают ответы.
+Вызовы буферизуются до finish_reason; ошибки закрывают поток одним [DONE].
+Лимиты читаются из env и передаются ядру аргументами (BND-001).
 """
 
 from __future__ import annotations
@@ -34,33 +24,21 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, Callable, Iterator, Mapping, Optional
 
+from core import passthrough_precommit
 from core.backend_adapter import (
-    SESSIONS_NONE,
-    STREAMING_NATIVE,
-    BackendAdapter,
-    BackendModel,
-    BackendNotSupported,
-    Capabilities,
-    KindConstraints,
-    Qualification,
-    PreSendTransientError,
-    StreamSink,
-    TurnContext,
-    TurnResult,
+    SESSIONS_NONE, STREAMING_NATIVE, BackendAdapter, BackendModel,
+    BackendNotSupported, Capabilities, KindConstraints, Qualification,
+    PreSendTransientError, StreamSink, TurnContext, TurnResult,
 )
 
 from core.tool_emulation import (
-    DEFAULT_MAX_PARALLEL_CALLS,
-    DEFAULT_MAX_PARALLEL_DEPTH,
-    DEFAULT_MAX_REPETITION_REPEATS,
-    DEFAULT_MAX_REPETITION_TOKEN_LEN,
-    RepetitionGuard,
-    ToolCallParser,
-    build_tool_schemas,
-    sanitize_tool_call,
+    DEFAULT_MAX_PARALLEL_CALLS, DEFAULT_MAX_PARALLEL_DEPTH,
+    DEFAULT_MAX_REPETITION_REPEATS, DEFAULT_MAX_REPETITION_TOKEN_LEN,
+    LiveParserError, RepetitionGuard, StreamNormalizer, ToolCallParser,
+    build_tool_schemas, sanitize_tool_call,
 )
 from core.cli_runtime_config import NonstreamConfig
-from core.liveness_signals import SIGNAL_S, LivenessWindow, SseProgress
+from core.liveness_signals import SIGNAL_S, LivenessWindow, SseProgress, parse_sse_json
 from core.liveness_signals import passthrough_window
 from core.nonstream_aggregator import NonstreamError, aggregate_events, choice_index
 from core.nonstream_aggregator import internal_stream_body, request_deadlines
@@ -75,6 +53,11 @@ from core.passthrough_sliding_window import (
 from core.presend_retry_policy import resolve_presend_response
 from core.runtime_env import DynamicFlagSource, bounded_int as _bounded_int
 from core.runtime_env import env_bool, positive_int as _positive_int
+from core.runtime_env import resolve_toolless_tag_policy
+from core.tool_mode import (
+    DEFAULT_EMULATE_SPEC, NormalizerModeSpec, NormalizerSinks, ToolMode,
+    build_mode_spec, check_unexpected_tool_calls, format_tool_mode_log, resolve_tool_mode,
+)
 from core.stream_framing import build_stream_error_chunk, format_sse_event
 from core.stream_framing import (
     format_stream_error_sse,
@@ -111,9 +94,7 @@ DEFAULT_QUEUE_TIMEOUT_S = 900.0
 KIND = "passthrough"
 
 # Loopback-upstream с `/v1` в конце; допустимы вложенные префиксы (`http://127.0.0.1:10830/go/v1`).
-_LOOPBACK_V1_RE = re.compile(
-    r"http://(?:127\.0\.0\.1|localhost):[0-9]{1,5}(?:/[a-z0-9._-]+)*/v1"
-)
+_LOOPBACK_V1_RE = re.compile(r"http://(?:127\.0\.0\.1|localhost):[0-9]{1,5}(?:/[a-z0-9._-]+)*/v1")
 _NO_EFFORT_VALUES = frozenset({"", "off", "none"})
 
 # Заголовки соединения (RFC 9110 §7.6.1) не пробрасываются; Host/Content-Length ставит шов.
@@ -126,14 +107,12 @@ _DROP_EXTRA = {"host", "content-length", "accept-encoding", "x-turn-owner-token"
 _REQUEST_DROP = _HOP_BY_HOP | _DROP_EXTRA | {_TOOL_SANITIZED_HEADER}
 _RESPONSE_DROP = _HOP_BY_HOP | {"content-length", _TOOL_SANITIZED_HEADER}
 
-
 def _positive_float(environ: Mapping[str, str], name: str, default: float) -> float:
     try:
         value = float(str(environ.get(name, "")).strip())
     except ValueError:
         return default
     return value if math.isfinite(value) and value > 0 else default
-
 
 @dataclass(frozen=True)
 class PassthroughLimits:
@@ -163,9 +142,7 @@ class PassthroughLimits:
     nonstream: NonstreamConfig = field(default_factory=NonstreamConfig)
 
     @classmethod
-    def from_env(
-        cls, environ: Optional[Mapping[str, str]] = None
-    ) -> "PassthroughLimits":
+    def from_env(cls, environ: Optional[Mapping[str, str]] = None) -> "PassthroughLimits":
         """Лимиты из окружения; нечисловое и неположительное значение -> default."""
         env = os.environ if environ is None else environ
         ns = NonstreamConfig.from_env(env)
@@ -199,21 +176,16 @@ class PassthroughLimits:
             reader_join_timeout_s=pf(env, r_join, 0.2),
             read_queue_max_entries=pi(env, r_q, 1),
             repetition_max_repeats=bi(env, ENV_REPETITION_MAX_REPEATS, d_rr, 3, 1000),
-            repetition_max_token_len=bi(
-                env, ENV_REPETITION_MAX_TOKEN_LEN, d_rt, 8, 512
-            ),
+            repetition_max_token_len=bi(env, ENV_REPETITION_MAX_TOKEN_LEN, d_rt, 8, 512),
             repetition_guard_enabled=env_bool(env, e_rg, False),
             invoke_normalization_enabled=env_bool(env, e_in, False),
             nonstream=ns,
         )
 
-
 class PassthroughConnectionPool:
     """Потокобезопасный LIFO-пул свободных соединений без состояния запроса."""
 
-    def __init__(
-        self, max_keepalive: int = 32, keepalive_expiry_s: float = 30.0
-    ) -> None:
+    def __init__(self, max_keepalive: int = 32, keepalive_expiry_s: float = 30.0) -> None:
         self._max_keepalive: int = max_keepalive
         self._keepalive_expiry_s: float = keepalive_expiry_s
         self._idle: dict[tuple[str, int], list[tuple[Any, float]]] = {}
@@ -281,18 +253,14 @@ class PassthroughConnectionPool:
             for conn, _ in entries:
                 conn.close()
 
-
 class ClientGone(Exception):
     """Запись клиенту невозможна (отмена/обрыв): upstream закрывается, повторов нет."""
-
 
 class AccumulatorOverflow(Exception):
     """Бюджет аккумулятора `tool_calls` (запрос/ключи/процесс) исчерпан."""
 
-
 class UpstreamBodyTooLarge(Exception):
     """Тело или строка upstream превысили лимит."""
-
 
 class ProcessBudget:
     """Суммарный бюджет аккумуляторов процесса по параллельным passthrough-запросам."""
@@ -318,7 +286,6 @@ class ProcessBudget:
         with self._lock:
             self._used = max(0, self._used - size)
 
-
 class ResponseSink:
     """Куда шов пишет ответ клиенту; реализует хаб (`server.py`). Любая ошибка записи -> ClientGone."""
 
@@ -338,10 +305,8 @@ class ResponseSink:
         """Тип ошибки отданного ответа для классификации исхода lease ('' — ошибки нет)."""
         return ""
 
-
 def new_call_id() -> str:
     return "call_" + uuid.uuid4().hex[:24]
-
 
 @dataclass
 class _PartialCall:
@@ -352,7 +317,6 @@ class _PartialCall:
     name: str = ""
     arguments: list[str] = field(default_factory=list)
 
-
 class ToolCallAccumulator:
     """Дельты `tool_calls` по составному ключу `(choice.index, tool_call.index)`.
 
@@ -360,9 +324,7 @@ class ToolCallAccumulator:
     освобождение бюджета — `pop_choice`/`drop_choice`/`close` (идемпотентно).
     """
 
-    def __init__(
-        self, limits: PassthroughLimits, process: Optional[ProcessBudget] = None
-    ) -> None:
+    def __init__(self, limits: PassthroughLimits, process: Optional[ProcessBudget] = None) -> None:
         self._limits = limits
         self._process = process
         self._entries: dict[tuple[int, int], _PartialCall] = {}
@@ -422,9 +384,7 @@ class ToolCallAccumulator:
                     raise AccumulatorOverflow("accumulator_keys")
                 entry = _PartialCall()
                 self._entries[key] = entry
-            fn = (
-                delta.get("function") if isinstance(delta.get("function"), dict) else {}
-            )
+            fn = delta.get("function") if isinstance(delta.get("function"), dict) else {}
             call_id = delta.get("id")
             if isinstance(call_id, str) and call_id and not entry.id:
                 self._grow(len(call_id.encode("utf-8")))
@@ -465,9 +425,7 @@ class ToolCallAccumulator:
             self._release(entry)
             fn = {"name": entry.name, "arguments": "".join(entry.arguments)}
             cid = entry.id or new_call_id()
-            calls.append(
-                {"index": key[1], "id": cid, "type": entry.type, "function": fn}
-            )
+            calls.append({"index": key[1], "id": cid, "type": entry.type, "function": fn})
         self._last_index.pop(choice, None)
         for remap_key in [k for k in self._remap if k[0] == choice]:
             self._remap.pop(remap_key, None)
@@ -480,7 +438,6 @@ class ToolCallAccumulator:
         for choice in self.pending_choices():
             self.drop_choice(choice)
 
-
 def sanitize_choice_calls(
     calls: list[dict[str, Any]],
     tool_schemas: Optional[dict[str, Any]],
@@ -489,9 +446,7 @@ def sanitize_choice_calls(
     """Санитизация вызовов одной choice; `index` меняется только если `parallel` изменил число вызовов."""
     mpc, mpd = limits.max_parallel_calls, limits.max_parallel_depth
     groups = [
-        sanitize_tool_call(
-            c, tool_schemas, max_parallel_calls=mpc, max_parallel_depth=mpd
-        )
+        sanitize_tool_call(c, tool_schemas, max_parallel_calls=mpc, max_parallel_depth=mpd)
         for c in calls
     ]
     flat = [item for group in groups for item in group]
@@ -501,21 +456,116 @@ def sanitize_choice_calls(
     )
     if not unpacked:
         return flat
-    return [
-        dict(item, index=i) if "index" in item else item for i, item in enumerate(flat)
-    ]
+    return [dict(item, index=i) if "index" in item else item for i, item in enumerate(flat)]
 
+def _check_native(spec: NormalizerModeSpec, calls: Any) -> None:
+    try:
+        check_unexpected_tool_calls(spec.mode, calls)
+    except ValueError:
+        raise LiveParserError("unexpected upstream tool calls") from None
+
+def _openai_call(call: Mapping[str, Any]) -> dict[str, Any]:
+    args = call.get("arguments")
+    arguments = args if isinstance(args, str) else json.dumps(args or {}, ensure_ascii=False)
+    return {
+        "id": str(call.get("id") or new_call_id()),
+        "type": "function",
+        "function": {"name": str(call.get("name") or ""), "arguments": arguments},
+    }
+
+class _ResponseText:
+    """Локальный текстовый шов choice; запрещённые режимы не создают ToolCallParser."""
+
+    def __init__(self, spec: NormalizerModeSpec, schemas: Any, enabled: bool) -> None:
+        self.content: list[str] = []
+        self.reasoning: list[str] = []
+        self.calls: list[dict[str, Any]] = []
+        self.parser: ToolCallParser | StreamNormalizer | None = None
+        sinks = NormalizerSinks(self.content.append, self.reasoning.append, self.calls.append)
+        if spec.mode is not ToolMode.EMULATE:
+            self.parser = StreamNormalizer.for_mode(spec, sinks, strict_live=True)
+        elif enabled:
+            self.parser = ToolCallParser(
+                self.content.append,
+                self.calls.append,
+                tool_schemas=schemas,
+                repetition_guard_enabled=False,
+            )
+
+    def _output(self) -> dict[str, str]:
+        output = {
+            "content": "".join(self.content),
+            "reasoning_content": "".join(self.reasoning),
+        }
+        self.content.clear()
+        self.reasoning.clear()
+        return {key: text for key, text in output.items() if text}
+
+    def feed(self, delta: dict[str, Any]) -> dict[str, Any]:
+        if self.parser is None:
+            return dict(delta)
+        result = dict(delta)
+        text = delta.get("content")
+        if isinstance(text, str) and text:
+            result.pop("content")
+            self.parser.feed(text)
+        reasoning = delta.get("reasoning_content")
+        if isinstance(reasoning, str) and isinstance(self.parser, StreamNormalizer):
+            result.pop("reasoning_content")
+            self.parser.feed_thinking(reasoning)
+        result.update(self._output())
+        return result
+
+    def finish(self) -> dict[str, str]:
+        if self.parser is not None:
+            self.parser.finish()
+        return self._output()
+
+def _merge_parsed_calls(raw_calls: Any, parsed: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    valid = isinstance(raw_calls, list) and all(isinstance(call, dict) for call in raw_calls)
+    calls = list(raw_calls) if valid else []
+    indexed = any("index" in call for call in calls)
+    indices = [call["index"] for call in calls if type(call.get("index")) is int]
+    next_index = max(indices, default=len(calls) - 1) + 1
+    for call in parsed:
+        entry = _openai_call(call)
+        if indexed:
+            entry["index"] = next_index
+            next_index += 1
+        calls.append(entry)
+    return calls
+
+def _normalize_message(
+    message: dict[str, Any], schemas: Any, limits: PassthroughLimits,
+    options: tuple[NormalizerModeSpec, bool],
+) -> bool:
+    spec, sanitize = options
+    raw_calls = message.get("tool_calls")
+    _check_native(spec, raw_calls)
+    text = _ResponseText(spec, schemas, sanitize and limits.invoke_normalization_enabled)
+    updated = text.feed(message)
+    for key, tail in text.finish().items():
+        updated[key] = (updated.get(key) or "") + tail
+    calls = _merge_parsed_calls(raw_calls, text.calls)
+    if sanitize and calls:
+        updated["tool_calls"] = sanitize_choice_calls(calls, schemas, limits)
+    if "content" in message:
+        updated.setdefault("content", "")
+    if updated == message:
+        return False
+    message.clear()
+    message.update(updated)
+    return True
 
 def sanitize_completion_body(
     body: bytes,
     tool_schemas: Optional[dict[str, Any]],
     limits: PassthroughLimits,
+    mode_spec: NormalizerModeSpec = DEFAULT_EMULATE_SPEC,
+    *,
+    sanitize: bool = True,
 ) -> bytes:
-    """Тело non-stream `chat.completion`: санитизируются `choices[].message.tool_calls`
-    и (при `limits.invoke_normalization_enabled`) извлекаются `<invoke>` из `message.content`.
-
-    Невалидный JSON, форма без `choices` и ответ без изменений возвращаются байт-в-байт.
-    """
+    """Проверяет режим и нормализует JSON; неизменённый ответ сохраняет исходные байты."""
     try:
         data = json.loads(body.decode("utf-8"))
     except (ValueError, UnicodeDecodeError):
@@ -526,69 +576,14 @@ def sanitize_completion_body(
     changed = False
     for choice in choices:
         message = choice.get("message") if isinstance(choice, dict) else None
-        if not isinstance(message, dict):
-            continue
-        raw_calls = message.get("tool_calls")
-        has_valid_native = (
-            isinstance(raw_calls, list)
-            and bool(raw_calls)
-            and all(isinstance(c, dict) for c in raw_calls)
-        )
-        merged_calls: list[dict[str, Any]] = list(raw_calls) if has_valid_native else []
-        extracted_calls: list[dict[str, Any]] = []
-        if limits.invoke_normalization_enabled:
-            content = message.get("content")
-            if isinstance(content, str) and content:
-                content_parts: list[str] = []
-                parsed_calls: list[dict[str, Any]] = []
-                p_kw = {
-                    "invoke_normalization_enabled": True,
-                    "repetition_guard_enabled": False,
-                }
-                parser = ToolCallParser(
-                    content_parts.append, parsed_calls.append, **p_kw
-                )
-                parser.feed(content)
-                parser.finish()
-                new_content = "".join(content_parts)
-                if parsed_calls or new_content != content:
-                    message["content"] = new_content
-                    changed = True
-                has_index = any("index" in c for c in merged_calls)
-                idxs = [c["index"] for c in merged_calls if type(c.get("index")) is int]
-                next_idx = max(idxs, default=len(merged_calls) - 1) + 1
-                for call in parsed_calls:
-                    raw_a = call.get("arguments")
-                    args = (
-                        raw_a
-                        if isinstance(raw_a, str)
-                        else json.dumps(raw_a or {}, ensure_ascii=False)
-                    )
-                    fn = {"name": str(call.get("name") or ""), "arguments": args}
-                    cid = str(call.get("id") or new_call_id())
-                    entry: dict[str, Any] = {
-                        "id": cid,
-                        "type": "function",
-                        "function": fn,
-                    }
-                    if has_index:
-                        entry["index"] = next_idx
-                        next_idx += 1
-                    extracted_calls.append(entry)
-                if extracted_calls:
-                    merged_calls.extend(extracted_calls)
-        if not merged_calls:
-            continue
-        cleaned = sanitize_choice_calls(merged_calls, tool_schemas, limits)
-        if extracted_calls or cleaned != raw_calls:
-            message["tool_calls"] = cleaned
-            changed = True
+        if isinstance(message, dict):
+            changed = (
+                _normalize_message(message, tool_schemas, limits, (mode_spec, sanitize)) or changed
+            )
     return json.dumps(data, ensure_ascii=False).encode("utf-8") if changed else body
-
 
 def _data_frame(payload: Mapping[str, Any]) -> bytes:
     return b"data: " + json.dumps(payload, ensure_ascii=False).encode("utf-8") + b"\n\n"
-
 
 def _error_frame(chunk: Mapping[str, Any], code: str, message: str) -> bytes:
     """Терминальный error-chunk в форме `chat.completion.chunk` (как fail-close кадр фасада)."""
@@ -598,14 +593,18 @@ def _error_frame(chunk: Mapping[str, Any], code: str, message: str) -> bytes:
                 message=message,
                 model=str(chunk.get("model") or ""),
                 code=code,
-                finish_reason="stop" if is_graceful_error_framing_enabled() else None,
+                finish_reason=(
+                    "stop"
+                    if is_graceful_error_framing_enabled()
+                    and code != "upstream_tool_mode_violation"
+                    else None
+                ),
                 completion_id=str(chunk.get("id") or "chatcmpl-passthrough"),
                 created=chunk.get("created"),
             )
         ).encode("utf-8")
         + b"data: [DONE]\n\n"
     )
-
 
 def iter_sse_events(
     readline: Callable[[int], bytes], max_line_bytes: int
@@ -634,7 +633,6 @@ def iter_sse_events(
             value = text[5:].decode("utf-8", errors="replace")
             data.append(value[1:] if value.startswith(" ") else value)
 
-
 @dataclass
 class StreamOutcome:
     """Итог пробрасывания SSE (для журнала и тестов)."""
@@ -648,7 +646,6 @@ class StreamOutcome:
     last_chunk: Optional[dict[str, Any]] = None
     unfinished_choices: Optional[set[int]] = None
     reader_stopped: bool = False
-
 
 class _TimedSseReader:
     """Один bounded reader; ожидание I/O не мешает heartbeat и дедлайну."""
@@ -672,7 +669,6 @@ class _TimedSseReader:
         self.stop = threading.Event()
         self.request_read: threading.Semaphore = threading.Semaphore(0)
         self.last_input = time.monotonic()
-
         def read() -> None:
             try:
                 while not self.stop.is_set():
@@ -698,7 +694,6 @@ class _TimedSseReader:
                         return
                     except queue.Full:
                         continue
-
         self.thread = threading.Thread(target=read, daemon=True, name="passthrough-sse")
         self.thread.start()
 
@@ -738,6 +733,222 @@ class _TimedSseReader:
         self.request_read.release()
         self.thread.join(timeout=self.limits.reader_join_timeout_s)
 
+class _RepetitionLoop(Exception):
+    """Guard обнаружил повтор уже нормализованного текста."""
+
+def _delta_frame(base: Mapping[str, Any], index: int, delta: dict[str, Any]) -> bytes:
+    payload = {
+        key: value for key, value in base.items() if key not in ("choices", "usage", "error")
+    }
+    payload.setdefault("id", "chatcmpl-passthrough")
+    payload.setdefault("object", "chat.completion.chunk")
+    payload.setdefault("created", int(time.time()))
+    payload.setdefault("model", "")
+    payload["choices"] = [{"index": index, "delta": delta, "finish_reason": None}]
+    return _data_frame(payload)
+
+def _published_call_count(calls: Any) -> int:
+    if not isinstance(calls, list):
+        return 0
+    return sum(isinstance(call, dict) and bool(call.get("id")) for call in calls)
+
+def _stream_error_info(error: Any) -> tuple[str, str]:
+    info = error if isinstance(error, dict) else {}
+    code = str(info.get("code") or info.get("type") or "upstream_stream_error")
+    return code, str(info.get("message") or error)
+
+class _SseRelay:
+    """Состояние одного relay; парсеры и буферы изолированы по choice.index."""
+
+    def __init__(
+        self,
+        write: Callable[[bytes], None],
+        schemas: Any,
+        limits: PassthroughLimits,
+        options: Mapping[str, Any],
+    ) -> None:
+        self.client_write, self.schemas, self.limits = write, schemas, limits
+        self.spec: NormalizerModeSpec = options.get("mode_spec", DEFAULT_EMULATE_SPEC)
+        self.sanitize = bool(options.get("sanitize", True))
+        self.trusted = bool(options.get("trusted_tools", False))
+        self.outcome: StreamOutcome = options.get("state") or StreamOutcome()
+        self.acc = ToolCallAccumulator(limits, options.get("process"))
+        self.seen: set[int] = set()
+        self.finished: set[int] = set()
+        self.last_chunk: dict[str, Any] = {}
+        self.guards: dict[int, RepetitionGuard] = {}
+        self.texts: dict[int, _ResponseText] = {}
+
+    def write(self, frame: bytes) -> None:
+        self.outcome.committed = True
+        self.client_write(frame)
+
+    def error(self, code: str, message: str, flag: str) -> StreamOutcome:
+        self.acc.close()
+        setattr(self.outcome, flag, True)
+        self.write(_error_frame(self.last_chunk, code, message))
+        return self.outcome
+
+    def _check_repetition(self, index: int, text: str) -> None:
+        if not self.limits.repetition_guard_enabled or not text:
+            return
+        if index not in self.guards:
+            self.guards[index] = RepetitionGuard(
+                max_repeats=self.limits.repetition_max_repeats,
+                max_token_len=self.limits.repetition_max_token_len,
+                enabled=True,
+            )
+        if self.guards[index].feed(text)[1]:
+            raise _RepetitionLoop()
+
+    def _text_for(self, index: int) -> _ResponseText:
+        if index not in self.texts:
+            enabled = self.sanitize and self.limits.invoke_normalization_enabled
+            self.texts[index] = _ResponseText(self.spec, self.schemas, enabled)
+        return self.texts[index]
+
+    def _add_parsed_calls(self, index: int) -> None:
+        text = self.texts[index]
+        for call in text.calls:
+            entry = _openai_call(call)
+            entry["index"] = self.acc.next_tool_index(index)
+            self.acc.add(index, [entry])
+        text.calls.clear()
+
+    def _native_delta(self, index: int, delta: dict[str, Any]) -> dict[str, Any]:
+        try:
+            _check_native(self.spec, delta.get("tool_calls"))
+        except LiveParserError:
+            if self.sanitize:
+                self.acc.add(index, delta.get("tool_calls"))
+            raise
+        if not self.sanitize or "tool_calls" not in delta:
+            return delta
+        if self.trusted:
+            self.outcome.tool_calls_published += _published_call_count(delta["tool_calls"])
+            return delta
+        self.acc.add(index, delta["tool_calls"])
+        return {key: value for key, value in delta.items() if key != "tool_calls"}
+
+    def _consume_choice(self, choice: dict[str, Any]) -> bool:
+        original = dict(choice)
+        index = choice_index(choice.get("index"))
+        self.seen.add(index)
+        delta = choice.get("delta")
+        if isinstance(delta, dict):
+            delta = self._native_delta(index, delta)
+            text = self._text_for(index)
+            delta = text.feed(delta)
+            self._add_parsed_calls(index)
+            content = delta.get("content")
+            if isinstance(content, str):
+                self._check_repetition(index, content)
+            choice["delta"] = delta
+        if choice.get("finish_reason"):
+            self.finished.add(index)
+        return choice != original
+
+    def _flush_text(self, index: int, base: Mapping[str, Any]) -> None:
+        text = self.texts.pop(index, None)
+        if text is None:
+            return
+        delta = text.finish()
+        for call in text.calls:
+            entry = _openai_call(call)
+            entry["index"] = self.acc.next_tool_index(index)
+            self.acc.add(index, [entry])
+        if delta:
+            self._check_repetition(index, delta.get("content", ""))
+            self.write(_delta_frame(base, index, delta))
+
+    def _terminal(self, choice: dict[str, Any], base: Mapping[str, Any]) -> bool:
+        index = choice_index(choice.get("index"))
+        delta = choice.get("delta")
+        modified = False
+        if self.sanitize and isinstance(delta, dict) and delta.get("content"):
+            self.write(_delta_frame(base, index, {"content": delta["content"]}))
+            choice["delta"] = {key: value for key, value in delta.items() if key != "content"}
+            modified = True
+        self._flush_text(index, base)
+        if self.acc.has_choice(index):
+            calls = sanitize_choice_calls(self.acc.pop_choice(index), self.schemas, self.limits)
+            self.outcome.tool_calls_published += len(calls)
+            self.write(_delta_frame(base, index, {"tool_calls": calls}))
+        return modified
+
+    def _consume_chunk(self, chunk: dict[str, Any], choices: list[Any]) -> bool:
+        self.last_chunk = {key: chunk.get(key) for key in ("id", "created", "model")}
+        self.outcome.last_chunk = self.last_chunk
+        modified = False
+        terminals: list[dict[str, Any]] = []
+        for choice in choices:
+            if isinstance(choice, dict):
+                modified = self._consume_choice(choice) or modified
+                if choice.get("finish_reason"):
+                    terminals.append(choice)
+        self.outcome.unfinished_choices = self.seen - self.finished
+        for choice in sorted(terminals, key=lambda item: choice_index(item.get("index"))):
+            modified = self._terminal(choice, chunk) or modified
+        return modified
+
+    def _other_chunk(self, chunk: dict[str, Any]) -> bool:
+        meta = {key: chunk[key] for key in ("id", "created", "model") if chunk.get(key) is not None}
+        if meta:
+            self.last_chunk = {**self.last_chunk, **meta}
+            self.outcome.last_chunk = {**(self.outcome.last_chunk or {}), **meta}
+        error = chunk.get("error")
+        if error is None or not self._pending():
+            return False
+        code, message = _stream_error_info(error)
+        self.error(code, message, "incomplete")
+        return True
+
+    def _pending(self) -> bool:
+        return bool(self.acc.pending_choices() or self.seen - self.finished)
+
+    def _end(self, raw: bytes | None = None) -> StreamOutcome:
+        for index in sorted(list(self.texts)):
+            self._flush_text(index, self.last_chunk)
+        if self._pending():
+            return self.error(
+                "upstream_incomplete_stream",
+                "upstream stream ended before finish_reason",
+                "incomplete",
+            )
+        if raw is not None:
+            self.outcome.done = True
+            self.write(raw)
+        return self.outcome
+
+    def _write_chunk(self, raw: bytes, chunk: dict[str, Any], modified: bool) -> None:
+        if not modified:
+            self.write(raw)
+            return
+        choices = chunk["choices"]
+        empty = all(
+            isinstance(choice, dict) and not choice.get("delta") and not choice.get("finish_reason")
+            for choice in choices
+        )
+        if choices and empty and "usage" not in chunk and "error" not in chunk:
+            return
+        self.write(_data_frame(chunk))
+
+    def run(self, reader: _TimedSseReader) -> StreamOutcome:
+        for raw, data in iter_sse_events(reader.readline, self.limits.max_body_bytes):
+            chunk = reader.progress.note(data)
+            if data is not None and data.strip() == "[DONE]":
+                return self._end(raw)
+            if chunk is None:
+                self.write(raw)
+                continue
+            choices = chunk.get("choices")
+            if not isinstance(choices, list):
+                if self._other_chunk(chunk):
+                    return self.outcome
+                self.write(raw)
+                continue
+            self._write_chunk(raw, chunk, self._consume_chunk(chunk, choices))
+        return self._end()
 
 def relay_sse(
     readline: Callable[[int], bytes],
@@ -745,310 +956,71 @@ def relay_sse(
     *,
     tool_schemas: Optional[dict[str, Any]],
     limits: PassthroughLimits,
-    process: Optional[ProcessBudget] = None,
-    sanitize: bool = True,
-    trusted_tools: bool = False,
-    state: StreamOutcome | None = None,
-    deadline: float | SlidingDeadline | None = None,
-    window: LivenessWindow | None = None,
+    **kw: Any,
 ) -> StreamOutcome:
-    """Пробросить SSE-поток upstream клиенту с санитизацией `tool_calls` (AD-005).
-
-    Исходный порядок событий сохраняется; единственное изменение — вызовы choice выходят
-    одним кадром прямо перед терминальным чанком своей choice, после санитизации.
-    """
-    eff_dl = (
-        deadline if deadline is not None else time.monotonic() + limits.total_timeout_s
-    )
-    reader = _TimedSseReader(readline, write, limits, eff_dl, window)
-    outcome = state if state is not None else StreamOutcome()
-    client_write = write
-
-    def write(frame: bytes) -> None:
-        """До вызова sink: даже частичная запись запрещает повтор запроса."""
-        outcome.committed = True
-        client_write(frame)
-
-    acc = ToolCallAccumulator(limits, process)
-    seen: set[int] = set()
-    finished: set[int] = set()
-    last_chunk: dict[str, Any] = {}
-    guards: dict[int, RepetitionGuard] = {}
-    parsers: dict[int, ToolCallParser] = {}
-    parser_content: dict[int, list[str]] = {}
-    parser_calls: dict[int, list[dict]] = {}
-
-    def guard_for(index: int) -> RepetitionGuard:
-        if index not in guards:
-            mr, mt = limits.repetition_max_repeats, limits.repetition_max_token_len
-            guards[index] = RepetitionGuard(
-                max_repeats=mr,
-                max_token_len=mt,
-                enabled=limits.repetition_guard_enabled,
-            )
-        return guards[index]
-
-    def repetition_error() -> StreamOutcome:
-        acc.close()
-        outcome.repetition_loop = True
-        msg = "upstream repetition loop detected"
-        write(_error_frame(last_chunk, "upstream_repetition_loop", msg))
-        return outcome
-
-    def check_repetition(index: int, text: str) -> bool:
-        if not limits.repetition_guard_enabled or not text:
-            return False
-        return guard_for(index).feed(text)[1]
-
-    def parser_for(index: int) -> ToolCallParser:
-        if index not in parsers:
-            parser_content[index] = []
-            parser_calls[index] = []
-            p_kw = {"tool_schemas": tool_schemas, "repetition_guard_enabled": False}
-            parsers[index] = ToolCallParser(
-                parser_content[index].append, parser_calls[index].append, **p_kw
-            )
-        return parsers[index]
-
-    def add_invoke_calls(index: int) -> None:
-        for call in parser_calls.get(index, ()):
-            raw_a = call.get("arguments")
-            args = (
-                raw_a
-                if isinstance(raw_a, str)
-                else json.dumps(raw_a or {}, ensure_ascii=False)
-            )
-            fn = {"name": str(call.get("name") or ""), "arguments": args}
-            cid = str(call.get("id") or new_call_id())
-            item = {
-                "index": acc.next_tool_index(index),
-                "id": cid,
-                "type": "function",
-                "function": fn,
-            }
-            acc.add(index, [item])
-        if index in parser_calls:
-            parser_calls[index].clear()
-
-    def content_frame(base: Mapping[str, Any], index: int, text: str) -> bytes:
-        payload: dict[str, Any] = {
-            k: base[k] for k in base if k not in ("choices", "usage", "error")
-        }
-        payload.setdefault("id", last_chunk.get("id") or "chatcmpl-passthrough")
-        payload.setdefault("object", "chat.completion.chunk")
-        payload.setdefault("created", last_chunk.get("created") or int(time.time()))
-        payload.setdefault("model", last_chunk.get("model") or "")
-        payload["choices"] = [
-            {"index": index, "delta": {"content": text}, "finish_reason": None}
-        ]
-        return _data_frame(payload)
-
-    def flush_parser(index: int, base: Mapping[str, Any]) -> Optional[StreamOutcome]:
-        """`finish()` парсера choice: удержанный content уходит перед терминалом."""
-        if index not in parsers:
-            return None
-        parser_content[index].clear()
-        add_invoke_calls(index)
-        parsers[index].finish()
-        flushed = "".join(parser_content[index])
-        parser_content[index].clear()
-        if flushed:
-            if check_repetition(index, flushed):
-                return repetition_error()
-            write(content_frame(base, index, flushed))
-        add_invoke_calls(index)
-        del parsers[index]
-        return None
-
+    """Пробрасывает SSE; kwargs сохраняют прежние опциональные параметры шва."""
+    relay = _SseRelay(write, tool_schemas, limits, kw)
+    deadline = kw.get("deadline")
+    if deadline is None:
+        deadline = time.monotonic() + limits.total_timeout_s
+    reader = _TimedSseReader(readline, relay.write, limits, deadline, kw.get("window"))
     try:
-        for raw, data in iter_sse_events(reader.readline, limits.max_body_bytes):
-            chunk = reader.progress.note(data)
-            if data is None:
-                write(raw)  # комментарий/keepalive/event без data — дословно
-                continue
-            if data.strip() == "[DONE]":
-                for pending_index in sorted(list(parsers)):
-                    flushed_outcome = flush_parser(pending_index, last_chunk)
-                    if flushed_outcome is not None:
-                        return flushed_outcome
-                if acc.pending_choices() or (seen - finished):
-                    acc.close()
-                    outcome.incomplete = True
-                    msg = "upstream stream ended before finish_reason"
-                    write(_error_frame(last_chunk, "upstream_incomplete_stream", msg))
-                    return outcome
-                outcome.done = True
-                write(raw)
-                return outcome
-            if chunk is None:
-                write(raw)
-                continue
-            choices = chunk.get("choices") if isinstance(chunk, dict) else None
-            if not isinstance(choices, list):
-                if isinstance(chunk, dict):
-                    keys = ("id", "created", "model")
-                    meta = {k: chunk[k] for k in keys if chunk.get(k) is not None}
-                    if meta:
-                        last_chunk = {**last_chunk, **meta}
-                        outcome.last_chunk = {**(outcome.last_chunk or {}), **meta}
-                    err_val = chunk.get("error")
-                    if err_val is not None and (
-                        seen - finished or acc.pending_choices()
-                    ):
-                        acc.close()
-                        outcome.incomplete = True
-                        em = err_val if isinstance(err_val, dict) else {}
-                        err_msg = str(em.get("message") or err_val)
-                        err_code = str(
-                            em.get("code") or em.get("type") or "upstream_stream_error"
-                        )
-                        write(_error_frame(last_chunk or chunk, err_code, err_msg))
-                        return outcome
-                write(raw)
-                continue
-            if not sanitize:
-                outcome.last_chunk = {
-                    k: chunk.get(k) for k in ("id", "created", "model")
-                }
-                for choice in choices:
-                    if isinstance(choice, dict):
-                        idx = choice_index(choice.get("index"))
-                        seen.add(idx)
-                        if choice.get("finish_reason"):
-                            finished.add(idx)
-                        d_obj = (
-                            choice.get("delta")
-                            if limits.repetition_guard_enabled
-                            else None
-                        )
-                        txt = d_obj.get("content") if isinstance(d_obj, dict) else None
-                        if isinstance(txt, str) and check_repetition(idx, txt):
-                            return repetition_error()
-                outcome.unfinished_choices = set(seen - finished)
-                write(raw)
-                continue
-            last_chunk = {k: chunk.get(k) for k in ("id", "created", "model")}
-            outcome.last_chunk = last_chunk
-            modified = False
-            terminal: list[int] = []
-            terminal_content: dict[int, str] = {}
-            for choice in choices:
-                if not isinstance(choice, dict):
-                    continue
-                index = choice_index(choice.get("index"))
-                seen.add(index)
-                delta = choice.get("delta")
-                if isinstance(delta, dict) and "tool_calls" in delta:
-                    if trusted_tools:
-                        calls = delta["tool_calls"]
-                        if isinstance(calls, list):
-                            n_pub = sum(
-                                isinstance(c, dict) and bool(c.get("id")) for c in calls
-                            )
-                            outcome.tool_calls_published += n_pub
-                    else:
-                        acc.add(index, delta["tool_calls"])
-                        delta = {k: v for k, v in delta.items() if k != "tool_calls"}
-                        choice["delta"] = delta
-                        modified = True
-                if isinstance(delta, dict):
-                    content_value = delta.get("content")
-                    if isinstance(content_value, str) and content_value:
-                        text_out = content_value
-                        if limits.invoke_normalization_enabled:
-                            parser_content[index] = parser_content.get(index, [])
-                            parser = parser_for(index)
-                            parser_content[index].clear()
-                            parser.feed(content_value)
-                            text_out = "".join(parser_content[index])
-                            parser_content[index].clear()
-                            had_calls = bool(parser_calls.get(index))
-                            add_invoke_calls(index)
-                            if text_out != content_value or had_calls:
-                                delta = dict(delta)
-                                if text_out:
-                                    delta["content"] = text_out
-                                else:
-                                    delta.pop("content", None)
-                                choice["delta"] = delta
-                                modified = True
-                        if check_repetition(index, text_out):
-                            return repetition_error()
-                if choice.get("finish_reason"):
-                    finished.add(index)
-                    terminal.append(index)
-                    c_txt = delta.get("content") if isinstance(delta, dict) else None
-                    if isinstance(c_txt, str) and c_txt:
-                        terminal_content[index] = c_txt
-                        delta = {k: v for k, v in delta.items() if k != "content"}
-                        choice["delta"] = delta
-                        modified = True
-            outcome.unfinished_choices = set(seen - finished)
-            for index in sorted(terminal):
-                if index in terminal_content:
-                    write(content_frame(chunk, index, terminal_content[index]))
-                flushed_outcome = flush_parser(index, chunk)
-                if flushed_outcome is not None:
-                    return flushed_outcome
-                if not acc.has_choice(index):
-                    continue
-                calls = sanitize_choice_calls(
-                    acc.pop_choice(index), tool_schemas, limits
-                )
-                outcome.tool_calls_published += len(calls)
-                base_c = {
-                    k: chunk[k] for k in chunk if k not in ("choices", "usage", "error")
-                }
-                c_item = {
-                    "index": index,
-                    "delta": {"tool_calls": calls},
-                    "finish_reason": None,
-                }
-                write(_data_frame({**base_c, "choices": [c_item]}))
-            if not modified:
-                write(raw)
-                continue
-            only_empty = all(
-                isinstance(c, dict)
-                and not c.get("delta")
-                and not c.get("finish_reason")
-                for c in choices
-            )
-            if choices and only_empty and "usage" not in chunk and "error" not in chunk:
-                continue  # чанк состоял только из дельт tool_calls
-            write(_data_frame(chunk))
-        # EOF без [DONE]: недособранное сбрасывается, незавершённые choices — ошибка.
-        for pending_index in sorted(list(parsers)):
-            flushed_outcome = flush_parser(pending_index, last_chunk)
-            if flushed_outcome is not None:
-                return flushed_outcome
-        unfinished = seen - finished
-        if acc.pending_choices() or unfinished:
-            acc.close()
-            outcome.incomplete = True
-            msg = "upstream stream ended before finish_reason"
-            write(_error_frame(last_chunk, "upstream_incomplete_stream", msg))
-        return outcome
-    except (AccumulatorOverflow, UpstreamBodyTooLarge) as exc:
-        acc.close()
-        outcome.overflow = True
-        what = (
-            "tool_calls exceed"
-            if isinstance(exc, AccumulatorOverflow)
-            else "event exceeds"
+        return relay.run(reader)
+    except LiveParserError:
+        return relay.error(
+            "upstream_tool_mode_violation", "upstream tool mode violation", "incomplete"
         )
-        msg = f"upstream {what} the bridge limit"
-        write(_error_frame(last_chunk, "upstream_response_too_large", msg))
-        return outcome
+    except _RepetitionLoop:
+        return relay.error(
+            "upstream_repetition_loop",
+            "upstream repetition loop detected",
+            "repetition_loop",
+        )
+    except (AccumulatorOverflow, UpstreamBodyTooLarge) as exc:
+        what = "tool_calls exceed" if isinstance(exc, AccumulatorOverflow) else "event exceeds"
+        return relay.error(
+            "upstream_response_too_large",
+            f"upstream {what} the bridge limit",
+            "overflow",
+        )
     finally:
-        acc.close()
+        relay.acc.close()
         reader.close()
-        outcome.reader_stopped = not reader.thread.is_alive()
+        relay.outcome.reader_stopped = not reader.thread.is_alive()
 
+def _checked_events(
+    events: Iterator[tuple[bytes, str | None]],
+    spec: NormalizerModeSpec,
+    limits: PassthroughLimits,
+) -> Iterator[tuple[bytes, str | None]]:
+    if spec.mode is ToolMode.EMULATE:
+        yield from events
+        return
+    relay = _SseRelay(lambda _: None, None, limits, {"mode_spec": spec})
+    try:
+        for raw, data in events:
+            chunk = parse_sse_json(data)
+            choices = chunk.get("choices") if chunk is not None else None
+            if isinstance(choices, list):
+                relay._consume_chunk(chunk, choices)
+            if data is not None and data.strip() == "[DONE]":
+                relay._end()
+            yield raw, data
+        relay._end()
+    finally:
+        relay.acc.close()
 
-def _json_error(
-    status: int, error_type: str, message: str
-) -> tuple[list[tuple[str, str]], bytes]:
+def _response_timed_out(error: Exception, options: Mapping[str, Any]) -> bool:
+    deadline, window = options.get("deadline"), options.get("window")
+    return (
+        isinstance(error, socket.timeout)
+        or getattr(error, "status_code", 0) == 504
+        or isinstance(error.__cause__, TimeoutError)
+        or (deadline is not None and time.monotonic() >= deadline)
+        or (window is not None and window.expired())
+    )
+
+def _json_error(status: int, error_type: str, message: str) -> tuple[list[tuple[str, str]], bytes]:
     body = json.dumps(
         {"error": {"message": message, "type": error_type, "code": status}},
         ensure_ascii=False,
@@ -1057,7 +1029,6 @@ def _json_error(
         ("Content-Type", "application/json; charset=utf-8"),
         ("Content-Length", str(len(body))),
     ], body
-
 
 def _read_bounded(resp: http.client.HTTPResponse, limit: int) -> bytes:
     """Тело upstream не больше `limit`: проверка заявленного размера и инкрементальное чтение."""
@@ -1075,15 +1046,12 @@ def _read_bounded(resp: http.client.HTTPResponse, limit: int) -> bytes:
             raise UpstreamBodyTooLarge("body")
         chunks.append(piece)
 
-
 class PassthroughAdapter(BackendAdapter):
     """Бэкенд `kind=passthrough`: модели каталога, раw-шов исполнения вместо `execute_turn`."""
 
     kind = KIND
     CONSTRAINTS = KindConstraints(base_url_allowed=True, api_key_env_allowed=True)
-    capabilities = Capabilities(
-        sessions=SESSIONS_NONE, streaming=STREAMING_NATIVE, usage="exact"
-    )
+    capabilities = Capabilities(sessions=SESSIONS_NONE, streaming=STREAMING_NATIVE, usage="exact")
 
     def __init__(
         self,
@@ -1130,9 +1098,7 @@ class PassthroughAdapter(BackendAdapter):
 
     @property
     def limits(self) -> PassthroughLimits:
-        return (
-            self._limits if self._limits is not None else PassthroughLimits.from_env()
-        )
+        return self._limits if self._limits is not None else PassthroughLimits.from_env()
 
     @limits.setter
     def limits(self, value: Optional[PassthroughLimits]) -> None:
@@ -1143,9 +1109,7 @@ class PassthroughAdapter(BackendAdapter):
         """Проверяет клиентский токен по собственному настроенному ключу upstream."""
         if not self._upstream_key or not token:
             return False
-        return hmac.compare_digest(
-            token.encode("utf-8"), self._upstream_key.encode("utf-8")
-        )
+        return hmac.compare_digest(token.encode("utf-8"), self._upstream_key.encode("utf-8"))
 
     def get_models(self) -> list[BackendModel]:
         return self._catalog_models()
@@ -1163,9 +1127,7 @@ class PassthroughAdapter(BackendAdapter):
     def spawn_session(self, ctx: TurnContext) -> object:
         raise BackendNotSupported("passthrough_no_sessions")
 
-    def execute_turn(
-        self, ctx: TurnContext, sse_writer: Optional[StreamSink]
-    ) -> TurnResult:
+    def execute_turn(self, ctx: TurnContext, sse_writer: Optional[StreamSink]) -> TurnResult:
         raise BackendNotSupported("passthrough_raw_seam")
 
     def close_session(self, sid: str) -> None:
@@ -1262,10 +1224,11 @@ class PassthroughAdapter(BackendAdapter):
         raw_body: bytes,
         request: Mapping[str, Any],
         headers: Mapping[str, str],
-        sink: ResponseSink,
+        sink: ResponseSink | passthrough_precommit.PrecommitSink,
         window: LivenessWindow | None = None,
     ) -> None:
         """One request: body goes upstream unmodified (AD-001: internal stream=true), response goes to `sink`."""
+        sink = passthrough_precommit.wrap_sink(sink, request, format_stream_error_sse, ClientGone)
         raw_body = self._with_body_defaults(raw_body)
         internal = internal_stream_body(path, request, raw_body)
         is_int = internal is not None
@@ -1276,6 +1239,7 @@ class PassthroughAdapter(BackendAdapter):
         slide = open_sliding_deadline(
             deadline, self.limits, is_int, request, _SLIDING_WIN_FLAG.enabled
         )
+        window, slide = passthrough_precommit.request_window(window, slide)
         q_def = float(getattr(self.host, "QUEUE_TIMEOUT_S", DEFAULT_QUEUE_TIMEOUT_S))
         queue_timeout = min(q_def, self.limits.total_timeout_s)
         if not self._slots.acquire(timeout=queue_timeout):
@@ -1291,7 +1255,6 @@ class PassthroughAdapter(BackendAdapter):
         transport_lock = threading.Lock()
         resp: http.client.HTTPResponse | None = None
         successful = False
-
         def abort() -> None:
             with transport_lock:
                 if stop.is_set():
@@ -1302,16 +1265,12 @@ class PassthroughAdapter(BackendAdapter):
                         sock.shutdown(socket.SHUT_RDWR)
                     except OSError:
                         continue
-
         def watch() -> None:
             p_int = self.limits.poll_interval_s
-            while not stop.wait(
-                min(p_int, max(0.0, slide.deadline_s - time.monotonic()))
-            ):
+            while not stop.wait(min(p_int, max(0.0, slide.deadline_s - time.monotonic()))):
                 if time.monotonic() >= slide.deadline_s or sink.client_gone():
                     abort()
                     return
-
         def on_socket(sock: socket.socket) -> None:
             with transport_lock:
                 if aborted.is_set():
@@ -1326,27 +1285,10 @@ class PassthroughAdapter(BackendAdapter):
         def open_response() -> tuple[
             http.client.HTTPConnection, http.client.HTTPResponse
         ]:
-            ps_dl = getattr(sink, "presend_deadline", None)
-            new_conn = self._open(
-                path,
-                raw_body,
-                headers,
-                deadline=open_deadline,
-                on_socket=on_socket,
-                presend_deadline=ps_dl,
-                on_pooling=opened_pooling.append,
+            return passthrough_precommit.open_response(
+                self, sink, slide, (path, raw_body, headers),
+                (open_deadline, on_socket, opened_pooling.append, is_int),
             )
-            try:
-                if sink.client_gone():
-                    raise ClientGone()
-                new_resp = new_conn.getresponse()
-            except BaseException:
-                new_conn.close()
-                raise
-            slide.relax_socket(
-                new_conn.sock, self.limits.read_timeout_s, internal is not None
-            )
-            return new_conn, new_resp
 
         def reopen_response() -> http.client.HTTPResponse:
             nonlocal conn, resp
@@ -1356,10 +1298,7 @@ class PassthroughAdapter(BackendAdapter):
                 conn.close()
             conn, resp = open_response()
             return resp
-
-        watcher = threading.Thread(
-            target=watch, daemon=True, name="passthrough-deadline"
-        )
+        watcher = threading.Thread(target=watch, daemon=True, name="passthrough-deadline")
         watcher.start()
         try:
             try:
@@ -1385,9 +1324,7 @@ class PassthroughAdapter(BackendAdapter):
             except PreSendTransientError as exc:
                 if getattr(sink, "accepts_presend_errors", False):
                     raise
-                is_to = exc.status_code == 504 or isinstance(
-                    exc.__cause__, TimeoutError
-                )
+                is_to = exc.status_code == 504 or isinstance(exc.__cause__, TimeoutError)
                 self._fail_io(sink, is_to)
                 return
             except (OSError, http.client.HTTPException) as exc:
@@ -1434,9 +1371,7 @@ class PassthroughAdapter(BackendAdapter):
                     and not ("text/event-stream" in ct and cl is None)
                     and "close" not in toks
                 )
-                self._pool.release_connection(
-                    self._host, self._port, conn, can_reuse=can_reuse
-                )
+                self._pool.release_connection(self._host, self._port, conn, can_reuse=can_reuse)
             with self._lock:
                 self._active -= 1
             self._slots.release()
@@ -1454,22 +1389,14 @@ class PassthroughAdapter(BackendAdapter):
         on_pooling: Callable[[bool], None] | None = None,
         fresh: bool = False,
     ) -> http.client.HTTPConnection:
-        rem = (
-            self.limits.total_timeout_s
-            if deadline is None
-            else deadline - time.monotonic()
-        )
+        rem = self.limits.total_timeout_s if deadline is None else deadline - time.monotonic()
         if rem <= 0:
             raise TimeoutError("upstream total deadline exceeded")
         conn_rem = (
-            rem
-            if presend_deadline is None
-            else min(rem, presend_deadline - time.monotonic())
+            rem if presend_deadline is None else min(rem, presend_deadline - time.monotonic())
         )
         if conn_rem <= 0:
-            raise PreSendTransientError(
-                "upstream connect budget exhausted", status_code=504
-            )
+            raise PreSendTransientError("upstream connect budget exhausted", status_code=504)
         pool_raw = os.environ.get("BRIDGE_CONNECTION_POOLING_ENABLED", "1")
         is_pooling_enabled = pool_raw.strip().lower() in ("1", "true", "yes", "on")
         if not is_pooling_enabled:
@@ -1495,15 +1422,11 @@ class PassthroughAdapter(BackendAdapter):
                     conn.close()
                     raise TimeoutError("upstream total deadline exceeded")
                 conn.sock.settimeout(min(self.limits.read_timeout_s, rem))
-            forwarded = {
-                k: v for k, v in headers.items() if k.lower() not in _REQUEST_DROP
-            }
+            forwarded = {k: v for k, v in headers.items() if k.lower() not in _REQUEST_DROP}
             upstream_token = self._upstream_key or self._read_key_ref()
             auth_keys = ("authorization", "x-api-key")
             if upstream_token:
-                forwarded = {
-                    k: v for k, v in forwarded.items() if k.lower() not in auth_keys
-                }
+                forwarded = {k: v for k, v in forwarded.items() if k.lower() not in auth_keys}
                 forwarded["Authorization"] = f"Bearer {upstream_token}"
             else:
                 client_toks: list[str] = []
@@ -1517,19 +1440,13 @@ class PassthroughAdapter(BackendAdapter):
                             client_toks.append(parts[0])
                     elif k.lower() == "x-api-key" and v.strip():
                         client_toks.append(v.strip())
-                cb = getattr(self, "_is_hub_key", None) or getattr(
-                    self.host, "is_hub_key", None
-                )
+                cb = getattr(self, "_is_hub_key", None) or getattr(self.host, "is_hub_key", None)
                 if client_toks and callable(cb) and any(cb(t) for t in client_toks):
-                    forwarded = {
-                        k: v for k, v in forwarded.items() if k.lower() not in auth_keys
-                    }
+                    forwarded = {k: v for k, v in forwarded.items() if k.lower() not in auth_keys}
             upstream_headers = self._upstream_headers()
             if upstream_headers:
                 replaced = {name.lower() for name in upstream_headers}
-                forwarded = {
-                    k: v for k, v in forwarded.items() if k.lower() not in replaced
-                }
+                forwarded = {k: v for k, v in forwarded.items() if k.lower() not in replaced}
                 forwarded.update(upstream_headers)
             forwarded["Host"] = f"{self._host}:{self._port}"
             forwarded["Content-Length"] = str(len(raw_body))
@@ -1560,9 +1477,7 @@ class PassthroughAdapter(BackendAdapter):
             raise
         return conn
 
-    def _fail(
-        self, sink: ResponseSink, status: int, error_type: str, message: str
-    ) -> None:
+    def _fail(self, sink: ResponseSink, status: int, error_type: str, message: str) -> None:
         self._log(f"passthrough fail status={status} type={error_type}")
         headers, body = _json_error(status, error_type, message)
         sink.start(status, headers)
@@ -1570,16 +1485,12 @@ class PassthroughAdapter(BackendAdapter):
 
     def _fail_io(self, sink: ResponseSink, is_timeout: bool) -> bool:
         if is_timeout:
-            self._fail(
-                sink, 504, "upstream_timeout", "upstream did not respond in time"
-            )
+            self._fail(sink, 504, "upstream_timeout", "upstream did not respond in time")
         else:
             self._fail(sink, 502, "upstream_unavailable", "upstream is unavailable")
         return False
 
-    def _response_headers(
-        self, resp: http.client.HTTPResponse
-    ) -> list[tuple[str, str]]:
+    def _response_headers(self, resp: http.client.HTTPResponse) -> list[tuple[str, str]]:
         return [(k, v) for k, v in resp.getheaders() if k.lower() not in _RESPONSE_DROP]
 
     def _read_presend_body(self, resp: http.client.HTTPResponse) -> bytes:
@@ -1588,74 +1499,142 @@ class PassthroughAdapter(BackendAdapter):
     def _client_gone_exc(self) -> ClientGone:
         return ClientGone()
 
-    def _respond(
+    def _request_mode(self, request: Mapping[str, Any]) -> NormalizerModeSpec:
+        mode = resolve_tool_mode(request.get("tools"), request.get("tool_choice"))
+        policy = resolve_toolless_tag_policy(os.environ)
+        spec = build_mode_spec(mode, policy)
+        self._log(
+            "passthrough "
+            + format_tool_mode_log(
+                request.get("tools"),
+                request.get("tool_choice"),
+                spec,
+            )
+        )
+        return spec
+
+    def _response_body(
         self,
         resp: http.client.HTTPResponse,
-        request: Mapping[str, Any],
-        sink: ResponseSink,
-        deadline: float | None = None,
-        **kw: Any,
-    ) -> bool:
-        on_timeout, window, slide = (
-            kw.get("on_timeout"),
-            kw.get("window"),
-            kw.get("slide"),
+        options: dict[str, Any],
+    ) -> tuple[bytes, bool]:
+        window = options.get("window")
+        reopen: Callable[[], http.client.HTTPResponse] | None = options.get("reopen")
+        sse = (
+            resp.status == 200
+            and "text/event-stream" in (resp.getheader("Content-Type") or "").lower()
         )
-        headers, reopen = kw.get("headers"), kw.get("reopen")
-        content_type = (resp.getheader("Content-Type") or "").lower()
-        ce = (resp.getheader("Content-Encoding") or "identity").lower()
-        encoded = ce != "identity"
-        sanitize = self._sanitize_enabled()
-        schemas = build_tool_schemas(request.get("tools")) if sanitize else None
-        sse = resp.status == 200 and "text/event-stream" in content_type
-        agg = window if sse and window and window.internal_stream else None
-        if sse and agg is None:
-            return self._relay_stream(
-                resp, schemas, sink, sanitize, slide or deadline, on_timeout, window
-            )
-
-        def _reopen() -> http.client.HTTPResponse:
+        aggregate = sse and window is not None and window.internal_stream
+        deadline = options.get("deadline")
+        def reopen_response() -> http.client.HTTPResponse:
             nonlocal resp
             assert reopen is not None
             resp = reopen()
             return resp
-
-        try:
-            if agg is not None:
-                ro_cb = _reopen if reopen is not None else None
-                body = self._aggregate_sse(
-                    resp, agg, headers=headers, reopen=ro_cb, deadline=deadline
-                )
-                content_type = "application/json"
-            else:
-                body = _read_bounded(resp, self.limits.max_body_bytes)
-            if deadline is not None and time.monotonic() >= deadline:
-                raise TimeoutError("upstream total deadline exceeded")
-        except NonstreamError as exc:
-            self._fail(sink, exc.status, exc.code, exc.message)
-            return False
-        except UpstreamBodyTooLarge:
-            msg = "upstream response exceeds the bridge limit"
-            self._fail(sink, 502, "upstream_response_too_large", msg)
-            return False
-        except (PreSendTransientError, OSError, http.client.HTTPException) as exc:
-            is_to = (
-                isinstance(exc, socket.timeout)
-                or getattr(exc, "status_code", 0) == 504
-                or isinstance(getattr(exc, "__cause__", None), TimeoutError)
-                or (deadline is not None and time.monotonic() >= deadline)
-                or (window is not None and window.expired())
+        if aggregate:
+            callback = reopen_response if reopen is not None else None
+            body = self._aggregate_sse(
+                resp,
+                window,
+                headers=options.get("headers"),
+                reopen=callback,
+                deadline=deadline,
+                mode_spec=options["mode_spec"],
             )
-            return self._fail_io(sink, is_to)
-        if sanitize and resp.status == 200 and "json" in content_type and not encoded:
-            body = sanitize_completion_body(body, schemas, self.limits)
-        out_hdrs = self._response_headers(resp) + [("Content-Length", str(len(body)))]
-        if agg is not None:
-            out_hdrs = [h for h in out_hdrs if h[0].lower() != "content-type"]
-            out_hdrs.append(("Content-Type", "application/json; charset=utf-8"))
-        sink.start(resp.status, out_hdrs)
+        else:
+            body = _read_bounded(resp, self.limits.max_body_bytes)
+        if deadline is not None and time.monotonic() >= deadline:
+            raise TimeoutError("upstream total deadline exceeded")
+        return body, aggregate
+
+    def _normalize_body(
+        self,
+        resp: http.client.HTTPResponse,
+        result: tuple[bytes, bool],
+        options: dict[str, Any],
+    ) -> bytes:
+        body, aggregate = result
+        media = "application/json" if aggregate else (resp.getheader("Content-Type") or "").lower()
+        encoding = (resp.getheader("Content-Encoding") or "identity").lower()
+        if resp.status == 200 and "json" in media and encoding == "identity":
+            return sanitize_completion_body(
+                body,
+                options["tool_schemas"],
+                self.limits,
+                options["mode_spec"],
+                sanitize=options["sanitize"],
+            )
+        return body
+
+    def _response_error(
+        self, sink: ResponseSink, error: Exception, options: dict[str, Any]
+    ) -> bool:
+        if isinstance(error, NonstreamError):
+            self._fail(sink, error.status, error.code, error.message)
+        elif isinstance(error, UpstreamBodyTooLarge):
+            self._fail(
+                sink,
+                502,
+                "upstream_response_too_large",
+                "upstream response exceeds the bridge limit",
+            )
+        elif isinstance(error, LiveParserError):
+            self._fail(
+                sink,
+                502,
+                "upstream_tool_mode_violation",
+                "upstream tool mode violation",
+            )
+        else:
+            return self._fail_io(sink, _response_timed_out(error, options))
+        return False
+
+    def _emit_response(
+        self,
+        resp: http.client.HTTPResponse,
+        sink: ResponseSink,
+        result: tuple[bytes, bool],
+    ) -> bool:
+        body, aggregate = result
+        headers = self._response_headers(resp) + [("Content-Length", str(len(body)))]
+        if aggregate:
+            headers = [header for header in headers if header[0].lower() != "content-type"]
+            headers.append(("Content-Type", "application/json; charset=utf-8"))
+        sink.start(resp.status, headers)
         sink.write(body)
         return True
+
+    def _respond(
+        self,
+        resp: http.client.HTTPResponse,
+        request: Mapping[str, Any],
+        *context: Any,
+        **kw: Any,
+    ) -> bool:
+        """Сохраняет позиционный контракт (sink, deadline), группируя параметры исполнения."""
+        sink = context[0]
+        deadline = context[1] if len(context) > 1 else kw.get("deadline")
+        sanitize = self._sanitize_enabled()
+        kw.update(
+            deadline=deadline,
+            sanitize=sanitize,
+            mode_spec=self._request_mode(request),
+            tool_schemas=build_tool_schemas(request.get("tools")) if sanitize else None,
+        )
+        content_type = (resp.getheader("Content-Type") or "").lower()
+        aggregate = getattr(kw.get("window"), "internal_stream", False)
+        if resp.status == 200 and "text/event-stream" in content_type and not aggregate:
+            kw["deadline"] = kw.get("slide") or deadline
+            return self._relay_stream(resp, kw["tool_schemas"], sink, sanitize, **kw)
+        try:
+            body, aggregate = self._response_body(resp, kw)
+            body = self._normalize_body(resp, (body, aggregate), kw)
+        except (
+            NonstreamError, UpstreamBodyTooLarge, LiveParserError, PreSendTransientError,
+            OSError, http.client.HTTPException,
+        ) as exc:
+            return self._response_error(sink, exc, kw)
+        return self._emit_response(resp, sink, (body, aggregate))
 
     def _get_retry_bulkhead(self) -> NonstreamRetryBulkhead:
         raw = os.environ.get("BRIDGE_NONSTREAM_RETRY_MAX_INFLIGHT")
@@ -1669,19 +1648,17 @@ class PassthroughAdapter(BackendAdapter):
         resp: http.client.HTTPResponse,
         window: LivenessWindow,
         sig_box: list[int],
+        mode_spec: NormalizerModeSpec = DEFAULT_EMULATE_SPEC,
     ) -> bytes:
         lim = self.limits
-
         def on_sig(kind: str, keys: tuple[str, ...] = ()) -> None:
             if kind == SIGNAL_S:
                 sig_box[0] += 1
             window.record_signal(kind, keys)
-
-        reader = _TimedSseReader(
-            resp.readline, lambda _f: None, lim, math.inf, window, True
-        )
+        reader = _TimedSseReader(resp.readline, lambda _f: None, lim, math.inf, window, True)
         try:
             events = iter_sse_events(reader.readline, lim.max_body_bytes)
+            events = _checked_events(events, mode_spec, lim)
             return aggregate_events(events, on_sig, lim.max_body_bytes, window.expired)
         finally:
             reader.close()
@@ -1690,17 +1667,22 @@ class PassthroughAdapter(BackendAdapter):
         self,
         error: NonstreamError,
         window: LivenessWindow,
-        reopen: Any,
-        deadline: float | None,
+        options: dict[str, Any],
     ) -> RetryRuntime:
+        reopen = options.get("reopen")
         return RetryRuntime(
             error=error,
             window=window,
             reopen=reopen if callable(reopen) else None,
-            deadline=deadline,
+            deadline=options.get("deadline"),
             poll_interval_s=self.limits.poll_interval_s,
             bulkhead=self._get_retry_bulkhead(),
-            read_once=lambda retry_resp: self._read_agg_once(retry_resp, window, [0]),
+            read_once=lambda retry_resp: self._read_agg_once(
+                retry_resp,
+                window,
+                [0],
+                options.get("mode_spec", DEFAULT_EMULATE_SPEC),
+            ),
         )
 
     def _aggregate_sse(
@@ -1709,17 +1691,17 @@ class PassthroughAdapter(BackendAdapter):
         window: LivenessWindow,
         **kw: Any,
     ) -> bytes:
-        headers, reopen, deadline = (
-            kw.get("headers"),
-            kw.get("reopen"),
-            kw.get("deadline"),
-        )
         st = getattr(window, "_state", None)
         has_s0 = getattr(st, "first_s_at", None) is not None
         win_s0 = int(getattr(window, "s_count", 0)) or (1 if has_s0 else 0)
         sig_box = [0]
         try:
-            return self._read_agg_once(resp, window, sig_box)
+            return self._read_agg_once(
+                resp,
+                window,
+                sig_box,
+                kw.get("mode_spec", DEFAULT_EMULATE_SPEC),
+            )
         except NonstreamError as exc:
             pol = NonstreamRetryPolicy.from_env()
             sess = str(getattr(self.capabilities, "sessions", SESSIONS_NONE))
@@ -1728,9 +1710,9 @@ class PassthroughAdapter(BackendAdapter):
                 aggregate_signals=sig_box[0],
                 window_signals=win_s0 + sig_box[0],
                 sessions=sess,
-                headers=headers or {},
+                headers=kw.get("headers") or {},
             )
-            runtime = self._retry_runtime(exc, window, reopen, deadline)
+            runtime = self._retry_runtime(exc, window, kw)
             result = retry_incomplete_once(
                 runtime,
                 policy_enabled=pol.max_retries >= 1,
@@ -1740,18 +1722,9 @@ class PassthroughAdapter(BackendAdapter):
                 raise
             return result
 
-    def _relay_stream(
-        self,
-        resp: http.client.HTTPResponse,
-        schemas: Optional[dict[str, Any]],
-        sink: ResponseSink,
-        sanitize: bool,
-        deadline: float | SlidingDeadline | None = None,
-        on_timeout: Callable[[], None] | None = None,
-        window: LivenessWindow | None = None,
-    ) -> bool:
+    def _trusted_tools(self, resp: http.client.HTTPResponse, sanitize: bool) -> bool:
         flag = getattr(self.host, "is_trusted_tool_streaming_enabled", None)
-        trusted = (
+        return (
             sanitize
             and self.config.get("trusted_tool_sanitizer") is True
             and bool(self._upstream_key)
@@ -1760,59 +1733,76 @@ class PassthroughAdapter(BackendAdapter):
             and flag() is True
             and resp.getheader("X-Bridge-Tool-Sanitized") == "1"
         )
-        sse_h = [
-            ("Content-Type", "text/event-stream"),
-            ("Cache-Control", "no-cache"),
-            ("X-Accel-Buffering", "no"),
-        ]
-        headers = [
-            (k, v)
-            for k, v in self._response_headers(resp)
-            if k.lower() != "content-type"
-        ] + sse_h
-        outcome = StreamOutcome(committed=True)
-        sink.start(200, headers)
-        try:
-            r_kw: dict[str, Any] = {
-                "tool_schemas": schemas,
-                "limits": self.limits,
-                "process": self.process_budget,
-                "sanitize": sanitize,
-                "trusted_tools": trusted,
-                "state": outcome,
-                "deadline": deadline,
-                "window": window,
-            }
-            outcome = relay_sse(resp.readline, sink.write, **r_kw)
-        except (socket.timeout, OSError, http.client.HTTPException) as exc:
-            if (
-                isinstance(exc, (TimeoutError, socket.timeout))
-                and on_timeout is not None
-            ):
-                on_timeout()
-            last_chunk = getattr(outcome, "last_chunk", None) or {}
-            unfinished_set = getattr(outcome, "unfinished_choices", None)
-            if unfinished_set is not None and len(unfinished_set) == 0:
-                sink.write(b"data: [DONE]\n\n")
-                return False
-            unfinished = sorted(unfinished_set) if unfinished_set is not None else [0]
-            mdl = str(last_chunk.get("model") or getattr(self, "id", "") or "")
-            e_kw: dict[str, Any] = {
-                "message": "upstream stream failed",
-                "code": "upstream_stream_error",
-                "model": mdl,
-                "completion_id": last_chunk.get("id"),
-                "created": last_chunk.get("created"),
-                "choice_indices": unfinished,
-            }
-            sink.write(format_stream_error_sse(**e_kw).encode("utf-8"))
+
+    def _stream_io_error(
+        self,
+        sink: ResponseSink,
+        outcome: StreamOutcome,
+        options: dict[str, Any],
+    ) -> bool:
+        error, on_timeout = options["error"], options.get("on_timeout")
+        if isinstance(error, (TimeoutError, socket.timeout)) and on_timeout is not None:
+            on_timeout()
+        last = outcome.last_chunk or {}
+        unfinished = outcome.unfinished_choices
+        if unfinished is not None and len(unfinished) == 0:
+            sink.write(b"data: [DONE]\n\n")
             return False
+        error_options: dict[str, Any] = {
+            "message": "upstream stream failed",
+            "code": "upstream_stream_error",
+            "model": str(last.get("model") or getattr(self, "id", "") or ""),
+            "completion_id": last.get("id"),
+            "created": last.get("created"),
+            "choice_indices": sorted(unfinished) if unfinished is not None else [0],
+        }
+        sink.write(format_stream_error_sse(**error_options).encode("utf-8"))
+        return False
+
+    def _stream_success(self, outcome: StreamOutcome) -> bool:
         if outcome.incomplete or outcome.overflow:
-            inc, ovf = outcome.incomplete, outcome.overflow
-            self._log(f"passthrough stream incomplete={inc} overflow={ovf}")
+            self._log(
+                f"passthrough stream incomplete={outcome.incomplete} overflow={outcome.overflow}"
+            )
         return not (
             not outcome.reader_stopped
             or outcome.incomplete
             or outcome.overflow
             or outcome.repetition_loop
         )
+
+    def _relay_stream(
+        self,
+        resp: http.client.HTTPResponse,
+        schemas: Optional[dict[str, Any]],
+        *context: Any,
+        **kw: Any,
+    ) -> bool:
+        """Совместимый позиционный вход: sink, sanitize, deadline, on_timeout, window."""
+        sink, sanitize = context[:2]
+        kw.update(zip(("deadline", "on_timeout", "window"), context[2:]))
+        trusted = self._trusted_tools(resp, sanitize)
+        headers = [
+            (key, value)
+            for key, value in self._response_headers(resp)
+            if key.lower() != "content-type"
+        ] + [
+            ("Content-Type", "text/event-stream"),
+            ("Cache-Control", "no-cache"),
+            ("X-Accel-Buffering", "no"),
+        ]
+        outcome = StreamOutcome(committed=True)
+        sink.start(200, headers)
+        kw.update(
+            tool_schemas=schemas,
+            limits=self.limits,
+            process=self.process_budget,
+            sanitize=sanitize,
+            trusted_tools=trusted,
+            state=outcome,
+        )
+        try:
+            outcome = relay_sse(resp.readline, sink.write, **kw)
+        except (socket.timeout, OSError, http.client.HTTPException) as exc:
+            return self._stream_io_error(sink, outcome, {**kw, "error": exc})
+        return self._stream_success(outcome)

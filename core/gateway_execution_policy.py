@@ -8,11 +8,19 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import cast
 
+from core.judge_role_policy import (
+    AutonomyViolation,
+    is_judge_subagent,
+    validate_judge_autonomy,
+)
+
 AUTONOMY_LEVELS = ("low", "medium", "high")
 AUTONOMY_OFF = "off"
-# Префиксы ролей по умолчанию: мутировать вправе только coder-*, судьи и места запрещены.
+# Префиксы ролей по умолчанию: мутировать вправе только coder-*.
 MUTATING_SUBAGENT_DEFAULT = "coder-"
-DENY_SUBAGENT_DEFAULT = "panel-judge-,judge-,seat-"
+# Судейские роли (panel-judge-*, judge-*, seat-*) безусловно не отвергаются: их ограничивает
+# кламп автономности из core/judge_role_policy.py, а env-перечень остаётся аварийным стопом.
+DENY_SUBAGENT_DEFAULT = ""
 
 
 class Autonomy(str, Enum):
@@ -56,14 +64,6 @@ def validate_boolean_flags(
             all((isinstance(value, bool), value)),
             error_type(f"settings read-back: {flag} is {value!r}, expected true"),
         )
-
-
-class AutonomyViolation(ValueError):
-    """Ошибка автономности с причиной для HTTP-границы."""
-
-    def __init__(self, reason: str, message: str) -> None:
-        super().__init__(message)
-        self.reason: str = reason
 
 
 def allow_high_autonomy(namespace: str) -> bool:
@@ -176,17 +176,21 @@ def resolve_autonomy_decision(
         AutonomyViolation("unsupported_autonomy", "autonomy must be a string"),
     )
     candidate = cast(str, raw).strip()
-    value, source = (
-        (candidate, "request")
-        if candidate
-        else (default_autonomy(namespace), "default")
+    # Судейская роль не наследует мутирующий дефолт namespace: пустой запрос — это off.
+    fallback = (
+        Autonomy.OFF.value
+        if is_judge_subagent(subagent_id)
+        else default_autonomy(namespace)
     )
+    value, source = (candidate, "request") if candidate else (fallback, "default")
     try:
         value = Autonomy(value)
     except ValueError as exc:
         raise AutonomyViolation(
             "unsupported_autonomy", "autonomy is not allowed (low|medium|high|off)"
         ) from exc
+    # Кламп роли проверяется до opt-in high: судье важен сам факт мутации, а не лимит.
+    validate_judge_autonomy(subagent_id, value.value)
     allowed = set(Autonomy)
     if not allow_high_autonomy(namespace):
         allowed.discard(Autonomy.HIGH)
@@ -218,7 +222,9 @@ def denied_subagent(namespace: str, *subagent_ids: str | None) -> bool:
     """Запретить роль по любому представлению идентификатора в рамках namespace.
 
     Проверяется объединение значений (raw-заголовок и trace из заголовка, extra_body
-    или тела), чтобы запрет нельзя было обойти альтернативным источником.
+    или тела), чтобы запрет нельзя было обойти альтернативным источником. Дефолтный
+    перечень пуст: судейские роли допускаются к read-only ходу и ограничены клампом
+    автономности, запрет срабатывает только по явно настроенным префиксам.
     """
     prefixes = _csv_env(
         f"{namespace.upper()}_DENY_SUBAGENT_PREFIXES", DENY_SUBAGENT_DEFAULT

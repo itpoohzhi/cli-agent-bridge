@@ -88,11 +88,9 @@
       "name": "Gemini 4 Carbon (AGY)",
       "enabled": true,
       "efforts": [
-        "low",
-        "medium",
-        "high"
+        "off"
       ],
-      "default_effort": "high",
+      "default_effort": "off",
       "context_window": 1048576,
       "max_tokens": 65536,
       "input": [
@@ -114,11 +112,9 @@
             "image/webp"
           ],
           "efforts_proven": [
-            "low",
-            "medium",
-            "high"
+            "off"
           ],
-          "command": "agy.real -p 'Read img-1.png' --add-dir <img_dir> --model <model> --effort <effort>"
+          "command": "agy.real -p 'Read img-1.png' --add-dir <img_dir> --model <model>"
         }
       }
     },

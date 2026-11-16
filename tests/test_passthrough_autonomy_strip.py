@@ -124,18 +124,26 @@ def test_prepare_positional_compatibility(monkeypatch: pytest.MonkeyPatch) -> No
 
     monkeypatch.setattr(policy, "resolve_passthrough_effort", resolve)
     single, _ = policy.prepare_passthrough_request(
-        {"model": "raw"}, {}, "canonical", object()
+        {"model": "raw"},
+        {},
+        "canonical",
+        policy.PassthroughOptions(alias=("canonical", "low")),
     )
     assert single["model"] == "canonical"
     request, _ = policy.prepare_passthrough_request(
-        {"model": "raw"}, {}, "canonical", object(), "medium", True
+        {"model": "raw"},
+        {},
+        "canonical",
+        policy.PassthroughOptions(
+            alias=("canonical", "medium"), alias_effort="medium", effort_on=True
+        ),
     )
     assert request["model"] == "canonical"
     assert seen == [(None, False), ("medium", True)]
     policy.prepare_passthrough_request({"model": "raw"}, {}, "canonical")
     assert seen[-1] == (None, False)
     with pytest.raises(TypeError):
-        policy.prepare_passthrough_request({}, {}, "model", 1, 2, 3, 4)
+        policy.prepare_passthrough_request({}, {}, "model", None, 1)
 
 
 def test_strip_top_level_only_and_preserve_unicode(
