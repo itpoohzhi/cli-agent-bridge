@@ -171,6 +171,18 @@ from core.watchdog import (  # noqa: E402,F401
     ProcessWatchdog,
 )
 from core.model_penalty import get_penalty_tracker  # noqa: E402
+from core import model_notes_snapshot as _model_notes_snapshot  # noqa: E402
+from core.model_notes_parse import (  # noqa: E402
+    BlocklistParseError,
+    parse_model_notes,
+    read_model_notes_file,
+)
+from core.model_notes_snapshot import ModelNotesSnapshotManager  # noqa: E402
+from core.published_model_owner import (  # noqa: E402
+    canonical_published_models,
+    publication_status,
+    wire_owner,
+)
 from core.cli_runtime_config import (  # noqa: E402 - импорт после настройки путей пакетов
     CliRuntimeConfig,
     WatchdogConfig,
@@ -677,18 +689,8 @@ def _refresh_acquire(key: str, now: float | None = None) -> int | None:
 
 
 def _get_published_models() -> dict[str, tuple[Any, Any]]:
-    published = {}
     models_source = BACKENDS.models() if hasattr(BACKENDS, "models") else []
-    for item in models_source:
-        if isinstance(item, tuple) and len(item) == 2:
-            a, m = item
-        else:
-            m = item
-            a = getattr(m, "adapter", None)
-        mid = getattr(m, "id", None) or (m.get("id") if isinstance(m, dict) else None)
-        if mid:
-            published[mid] = (a, m)
-    return published
+    return canonical_published_models(FLEET, models_source)
 
 
 _EFFORT_SPECS_CACHE: tuple[Any, dict[str, ModelEffortSpec]] = (None, {})
@@ -723,122 +725,94 @@ def _advertise_efforts(card: dict[str, Any], mid: str, specs: dict[str, ModelEff
         card.update(card_effort_fields(fields))
 
 
+def _publication_order(published: Mapping[str, object]) -> list[str]:
+    order = [MODEL_ID] if MODEL_ID in published else []
+    fleet_order = FLEET.get("order", [])
+    for model_id in (*fleet_order, *published):
+        if model_id in published and model_id not in order:
+            order.append(model_id)
+    return order
+
+
+def _publication_card(
+    public_id: str,
+    base_id: str,
+    adapter: Any,
+    model: Any,
+    specs: dict[str, ModelEffortSpec],
+) -> dict[str, Any]:
+    record = FLEET["models"][base_id]
+    context_window = getattr(model, "context_window", 200000)
+    resilience = RESILIENCE.snapshot(a.id for a in BACKENDS.adapters())
+    projected = publication_status(
+        record,
+        resilience,
+        _MODEL_NOTES_FILTER.status,
+        _MODEL_NOTES_FILTER.is_blocked(base_id),
+        flag_enabled("BRIDGE_TRANSPORT_ROUTING_ENABLED"),
+    )
+    penalty = _PENALTY_TRACKER.get_model_status(base_id)
+    is_penalized = penalty["is_penalized"]
+    card = {
+        "id": public_id,
+        "object": "model",
+        "owned_by": wire_owner(adapter, model, record),
+        "created": 0,
+        "context_window": context_window,
+        "context_length": context_window,
+        "max_output_tokens": MAX_OUTPUT_TOKENS,
+        "modalities": _model_modalities(model, base_id),
+        "supports_thinking": True,
+        "supported_reasoning_efforts": ["low", "medium", "high"],
+        "default_reasoning_effort": "high",
+        "available": projected.status.available and not is_penalized,
+        "penalized_until": int(penalty["penalized_until"]) if is_penalized else None,
+    }
+    _advertise_efforts(card, public_id, specs)
+    return card
+
+
+def _publication_candidates(
+    published: Mapping[str, object],
+) -> list[tuple[str, str]]:
+    candidates = [(model_id, model_id) for model_id in _publication_order(published)]
+    fleet_models = FLEET.get("models", {})
+    for alias_id in ADVERTISED_EFFORT_ALIASES:
+        alias = _resolve_model_alias(alias_id, fleet_models)
+        base_id = alias[0] if isinstance(alias, (tuple, list)) else alias
+        if base_id in published and alias_id not in published:
+            candidates.append((alias_id, base_id))
+    return candidates
+
+
+def _publication_cards(
+    candidates: list[tuple[str, str]],
+    published: Mapping[str, tuple[Any, Any]],
+    specs: dict[str, ModelEffortSpec],
+    owner_tuple: tuple[str, ...] | None,
+    hide_internal: bool,
+) -> list[dict[str, Any]]:
+    cards = []
+    for public_id, base_id in candidates:
+        if hide_internal and base_id in INTERNAL_MODEL_IDS:
+            continue
+        card = _publication_card(public_id, base_id, *published[base_id], specs)
+        if owner_tuple is None or card["owned_by"] in owner_tuple:
+            cards.append(card)
+    return cards
+
+
 def _build_models_list(
     owner_tuple: tuple[str, ...] | None = None,
 ) -> list[dict[str, Any]]:
     published = _get_published_models()
-    specs = _effort_specs() if flag_enabled(FLAG_EFFORT_CATALOG) else effortless_specs(_effort_specs())
-    order = []
-    if MODEL_ID in published:
-        order.append(MODEL_ID)
-    fleet_order = FLEET.get("order", []) if isinstance(FLEET, dict) else []
-    for mid in fleet_order:
-        if mid != MODEL_ID and mid in published and mid not in order:
-            order.append(mid)
-    for mid in published:
-        if mid not in order:
-            order.append(mid)
-
-    internal_key = getattr(
-        sys.modules[__name__], "_INTERNAL_SERVICE_KEY", None
-    ) or os.environ.get("INTERNAL_SERVICE_KEY", "")
-    hide_internal = bool(internal_key) or (owner_tuple is not None)
-
-    data = []
-    listed = set()
-    for mid in order:
-        if hide_internal and mid in INTERNAL_MODEL_IDS:
-            continue
-        a, m = published[mid]
-        owned_by = (
-            getattr(a, "owned_by", "")
-            if a is not None
-            else (
-                getattr(m, "owned_by", "")
-                or (m.get("owned_by", "") if isinstance(m, dict) else "")
-            )
-        )
-        if owner_tuple is not None and owned_by not in owner_tuple:
-            continue
-        context_window = (
-            getattr(m, "context_window", 200000)
-            if not isinstance(m, dict)
-            else m.get("context_window", 200000)
-        )
-        stat = _PENALTY_TRACKER.get_model_status(mid)
-        is_pen = stat["is_penalized"]
-        pen_until = int(stat["penalized_until"]) if is_pen else None
-        card = {
-            "id": mid,
-            "object": "model",
-            "owned_by": owned_by,
-            "created": 0,
-            "context_window": context_window,
-            "context_length": context_window,
-            "max_output_tokens": MAX_OUTPUT_TOKENS,
-            "modalities": _model_modalities(m, mid),
-            "supports_thinking": True,
-            "supported_reasoning_efforts": ["low", "medium", "high"],
-            "default_reasoning_effort": "high",
-            "available": not is_pen,
-            "penalized_until": pen_until,
-        }
-        _advertise_efforts(card, mid, specs)
-        data.append(card)
-        listed.add(mid)
-
-    fleet_models = FLEET.get("models", {}) if isinstance(FLEET, dict) else {}
-    for alias_id in ADVERTISED_EFFORT_ALIASES:
-        if alias_id in listed or (hide_internal and alias_id in INTERNAL_MODEL_IDS):
-            continue
-        alias = _resolve_model_alias(alias_id, fleet_models)
-        base_id = alias[0] if (alias and isinstance(alias, (tuple, list))) else alias
-        if (
-            not base_id
-            or base_id not in published
-            or (hide_internal and base_id in INTERNAL_MODEL_IDS)
-        ):
-            continue
-        a, m = published[base_id]
-        owned_by = (
-            getattr(a, "owned_by", "")
-            if a is not None
-            else (
-                getattr(m, "owned_by", "")
-                or (m.get("owned_by", "") if isinstance(m, dict) else "")
-            )
-        )
-        if owner_tuple is not None and owned_by not in owner_tuple:
-            continue
-        context_window = (
-            getattr(m, "context_window", 200000)
-            if not isinstance(m, dict)
-            else m.get("context_window", 200000)
-        )
-        target_id = base_id if base_id else alias_id
-        stat = _PENALTY_TRACKER.get_model_status(target_id)
-        is_pen = stat["is_penalized"]
-        pen_until = int(stat["penalized_until"]) if is_pen else None
-        card = {
-            "id": alias_id,
-            "object": "model",
-            "owned_by": owned_by,
-            "created": 0,
-            "context_window": context_window,
-            "context_length": context_window,
-            "max_output_tokens": MAX_OUTPUT_TOKENS,
-            "modalities": _model_modalities(m, base_id),
-            "supports_thinking": True,
-            "supported_reasoning_efforts": ["low", "medium", "high"],
-            "default_reasoning_effort": "high",
-            "available": not is_pen,
-            "penalized_until": pen_until,
-        }
-        _advertise_efforts(card, alias_id, specs)
-        data.append(card)
-        listed.add(alias_id)
-
-    return data
+    selected = _effort_specs()
+    specs = selected if flag_enabled(FLAG_EFFORT_CATALOG) else effortless_specs(selected)
+    internal_key = _INTERNAL_SERVICE_KEY or os.environ.get("INTERNAL_SERVICE_KEY", "")
+    hide_internal = bool(internal_key) or owner_tuple is not None
+    return _publication_cards(
+        _publication_candidates(published), published, specs, owner_tuple, hide_internal
+    )
 
 
 def _etag(payload: Any) -> str:
@@ -1463,11 +1437,6 @@ _CHAT_PATHS = ("/v1/chat/completions", "/chat/completions")
 _LOOPBACK_PEERS = ("127.0.0.1", "::1", "::ffff:127.0.0.1")
 
 
-_MODEL_BLOCK_STATUSES = re.compile(
-    r"\b(?:TEMP\s+OFF|LIMIT\s+BLOCKED|QUOTA_EXHAUSTED|BANNED)\b", re.I
-)
-
-
 def _base_quota_model(model: str) -> str:
     return re.sub(r"-(?:minimal|low|medium|high|xhigh|max)$", "", model)
 
@@ -1575,174 +1544,78 @@ class QuotaCircuitBreakerCache:
 _QUOTA_CB_CACHE = QuotaCircuitBreakerCache()
 
 
-def _parse_blocked_models(
-    text: str,
-    now_utc: float | None = None,
-    *,
-    parsed_rules: list[tuple[frozenset[str], frozenset[str], float | None]]
-    | None = None,
-) -> frozenset[str]:
-    """Только конкретные ID в статусных колонках; prose и запреты транспортов не модели."""
-    from datetime import datetime, timedelta, timezone
+def _legacy_note_line(line: str) -> bool:
+    return line.startswith("|") and line.endswith("|")
 
-    now_utc = time.time() if now_utc is None else now_utc
-    blocked: set[str] = set()
-    headers: list[str] = []
-    for line in text.splitlines():
-        if not line.lstrip().startswith("|"):
-            headers = []
-            continue
-        cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
-        if any("статус" in cell.lower() for cell in cells):
-            headers = [cell.lower() for cell in cells]
-            continue
-        if not headers or len(cells) != len(headers):
-            continue
-        status_index = next(
-            (i for i, cell in enumerate(headers) if "статус" in cell), None
-        )
-        if status_index is None or not _MODEL_BLOCK_STATUSES.search(
-            cells[status_index]
-        ):
-            continue
-        expiration = re.search(
-            r"\b\(?до\s+(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2})\s+MSK\)?",
-            line,
-            re.I,
-        )
-        expires = None
-        if expiration:
+
+def _legacy_notes_rows(text: str) -> list[list[str]]:
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if len(lines) < 3 or not all(_legacy_note_line(line) for line in lines):
+        raise BlocklistParseError("Нет явной legacy-таблицы блокировок")
+    rows = [[cell.strip() for cell in line[1:-1].split("|")] for line in lines]
+    if any(len(row) != 2 for row in rows):
+        raise BlocklistParseError("Некорректная legacy-таблица блокировок")
+    return rows
+
+
+def _legacy_notes_document(text: str) -> str:
+    rows = _legacy_notes_rows(text)
+    suffixes = ("Комментарий", "---", *("" for _ in rows[2:]))
+    body = "\n".join(
+        f"| {' | '.join((*row, suffix))} |" for row, suffix in zip(rows, suffixes)
+    )
+    return "## 1. Блокировки\n" + body
+
+
+class _CompatibleModelNotesManager(ModelNotesSnapshotManager):
+    """Accepts the legacy explicit table while retaining strict validation."""
+
+    def _work(self) -> None:
+        try:
+            base = _model_notes_snapshot._disk(self.snapshot_path)
+            text = read_model_notes_file(self.source)
             try:
-                expires = (
-                    datetime.strptime(expiration.group(1), "%Y-%m-%d %H:%M")
-                    .replace(tzinfo=timezone(timedelta(hours=3)))
-                    .timestamp()
-                )
-            except ValueError:
-                pass
-        elif re.search(r"\bдо\b.*MSK", line, re.I):
-            _log(f"warning: unparseable expiration date in model note: {line.strip()}")
-        if "группа" in headers:
-            group = cells[headers.index("группа")].lower()
-            if group not in ("модели", "models"):
-                continue
-            model_cell = cells[headers.index("что")]
-        elif "модель" in headers[0] or "model" in headers[0]:
-            model_cell = cells[0].split(" / ", 1)[0]
-        else:
-            continue
-        models = frozenset(re.findall(r"`([a-zA-Z0-9][a-zA-Z0-9._:-]*)`", model_cell))
-        if parsed_rules is not None:
-            parsed_rules.append((frozenset(), models, expires))
-        if expires is not None and now_utc > expires:
-            continue
-        blocked.update(models)
-    return frozenset(blocked)
+                notes = parse_model_notes(text)
+            except BlocklistParseError:
+                notes = parse_model_notes(_legacy_notes_document(text))
+            self._publish(notes, text, base)
+            self._result = notes
+            self.worker_error = None
+        except BaseException as error:
+            self.worker_error = error
+            self._fault(error)
+            if not isinstance(error, Exception):
+                raise
+        finally:
+            self._done.set()
 
 
 class ModelNotesFilter:
-    """TTL-снимок: медленный диск не задерживает HTTP, ошибки обновления — fail-open."""
+    """Fail-closed startup snapshot with read-only request-path queries."""
 
     def __init__(self, path: Path | None = None, ttl_s: float | None = None) -> None:
-        self.path = (
-            path
-            or Path(
-                os.environ.get(
-                    "BRIDGE_MODEL_NOTES_PATH", "~/Мой диск/Context/model-notes.md"
-                )
-            ).expanduser()
-        )
-        self.ttl_s = ttl_s
-        self.blocked: frozenset[str] = frozenset()
-        self.expires_at = 0.0
-        self.lock = threading.Lock()
-        self.loading: threading.Event | None = None
-        self.signature: tuple[int, int] | None = None
-        self._parsed_rules: (
-            list[tuple[frozenset[str], frozenset[str], float | None]] | None
-        ) = None
+        env: dict[str, object] = dict(os.environ)
+        if path is not None:
+            env["MODEL_NOTES_PATH"] = str(path)
+        if ttl_s is not None:
+            env["MODEL_NOTES_REFRESH_INTERVAL_S"] = str(ttl_s)
+        self.manager = _CompatibleModelNotesManager(env)
+
+    @property
+    def status(self) -> str:
+        return self.manager.status
+
+    def close(self) -> None:
+        self.manager.close()
 
     def is_blocked(self, model: str) -> bool:
         if _QUOTA_CB_CACHE.is_blocked(model):
             return True
-        return self._notes_blocked(model) or self._notes_blocked(
-            _base_quota_model(model)
-        )
-
-    def _notes_blocked(self, model: str) -> bool:
-        now = time.monotonic()
-        if now < self.expires_at:
-            return model in self.blocked
-        # try-lock: запрос не ждёт чужого I/O под mutex.
-        if not self.lock.acquire(blocking=False):
-            return model in self.blocked
-        try:
-            if now < self.expires_at:
-                return model in self.blocked
-            if self.loading is None:
-                done = self.loading = threading.Event()
-                try:
-                    ttl = (
-                        self.ttl_s
-                        if self.ttl_s is not None
-                        else float(
-                            os.environ.get("BRIDGE_MODEL_NOTES_CACHE_TTL_S", "10")
-                        )
-                    )
-                    if not math.isfinite(ttl) or ttl < 0:
-                        ttl = 10.0
-                    wait_s = float(
-                        os.environ.get("BRIDGE_MODEL_NOTES_READ_BUDGET_S", "0.02")
-                    )
-                    wait_s = (
-                        min(0.04, max(0.0, wait_s)) if math.isfinite(wait_s) else 0.02
-                    )
-                except ValueError:
-                    ttl, wait_s = 10.0, 0.02
-
-                def refresh() -> None:
-                    try:
-                        stat = self.path.stat()
-                        signature = (stat.st_mtime_ns, stat.st_size)
-                        now_utc = time.time()
-                        if (
-                            signature == self.signature
-                            and self._parsed_rules is not None
-                        ):
-                            rules = self._parsed_rules
-                            models = frozenset(
-                                model
-                                for _, model_ids, expiry_ts in rules
-                                if expiry_ts is None or expiry_ts >= now_utc
-                                for model in model_ids
-                            )
-                        else:
-                            rules = []
-                            models = _parse_blocked_models(
-                                self.path.read_text(encoding="utf-8"),
-                                now_utc,
-                                parsed_rules=rules,
-                            )
-                    except (OSError, UnicodeError, ValueError):
-                        signature, models, rules = None, frozenset(), None
-                    with self.lock:
-                        self.blocked, self.signature = models, signature
-                        self._parsed_rules = rules
-                        self.expires_at = time.monotonic() + ttl
-                        self.loading = None
-                    done.set()
-
-                threading.Thread(
-                    target=refresh, daemon=True, name="model-notes-refresh"
-                ).start()
-            else:
-                # Другой запрос уже обновляет; возвращаем stale кэш (F-007)
-                return model in self.blocked
-        finally:
-            self.lock.release()
-        if not done.wait(wait_s):
-            return model in self.blocked
-        return model in self.blocked
+        notes = self.manager.snapshot
+        if notes is None:
+            return True
+        names = {model, _base_quota_model(model)}
+        return any(rule.model in names for rule in notes.rules)
 
 
 _MODEL_NOTES_FILTER = ModelNotesFilter()
