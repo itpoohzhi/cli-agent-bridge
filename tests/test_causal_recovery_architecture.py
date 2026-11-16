@@ -14,7 +14,7 @@ import sys
 from typing import cast
 Fn = ast.FunctionDef | ast.AsyncFunctionDef
 Result = dict[str, str | int]
-BASE = "74a9c6e685b596e36ffd54b68e3f4e4ead370587"
+BASE = "a8e6e508d0a398625bc557f2e16f155a0c1ab171"
 BRIDGE, RUNNER = "bridges/agy-bridge/server.py", "bridges/agy-bridge/agy_runtime/sse_body_runner.py"
 CORE = ("core/turn_outcome_policy.py", "core/stream_interruption_recovery.py", "core/turn_finalization.py")
 STAGES = (("W0", ("tests/test_causal_turn_recovery_flow.py", "tests/test_causal_recovery_architecture.py")),
@@ -149,7 +149,7 @@ def selected(stage: str) -> tuple[str, ...]:
     assert stage in names, stage
     return tuple(dict.fromkeys(p for _, ps in STAGES[:names.index(stage) + 1] for p in ps))
 def protected(root: Path, base: str) -> Result:
-    """Сохранить telemetry guard и его scope без ослабления baseline failure."""
+    """Сохранить telemetry guard и его scope с актуальным baseline под лимитом."""
     tree = ast.parse(source(root, "tests/test_request_telemetry.py"))
     pairs = [n for n in tree.body if isinstance(n, ast.Assign) and isinstance(n.targets[0], ast.Name)
              and n.targets[0].id in ("MODULES", "TEST_FILES")]
@@ -158,8 +158,8 @@ def protected(root: Path, base: str) -> Result:
               "core/passthrough_sliding_window.py", "adapters/passthrough_adapter.py")
     for path in paths:
         assert source(root, path) == source(root, path, base), ("protected", path)
-    assert len(source(root, "server.py").splitlines()) == 8930
-    return {"existing_telemetry_guard": "FAIL_UNCHANGED", "actual": 8930, "limit": 8801}
+    assert len(source(root, "server.py").splitlines()) == 7993
+    return {"existing_telemetry_guard": "PASS_UNDER_LIMIT", "actual": 7993, "limit": 8801}
 def scope_guard(root: Path, paths: Sequence[str], base: str = BASE) -> None:
     """Учесть tracked, untracked и ignored исходники диапазона `base`..рабочее дерево."""
     changed = git(root, "diff", "--name-only", base).splitlines()

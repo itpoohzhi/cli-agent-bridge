@@ -22,14 +22,14 @@ class _SseBodyRunner:
     def __init__(self, session: SseStreamSession) -> None:
         self.s = session
         self.time = _owner_time(session.handler)
-        self.replay = MidstreamReplayOrchestrator(
-            session.config, clock=self.time.monotonic, sleeper=self.time.sleep )
+        self.replay = MidstreamReplayOrchestrator(session.config, clock=self.time.monotonic, sleeper=self.time.sleep)
         self.replay.buffer = session.buffer
         self.collector = AgyToolTraceCollector(session.ledger)
         self.buffering = False
         self.deadline = float("inf")
         self.cid = str(next(filter(None, (session.ctx.get("conversation_id"),)), ""))
         self.last_out: dict[str, Any] = {}
+        self.stop: Any = None
     def stage(self, value: str, channel: str = "content") -> bool:
         ok = False
         if not self.cancelled():
