@@ -1,7 +1,8 @@
-"""Чистый agent-agnostic фасад транзиентного и доказанного каузального восстановления."""
+"""Agent-agnostic фасад транзиентного, functionCall и каузального восстановления."""
 from __future__ import annotations
 from dataclasses import dataclass, replace
 from typing import Final, cast
+from core.function_call_recovery import FUNCTION_CALL_ERROR_RE as FUNCTION_CALL_ERROR_RE, FUNCTION_CALL_HEAL_REASON, is_recoverable_function_call_error as is_recoverable_function_call_error
 import core.turn_outcome_policy as causal
 from core.route_health_policy import (
     TRANSIENT_STREAM_INTERRUPTION_RE as TRANSIENT_STREAM_INTERRUPTION_RE,
@@ -9,7 +10,6 @@ from core.route_health_policy import (
     is_transient_stream_interruption as is_transient_stream_interruption,
     validate_retry_config,
 )
-
 CLI_ERROR_SOURCE: Final[str] = "cli_error"
 ERROR_STATUS: Final[str] = "ERROR"
 DONE_STATUS: Final[str] = "DONE"
@@ -31,7 +31,9 @@ def _safety_meta_items(obj: object, depth: int = 0) -> list[tuple[str, object]]:
     return [item for k, v in pairs if str(k).lower() not in ("content", "thinking", "tool_calls")
             for item in ([(str(k), v)] if str(k).lower() in ("block_reason", "blockreason", "finish_reason", "finishreason", "stop_reason", "stopreason")
                          else _safety_meta_items(v, depth + 1))]
-
+def is_self_healable_error(text: str | None, *, source: str = "cli_error") -> bool:
+    """Транзиентный обрыв либо исправимая ошибка functionCall."""
+    return is_transient_stream_interruption(text, source=source) or is_recoverable_function_call_error(text, source=source)  # fmt: skip
 class InterruptionTailState:
     """Факты о финальном planner-шаге и транзиентных обрывах."""
     final_planner: bool = False
@@ -61,7 +63,7 @@ class InterruptionTailState:
             seq = rtype if isinstance(rtype, int) else idx if idx is not None else -1
             self.final_planner, self.final_planner_content = False, ""
             self.has_open_planner_after_completion = self.last_planner_step_index >= 0
-            self.had_transient_error |= is_transient_stream_interruption(text)
+            self.had_transient_error |= is_self_healable_error(text)
             self.had_safety_error |= struct_safety or causal.is_fatal_safety_error(text)
             if seq < 0 or seq >= self.last_error_step_index:
                 self.last_error_step_index = seq
@@ -70,7 +72,6 @@ class InterruptionTailState:
                 attempt = kw.get("attempt", self.attempt)
                 self.last_error_attempt = attempt if type(attempt) is int else -1
                 self.error_from_structured_record = seq >= 0
-
     def note_planner_record(self, rec: dict[str, object], idx: int | None, *, attempt: int | None = None) -> None:
         """Непустой DONE без tools завершает шаг; запись без индекса финал не затирает."""
         struct_safety = any(causal.meta_pair_is_fatal(k, v) for k, v in _safety_meta_items(rec))
@@ -161,22 +162,18 @@ class TurnOutcomeResolution:
 
 @dataclass(frozen=True)
 class _TurnFacts:
-    rc: int
-    result_error: str
-    result_status: str
-    final_text: str
-    emitted_text: str
-    completion_done_without_tools: bool = False
-    last_completion_seq: int = -1
-    last_error_seq: int = -1
-    drain_complete: bool = False
-    had_transient_error: bool = False
+    rc: int; result_error: str; result_status: str  # fmt: skip  # noqa: E702
+    final_text: str; emitted_text: str  # fmt: skip  # noqa: E702
     had_safety_error: bool = False
-    has_unclosed_tool_call: bool = False
-    self_heal_enabled: bool = True
+    completion_done_without_tools: bool = False; last_completion_seq: int = -1; last_error_seq: int = -1  # fmt: skip  # noqa: E501,E702
+    drain_complete: bool = False; had_transient_error: bool = False  # fmt: skip  # noqa: E702
+    has_unclosed_tool_call: bool = False; self_heal_enabled: bool = True  # fmt: skip  # noqa: E702
     causal_input: causal.CausalOutcomeInput | None = None
+_DONE_REASONS: Final[frozenset[str]] = frozenset(("clean_done", "self_healed_after_transient_interruption", FUNCTION_CALL_HEAL_REASON))  # fmt: skip
 
-_DONE_REASONS: Final[tuple[str, ...]] = ("clean_done", SELF_HEALED_REASON)
+# Машиночитаемые причины (`turn-resolved reason=…`): не секреты, маскировщик логов их не трогает.
+TURN_REASON_CODES: Final[frozenset[str]] = frozenset((*_DONE_REASONS, "self_heal_disabled", "non_transient_result_error", "unclassified_nonzero_rc", "drain_incomplete", "unclosed_tool_call", "not_recovered", "transient_pre_delivery_retry", "retry_blocked", "graceful_partial_close", "graceful_blocked"))  # fmt: skip
+
 def _heal_blocker(f: _TurnFacts, transient_error: bool) -> str:
     """Первая причина, запрещающая самоисцеление (пусто — разрешено)."""
     checks = (("self_heal_disabled", not f.self_heal_enabled), ("non_transient_result_error", bool(f.result_error) and not transient_error),
@@ -196,6 +193,7 @@ def resolve_done_turn_outcome(**kw: object) -> TurnOutcomeResolution:
         error = f.result_error if causal.is_fatal_safety_error(f.result_error) else f"fatal_safety_error: {f.result_error}"
         return TurnOutcomeResolution(ERROR_STATE, 1, error, False, "fatal_safety_error", True)
     transient = is_transient_stream_interruption(f.result_error)
+    fc_error = is_recoverable_function_call_error(f.result_error)
     if f.result_error and not transient and f.causal_input is not None:
         decision = evaluate_done_causal_recovery(f.causal_input, f.result_error)
         consistent = (f.self_heal_enabled and not f.has_unclosed_tool_call and bool(f.final_text.strip() or f.emitted_text.strip())
@@ -205,11 +203,12 @@ def resolve_done_turn_outcome(**kw: object) -> TurnOutcomeResolution:
         return TurnOutcomeResolution(DONE_STATE if healed else ERROR_STATE, 0 if healed else f.rc or 1,
                                      "" if healed else f.result_error, healed, reason, True)
     clean = not (f.rc or f.result_error or f.result_status == ERROR_STATUS)
-    blocker = _heal_blocker(f, transient)
-    reasons = (("clean_done", clean), (blocker, bool(blocker)), (SELF_HEALED_REASON, _is_recovered(f)), ("not_recovered", True))
+    blocker = _heal_blocker(f, transient or fc_error)
+    heal_reason = FUNCTION_CALL_HEAL_REASON if fc_error else SELF_HEALED_REASON
+    reasons = (("clean_done", clean), (blocker, bool(blocker)), (heal_reason, _is_recovered(f)), ("not_recovered", True))
     reason = next(name for name, hit in reasons if hit)
     error = f.result_error if f.result_error else f"rc={f.rc}"
-    healed = reason == SELF_HEALED_REASON
+    healed = reason in _DONE_REASONS and reason != "clean_done"
     ok_out, fail_out = (DONE_STATE, 0, ""), (ERROR_STATE, f.rc if f.rc else 1, error)
     state, rc, err = ok_out if reason in _DONE_REASONS else fail_out
     return TurnOutcomeResolution(state, rc, err, healed, reason, healed or bool(f.result_error))

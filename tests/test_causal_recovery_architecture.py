@@ -127,11 +127,11 @@ def imports(rel: str, tree: ast.AST) -> set[str]:
             if rel in PURE:
                 assert name not in ("open", "read_text", "read_bytes", "getenv"), name
     if rel in PURE:
-        deps = {"core.turn_outcome_policy", RHP[:-3].replace("/", ".")} | (RHP_LIBS if rel == RHP else frozenset[str]())
+        deps = {"core.turn_outcome_policy", RHP[:-3].replace("/", ".")} | (RHP_LIBS if rel == RHP else frozenset[str]()) | ({"core.function_call_recovery"} if rel == CORE[1] else set())
         assert names <= LIBS | deps | {CORE[0]: {"html", "unicodedata"}, CORE[1]: {"json"}}.get(rel, set()), (rel, names)
     else:
         allowed = ({"__future__", "json", "threading", "typing", "agy_runtime.midstream_resilience", "agy_runtime.sse_stream_helpers",
-                    "core.route_health_policy", "core.stream_resilience_policy", "core.stream_resilience_runtime"} if rel == RUNNER else
+                    "core.route_health_policy", "core.stream_resilience_policy", "core.stream_resilience_runtime", "core.agy_capacity_guard", "core.usage_wire"} if rel == RUNNER else
                    LIBS | {"argparse", "json", "math", "os", "pathlib", "time", "core.runtime_env", "core.stream_interruption_recovery", "core.turn_outcome_policy"})
         assert names <= allowed, (rel, names)
     return names

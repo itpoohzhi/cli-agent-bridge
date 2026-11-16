@@ -34,7 +34,8 @@ DROID_MODELS = {  # model_id -> (вендор, default_effort, efforts)
 PRIMARY = {
     "gpt-6.1-sol": "openai-key-2",
     "claude-sonnet-5-5": "claude-p",
-    "gemini-3.8-flash": "agy",
+    "gemini-3.8-flash": "droid",
+    "gemini-3.8-flash-agy": "agy",
     "gpt-6.1-sol-droid": "droid",
     "claude-sonnet-5-5-droid": "droid",
     "gemini-3.8-flash-droid": "droid",
@@ -48,10 +49,11 @@ ALTERNATES = {
     "gpt-6.1-sol": ["codex", "openai-key-3", "droid"],
     "gpt-6.1-terra": ["codex", "openai-key-3"],
     "claude-sonnet-5-5": ["droid"],
-    "gemini-3.8-flash": ["droid"],
     "claude-haiku-5-5": ["opencode-go-claude"],
 }
-DIRECT_MODELS = ("deepseek-v4.1-flash",)  # вне droid: direct с резервом opencode-go; kimi-k3.1-pro удалена
+DIRECT_MODELS = (
+    "deepseek-v4.1-flash",
+)  # вне droid: direct с резервом opencode-go; kimi-k3.1-pro удалена
 SUFFIX_ALIASES = {
     **{
         f"gemini-3.8-flash-droid-{effort}": {
@@ -104,6 +106,14 @@ SUFFIX_ALIASES = {
     **{
         f"gemini-3.8-flash-{effort}": {
             "backend_id": "gemini-3.8-flash",
+            "backend": "droid",
+            "effort": effort,
+        }
+        for effort in LMH
+    },
+    **{
+        f"gemini-3.8-flash-agy-{effort}": {
+            "backend_id": "gemini-3.8-flash-agy",
             "backend": "agy",
             "effort": effort,
         }

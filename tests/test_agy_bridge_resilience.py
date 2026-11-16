@@ -1,15 +1,4 @@
-"""Тесты отказоустойчивости agy-bridge (ADR-0007, arch-spec r2 §6, RW-008).
-
-Покрыто 15 сценариев: детекция неактивности группы, сброс таймера по CPU и по
-протокольным событиям, fail-closed при деградации `ps`, троттлинг `check()` в
-`_execute`, `child_exited` как штатное завершение, `absolute_cap` -> `timeout`,
-kill-switch, контракт ошибки `idle_timeout` (HTTP 504 / SSE), зачистка группы
-процессов и reap лидера, изоляция таймаута источника в `fetch_via_playwright.py`.
-
-Мост `bridges/agy-bridge/server.py` лежит в каталоге с дефисом, поэтому грузится
-через `importlib`. Таймауты малые (`idle_timeout_s=0.2`) либо мок-часы; процессы
-создаются с `start_new_session=True` и убираются в `finally`.
-"""
+"""Отказоустойчивость agy-bridge: watchdog, SSE, процессы и маскирование (ADR-0007)."""
 
 from __future__ import annotations
 
@@ -79,6 +68,17 @@ def _load_bridge() -> Any:
 
 
 srv = _load_bridge()
+
+
+def test_err_summary_redacts_before_truncation() -> None:
+    secrets = [prefix + "z" * 40 for prefix in ("sk-", "AIza", "ghp_", "")]
+    for secret in [*secrets, "api_key=short-private-value"]:
+        for limit in (1, 12, 120, 200):
+            prefix = "x " * max(0, (limit - 10) // 2)
+            err = prefix + secret + "\n tail"
+            expected = " ".join(srv._mask_secrets(err).split())[:limit]
+            assert srv._err_summary(err, limit) == expected
+            assert secret.split("=")[-1][:4] not in expected
 
 
 class _FakeClock:
@@ -2718,7 +2718,9 @@ class ExitLogAndHealthTests(unittest.TestCase):
         with _Fixture() as fx:
             sent: list[tuple[int, dict[str, object]]] = []
 
-            def send(code: int, payload: dict[str, object]) -> None:
+            def send(
+                code: int, payload: dict[str, object], extra_headers: object = None
+            ) -> None:
                 sent.append((code, payload))
 
             def fetch() -> dict[str, object]:
@@ -3751,7 +3753,9 @@ class L2HarnessTests(unittest.TestCase):
             self.assertLessEqual(rss_end, 160 * 1024 * 1024)
             health: list[dict[str, object]] = []
 
-            def send(_code: int, payload: dict[str, object]) -> None:
+            def send(
+                _code: int, payload: dict[str, object], extra_headers: object = None
+            ) -> None:
                 health.append(payload)
 
             with _Sock() as sock:
@@ -6445,7 +6449,12 @@ def _dict_or_empty(value: object) -> dict[str, object]:
 
 # ---- Image input (workspace-read): AD-001..AD-006, F-001..F-010 ---------------------
 
-_IMG_TARGETS = ("gemini-4-hydrogen", "gemini-4-carbon", "gemini-4-argon", "gemini-3.8-flash")
+_IMG_TARGETS = (
+    "gemini-4-hydrogen",
+    "gemini-4-carbon",
+    "gemini-4-argon",
+    "gemini-3.8-flash",
+)
 _IMG_MIMES = ("image/png", "image/jpeg", "image/gif", "image/webp")
 _IMG_MAGIC: dict[str, bytes] = {
     "image/png": b"\x89PNG\r\n\x1a\n",
@@ -15015,3 +15024,49 @@ class TestNonstreamLivenessResilience(unittest.TestCase):
         window.record_process(cpu_delta_s=5.0, new_children=3, alive=True)
         clock.now += 1.0
         self.assertEqual(window.expired(), REASON_FIRST)
+
+
+def test_format_print_timeout_normalizes_numeric_values():
+    bridge = _load_bridge()
+    formatter = bridge._format_print_timeout
+
+    assert formatter(None) == "0s"
+    assert formatter(False) == "0s"
+    assert formatter(True) == "0s"
+    assert formatter(-5) == "0s"
+    assert formatter(0) == "0s"
+    assert formatter(338) == "338s"
+    assert formatter("338") == "338s"
+    assert formatter("2.5") == "2.5s"
+    assert formatter(2.5) == "2.5s"
+    assert formatter("10m") == "10m"
+    assert formatter("invalid") == "0s"
+
+
+def test_prepare_agy_home_synchronizes_antigravity_credentials(tmp_path):
+    bridge = _load_bridge()
+    fake_home = tmp_path / "home"
+    fake_clean = tmp_path / "clean_home"
+    fake_home.mkdir(parents=True)
+    fake_clean.mkdir(parents=True)
+    fake_lib = fake_home / "Library"
+    fake_lib.mkdir(parents=True)
+
+    fake_cli = fake_home / ".gemini" / "antigravity-cli"
+    fake_cli.mkdir(parents=True)
+    (fake_cli / "antigravity-oauth-token").write_text("token-123", encoding="utf-8")
+    (fake_cli / "antigravity-account.json").write_text('{"email":"test@example.com"}', encoding="utf-8")
+
+    fake_brain = fake_clean / ".gemini" / "antigravity-cli" / "brain"
+    fake_conv = fake_clean / ".gemini" / "antigravity-cli" / "conversations"
+
+    with mock.patch.object(bridge, "HOME", fake_home), \
+         mock.patch.object(bridge, "CLEAN_HOME_DIR", fake_clean), \
+         mock.patch.object(bridge, "BRAIN_DIR", fake_brain), \
+         mock.patch.object(bridge, "CONV_DIR", fake_conv), \
+         mock.patch.object(bridge, "_AGY_HOME_INITIALIZED", False), \
+         mock.patch.object(bridge, "_ensure_symlink", lambda src, dst: None):
+        res = bridge._prepare_agy_home()
+        clean_cli = fake_clean / ".gemini" / "antigravity-cli"
+        assert (clean_cli / "antigravity-oauth-token").read_text(encoding="utf-8") == "token-123"
+        assert (clean_cli / "antigravity-account.json").read_text(encoding="utf-8") == '{"email":"test@example.com"}'

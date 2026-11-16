@@ -5,7 +5,9 @@ import os
 import re
 import time
 from types import EllipsisType
-from typing import Any, Optional, Union
+from typing import Any, Mapping, Optional, Union
+
+from core.usage_wire import positive_wire_usage
 
 
 def sanitize_error_message(message: str) -> str:
@@ -92,8 +94,9 @@ def build_stream_error_chunk(
     completion_id: Optional[str] = None,
     created: Optional[int] = None,
     choice_indices: Optional[list[int]] = None,
+    usage: Optional[Mapping[str, Any]] = None,
 ) -> dict:
-    """Build an error chunk, distinguishing omitted finish_reason from None."""
+    """Build an error chunk, distinguishing omitted finish_reason from None; `usage` — только положительный."""
     sanitized_msg = sanitize_error_message(message)
     graceful = is_graceful_error_framing_enabled()
     if finish_reason is ...:
@@ -122,7 +125,7 @@ def build_stream_error_chunk(
                 }
             )
 
-    return {
+    chunk: dict[str, Any] = {
         "id": completion_id if completion_id is not None else f"chatcmpl-err-{now}",
         "object": "chat.completion.chunk",
         "created": created if created is not None else now,
@@ -135,6 +138,10 @@ def build_stream_error_chunk(
             "param": None,
         },
     }
+    kept_usage = positive_wire_usage(usage)
+    if kept_usage is not None:
+        chunk["usage"] = kept_usage
+    return chunk
 
 
 def format_sse_event(

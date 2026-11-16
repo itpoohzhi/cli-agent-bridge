@@ -8,6 +8,8 @@ from typing import Any, Callable, final
 from agy_runtime.midstream_resilience import AgyToolTraceCollector, _owner_time
 from agy_runtime.sse_stream_helpers import SseStreamSession
 from core.route_health_policy import redact_diagnostic_text
+from core.agy_capacity_guard import CAPACITY_REASON
+from core.usage_wire import positive_wire_usage
 from core.stream_resilience_policy import can_safely_replay_turn, is_present, is_uncommitted_step
 from core.stream_resilience_runtime import MidstreamReplayOrchestrator
 _attempt_scope = threading.local()
@@ -63,8 +65,7 @@ class _SseBodyRunner:
         forward = self.s.ledger.should_forward_step(event.get("step_index"))
         ok = True
         if all((self.buffering, forward)):
-            record = dict( event, tool_name=event.get("tool_name", event.get("name")),
-                type=event.get("type", "tool_result"), )
+            record = dict(event, tool_name=event.get("tool_name", event.get("name")), type=event.get("type", "tool_result"))
             self.collector.on_record(record)
         if any((not self.buffering, forward)):
             ok = False
@@ -75,12 +76,11 @@ class _SseBodyRunner:
         s = self.s
         s.stream_text, s.stream_reasoning = self.stage, self.stage_reasoning
         if is_present(s.tool_turn):
-            s.tool_turn = s.hooks[3](
-                next(filter(None, (s.ctx.get("tools"),)), list[dict[str, Any]]()),
-                self.stage, self.stage_reasoning, self.stage_calls, )
+            s.tool_turn = s.hooks[3](next(filter(None, (s.ctx.get("tools"),)), list[dict[str, Any]]()), self.stage, self.stage_reasoning, self.stage_calls)
             s.stream_text = s.tool_turn.feed
             s.stream_reasoning = s.tool_turn.feed_reasoning
             s.ctx["tool_stop"] = s.tool_turn.turn_complete
+            s.ctx["tool_calls_emitted"] = lambda: bool(s.tool_turn.calls)
     def tool_stop(self) -> bool:
         return self.expired() or bool(self.stop and self.stop())
     def recovery_snapshot(self) -> str:
@@ -96,7 +96,7 @@ class _SseBodyRunner:
         if self.buffering:
             s.buffer.rollback_uncommitted()
             self.prepare_buffer()
-            ctx.update(conversation_id=self.cid, attempt_budget_s=budget)
+            ctx.update(conversation_id=self.cid, attempt_budget_s=budget, attempt_index=index)
             if s.config.flag_enabled("midstream_retry_enabled"):
                 self.deadline = self.time.monotonic() + budget
         self.stop = stop = ctx.get("tool_stop")
@@ -111,8 +111,7 @@ class _SseBodyRunner:
             else:
                 ctx["tool_stop"] = stop
         if all((self.expired(), not self.cancelled())):
-            out.update( state="timeout", rc=124, err="retry_budget_exhausted",
-                timeout_limit_s=budget, )
+            out.update(state="timeout", rc=124, err="retry_budget_exhausted", timeout_limit_s=budget)
         self.deadline, self.last_out = float("inf"), out
         if self.buffering:
             self.reconcile_trace(out)
@@ -145,12 +144,14 @@ class _SseBodyRunner:
         s = self.s
         if is_present(s.tool_turn):
             s.tool_turn.finish()
+            if s.tool_turn.error:
+                s.buffer.rollback_uncommitted()
+                return True
         callbacks = dict(content=s.on_text, reasoning_content=s.on_reasoning)
         pending = s.buffer.commit_fragments()
         ok = True
         for channel, value in pending:
-            callback = dict(callbacks, tool_calls=lambda v: s.on_calls(json.loads(v)))[
-                channel ]
+            callback = dict(callbacks, tool_calls=lambda v: s.on_calls(json.loads(v)))[channel]
             ok = callback(value)
             if not ok:
                 s.ledger.client_delivery_reconciled = False
@@ -177,13 +178,12 @@ class _SseBodyRunner:
         proceed = True
         if self.buffering:
             ctx["finalize_timeout"] = lambda _out: None
-            out = dict( self.replay.run_with_resilience(
-                    self.attempt, s.ledger, s.keepalive, self.cancelled ) )
+            out = dict(self.replay.run_with_resilience(self.attempt, s.ledger, s.keepalive, self.cancelled))
             if all( ( dict(cancelled=True).get(str(out.get("state")), False),
                     not self.cancelled(), ) ):
                 out = ( self.last_out if self.last_out
                     else dict(state="pump_error", rc=1, err="retry cancelled") )
-            success = dict(done=True).get(str(out.get("state")), False)
+            success = out.get("state") == "done"
             if all((success, out.get("rc") == 0)):
                 if not self.cancelled():
                     proceed = self.drain()
@@ -208,7 +208,7 @@ class _SseBodyRunner:
         proceed = True
         if all(((not is_present(err)), (is_present(s.tool_turn)))):
             s.tool_turn.finish()
-            proceed = not any((self.cancelled(), not s.tool_turn.ok))
+            proceed = not self.cancelled() and (s.tool_turn.ok or bool(s.tool_turn.error))
             if s.tool_turn.error:
                 err = s.tool_turn.error_body()
             elif s.tool_turn.calls:
@@ -217,34 +217,34 @@ class _SseBodyRunner:
             self._finish_response(out, err, reason)
     def _finish_response(self, out: dict[str, Any], err: Any, reason: str) -> None:
         s = self.s
-        presend = all( ( (is_present(err)), not s.ctx["stream_committed"],
-                any((s.resilience, s.ctx.get("step_job_id"))), ) )
+        presend = all(((is_present(err)), not s.ctx["stream_committed"], any((s.resilience, s.ctx.get("step_job_id")))))
         if presend:
-            clean = { k: redact_diagnostic_text(v) if isinstance(v, str) else v
-                for k, v in err.items() }
+            clean = {k: redact_diagnostic_text(v) if isinstance(v, str) else v for k, v in err.items()}
             code = 502
-            if s.ctx.get("step_job_id"):
+            if any((s.ctx.get("step_job_id"), err.get("type") == CAPACITY_REASON)):
                 code = int(err.get("code") if err.get("code") else 502)
             s.handler._send(code, {"error": clean})
             s.handler.close_connection = True
         elif s.commit():
             ok = ( self.finish_success(out, reason) if (not is_present(err))
-                else s.emit(s.error_chunk(err)) )
+                else s.emit(s.error_chunk(err, self.error_usage(out))) )
             if any((ok, not s.resilience)):
                 _ = s.emit("data: [DONE]\n\n")
+    def error_usage(self, out: dict[str, Any]) -> dict[str, Any] | None:
+        try:
+            return positive_wire_usage(self.s.handler._usage_payload(out.get("usage") or {}, out.get("usage_resolved")))
+        except (TypeError, ValueError, AttributeError):
+            return None
     def finish_success(self, out: dict[str, Any], reason: str) -> bool:
         s = self.s
         cid = str(next(filter(None, (out.get("conversation_id"),)), ""))
         ok = s.emit(s.chunk({}, reason, conversation_id=cid))
         if any((ok, not s.resilience)):
             ok = True
-            usage = s.handler._usage_payload(
-                next(filter(None, (out.get("usage"),)), dict[str, Any]()),
-                out.get("usage_resolved"), )
+            usage = s.handler._usage_payload(next(filter(None, (out.get("usage"),)), dict[str, Any]()), out.get("usage_resolved"))
             if any((usage.get("prompt_tokens"), usage.get("completion_tokens"))):
                 ok = s.emit(s.chunk({}, reason, usage=usage, conversation_id=cid))
         return ok
-def serve_sse_body( handler: Any, ctx: dict[str, Any], hooks: tuple[Any, Any, Any, Any],
-) -> None:
+def serve_sse_body(handler: Any, ctx: dict[str, Any], hooks: tuple[Any, Any, Any, Any]) -> None:
     """Дренирует CLI через общий sink, hooks сохраняют динамический TTL фасада."""
     _SseBodyRunner(SseStreamSession(handler, ctx, hooks)).run()
