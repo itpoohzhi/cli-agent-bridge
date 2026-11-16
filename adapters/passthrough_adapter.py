@@ -10,6 +10,7 @@ from __future__ import annotations
 import copy
 import hmac
 import http.client
+import io
 import json
 import math
 import os
@@ -22,7 +23,7 @@ import time
 import urllib.parse
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, Callable, Iterator, Mapping, Optional, TypedDict, Unpack
+from typing import Any, Callable, Iterator, Mapping, Optional, TypedDict, Unpack, cast
 
 from adapters.passthrough_pool import (
     PassthroughConnectionPool as _PassthroughConnectionPool,
@@ -68,6 +69,7 @@ from core.tool_mode import (
     build_mode_spec, check_unexpected_tool_calls, format_tool_mode_log, resolve_tool_mode,
 )
 from core.stream_framing import build_stream_error_chunk, format_sse_event
+from core.stream_guard import StreamGuard
 from core.stream_framing import (
     format_stream_error_sse,
     is_graceful_error_framing_enabled,
@@ -292,6 +294,42 @@ class ResponseSink:
         """Тип ошибки отданного ответа для классификации исхода lease ('' — ошибки нет)."""
         return ""
 
+class _GuardedSink(ResponseSink):
+    """Передаёт события guard, сохраняя байты и единственного писателя relay."""
+
+    def __init__(self, sink: ResponseSink, guard: StreamGuard | None) -> None:
+        self.sink: ResponseSink = sink
+        self.start: Callable[[int, list[tuple[str, str]]], None] = sink.start
+        self.guard: StreamGuard = (
+            guard if guard is not None else getattr(sink, "stream_guard", None)
+        ) or StreamGuard()
+
+    def _drain(self) -> None:
+        for record in cast(list[dict[str, object]], self.guard.drain()):
+            self.sink.write(cast(bytes, record["_wire"]))
+
+    def write(self, frame: bytes) -> None:
+        try:
+            for raw, data in iter_sse_events(io.BytesIO(frame).readline, len(frame)):
+                record = cast(dict[str, object], parse_sse_json(data) or {})
+                if data is None and raw.lstrip().startswith(b":"):
+                    record["type"] = "keepalive"
+                record["_wire"] = raw
+                if not self.guard.submit(record):
+                    return
+                if data is not None and data.strip() == "[DONE]":
+                    self.guard.close()
+                self._drain()
+        except BaseException:
+            _ = self.guard.submit({"error": {}, "_wire": b""})
+            self.guard.close()
+            _ = self.guard.drain()
+            raise
+
+    def close(self) -> None:
+        self.guard.close()
+        self._drain()
+
 def new_call_id() -> str:
     return "call_" + uuid.uuid4().hex[:24]
 
@@ -450,7 +488,6 @@ def _check_native(spec: NormalizerModeSpec, calls: Any) -> None:
         check_unexpected_tool_calls(spec.mode, calls)
     except ValueError:
         raise LiveParserError("unexpected upstream tool calls") from None
-
 def _openai_call(call: Mapping[str, Any]) -> dict[str, Any]:
     args = call.get("arguments")
     arguments = args if isinstance(args, str) else json.dumps(args or {}, ensure_ascii=False)
@@ -459,10 +496,8 @@ def _openai_call(call: Mapping[str, Any]) -> dict[str, Any]:
         "type": "function",
         "function": {"name": str(call.get("name") or ""), "arguments": arguments},
     }
-
 class _ResponseText:
     """Локальный текстовый шов choice; запрещённые режимы не создают ToolCallParser."""
-
     def __init__(self, spec: NormalizerModeSpec, schemas: Any, enabled: bool) -> None:
         self.content: list[str] = []
         self.reasoning: list[str] = []
@@ -478,7 +513,6 @@ class _ResponseText:
                 tool_schemas=schemas,
                 repetition_guard_enabled=False,
             )
-
     def _output(self) -> dict[str, str]:
         output = {
             "content": "".join(self.content),
@@ -487,7 +521,6 @@ class _ResponseText:
         self.content.clear()
         self.reasoning.clear()
         return {key: text for key, text in output.items() if text}
-
     def feed(self, delta: dict[str, Any]) -> dict[str, Any]:
         if self.parser is None:
             return dict(delta)
@@ -502,12 +535,10 @@ class _ResponseText:
             self.parser.feed_thinking(reasoning)
         result.update(self._output())
         return result
-
     def finish(self) -> dict[str, str]:
         if self.parser is not None:
             self.parser.finish()
         return self._output()
-
 def _merge_parsed_calls(raw_calls: Any, parsed: list[dict[str, Any]]) -> list[dict[str, Any]]:
     valid = isinstance(raw_calls, list) and all(isinstance(call, dict) for call in raw_calls)
     calls = list(raw_calls) if valid else []
@@ -521,7 +552,6 @@ def _merge_parsed_calls(raw_calls: Any, parsed: list[dict[str, Any]]) -> list[di
             next_index += 1
         calls.append(entry)
     return calls
-
 def _normalize_message(
     message: dict[str, Any], schemas: Any, limits: PassthroughLimits,
     options: tuple[NormalizerModeSpec, bool],
@@ -543,7 +573,6 @@ def _normalize_message(
     message.clear()
     message.update(updated)
     return True
-
 def sanitize_completion_body(
     body: bytes,
     tool_schemas: Optional[dict[str, Any]],
@@ -568,10 +597,8 @@ def sanitize_completion_body(
                 _normalize_message(message, tool_schemas, limits, (mode_spec, sanitize)) or changed
             )
     return json.dumps(data, ensure_ascii=False).encode("utf-8") if changed else body
-
 def _data_frame(payload: Mapping[str, Any]) -> bytes:
     return b"data: " + json.dumps(payload, ensure_ascii=False).encode("utf-8") + b"\n\n"
-
 def _error_frame(chunk: Mapping[str, Any], code: str, message: str) -> bytes:
     """Терминальный error-chunk в форме `chat.completion.chunk` (как fail-close кадр фасада)."""
     return (
@@ -592,7 +619,6 @@ def _error_frame(chunk: Mapping[str, Any], code: str, message: str) -> bytes:
         ).encode("utf-8")
         + b"data: [DONE]\n\n"
     )
-
 def iter_sse_events(
     readline: Callable[[int], bytes], max_line_bytes: int
 ) -> Iterator[tuple[bytes, Optional[str]]]:
@@ -619,11 +645,9 @@ def iter_sse_events(
         elif text.startswith(b"data:"):
             value = text[5:].decode("utf-8", errors="replace")
             data.append(value[1:] if value.startswith(" ") else value)
-
 @dataclass
 class StreamOutcome:
     """Итог пробрасывания SSE (для журнала и тестов)."""
-
     done: bool = False
     incomplete: bool = False
     overflow: bool = False
@@ -633,10 +657,8 @@ class StreamOutcome:
     last_chunk: Optional[dict[str, Any]] = None
     unfinished_choices: Optional[set[int]] = None
     reader_stopped: bool = False
-
 class _TimedSseReader:
     """Один bounded reader; ожидание I/O не мешает heartbeat и дедлайну."""
-
     def __init__(
         self,
         readline: Callable[[int], bytes],
@@ -683,7 +705,6 @@ class _TimedSseReader:
                         continue
         self.thread = threading.Thread(target=read, daemon=True, name="passthrough-sse")
         self.thread.start()
-
     def readline(self, _limit: int) -> bytes:
         self.request_read.release()
         while True:
@@ -714,15 +735,12 @@ class _TimedSseReader:
             if item:
                 self.last_input = time.monotonic()
             return item
-
     def close(self) -> None:
         self.stop.set()
         self.request_read.release()
         self.thread.join(timeout=self.limits.reader_join_timeout_s)
-
 class _RepetitionLoop(Exception):
     """Guard обнаружил повтор уже нормализованного текста."""
-
 def _delta_frame(base: Mapping[str, Any], index: int, delta: dict[str, Any]) -> bytes:
     payload = {
         key: value for key, value in base.items() if key not in ("choices", "usage", "error")
@@ -733,20 +751,16 @@ def _delta_frame(base: Mapping[str, Any], index: int, delta: dict[str, Any]) -> 
     payload.setdefault("model", "")
     payload["choices"] = [{"index": index, "delta": delta, "finish_reason": None}]
     return _data_frame(payload)
-
 def _published_call_count(calls: Any) -> int:
     if not isinstance(calls, list):
         return 0
     return sum(isinstance(call, dict) and bool(call.get("id")) for call in calls)
-
 def _stream_error_info(error: Any) -> tuple[str, str]:
     info = error if isinstance(error, dict) else {}
     code = str(info.get("code") or info.get("type") or "upstream_stream_error")
     return code, str(info.get("message") or error)
-
 class _SseRelay:
     """Состояние одного relay; парсеры и буферы изолированы по choice.index."""
-
     def __init__(
         self,
         write: Callable[[bytes], None],
@@ -765,17 +779,14 @@ class _SseRelay:
         self.last_chunk: dict[str, Any] = {}
         self.guards: dict[int, RepetitionGuard] = {}
         self.texts: dict[int, _ResponseText] = {}
-
     def write(self, frame: bytes) -> None:
         self.outcome.committed = True
         self.client_write(frame)
-
     def error(self, code: str, message: str, flag: str) -> StreamOutcome:
         self.acc.close()
         setattr(self.outcome, flag, True)
         self.write(_error_frame(self.last_chunk, code, message))
         return self.outcome
-
     def _check_repetition(self, index: int, text: str) -> None:
         if not self.limits.repetition_guard_enabled or not text:
             return
@@ -787,13 +798,11 @@ class _SseRelay:
             )
         if self.guards[index].feed(text)[1]:
             raise _RepetitionLoop()
-
     def _text_for(self, index: int) -> _ResponseText:
         if index not in self.texts:
             enabled = self.sanitize and self.limits.invoke_normalization_enabled
             self.texts[index] = _ResponseText(self.spec, self.schemas, enabled)
         return self.texts[index]
-
     def _add_parsed_calls(self, index: int) -> None:
         text = self.texts[index]
         for call in text.calls:
@@ -801,7 +810,6 @@ class _SseRelay:
             entry["index"] = self.acc.next_tool_index(index)
             self.acc.add(index, [entry])
         text.calls.clear()
-
     def _native_delta(self, index: int, delta: dict[str, Any]) -> dict[str, Any]:
         try:
             _check_native(self.spec, delta.get("tool_calls"))
@@ -816,7 +824,6 @@ class _SseRelay:
             return delta
         self.acc.add(index, delta["tool_calls"])
         return {key: value for key, value in delta.items() if key != "tool_calls"}
-
     def _consume_choice(self, choice: dict[str, Any]) -> bool:
         original = dict(choice)
         index = choice_index(choice.get("index"))
@@ -834,7 +841,6 @@ class _SseRelay:
         if choice.get("finish_reason"):
             self.finished.add(index)
         return choice != original
-
     def _flush_text(self, index: int, base: Mapping[str, Any]) -> None:
         text = self.texts.pop(index, None)
         if text is None:
@@ -847,7 +853,6 @@ class _SseRelay:
         if delta:
             self._check_repetition(index, delta.get("content", ""))
             self.write(_delta_frame(base, index, delta))
-
     def _terminal(self, choice: dict[str, Any], base: Mapping[str, Any]) -> bool:
         index = choice_index(choice.get("index"))
         delta = choice.get("delta")
@@ -862,7 +867,6 @@ class _SseRelay:
             self.outcome.tool_calls_published += len(calls)
             self.write(_delta_frame(base, index, {"tool_calls": calls}))
         return modified
-
     def _consume_chunk(self, chunk: dict[str, Any], choices: list[Any]) -> bool:
         self.last_chunk = {key: chunk.get(key) for key in ("id", "created", "model")}
         self.outcome.last_chunk = self.last_chunk
@@ -877,7 +881,6 @@ class _SseRelay:
         for choice in sorted(terminals, key=lambda item: choice_index(item.get("index"))):
             modified = self._terminal(choice, chunk) or modified
         return modified
-
     def _other_chunk(self, chunk: dict[str, Any]) -> bool:
         meta = {key: chunk[key] for key in ("id", "created", "model") if chunk.get(key) is not None}
         if meta:
@@ -889,10 +892,8 @@ class _SseRelay:
         code, message = _stream_error_info(error)
         self.error(code, message, "incomplete")
         return True
-
     def _pending(self) -> bool:
         return bool(self.acc.pending_choices() or self.seen - self.finished)
-
     def _end(self, raw: bytes | None = None) -> StreamOutcome:
         for index in sorted(list(self.texts)):
             self._flush_text(index, self.last_chunk)
@@ -906,7 +907,6 @@ class _SseRelay:
             self.outcome.done = True
             self.write(raw)
         return self.outcome
-
     def _write_chunk(self, raw: bytes, chunk: dict[str, Any], modified: bool) -> None:
         if not modified:
             self.write(raw)
@@ -919,7 +919,6 @@ class _SseRelay:
         if choices and empty and "usage" not in chunk and "error" not in chunk:
             return
         self.write(_data_frame(chunk))
-
     def run(self, reader: _TimedSseReader) -> StreamOutcome:
         for raw, data in iter_sse_events(reader.readline, self.limits.max_body_bytes):
             chunk = reader.progress.note(data)
@@ -936,7 +935,6 @@ class _SseRelay:
                 continue
             self._write_chunk(raw, chunk, self._consume_chunk(chunk, choices))
         return self._end()
-
 def relay_sse(
     readline: Callable[[int], bytes],
     write: Callable[[bytes], None],
@@ -974,7 +972,6 @@ def relay_sse(
         relay.acc.close()
         reader.close()
         relay.outcome.reader_stopped = not reader.thread.is_alive()
-
 def _checked_events(
     events: Iterator[tuple[bytes, str | None]],
     spec: NormalizerModeSpec,
@@ -1545,6 +1542,7 @@ class PassthroughAdapter(BackendAdapter):
     ) -> bool:
         """Совместимый позиционный вход: sink, sanitize, deadline, on_timeout, window."""
         sink, sanitize = context[:2]
+        sink = _GuardedSink(sink, kw.get("stream_guard"))
         kw.update(zip(("deadline", "on_timeout", "window"), context[2:]))
         trusted = self._trusted_tools(resp, sanitize)
         headers = [
@@ -1557,7 +1555,6 @@ class PassthroughAdapter(BackendAdapter):
             ("X-Accel-Buffering", "no"),
         ]
         outcome = StreamOutcome(committed=True)
-        sink.start(200, headers)
         kw.update(
             tool_schemas=schemas,
             limits=self.limits,
@@ -1567,7 +1564,10 @@ class PassthroughAdapter(BackendAdapter):
             state=outcome,
         )
         try:
+            sink.start(200, headers)
             outcome = relay_sse(resp.readline, sink.write, **kw)
         except (socket.timeout, OSError, http.client.HTTPException) as exc:
             return self._stream_io_error(sink, outcome, {**kw, "error": exc})
+        finally:
+            sink.close()
         return self._stream_success(outcome)
