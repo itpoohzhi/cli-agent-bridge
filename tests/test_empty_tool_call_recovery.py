@@ -1851,3 +1851,84 @@ def test_council_r18_glue_is_linear_on_hostile_input(unit: str, times: int) -> N
         started = time.monotonic()
         mask_credential_context(head + unit * times)
         assert time.monotonic() - started < 2.0, (head, unit)
+
+
+@pytest.mark.parametrize(
+    "unit",
+    [
+        "password=\" trunc api_key='\"'x;y' ",
+        "password=\" trunc api_key='\"'x;y ",
+        "password=\" trunc api_key='\"'x token=a;b' ",
+        "msg='password=\" trunc api_key='\" x",
+        "api_key='\"'x api_key='\"'",
+    ],
+)
+def test_council_r19_glue_time_ratio_is_linear(unit: str) -> None:
+    import time
+
+    def run(times: int) -> float:
+        started = time.monotonic()
+        mask_credential_context(unit * times)
+        return time.monotonic() - started
+
+    run(500)
+    small = min(run(5000) for _ in range(3))
+    large = min(run(40000) for _ in range(3))
+    assert large < 2.0, (unit, large)
+    # 8x входа: линейный разбор даёт ~8x времени, квадратичный — ~64x.
+    assert large < max(small, 0.005) * 8 * 2, (unit, small, large)
+
+
+# ---- Cycle 12 (council-r19): незавершённое закавыченное значение после склейки ---------------------------
+
+
+_R19_CASES: list[tuple[str, str, tuple[str, ...]]] = [
+    (
+        "RW001-unclosed-semicolon",
+        "password=\" truncated api_key='\"'hunter2;secret2",
+        ("hunter2", "secret2"),
+    ),
+    (
+        "RW001-unclosed-comma-space",
+        "password=\" truncated api_key='\"'hunter2, secret2 tail",
+        ("hunter2", "secret2", "tail"),
+    ),
+    (
+        "RW002-nested-prefix-inside-quoted",
+        "password=\" truncated api_key='\"'hunter2 token=abc;def'",
+        ("hunter2", "abc", "def"),
+    ),
+    (
+        "RW002-nested-prefix-then-more",
+        "password=\" truncated api_key='\"'hunter2 token=abc;def' ok=1",
+        ("hunter2", "abc", "def"),
+    ),
+    (
+        "RW003-mirror-escaped-unclosed",
+        "password=' truncated api_key=\"\\'\"hunter2;secret2",
+        ("hunter2", "secret2"),
+    ),
+    (
+        "RW003-mirror-plain-unclosed",
+        "password=' truncated api_key=\"'\"hunter2;secret2",
+        ("hunter2", "secret2"),
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    ("name", "line", "secrets"), _R19_CASES, ids=[c[0] for c in _R19_CASES]
+)
+def test_council_r19_unclosed_or_nested_quoted_value_is_masked_whole(
+    name: str, line: str, secrets: tuple[str, ...]
+) -> None:
+    from core.log_redaction import redact_log_text
+
+    for out in (
+        mask_credential_context(line),
+        redact_log_text(line),
+        str(capacity_error_body(line)["message"]),
+    ):
+        for secret in secrets:
+            assert secret not in out, (name, out)
+        assert "***" in out, (name, out)

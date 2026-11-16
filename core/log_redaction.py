@@ -518,15 +518,15 @@ def _scan_credential_value(
             or _CREDENTIAL_PREFIX_RE.match(text, end) is not None
         ):
             return (start if hollow else end), _NO_APPROVAL
-        if (
-            text[pos] in ('"', "'")
-            and text[end - 1] in ('"', "'")
-            and (quoted := _scan_quoted_value(text, end - 1, failed_until)) is not None
-            and _CREDENTIAL_PREFIX_RE.search(text, end, quoted) is None
-        ):
+        if text[pos] in ('"', "'") and text[end - 1] in ('"', "'"):
             # Закрывающая кавычка пары на деле открывает закавыченное значение (`api_key='"'hunter2;x'`):
-            # его разделители не обрывают маску. Значение с чужим префиксом внутри так не поглощается.
-            return quoted, _NO_APPROVAL
+            # его разделители не обрывают маску. Fail-closed: значение маскируется целиком, в том числе
+            # с чужим префиксом внутри, а без закрывающей кавычки (обрыв лога) — до границы объемлющей
+            # строки или конца текста.
+            quoted = _scan_quoted_value(text, end - 1, failed_until)
+            if quoted is not None:
+                return quoted, _NO_APPROVAL
+            return _enclosing_close(text, end, frames), _NO_APPROVAL
         value_end = _skip(_SCHEME_VALUE_RE if is_scheme else _KEY_VALUE_RE, text, end)
         if value_end < len(text) and text[value_end] in ('"', "'"):
             # В JSON-строке `\` перед закрывающей кавычкой — экранирование, а не часть значения.
