@@ -374,7 +374,7 @@
     },
     "droid": {
       "kind": "droid",
-      "enabled": true,
+      "enabled": false,
       "owned_by": "factory-droid",
       "max_concurrent": 64
     },
@@ -487,6 +487,23 @@
         "low",
         "medium",
         "high"
+      ],
+      "default_effort": "high",
+      "context_window": 1000000,
+      "max_tokens": 128000,
+      "images": {
+        "status": "unverified"
+      }
+    },
+    {
+      "id": "claude-sonnet-5-5",
+      "backend": "claude-p",
+      "name": "Claude Sonnet 5.5 (Claude-p bridge)",
+      "efforts": [
+        "low",
+        "medium",
+        "high",
+        "max"
       ],
       "default_effort": "high",
       "context_window": 1000000,
@@ -689,7 +706,7 @@
       "routing": {
         "algorithm": "weighted-sha256-v1",
         "enabled": true,
-        "catalog_hash": "4f6a36fc7eee9aa127f02c323fac8c34d9f0a32a020c3dfe449ff57942172623",
+        "catalog_hash": "6549c1ad9b2b814b158503e244f2b44a5ca8391743da3388949ba2693c669561",
         "legacy_backend": "openai-key-2",
         "disabled_backend": "codex",
         "routes": [
@@ -698,12 +715,6 @@
             "backend": "codex",
             "weight": 0,
             "priority": 10
-          },
-          {
-            "route_id": "droid",
-            "backend": "droid",
-            "weight": 50,
-            "priority": 30
           },
           {
             "route_id": "openai-key-2",
@@ -759,51 +770,6 @@
             "backend": "openai-key-3",
             "weight": 50,
             "priority": 20
-          }
-        ]
-      }
-    },
-    {
-      "id": "claude-sonnet-5-5",
-      "backend": "droid",
-      "name": "Claude Sonnet 5.5 (Droid bridge)",
-      "efforts": [
-        "low",
-        "medium",
-        "high",
-        "max"
-      ],
-      "default_effort": "high",
-      "context_window": 1000000,
-      "max_tokens": 128000,
-      "images": {
-        "status": "unverified"
-      },
-      "policy_lines": [
-        26,
-        88,
-        390,
-        407,
-        435
-      ],
-      "routing": {
-        "algorithm": "weighted-sha256-v1",
-        "enabled": true,
-        "catalog_hash": "3fb8ddce9ee1ea3596de985202161478a01bb7447a96cba46317f686e5f95032",
-        "legacy_backend": "droid",
-        "disabled_backend": "claude-p",
-        "routes": [
-          {
-            "route_id": "claude-p",
-            "backend": "claude-p",
-            "weight": 0,
-            "priority": 10
-          },
-          {
-            "route_id": "droid",
-            "backend": "droid",
-            "weight": 50,
-            "priority": 30
           }
         ]
       }

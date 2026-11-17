@@ -1,7 +1,7 @@
 {
-  "compiled_at": "2026-11-17T04:47:14+0300",
+  "compiled_at": "2026-11-17T04:48:25+0300",
   "compiler_version": 1,
-  "fleet_sha256": "fb3e9f4c1f9b9c538ab12cc1ae0a8222bcbb0099ec7fef06c98d82b1f4376964",
+  "fleet_sha256": "01c88ca0b11d650b7147c6f2f46c95a1321c9ec7aa7bf10a46f20fc551df2c57",
   "inputs": {
     "discovery_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
     "manifests": {
@@ -11,7 +11,7 @@
       "claude-p.yaml": "8ac948e1049b2ca703b010f4f54a5bec01d334caf75fd805f54fef47561246f7",
       "codex.yaml": "62caf30d9ce2f621f35d41e3ff3fb5d2066fe0e78190097cf27956b86babc7b1",
       "deepseek-direct.yaml": "5decd8d0524651aa79cf0a5ef0879ee65633afd2394557b0cee8e86a96b262c7",
-      "droid.yaml": "7d3d44b9bd47b10d6461866d04eb16b3524ee313d84ce19c0f2ed7dba9e3109e",
+      "droid.yaml": "d2e2381093c695824123749e302d57028a113b7a522d7b29a8cdcc6b1c661e47",
       "muse.yaml": "610c34e6a064333504b3b6ec7aeed78c597d69526b56d701f6fbd42727ec3b78",
       "openai-key-2.yaml": "f3a13ea5b5b18353dda5e02e9678fd88aa2c21a18a53e44f4e8f0ce05f9f0fba",
       "openai-key-3.yaml": "eccc73e68769ab0d742b5ace825af8bbcb2d02f07068e272c608ddefd1b2177e",
@@ -19,7 +19,7 @@
       "opencode-go.yaml": "8d27372c95fcf802352d38e4e6f3a6c1919030ef6220d3c6c2c5808fe6077f68",
       "opencode-zen.yaml": "9239b0e1c543c23037f5407b6c64a0db04735d092ba7ccc53d197f83f91d1636"
     },
-    "manifests_sha256": "5798631a23221024f3bd7e61182173150f0038acab8ff70ec742fb802592e533"
+    "manifests_sha256": "5263bb006d13bb4af0cd6b2e227def8d1b80ac4a949e696adf8c01baea9c72c1"
   },
   "models": {
     "beam-free": {
@@ -77,17 +77,17 @@
     "claude-sonnet-5-5": {
       "alternates": [
         {
-          "provider": "claude-p"
+          "provider": "droid"
         }
       ],
       "efforts_proven": [],
       "family": "Anthropic",
-      "family_source": "exact_map",
+      "family_source": "owned_by",
       "history": [],
       "in_fleet": true,
-      "provider": "droid",
+      "provider": "claude-p",
       "quorum_eligible": false,
-      "quota_group": "factory-droid",
+      "quota_group": "anthropic-claude",
       "status": "quarantine"
     },
     "claude-sonnet-5-5-droid": {
@@ -558,7 +558,7 @@
     "droid": {
       "allow_base_url": [],
       "bridge": true,
-      "enabled": true,
+      "enabled": false,
       "kind": "droid",
       "max_concurrent": 64,
       "quota_group": "factory-droid",
