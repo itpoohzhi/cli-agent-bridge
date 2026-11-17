@@ -1,23 +1,19 @@
-# Провайдер codex: codex-lb (OpenAI GPT), passthrough к :2455.
+# Провайдер codex: codex app-server (OpenAI GPT) в resident stdio пуле.
 manifest_version: 1
 provider_id: codex
-kind: passthrough
+kind: stdio_resident
 enabled: true
 required: false
 priority: 10
 routing: {weight: 0}
 owned_by: openai-codex
 transport:
-  bridge: {base_url: 'http://127.0.0.1:2455/v1', api_key_env: CODEX_LB_API_KEY}
-allow_base_url:
-- {scheme: http, host: 127.0.0.1, port: 2455, path_prefix: /v1}
-limits: {max_concurrent: 128, quota_group: openai-codex, timeout_s: 180}
+  bridge:
+    wrapper: 'codex app-server'
+limits: {max_concurrent: 10, quota_group: openai-codex, timeout_s: 180}
 discovery:
-  method: http
-  http: {path: /models, id_field: 'data[].id'}
-  include: [gpt-*]
-  exclude: ['*-free']
-  refresh_interval_s: 900
+  method: static
+  static: [gpt-6.1-sol, gpt-6.1-terra]
 family_rule:
   type: prefix
   prefix:
@@ -25,7 +21,7 @@ family_rule:
     map: {gpt-: OpenAI}
 models_overrides:
   gpt-6.1-sol:
-    name: GPT-6.1 Sol (Codex passthrough)
+    name: GPT-6.1 Sol (Codex resident)
     efforts: [low, medium, high, max]
     default_effort: high
     context_window: 272000
@@ -33,7 +29,7 @@ models_overrides:
     input: [text]
     images: {cli_registry: implicit_supported, status: unverified, method: null, proof: null}
   gpt-6.1-terra:
-    name: GPT-6.1 Terra (Codex passthrough)
+    name: GPT-6.1 Terra (Codex resident)
     efforts: [low, medium, high]
     default_effort: high
     context_window: 500000

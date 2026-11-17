@@ -27,7 +27,7 @@ aliases:
   gemini-4-argon-high: {backend_id: gemini-4-argon, backend: agy, effort: high}
   gemini-3.8-flash-low: {backend_id: gemini-3.8-flash, backend: droid, effort: low}
   gemini-3.8-flash-agy-low: {backend_id: gemini-3.8-flash-agy, backend: agy, effort: low}
-  gemini-3.8-flash-medium: {backend_id: gemini-3.8-flash, backend: droid, effort: medium}
+  gemini-3.8-flash-medium: {backend_id: gemini-3.8-flash-agy, backend: agy, effort: medium}
   gemini-3.8-flash-agy-medium: {backend_id: gemini-3.8-flash-agy, backend: agy, effort: medium}
   gemini-3.8-flash-high: {backend_id: gemini-3.8-flash, backend: droid, effort: high}
   gemini-3.8-flash-agy-high: {backend_id: gemini-3.8-flash-agy, backend: agy, effort: high}
