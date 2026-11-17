@@ -28,15 +28,12 @@ from core.model_fallback_chain import FallbackChain, load_chains  # noqa: E402
 from core import fallback_http_hook  # noqa: E402
 
 ALIAS = "compaction-resilient"
-QUOTA = {"error": {"code": "GoUsageLimitError", "message": "resets in 2d 10h"}}
-TEXT = "Шаг 1.\n\nИтог ✓"
+QUOTA, TEXT = {"error": {"code": "GoUsageLimitError", "message": "resets in 2d 10h"}}, "Шаг 1.\n\nИтог ✓"
 EMPTY_NOTES = "## 1. Блокировки\n| Модель | Статус | Причина |\n|---|---|---|\n"
 
 
 @pytest.fixture(autouse=True)
-def isolated_model_notes(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> Generator[None]:
+def isolated_model_notes(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Generator[None]:
     """Не зависеть от model-notes рабочего хоста и его snapshot."""
     path = tmp_path / "fallback-model-notes.md"
     path.write_text(EMPTY_NOTES, encoding="utf-8")
@@ -87,10 +84,8 @@ class _Scenario:
             ) + b"data: [DONE]\n\n"
         else:
             body = json.dumps({
-                "id": "chatcmpl-fallback-e2e", "object": "chat.completion", "created": 1,
-                "model": model,
-                "choices": [{"index": 0, "message": {"role": "assistant", "content": TEXT},
-                             "finish_reason": "stop"}],
+                "id": "chatcmpl-fallback-e2e", "object": "chat.completion", "created": 1, "model": model,
+                "choices": [{"index": 0, "message": {"role": "assistant", "content": TEXT}, "finish_reason": "stop"}],
             }).encode()
         handler.send_response(status)
         handler.send_header("Content-Type", content_type)
@@ -123,11 +118,8 @@ def _configure(monkeypatch: pytest.MonkeyPatch, scenario: _Scenario, port: int) 
     ]
     raw["default_model"] = scenario.chain.candidates[0].model
     raw["aliases"] = {}
-    raw["backends"] = {"codex": {
-        "kind": "passthrough", "enabled": True, "required": False,
-        "owned_by": "fallback-e2e", "max_concurrent": 4,
-        "base_url": f"http://127.0.0.1:{port}/v1",
-    }}
+    raw["backends"] = {"codex": {"kind": "passthrough", "enabled": True, "required": False,
+                                  "owned_by": "fallback-e2e", "max_concurrent": 4, "base_url": f"http://127.0.0.1:{port}/v1"}}
     catalog = server._build_catalog(raw)
     monkeypatch.setattr(server, "FLEET", catalog)
     backends = AdapterRegistry.from_fleet(catalog, ADAPTER_KINDS, lambda: catalog, server)
@@ -146,7 +138,6 @@ def gateway(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Generator[Callab
     monkeypatch.setattr(server, "TOKEN_CACHE", server.TokenCache(path=tmp_path / ".env", environ={"BRIDGE_KEY": "fallback-e2e-key"}))
     failures = Mock(wraps=server._PENALTY_TRACKER.record_start_failure)
     monkeypatch.setattr(server._PENALTY_TRACKER, "record_start_failure", failures)
-
     with ExitStack() as stack:
         def start(exhausted_status: int = 429) -> Any:
             config = yaml.safe_load((ROOT / "fallback_chains.d/compaction.yaml").read_text())
@@ -175,8 +166,7 @@ def gateway(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Generator[Callab
         yield start
 
 
-def _request(port: int, request: dict[str, Any] | None = None, auth: bool = True,
-             extra: dict[str, str] | None = None) -> Any:
+def _request(port: int, request: dict[str, Any] | None = None, auth: bool = True, extra: dict[str, str] | None = None) -> Any:
     conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
     headers = {"Connection": "close", "Content-Type": "application/json", **(extra or {})}
     if auth:
@@ -185,8 +175,7 @@ def _request(port: int, request: dict[str, Any] | None = None, auth: bool = True
         method, path = ("GET", "/v1/models") if request is None else ("POST", "/v1/chat/completions")
         conn.request(method, path, body=None if request is None else json.dumps(request), headers=headers)
         response = conn.getresponse()
-        result = SimpleNamespace(status=response.status, headers=dict(response.getheaders()),
-                                 body=response.read())
+        result = SimpleNamespace(status=response.status, headers=dict(response.getheaders()), body=response.read())
         # Content-Length не означает завершение post-response учёта штрафов обработчиком.
         if conn.sock is not None:
             assert conn.sock.recv(1) == b""
@@ -196,8 +185,7 @@ def _request(port: int, request: dict[str, Any] | None = None, auth: bool = True
 
 
 def _chat(stream: bool, model: str = ALIAS) -> dict[str, Any]:
-    return {"model": model, "stream": stream,
-            "messages": [{"role": "user", "content": "Сожми этот диалог."}]}
+    return {"model": model, "stream": stream, "messages": [{"role": "user", "content": "Сожми этот диалог."}]}
 
 
 def _assert_success(response: Any, stream: bool, model: str = ALIAS) -> None:
@@ -222,8 +210,7 @@ def _assert_success(response: Any, stream: bool, model: str = ALIAS) -> None:
 
 
 @pytest.mark.parametrize("enabled", ["true", "false"])
-def test_models_advertise_alias_only_when_enabled(gateway: Any, monkeypatch: pytest.MonkeyPatch,
-                                                  enabled: str) -> None:
+def test_models_advertise_alias_only_when_enabled(gateway: Any, monkeypatch: pytest.MonkeyPatch, enabled: str) -> None:
     monkeypatch.setenv("BRIDGE_MODEL_FALLBACK_ENABLED", enabled)
     h = gateway()
     response = _request(h.port)
@@ -277,8 +264,7 @@ def test_exhaustion_is_http_error_before_sse(gateway: Any, status: int, stream: 
 
 
 @pytest.mark.parametrize("stream", [False, True])
-def test_kill_switch_off_hook_is_inert_for_alias(gateway: Any, monkeypatch: pytest.MonkeyPatch,
-                                                 stream: bool) -> None:
+def test_kill_switch_off_hook_is_inert_for_alias(gateway: Any, monkeypatch: pytest.MonkeyPatch, stream: bool) -> None:
     """F-016: выключенный флаг — хук не вмешивается; алиас не уходит ни на какую модель."""
     monkeypatch.setenv("BRIDGE_MODEL_FALLBACK_ENABLED", "false")
     h = gateway()
@@ -293,8 +279,8 @@ def test_disabled_target_avoids_exhausted_provider() -> None:
     chain = load_chains(ROOT / "fallback_chains.d", env={}).chains[ALIAS]
     assert chain.disabled_target == "gemini-4-argon"
     assert {c.model: c.quota_scope for c in chain.candidates} == {
-        "gemini-4-argon": "agy", "claude-haiku-5-5": "claude",
-        "gpt-6.1-sol": "codex", "deepseek-v4.1-flash": "opencode-go",
+        "gemini-4-argon": "agy", "claude-haiku-5-5": "claude", "gpt-6.1-sol": "codex",
+        "deepseek-v4.1-flash": "opencode-go",
     }
 
 
@@ -315,9 +301,7 @@ def test_idempotency_key_is_forwarded_as_step_job_id(gateway: Any) -> None:
 
 
 @pytest.mark.parametrize("bypass", [False, True])
-def test_bypass_header_cannot_skip_model_notes(
-    gateway: Any, monkeypatch: pytest.MonkeyPatch, bypass: bool
-) -> None:
+def test_bypass_header_cannot_skip_model_notes(gateway: Any, monkeypatch: pytest.MonkeyPatch, bypass: bool) -> None:
     h = gateway()
     first, second = [c.model for c in h.scenario.chain.candidates[:2]]
     monkeypatch.setattr(server._MODEL_NOTES_FILTER, "is_blocked", lambda model: model == first)
@@ -334,22 +318,17 @@ def test_success_is_recorded_on_penalty_tracker(gateway: Any, monkeypatch: pytes
     success.assert_called_once_with(h.scenario.chain.candidates[0].model)
 
 
-def test_permission_error_on_candidate_falls_through(gateway: Any,
-                                                      monkeypatch: pytest.MonkeyPatch) -> None:
+def test_permission_error_on_candidate_falls_through(gateway: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     h = gateway()
     first, second = [c.model for c in h.scenario.chain.candidates[:2]]
-    monkeypatch.setattr(
-        server, "_quarantine_denial",
-        lambda model, subagent: "denied" if model == first else None,
-    )
+    monkeypatch.setattr(server, "_quarantine_denial", lambda model, subagent: "denied" if model == first else None)
     response = _request(h.port, _chat(False))
     assert response.status == 200
     assert [call["model"] for call in h.scenario.calls] == [second]
 
 
 @pytest.mark.parametrize("stream", [False, True])
-def test_disabled_direct_model_keeps_base_penalty(gateway: Any, monkeypatch: pytest.MonkeyPatch,
-                                                stream: bool) -> None:
+def test_disabled_direct_model_keeps_base_penalty(gateway: Any, monkeypatch: pytest.MonkeyPatch, stream: bool) -> None:
     monkeypatch.setenv("BRIDGE_MODEL_FALLBACK_ENABLED", "false")
     h = gateway()
     target = h.scenario.chain.candidates[0].model
