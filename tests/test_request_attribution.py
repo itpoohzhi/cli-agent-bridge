@@ -18,7 +18,7 @@ from unittest.mock import Mock
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import server  # noqa: E402
 from tests.gateway_policy_testlib import assert_deepseek_defaults, install_route_auth  # noqa: E402
@@ -124,7 +124,12 @@ def wire(monkeypatch, tmp_path):
         m["backend"] = {"gemini-3.8-flash": "agy", "claude-sonnet-5-5": "claude-p"}.get(m["id"], m["backend"])
     monkeypatch.setenv("BRIDGE_DYNAMIC_CONFIG_PATH", str(tmp_path / "missing-dynamic.json"))
     monkeypatch.setattr(server, "_PENALTY_TRACKER", ModelPenaltyTracker(storage_path=tmp_path / "penalties.json"))
-    monkeypatch.setattr(server, "_MODEL_NOTES_FILTER", server.ModelNotesFilter(tmp_path / "notes.md"))
+    notes_path = tmp_path / "notes.md"
+    notes_path.write_text(
+        "## 1. Блокировки\n| Модель | Статус | Причина |\n|---|---|---|\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(server, "_MODEL_NOTES_FILTER", server.ModelNotesFilter(notes_path))
     fleet = server._build_catalog(data)
     monkeypatch.setattr(server, "FLEET", fleet)
     monkeypatch.setattr(
