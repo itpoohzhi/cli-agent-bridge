@@ -170,8 +170,8 @@ def test_compile_is_byte_deterministic() -> None:
     assert fc.canonical_json(first.sidecar) == fc.canonical_json(second.sidecar)
     standard = (json.dumps(first.fleet, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
     assert render_fleet_json(first.fleet) == standard
-    assert len(standard.splitlines()) <= 1066  # Отдельные AGY/Droid Gemini + tools.
-    assert len(render_fleet_json(first.sidecar).splitlines()) <= 734
+    assert len(standard.splitlines()) <= 1090  # Отдельные AGY/Droid Gemini + tools + блоки routing.
+    assert len(render_fleet_json(first.sidecar).splitlines()) <= 744
 
 
 def test_input_order_does_not_change_output() -> None:

@@ -112,21 +112,6 @@
       "backend": "agy",
       "effort": "high"
     },
-    "gemini-4-carbon-low": {
-      "backend_id": "gemini-4-carbon",
-      "backend": "agy",
-      "effort": "low"
-    },
-    "gemini-4-carbon-medium": {
-      "backend_id": "gemini-4-carbon",
-      "backend": "agy",
-      "effort": "medium"
-    },
-    "gemini-4-carbon-high": {
-      "backend_id": "gemini-4-carbon",
-      "backend": "agy",
-      "effort": "high"
-    },
     "gemini-3.8-flash-low": {
       "backend_id": "gemini-3.8-flash",
       "backend": "droid",
@@ -159,17 +144,17 @@
     },
     "claude-sonnet-5-5-low": {
       "backend_id": "claude-sonnet-5-5",
-      "backend": "claude-p",
+      "backend": "droid",
       "effort": "low"
     },
     "claude-sonnet-5-5-medium": {
       "backend_id": "claude-sonnet-5-5",
-      "backend": "claude-p",
+      "backend": "droid",
       "effort": "medium"
     },
     "claude-sonnet-5-5-high": {
       "backend_id": "claude-sonnet-5-5",
-      "backend": "claude-p",
+      "backend": "droid",
       "effort": "high"
     },
     "claude-sonnet-5-5-max": {
@@ -334,7 +319,7 @@
         ]
       },
       "per_request_headers": {
-        "x-opencode-session": "{session_affinity}"
+        "x-opencode-session": "{uuid4}"
       },
       "default_body_extra": {
         "thinking": {
@@ -362,7 +347,7 @@
         ]
       },
       "per_request_headers": {
-        "x-opencode-session": "{session_affinity}"
+        "x-opencode-session": "{uuid4}"
       }
     },
     "deepseek-direct": {
@@ -425,6 +410,10 @@
       "default_effort": "high",
       "context_window": 1048576,
       "max_tokens": 65536,
+      "input": [
+        "text",
+        "tools"
+      ],
       "images": {
         "status": "unverified"
       },
@@ -442,6 +431,10 @@
       "default_effort": "high",
       "context_window": 1048576,
       "max_tokens": 65536,
+      "input": [
+        "text",
+        "tools"
+      ],
       "images": {
         "status": "unverified"
       }
@@ -459,6 +452,10 @@
       "default_effort": "high",
       "context_window": 1048576,
       "max_tokens": 65536,
+      "input": [
+        "text",
+        "tools"
+      ],
       "images": {
         "status": "unverified"
       }
@@ -476,45 +473,12 @@
       "default_effort": "high",
       "context_window": 1048576,
       "max_tokens": 65536,
-      "images": {
-        "status": "unverified"
-      }
-    },
-    {
-      "id": "claude-haiku-5-5",
-      "backend": "claude-p",
-      "name": "Claude Haiku 5.5 (Claude-p bridge)",
-      "efforts": [
-        "low",
-        "medium",
-        "high"
+      "input": [
+        "text",
+        "tools"
       ],
-      "default_effort": "low",
-      "context_window": 1000000,
-      "max_tokens": 128000,
       "images": {
         "status": "unverified"
-      },
-      "routing": {
-        "algorithm": "weighted-sha256-v1",
-        "enabled": true,
-        "catalog_hash": "9ee778fa614c6e4bc1c555a006827b096790504f996472b2947632b4b19359f5",
-        "legacy_backend": "claude-p",
-        "disabled_backend": "claude-p",
-        "routes": [
-          {
-            "route_id": "claude-p",
-            "backend": "claude-p",
-            "weight": 100,
-            "priority": 10
-          },
-          {
-            "route_id": "opencode-go-claude",
-            "backend": "opencode-go-claude",
-            "weight": 100,
-            "priority": 15
-          }
-        ]
       }
     },
     {
@@ -531,44 +495,6 @@
       "max_tokens": 128000,
       "images": {
         "status": "unverified"
-      }
-    },
-    {
-      "id": "claude-sonnet-5-5",
-      "backend": "claude-p",
-      "name": "Claude Sonnet 5.5 (Claude-p bridge)",
-      "efforts": [
-        "low",
-        "medium",
-        "high",
-        "max"
-      ],
-      "default_effort": "high",
-      "context_window": 1000000,
-      "max_tokens": 128000,
-      "images": {
-        "status": "unverified"
-      },
-      "routing": {
-        "algorithm": "weighted-sha256-v1",
-        "enabled": true,
-        "catalog_hash": "a3f47ee2ec963cf44b9c4d559858c2e78b28961ee375ddbc07faabf7e9e7402d",
-        "legacy_backend": "claude-p",
-        "disabled_backend": "claude-p",
-        "routes": [
-          {
-            "route_id": "claude-p",
-            "backend": "claude-p",
-            "weight": 100,
-            "priority": 10
-          },
-          {
-            "route_id": "droid",
-            "backend": "droid",
-            "weight": 0,
-            "priority": 30
-          }
-        ]
       }
     },
     {
@@ -671,6 +597,43 @@
       ]
     },
     {
+      "id": "claude-haiku-5-5",
+      "backend": "opencode-go-claude",
+      "name": "Claude Haiku 5.5 (OpenCode Go georouter)",
+      "efforts": [
+        "low",
+        "medium",
+        "high"
+      ],
+      "default_effort": "low",
+      "context_window": 1000000,
+      "max_tokens": 128000,
+      "images": {
+        "status": "unverified"
+      },
+      "routing": {
+        "algorithm": "weighted-sha256-v1",
+        "enabled": true,
+        "catalog_hash": "62ec7d99822503e8d463871b583316dce26e4856bf9c6f37e351a8887e989af5",
+        "legacy_backend": "opencode-go-claude",
+        "disabled_backend": "claude-p",
+        "routes": [
+          {
+            "route_id": "claude-p",
+            "backend": "claude-p",
+            "weight": 0,
+            "priority": 10
+          },
+          {
+            "route_id": "opencode-go-claude",
+            "backend": "opencode-go-claude",
+            "weight": 100,
+            "priority": 15
+          }
+        ]
+      }
+    },
+    {
       "id": "deepseek-v4.1-flash",
       "backend": "deepseek-direct",
       "name": "DeepSeek V4.1 Flash (direct)",
@@ -728,7 +691,7 @@
       "routing": {
         "algorithm": "weighted-sha256-v1",
         "enabled": true,
-        "catalog_hash": "6549c1ad9b2b814b158503e244f2b44a5ca8391743da3388949ba2693c669561",
+        "catalog_hash": "4f6a36fc7eee9aa127f02c323fac8c34d9f0a32a020c3dfe449ff57942172623",
         "legacy_backend": "openai-key-2",
         "disabled_backend": "codex",
         "routes": [
@@ -741,7 +704,7 @@
           {
             "route_id": "droid",
             "backend": "droid",
-            "weight": 0,
+            "weight": 50,
             "priority": 30
           },
           {
@@ -798,6 +761,51 @@
             "backend": "openai-key-3",
             "weight": 50,
             "priority": 20
+          }
+        ]
+      }
+    },
+    {
+      "id": "claude-sonnet-5-5",
+      "backend": "droid",
+      "name": "Claude Sonnet 5.5 (Droid bridge)",
+      "efforts": [
+        "low",
+        "medium",
+        "high",
+        "max"
+      ],
+      "default_effort": "high",
+      "context_window": 1000000,
+      "max_tokens": 128000,
+      "images": {
+        "status": "unverified"
+      },
+      "policy_lines": [
+        26,
+        88,
+        390,
+        407,
+        435
+      ],
+      "routing": {
+        "algorithm": "weighted-sha256-v1",
+        "enabled": true,
+        "catalog_hash": "3fb8ddce9ee1ea3596de985202161478a01bb7447a96cba46317f686e5f95032",
+        "legacy_backend": "droid",
+        "disabled_backend": "claude-p",
+        "routes": [
+          {
+            "route_id": "claude-p",
+            "backend": "claude-p",
+            "weight": 0,
+            "priority": 10
+          },
+          {
+            "route_id": "droid",
+            "backend": "droid",
+            "weight": 50,
+            "priority": 30
           }
         ]
       }

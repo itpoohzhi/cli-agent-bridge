@@ -243,13 +243,17 @@ def resolve_post_route(context: PostRequestContext) -> PostRoute | None:
         return None
     route.model = dict(models[route.model_id])
     routing = route.model.get("routing")
-    if isinstance(routing, dict) and routing.get("legacy_backend") not in (
-        None, route.model.get("backend"),
-    ):
-        route.model.pop("routing", None)
-        routing = None
+    if isinstance(routing, dict):
+        backend = route.model.get("backend")
+        legacy = routing.get("legacy_backend")
+        disabled = routing.get("disabled_backend")
+        if legacy not in (None, backend) and (disabled is None or backend != disabled):
+            route.model.pop("routing", None)
+            routing = None
     if isinstance(routing, dict) and not host.flag_enabled("BRIDGE_TRANSPORT_ROUTING_ENABLED"):
-        route.model["backend"] = routing["disabled_backend"]
+        disabled_backend = routing.get("disabled_backend")
+        if disabled_backend:
+            route.model["backend"] = disabled_backend
     return route
 
 

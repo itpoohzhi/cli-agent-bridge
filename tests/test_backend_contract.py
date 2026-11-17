@@ -112,7 +112,9 @@ class TestInterface(unittest.TestCase):
         self.assertEqual(set(BackendAdapter.__abstractmethods__), set(CONTRACT_METHODS))
 
     def test_adapter_kinds_are_hard_coded_in_code(self):
-        self.assertEqual(set(ADAPTER_KINDS), {"droid", "muse", "passthrough"})
+        self.assertEqual(
+            set(ADAPTER_KINDS), {"droid", "muse", "passthrough", "stdio_resident"}
+        )
         self.assertIs(ADAPTER_KINDS["droid"], DroidAdapter)
         self.assertIs(ADAPTER_KINDS["muse"], MuseAdapter)
         self.assertIs(ADAPTER_KINDS["passthrough"], PassthroughAdapter)
@@ -207,7 +209,7 @@ class TestRealAdapters(unittest.TestCase):
     def test_model_routing(self) -> None:
         reg = server.BACKENDS
         expected = {
-            "claude-sonnet-5-5": "claude-p",
+            "claude-sonnet-5-5": "droid",
             "gemini-3.8-flash": "droid", "gemini-3.8-flash-agy": "agy",
             "gpt-6.1-sol": "openai-key-2",
             "claude-sonnet-5-5-droid": "droid",
@@ -220,7 +222,7 @@ class TestRealAdapters(unittest.TestCase):
             "muse-wonder-full-1.0": "muse",
             "gpt-6.1-terra": "openai-key-2",
             "claude-opus-5-5": "claude-p",
-            "claude-haiku-5-5": "claude-p",
+            "claude-haiku-5-5": "opencode-go-claude",
             "gemini-4-argon": "agy",
             "gemini-4-carbon": "agy",
             "gemini-4-hydrogen": "agy",
