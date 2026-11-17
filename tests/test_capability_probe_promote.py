@@ -80,9 +80,9 @@ def test_select_manifest_tiebreak_matches_compiler(
 def test_select_manifest_on_real_providers() -> None:
     manifests = load_manifests(PROVIDERS, ADAPTER_KINDS).manifests
     for model, provider in (
-        ("gpt-6.1-sol", "openai-key-2"),
+        ("gpt-6.1-sol", "codex"),
         ("deepseek-v4.1-flash", "deepseek-direct"),
-        ("gpt-6.1-terra", "openai-key-2"),
+        ("gpt-6.1-terra", "codex"),
         ("gemini-4-argon", "agy"),
     ):
         picked = select_manifest(manifests, model, None)
@@ -127,7 +127,7 @@ def _probe(mode: str, providers: Path, env: dict[str, str], **kw: Any) -> int:
     try:
         return cp.probe_cli(
             "gpt-6.1-sol",
-            provider_id=kw.pop("provider_id", "openai-key-2"),
+            provider_id=kw.pop("provider_id", "codex"),
             hub_url=hub.hub_url,
             as_json=True,
             providers_dir=providers,
@@ -138,16 +138,16 @@ def _probe(mode: str, providers: Path, env: dict[str, str], **kw: Any) -> int:
         hub.close()
 
 
-def test_explicit_codex_does_not_promote_direct_owner(
+def test_explicit_droid_does_not_promote_direct_owner(
     promote_env: Any, capsys: pytest.CaptureFixture[str]
 ) -> None:
     providers, state, env = promote_env
-    named = select_manifest(load_manifests(providers, ADAPTER_KINDS).manifests, "gpt-6.1-sol", "codex")
-    assert named.manifest is not None and named.manifest.provider_id == "codex"
-    assert _probe("good", providers, env, provider_id="codex", promote=True) == 1
+    named = select_manifest(load_manifests(providers, ADAPTER_KINDS).manifests, "gpt-6.1-sol", "droid")
+    assert named.manifest is not None and named.manifest.provider_id == "droid"
+    assert _probe("good", providers, env, provider_id="droid", promote=True) == 1
     output = capsys.readouterr()
     summary = json.loads(output.out)
-    assert (summary["provider_id"], summary["verdict"]) == ("codex", "confirmed")
+    assert (summary["provider_id"], summary["verdict"]) == ("droid", "confirmed")
     assert "post_verify_mismatch" in output.err
     assert not any(
         (state / p).exists()
@@ -164,7 +164,7 @@ def _promoted(promote_env: Any, capsys: pytest.CaptureFixture[str]) -> Any:
     receipt = json.loads(raw)
     assert hashlib.sha256(raw).hexdigest() == summary["receipt_sha256"]
     assert raw == json.dumps(receipt, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
-    assert (receipt["provider_id"], receipt["model_id"]) == ("openai-key-2", "gpt-6.1-sol")
+    assert (receipt["provider_id"], receipt["model_id"]) == ("codex", "gpt-6.1-sol")
     return summary, state
 
 
@@ -172,12 +172,12 @@ def test_promote_confirmed_updates_lifecycle(
     promote_env: Any, capsys: pytest.CaptureFixture[str]
 ) -> None:
     summary, state = _promoted(promote_env, capsys)
-    assert summary["provider_id"] == "openai-key-2" and summary["verdict"] == "confirmed"
+    assert summary["provider_id"] == "codex" and summary["verdict"] == "confirmed"
     records = json.loads((state / "model-lifecycle.json").read_text())["records"]
     assert len(records) == 1 and records[0]["status"] == "confirmed"
     assert records[0]["receipt_sha256"] == summary["receipt_sha256"]
     assert len(records[0]["fingerprint_sha256"]) == 64
-    assert (records[0]["provider_id"], records[0]["model_id"]) == ("openai-key-2", "gpt-6.1-sol")
+    assert (records[0]["provider_id"], records[0]["model_id"]) == ("codex", "gpt-6.1-sol")
     assert records[0]["fingerprint_sha256"] == hashlib.sha256(b"no-fingerprint").hexdigest()
     assert (state / ".lifecycle.lock").exists()
 
@@ -191,15 +191,15 @@ def test_promote_confirmed_updates_sidecar_and_compiled(
     assert (entry["status"], entry["quorum_eligible"], entry["provider"]) == (
         "confirmed",
         True,
-        "openai-key-2",
+        "codex",
     )
-    assert (entry["family"], entry["family_source"]) == ("OpenAI", "exact_map")
+    assert (entry["family"], entry["family_source"]) == ("OpenAI", "prefix")
     assert entry["probe"]["receipt_sha256"] == summary["receipt_sha256"]
     assert entry["probe"]["fingerprint_sha256"] == hashlib.sha256(b"no-fingerprint").hexdigest()
     assert entry["efforts_proven"] == ["low", "medium", "high", "xhigh", "max"]
     compiled = json.loads((state / "fleet.compiled.json").read_text())
     models = {m["id"]: m for m in compiled["models"]}
-    assert models["gpt-6.1-sol"]["backend"] == "openai-key-2"
+    assert models["gpt-6.1-sol"]["backend"] == "codex"
     assert models["gpt-6.1-sol"]["efforts"] == [
         "low",
         "medium",
