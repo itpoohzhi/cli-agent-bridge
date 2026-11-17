@@ -6,7 +6,7 @@ kind: droid
 enabled: true
 required: false
 priority: 30
-routing: {weight: 0}
+routing: {weight: 20}
 owned_by: factory-droid
 transport:
   bridge: {}
