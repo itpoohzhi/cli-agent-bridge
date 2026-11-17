@@ -170,7 +170,7 @@ def test_compile_is_byte_deterministic() -> None:
     assert fc.canonical_json(first.sidecar) == fc.canonical_json(second.sidecar)
     standard = (json.dumps(first.fleet, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
     assert render_fleet_json(first.fleet) == standard
-    assert len(standard.splitlines()) <= 1135  # Отдельные AGY/Droid Gemini + tools + блоки routing + слоты OpenCode Go sub1/sub2.
+    assert len(standard.splitlines()) <= 1160  # Отдельные AGY/Droid Gemini + tools + блоки routing + слоты OpenCode Go sub1/sub2 с декларативным failover (F-003/F-004).
     assert len(render_fleet_json(first.sidecar).splitlines()) <= 850
 
 

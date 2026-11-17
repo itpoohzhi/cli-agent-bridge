@@ -19,9 +19,11 @@ from adapters.passthrough_adapter import PassthroughAdapter, PassthroughLimits, 
 from core.fleet_compiler import backend_entry
 from core.passthrough_adapter_runtime import PassthroughRouteRefusal
 from core.provider_manifest import read_yaml_file, validate_manifest
+from core.presend_retry_policy import resolve_presend_response
 from core.route_attempts import (
     AttemptPhase,
     RouteAttemptRunner,
+    RouteFailover,
     RouteRefusal,
     build_pool_exhausted_error,
     decide_attempt,
@@ -30,7 +32,14 @@ from core.route_attempts import (
 from core.route_health_policy import RetryBudgetConfig
 
 ROOT = Path(__file__).resolve().parents[1]
-GO_EXTRA = {"extra_statuses": (402, 403), "extra_error_types": ("permission_error", "credit_exhausted")}
+GO_TYPES = ("permission_error", "credit_exhausted", "payment_required")
+GO_MARKERS = ("credit", "subscription", "usage limit", "go usage", "payment")
+GO_EXTRA = {"extra_statuses": (402, 403), "extra_error_types": GO_TYPES,
+            "message_markers": GO_MARKERS}
+GO_FAILOVER = RouteFailover(
+    statuses=frozenset({402, 403}), error_types=frozenset(GO_TYPES),
+    message_markers=GO_MARKERS, pool="opencode-go", pool_label="OpenCode Go",
+)
 SUB1_403 = b'{"error":{"type":"permission_error","message":"subscription required"}}'
 FORBIDDEN_MODEL_403 = b'{"error":{"type":"internal_model_forbidden","message":"model forbidden"}}'
 
@@ -69,6 +78,21 @@ def test_without_provider_opt_in_402_403_are_not_failover(status: int) -> None:
 def test_decide_attempt_allows_go_403_only_with_extra_statuses() -> None:
     assert decide_attempt(_budget(), 1, 0.0, _outcome(403), extra_statuses=(402, 403)).allow_retry is True
     assert decide_attempt(_budget(), 1, 0.0, _outcome(403), extra_statuses=()).allow_retry is False
+    # Per-route контракт: исход судит failover именно отказавшего маршрута.
+    assert decide_attempt(_budget(), 1, 0.0, _outcome(403), failover=GO_FAILOVER).allow_retry is True
+    assert decide_attempt(_budget(), 1, 0.0, _outcome(402), failover=RouteFailover()).allow_retry is False
+
+
+def test_markers_are_declarative_not_global_heuristics() -> None:
+    body = b'{"error":{"type":"other_error","message":"Subscription required"}}'
+    # Без объявленных маркеров ядро чужих эвристик не применяет (раньше — True).
+    assert is_route_refusal_status(403, body, extra_statuses=(403,),
+                                   extra_error_types=("permission_error",)) is False
+    assert is_route_refusal_status(403, body, extra_statuses=(403,),
+                                   message_markers=("subscription",)) is True
+    # 402 не форсируется ядром вопреки объявленным типам/маркерам маршрута.
+    assert is_route_refusal_status(
+        402, b'{"error":{"type":"other_error","message":"nope"}}', **GO_EXTRA) is False
 
 
 # ---- runner: sub1 (403) -> sub2 (успех), тест 1 и 3 ---------------------------
@@ -85,7 +109,10 @@ def _runner(execute: Callable[[str, Any], Any], backends: list[str]) -> RouteAtt
         ready=lambda _: True, acquire=lambda *_: lease, execute=execute,
         retry_token=lambda: True, cancelled=lambda: False,
     )
-    return RouteAttemptRunner(backends, ports, _budget(), _Clock(), extra_statuses=(402, 403))
+    per_route = {backend: GO_FAILOVER for backend in backends
+                 if backend.startswith("opencode-go-")}
+    return RouteAttemptRunner(backends, ports, _budget(), _Clock(),
+                              failover_by_backend=per_route)
 
 
 def test_runner_fails_over_from_sub1_403_to_sub2() -> None:
@@ -101,6 +128,21 @@ def test_runner_fails_over_from_sub1_403_to_sub2() -> None:
 
     assert _runner(execute, ["opencode-go-sub1", "opencode-go-sub2"]).run() == "ok-sub2"
     assert seen == ["opencode-go-sub1", "opencode-go-sub2"]
+
+
+def test_runner_mixed_model_non_opt_in_backend_is_not_failed_over() -> None:
+    seen: list[str] = []
+
+    def execute(backend: str, attempt: Any) -> Any:
+        seen.append(backend)
+        attempt.advance(AttemptPhase.SENDING)
+        attempt.advance(AttemptPhase.RESPONSE_HEADERS, 402)
+        raise RouteRefusal(402, (), b'{"error":{"type":"payment_required","message":"pay"}}')
+
+    with pytest.raises(RouteRefusal):
+        _runner(execute, ["deepseek-direct", "opencode-go-sub1"]).run()
+    # Non-opt-in бэкенд смешанной модели не наследует {402, 403} соседа по пулу.
+    assert seen == ["deepseek-direct"]
 
 
 def test_runner_returns_first_slot_200_without_second_attempt() -> None:
@@ -126,6 +168,7 @@ def test_pool_exhausted_is_composite_429_without_masked_lexicon() -> None:
     payload = json.loads(body)
     message = payload["error"]["message"]
     assert status == 429
+    assert "OpenCode Go" in message
     assert payload["error"]["type"] == "rate_limit_error"
     assert "opencode-go-sub1" in message and "403" in message
     assert "opencode-go-sub2" in message and "402" in message
@@ -235,6 +278,82 @@ def test_adapter_non_go_403_is_forwarded_not_replayed() -> None:
         upstream.close()
 
 
+# ---- фасад: per-route изоляция и пул в `_run_routes`, presend-контракт ---------
+
+
+def _facade_run(monkeypatch: pytest.MonkeyPatch, outcomes: dict[str, int]) -> tuple[list[str], Any]:
+    from core import passthrough_facade as facade
+
+    seen: list[str] = []
+    sink = SimpleNamespace(status=None, payload=b"")
+    sink.start = lambda status, headers: setattr(sink, "status", status)
+    sink.write = lambda data: setattr(sink, "payload", sink.payload + data)
+    go_config = {"failover_statuses": [402, 403], "failover_error_types": list(GO_TYPES),
+                 "failover_message_markers": list(GO_MARKERS),
+                 "failover_pool": "opencode-go", "failover_pool_label": "OpenCode Go"}
+    backends = {name: SimpleNamespace(config=dict(go_config) if name.startswith("opencode-go-") else {})
+                for name in outcomes}
+    host = SimpleNamespace(
+        BACKENDS=backends, _client_gone=lambda conn: False,
+        _HandlerSink=lambda handler, extra_headers=None: sink,
+        _trace_headers=lambda trace: [],
+    )
+    handler = SimpleNamespace(connection=object(), _trace=SimpleNamespace(subagent_id=None))
+    route = SimpleNamespace(
+        host=host, handler=handler, model_id="deepseek-v4.1-flash",
+        model={"backend": next(iter(outcomes)), "routing": {}},
+        reject=lambda *args: setattr(sink, "status", args[0]),
+    )
+
+    def attempt_fn(route_: Any, spec: Any, body: Any, attempt: Any) -> None:
+        seen.append(spec.backend)
+        attempt.advance(AttemptPhase.SENDING)
+        attempt.advance(AttemptPhase.RESPONSE_HEADERS, outcomes[spec.backend])
+        raise RouteRefusal(outcomes[spec.backend], (), SUB1_403)
+
+    monkeypatch.setattr(facade, "prepare_post_body", lambda route_: object())
+    monkeypatch.setattr(facade, "route_order", lambda *args: list(outcomes))
+    monkeypatch.setattr(facade, "_eligible", lambda *args: True)
+    monkeypatch.setattr(facade, "_attempt", attempt_fn)
+    specs = [SimpleNamespace(backend=name) for name in outcomes]
+    facade._run_routes(route, specs, "seed", None)
+    return seen, sink
+
+
+def test_facade_mixed_model_forwards_non_opt_in_refusal_without_failover(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen, sink = _facade_run(monkeypatch, {"deepseek-direct": 403, "opencode-go-sub1": 403})
+    assert seen == ["deepseek-direct"]
+    assert sink.status == 403
+    assert sink.payload == SUB1_403
+
+
+def test_facade_pool_exhaustion_names_pool_label(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen, sink = _facade_run(monkeypatch, {"opencode-go-sub1": 403, "opencode-go-sub2": 402})
+    assert seen == ["opencode-go-sub1", "opencode-go-sub2"]
+    assert sink.status == 429
+    message = json.loads(sink.payload)["error"]["message"]
+    assert "OpenCode Go" in message
+    assert "opencode-go-sub1" in message and "opencode-go-sub2" in message
+
+
+def test_presend_buffered_body_returned_without_response_mutation() -> None:
+    response = SimpleNamespace(status=403)
+    adapter = SimpleNamespace(
+        config={"failover_statuses": [402, 403], "failover_error_types": list(GO_TYPES),
+                "failover_message_markers": list(GO_MARKERS)},
+        _read_presend_body=lambda resp: FORBIDDEN_MODEL_403,
+        _response_headers=lambda resp: [("Content-Type", "application/json")],
+        _client_gone_exc=lambda: RuntimeError("client_gone"),
+    )
+    sink = SimpleNamespace(accepts_presend_errors=True, client_gone=lambda: False)
+    conn = SimpleNamespace()
+    result = resolve_presend_response(adapter, conn, response, sink, lambda: pytest.fail("retried"))
+    assert result == (conn, response, False, FORBIDDEN_MODEL_403)
+    assert not hasattr(response, "presend_body")
+
+
 # ---- манифесты слотов ----------------------------------------------------------
 
 
@@ -246,10 +365,16 @@ def test_slot_manifest_loads_and_compiles(slot: str, key_name: str) -> None:
     assert result.errors == ()
     assert result.manifest is not None
     manifest = result.manifest
-    assert manifest.limits.quota_group == "opencode-go"
+    assert manifest.limits.quota_group == f"opencode-go-{slot}"
     assert manifest.failover.statuses == (402, 403)
     assert "permission_error" in manifest.failover.error_types
+    assert "subscription" in manifest.failover.message_markers
+    assert manifest.failover.pool == "opencode-go"
+    assert manifest.failover.pool_label == "OpenCode Go"
     entry = backend_entry(manifest)
     assert entry["base_url"] == "http://127.0.0.1:10830/go/v1"
     assert entry["api_key_ref"] == f"file:~/.config/opencode-go-account-switch/profiles/{slot}/opencode-go.key"
     assert entry["failover_statuses"] == [402, 403]
+    assert entry["failover_message_markers"] == list(manifest.failover.message_markers)
+    assert entry["failover_pool"] == "opencode-go"
+    assert entry["failover_pool_label"] == "OpenCode Go"

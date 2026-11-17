@@ -9,6 +9,7 @@ from typing import Any, TypeAlias, TypedDict
 
 from core.model_lifecycle import STATUS_CONFIRMED, STATUS_QUARANTINE, STATUS_STALE
 from core.model_lifecycle import LifecycleRegistry, ModelRecord
+from core.provider_manifest import failover_backend_entry
 
 # Входные DTO принадлежат HOST: здесь нет зависимости от загрузчика манифестов.
 ManifestLike: TypeAlias = Any
@@ -244,11 +245,7 @@ def backend_entry(manifest: ManifestLike) -> dict[str, Any]:
         value = getattr(bridge, key)
         if value is not None and value != {}:
             entry[key] = deepcopy(value)
-    failover = getattr(manifest, "failover", None)
-    if failover is not None and failover.statuses:
-        entry["failover_statuses"] = list(failover.statuses)
-        if failover.error_types:
-            entry["failover_error_types"] = list(failover.error_types)
+    entry.update(failover_backend_entry(getattr(manifest, "failover", None)))
     entry.update(upstream_params(manifest))
     return entry
 

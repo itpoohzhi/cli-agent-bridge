@@ -1,5 +1,5 @@
 # Провайдер opencode-go-sub1: слот sub1 подписки OpenCode Go через локальный шлюз :10830/go (kind passthrough).
-# Пул opencode-go (quota_group): второй слот — opencode-go-sub2; failover между слотами выполняет мост :9882.
+# Пул сводной ошибки — failover.pool=opencode-go (второй слот — opencode-go-sub2); quota_group независим на аккаунт; failover между слотами выполняет мост :9882.
 # Ключ слота — только файловая ссылка на SSOT ~/.config/opencode-go-account-switch/profiles/sub1/opencode-go.key.
 # Альтернативный единственный источник ключа: env OPENCODE_GO_SUB1_KEY (замена api_key_ref на bridge.api_key_env).
 manifest_version: 1
@@ -10,7 +10,7 @@ required: false
 priority: 11
 routing: {weight: 50}
 owned_by: opencode-go
-failover: {statuses: [402, 403], error_types: [permission_error, credit_exhausted]}
+failover: {statuses: [402, 403], error_types: [permission_error, credit_exhausted, payment_required], message_markers: [credit, subscription, 'usage limit', 'go usage', payment], pool: opencode-go, pool_label: 'OpenCode Go'}
 transport:
   bridge: {base_url: 'http://127.0.0.1:10830/go/v1'}
   direct:
@@ -31,7 +31,7 @@ transport:
       response: {field: 'choices[0].message.content'}
 allow_base_url:
 - {scheme: http, host: 127.0.0.1, port: 10830, path_prefix: /go/v1}
-limits: {max_concurrent: 64, quota_group: opencode-go, timeout_s: 180}
+limits: {max_concurrent: 64, quota_group: opencode-go-sub1, timeout_s: 180}
 discovery:
   method: static
   static: [deepseek-v4.1-flash]

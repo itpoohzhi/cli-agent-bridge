@@ -275,7 +275,7 @@ def test_response_without_route_refusal_is_not_read_or_replayed(status: int, acc
     result = resolve_presend_response(
         adapter, conn, response, sink, lambda: pytest.fail("retried")
     )
-    assert result == (conn, response, False)
+    assert result == (conn, response, False, None)
     assert adapter.reads == 0
 
 

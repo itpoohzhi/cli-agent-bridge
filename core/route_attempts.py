@@ -20,8 +20,8 @@ DEFAULT_ROUTE_FAILOVER_STATUSES = frozenset({401, 429, 503})
 ALLOWED_FAILOVER_STATUSES = frozenset({401, 402, 403, 429, 503})
 ENV_POOL_EXHAUSTED_RETRY_AFTER_S = "BRIDGE_POOL_EXHAUSTED_RETRY_AFTER_S"
 DEFAULT_POOL_EXHAUSTED_RETRY_AFTER_S = 60
-# Маркеры тела 403, означающие исчерпание слота, а не запрет модели/роли.
-_SLOT_EXHAUSTED_MARKERS = ("credit", "subscription", "usage limit", "go usage")
+# Маркеры исчерпания слота не зашиты в ядро: провайдер объявляет их декларативно
+# (`failover.message_markers` манифеста -> `failover_message_markers` бэкенда).
 # Безопасные причины для сводной ошибки: без quota-лексики и типов, маскируемых клиентом.
 _SAFE_REASONS = {
     401: "upstream rejected the slot key (HTTP 401)",
@@ -53,25 +53,31 @@ def is_route_refusal_status(
     *,
     extra_statuses: Iterable[int] = (),
     extra_error_types: Iterable[str] = (),
+    message_markers: Iterable[str] = (),
 ) -> bool:
-    """Отказ слота: глобальные статусы или per-provider расширение по телу ошибки.
+    """Отказ слота: глобальные статусы или per-route расширение по телу ошибки.
 
-    Расширение действует только для статусов из `extra_statuses` провайдера:
-    402 считается отказом слота сам по себе, прочие (403) — только при типе
-    ошибки из `extra_error_types` или маркере исчерпания в сообщении, чтобы
-    не-Go 403 (`internal_model_forbidden`) не повторялся другим ключом.
+    Расширение действует только для статусов из `extra_statuses` конкретного
+    маршрута. Если маршрут объявил `extra_error_types` и/или `message_markers`,
+    отказом считается только совпадение типа ошибки или маркера в сообщении
+    (без захардкоженных провайдерных эвристик ядра: 402 сам по себе и чужие
+    маркеры ничего не форсируют), чтобы не-Go 403 (`internal_model_forbidden`)
+    не повторялся другим ключом. Статус-only opt-in (ни типов, ни маркеров)
+    считает сам статус из `extra_statuses` явным объявлением отказа слота.
     """
     if status in DEFAULT_ROUTE_FAILOVER_STATUSES:
         return True
     if status not in frozenset(extra_statuses) & ALLOWED_FAILOVER_STATUSES:
         return False
-    if status == 402:
+    types = frozenset(extra_error_types)
+    markers = tuple(marker.lower() for marker in message_markers if marker)
+    if not types and not markers:
         return True
     kind, message = parse_upstream_error(body)
-    if kind and kind in frozenset(extra_error_types):
+    if kind and kind in types:
         return True
     lowered = message.lower()
-    return any(marker in lowered for marker in _SLOT_EXHAUSTED_MARKERS)
+    return any(marker in lowered for marker in markers)
 
 
 def effective_failover_statuses(
@@ -86,22 +92,102 @@ def effective_failover_statuses(
     return (frozenset(allowed_statuses) | frozenset(extra_statuses)) & ALLOWED_FAILOVER_STATUSES
 
 
-def failover_config_from_mapping(
-    config: Mapping[str, object] | None,
-) -> tuple[frozenset[int], frozenset[str]]:
-    """Читает `failover_statuses`/`failover_error_types` из конфига бэкенда; мусор игнорируется."""
+@dataclass(frozen=True, slots=True)
+class RouteFailover:
+    """Единый per-route контракт failover одного бэкенда/маршрута.
+
+    Вычисляется строго из конфига конкретного бэкенда и никогда не объединяется
+    по модели: non-opt-in сосед по модели не наследует чужие статусы/маркеры.
+    `pool`/`pool_label` задают принадлежность слота пулу сводной ошибки 429
+    независимо от `quota_group` учёта квот.
+    """
+
+    statuses: frozenset[int] = frozenset()
+    error_types: frozenset[str] = frozenset()
+    message_markers: tuple[str, ...] = ()
+    pool: str = ""
+    pool_label: str = ""
+
+    @property
+    def opt_in(self) -> bool:
+        return bool(self.statuses)
+
+    @property
+    def pool_key(self) -> str:
+        return self.pool or self.pool_label
+
+    @property
+    def label(self) -> str:
+        return self.pool_label or self.pool or "provider pool"
+
+    def effective_statuses(
+        self, allowed_statuses: Iterable[int] = DEFAULT_ROUTE_FAILOVER_STATUSES,
+    ) -> frozenset[int]:
+        return effective_failover_statuses(allowed_statuses, self.statuses)
+
+    def matches(self, status: int, body: bytes = b"") -> bool:
+        return is_route_refusal_status(
+            status, body, extra_statuses=self.statuses,
+            extra_error_types=self.error_types, message_markers=self.message_markers,
+        )
+
+
+def _str_values(raw: object) -> tuple[str, ...]:
+    if not isinstance(raw, (list, tuple, frozenset, set)):
+        return ()
+    return tuple(value for value in raw if isinstance(value, str) and value)
+
+
+def failover_from_mapping(config: Mapping[str, object] | None) -> RouteFailover:
+    """Читает per-backend `failover_*` из конфига бэкенда; мусор игнорируется."""
     if not isinstance(config, Mapping):
-        return frozenset(), frozenset()
+        return RouteFailover()
     raw_statuses = config.get("failover_statuses")
     statuses = frozenset(
         value for value in raw_statuses
         if type(value) is int and value in ALLOWED_FAILOVER_STATUSES
     ) if isinstance(raw_statuses, (list, tuple, frozenset, set)) else frozenset()
-    raw_types = config.get("failover_error_types")
-    types = frozenset(
-        value for value in raw_types if isinstance(value, str) and value
-    ) if isinstance(raw_types, (list, tuple, frozenset, set)) else frozenset()
-    return statuses, types
+    pool = config.get("failover_pool")
+    pool_label = config.get("failover_pool_label")
+    return RouteFailover(
+        statuses=statuses,
+        error_types=frozenset(_str_values(config.get("failover_error_types"))),
+        message_markers=tuple(
+            marker.lower() for marker in _str_values(config.get("failover_message_markers"))
+        ),
+        pool=pool if isinstance(pool, str) else "",
+        pool_label=pool_label if isinstance(pool_label, str) else "",
+    )
+
+
+def failover_config_from_mapping(
+    config: Mapping[str, object] | None,
+) -> tuple[frozenset[int], frozenset[str]]:
+    """Совместимая пара `(statuses, error_types)` поверх `failover_from_mapping`."""
+    failover = failover_from_mapping(config)
+    return failover.statuses, failover.error_types
+
+
+@dataclass(frozen=True, slots=True)
+class PresendEvaluation:
+    """Итог presend-классификации; `body=None` — тело не читалось (терминальный ответ)."""
+
+    is_refusal: bool
+    body: bytes | None = None
+
+
+def evaluate_presend_candidate(
+    status: int, read_body: Callable[[], bytes], failover: RouteFailover,
+) -> PresendEvaluation:
+    """Единый presend-классификатор: читает тело только у кандидата по статусу.
+
+    Уже прочитанное тело возвращается вызывающему явно (`body`), а не вешается
+    атрибутом на системный `HTTPResponse`; терминальные ответы не читаются.
+    """
+    if status not in failover.effective_statuses():
+        return PresendEvaluation(False, None)
+    body = read_body()
+    return PresendEvaluation(failover.matches(status, body), body)
 
 
 def _retry_after_s(headers: Sequence[tuple[str, str]]) -> int | None:
@@ -213,12 +299,18 @@ def decide_attempt(
     outcome: AttemptState | Mapping[str, object] | None,
     allowed_statuses: Iterable[int] = DEFAULT_ROUTE_FAILOVER_STATUSES,
     extra_statuses: Iterable[int] = (),
+    failover: RouteFailover | None = None,
 ) -> AttemptDecision:
-    """Сначала общий PR17 budget, затем отдельное доказательство no-replay."""
+    """Сначала общий PR17 budget, затем отдельное доказательство no-replay.
+
+    `failover` — контракт именно того маршрута, чей `outcome` оценивается;
+    при заданном `failover` его статусы заменяют плоский `extra_statuses`.
+    """
     decision = compute_attempt_decision(config, attempt_index, elapsed_s)
     if not decision.allow_retry or outcome is None:
         return decision
-    if _replay_safe(outcome, effective_failover_statuses(allowed_statuses, extra_statuses)):
+    extra = failover.statuses if failover is not None else extra_statuses
+    if _replay_safe(outcome, effective_failover_statuses(allowed_statuses, extra)):
         return decision
     return AttemptDecision(False, 0.0, RetryReason.NON_RETRYABLE_CATEGORY)
 
@@ -303,6 +395,7 @@ class RouteAttemptRunner:
         config: RetryBudgetConfig, clock: Callable[[], float],
         allowed_statuses: Iterable[int] = DEFAULT_ROUTE_FAILOVER_STATUSES,
         extra_statuses: Iterable[int] = (),
+        failover_by_backend: Mapping[str, RouteFailover] | None = None,
     ) -> None:
         self._routes = iter(routes)
         self._ports = ports
@@ -314,7 +407,18 @@ class RouteAttemptRunner:
         self._used = False
         self._last_state: AttemptState | None = None
         self._last_error: BaseException | None = None
+        self._allowed_statuses = tuple(allowed_statuses)
+        # Плоский `extra_statuses` — только legacy-дефолт для бэкендов без записи
+        # в `failover_by_backend`; per-route контракт имеет приоритет по бэкенду.
         self._statuses = effective_failover_statuses(allowed_statuses, extra_statuses)
+        self._failover_by_backend = dict(failover_by_backend or {})
+        self._active_statuses = self._statuses
+
+    def _statuses_for(self, backend: str) -> frozenset[int]:
+        failover = self._failover_by_backend.get(backend)
+        if failover is None:
+            return self._statuses
+        return failover.effective_statuses(self._allowed_statuses)
 
     def _check_cancelled(self) -> None:
         if self._ports.cancelled():
@@ -325,7 +429,7 @@ class RouteAttemptRunner:
         now = self._clock()
         decision = decide_attempt(
             self._config, self._attempts, now - self._started_s, self._last_state,
-            self._statuses,
+            self._active_statuses,
         )
         if not decision.allow_retry:
             raise RouteUnavailable(decision.reason.value)
@@ -343,6 +447,9 @@ class RouteAttemptRunner:
                 return False, None
             attempt = self._context()
             self._attempts += 1
+            # Статусы переключаются только после оценки предыдущей попытки:
+            # её исход судит контракт её собственного бэкенда, не следующего.
+            self._active_statuses = self._statuses_for(backend)
             attempt.advance(AttemptPhase.CONNECTING)
             return True, self._ports.execute(backend, attempt)
         except BaseException as exc:
@@ -378,7 +485,7 @@ class RouteAttemptRunner:
             return False
         elif state.phase != AttemptPhase.CONNECTING:
             return False
-        return _replay_safe(state, self._statuses)
+        return _replay_safe(state, self._active_statuses)
 
     def _route(self, backend: str) -> tuple[bool, object]:
         context = self._context()

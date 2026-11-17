@@ -337,8 +337,18 @@
       ],
       "failover_error_types": [
         "permission_error",
-        "credit_exhausted"
+        "credit_exhausted",
+        "payment_required"
       ],
+      "failover_message_markers": [
+        "credit",
+        "subscription",
+        "usage limit",
+        "go usage",
+        "payment"
+      ],
+      "failover_pool": "opencode-go",
+      "failover_pool_label": "OpenCode Go",
       "api_key_ref": "file:~/.config/opencode-go-account-switch/profiles/sub1/opencode-go.key",
       "headers_from_json": {
         "file": "~/.config/opencode/opencode.json",
@@ -373,8 +383,18 @@
       ],
       "failover_error_types": [
         "permission_error",
-        "credit_exhausted"
+        "credit_exhausted",
+        "payment_required"
       ],
+      "failover_message_markers": [
+        "credit",
+        "subscription",
+        "usage limit",
+        "go usage",
+        "payment"
+      ],
+      "failover_pool": "opencode-go",
+      "failover_pool_label": "OpenCode Go",
       "api_key_ref": "file:~/.config/opencode-go-account-switch/profiles/sub2/opencode-go.key",
       "headers_from_json": {
         "file": "~/.config/opencode/opencode.json",

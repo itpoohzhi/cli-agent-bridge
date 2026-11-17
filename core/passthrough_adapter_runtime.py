@@ -24,9 +24,8 @@ from core.passthrough_sliding_window import (
 )
 from core.route_attempts import (
     RouteRefusal,
-    effective_failover_statuses,
-    failover_config_from_mapping,
-    is_route_refusal_status,
+    evaluate_presend_candidate,
+    failover_from_mapping,
 )
 from core.runtime_env import flag_enabled
 from core.transport_credentials import credential_ready
@@ -228,19 +227,17 @@ class _RequestRuntime:
         response, request, adapter = self.response, self.exchange, self.adapter
         if response is None:
             raise RuntimeError("missing_upstream_response")
-        extra_statuses, extra_types = failover_config_from_mapping(
-            getattr(adapter, "config", None)
-        )
-        if response.status in effective_failover_statuses(extra_statuses=extra_statuses) and getattr(
+        failover = failover_from_mapping(getattr(adapter, "config", None))
+        if response.status in failover.effective_statuses() and getattr(
             request.sink, "accepts_presend_errors", False
         ):
-            body = adapter._read_presend_body(response)
+            evaluation = evaluate_presend_candidate(
+                response.status, lambda: adapter._read_presend_body(response), failover,
+            )
+            body = evaluation.body or b""
             headers = tuple(adapter._response_headers(response)) + (("Content-Length", str(len(body))),)
             self._check()
-            if is_route_refusal_status(
-                response.status, body,
-                extra_statuses=extra_statuses, extra_error_types=extra_types,
-            ):
+            if evaluation.is_refusal:
                 raise PassthroughRouteRefusal(response.status, headers, body)
             # Кандидат по статусу, но не отказ слота (например, запрет модели):
             # тело уже прочитано, поэтому ответ отдаётся дословно здесь.
