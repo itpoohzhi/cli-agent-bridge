@@ -71,6 +71,7 @@ from core.passthrough_adapter_runtime import (
     HandleRequestOptions,
     PassthroughRequest,
     RuntimeOptions,
+    fail_context,
     handle_request,
 )
 from core.passthrough_exchange import OpenRequestOptions, open_request
@@ -1516,20 +1517,49 @@ class PassthroughAdapter(BackendAdapter):
         return open_request(self, path, raw_body, headers, **kwargs)
 
     def _fail(
-        self, sink: ResponseSink, status: int, error_type: str, message: str
+        self,
+        sink: ResponseSink,
+        status: int,
+        error_type: str,
+        message: str,
+        *,
+        model: str = "-",
+        request_id: str = "-",
     ) -> None:
-        self._log(f"passthrough fail status={status} type={error_type}")
+        self._log(
+            f"passthrough fail status={status} type={error_type} "
+            f"model={model} request_id={request_id}"
+        )
         headers, body = _json_error(status, error_type, message)
         sink.start(status, headers)
         sink.write(body)
 
-    def _fail_io(self, sink: ResponseSink, is_timeout: bool) -> bool:
+    def _fail_io(
+        self,
+        sink: ResponseSink,
+        is_timeout: bool,
+        *,
+        model: str = "-",
+        request_id: str = "-",
+    ) -> bool:
         if is_timeout:
             self._fail(
-                sink, 504, "upstream_timeout", "upstream did not respond in time"
+                sink,
+                504,
+                "upstream_timeout",
+                "upstream did not respond in time",
+                model=model,
+                request_id=request_id,
             )
         else:
-            self._fail(sink, 502, "upstream_unavailable", "upstream is unavailable")
+            self._fail(
+                sink,
+                502,
+                "upstream_unavailable",
+                "upstream is unavailable",
+                model=model,
+                request_id=request_id,
+            )
         return False
 
     def _response_headers(
@@ -1617,16 +1647,27 @@ class PassthroughAdapter(BackendAdapter):
         return body
 
     def _response_error(
-        self, sink: ResponseSink, error: Exception, options: dict[str, Any]
+        self,
+        sink: ResponseSink,
+        error: Exception,
+        options: dict[str, Any],
+        *,
+        model: str = "-",
+        request_id: str = "-",
     ) -> bool:
         if isinstance(error, NonstreamError):
-            self._fail(sink, error.status, error.code, error.message)
+            self._fail(
+                sink, error.status, error.code, error.message,
+                model=model, request_id=request_id,
+            )
         elif isinstance(error, UpstreamBodyTooLarge):
             self._fail(
                 sink,
                 502,
                 "upstream_response_too_large",
                 "upstream response exceeds the bridge limit",
+                model=model,
+                request_id=request_id,
             )
         elif isinstance(error, LiveParserError):
             self._fail(
@@ -1634,9 +1675,16 @@ class PassthroughAdapter(BackendAdapter):
                 502,
                 "upstream_tool_mode_violation",
                 "upstream tool mode violation",
+                model=model,
+                request_id=request_id,
             )
         else:
-            return self._fail_io(sink, _response_timed_out(error, options))
+            return self._fail_io(
+                sink,
+                _response_timed_out(error, options),
+                model=model,
+                request_id=request_id,
+            )
         return False
 
     def _emit_response(
@@ -1689,7 +1737,12 @@ class PassthroughAdapter(BackendAdapter):
             OSError,
             http.client.HTTPException,
         ) as exc:
-            return self._response_error(sink, exc, kw)
+            model, request_id = fail_context(
+                request, kw.get("headers") or {}, self.host
+            )
+            return self._response_error(
+                sink, exc, kw, model=model, request_id=request_id
+            )
         aff = kw.get("affinity_uuid")
         scope = kw.get("affinity_scope") or ""
         if resp.status == 200 and aff and isinstance(body, (bytes, str)):

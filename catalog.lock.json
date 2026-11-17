@@ -1,7 +1,7 @@
 {
-  "compiled_at": "2026-11-17T12:39:24+0300",
+  "compiled_at": "2026-11-17T13:52:03+0300",
   "compiler_version": 1,
-  "fleet_sha256": "7eaa09b1135e4a542fba402101637cb1291b8a170fe6f12d6ae488d9d66374e3",
+  "fleet_sha256": "2521c4b30adefff6c899967eb4a3d0bdf037ce41f4513622e057c016df248e11",
   "inputs": {
     "discovery_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
     "manifests": {
@@ -10,7 +10,7 @@
       "agy.yaml": "d7ca0b66b7ea9612ca770187c0358fcac734935015a2ab45dddd390ae8c58de9",
       "claude-p.yaml": "8ac948e1049b2ca703b010f4f54a5bec01d334caf75fd805f54fef47561246f7",
       "codex.yaml": "62caf30d9ce2f621f35d41e3ff3fb5d2066fe0e78190097cf27956b86babc7b1",
-      "deepseek-direct.yaml": "5decd8d0524651aa79cf0a5ef0879ee65633afd2394557b0cee8e86a96b262c7",
+      "deepseek-direct.yaml": "3fcf9d693dde7a5891a62f5b819818fa8c1ec9a30cf89c587ef9f73db9913e20",
       "droid.yaml": "d2e2381093c695824123749e302d57028a113b7a522d7b29a8cdcc6b1c661e47",
       "muse.yaml": "610c34e6a064333504b3b6ec7aeed78c597d69526b56d701f6fbd42727ec3b78",
       "openai-key-2.yaml": "f3a13ea5b5b18353dda5e02e9678fd88aa2c21a18a53e44f4e8f0ce05f9f0fba",
@@ -21,7 +21,7 @@
       "opencode-go.yaml": "8d27372c95fcf802352d38e4e6f3a6c1919030ef6220d3c6c2c5808fe6077f68",
       "opencode-zen.yaml": "9239b0e1c543c23037f5407b6c64a0db04735d092ba7ccc53d197f83f91d1636"
     },
-    "manifests_sha256": "ea8a1e54f991cd1314c56e21f80d3243ab0f129943ec321d4a54d36197d7a71e"
+    "manifests_sha256": "98a516655efb9ef34e2a1783998cf541cb8fd89e9e99a6629fea7b69fcb8512f"
   },
   "models": {
     "beam-free": {
@@ -110,10 +110,10 @@
           "provider": "opencode-go"
         },
         {
-          "provider": "opencode-go-sub1"
+          "provider": "opencode-go-sub2"
         },
         {
-          "provider": "opencode-go-sub2"
+          "provider": "deepseek-direct"
         }
       ],
       "efforts_proven": [],
@@ -121,9 +121,9 @@
       "family_source": "exact_map",
       "history": [],
       "in_fleet": true,
-      "provider": "deepseek-direct",
+      "provider": "opencode-go-sub1",
       "quorum_eligible": false,
-      "quota_group": "deepseek-direct",
+      "quota_group": "opencode-go-sub1",
       "status": "quarantine"
     },
     "deepseek-v4.1-flash-free": {

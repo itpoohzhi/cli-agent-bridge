@@ -573,7 +573,7 @@ def test_sidecar_shape() -> None:
     assert sidecar["models"]["gpt-6.1-sol"]["family"] == "OpenAI"
     assert sidecar["models"]["claude-sonnet-5-5"]["family"] == "Anthropic"
     assert sidecar["models"]["muse-wonder-full-1.0"]["family"] == "Meta"
-    assert sidecar["models"]["deepseek-v4.1-flash"]["provider"] == "deepseek-direct"
+    assert sidecar["models"]["deepseek-v4.1-flash"]["provider"] == "opencode-go-sub1"
     assert "kimi-k3.1-pro" not in sidecar["models"]
     assert sidecar["models"]["deepseek-v4.1-flash"]["family"] == "DeepSeek"
     assert all(entry["status"] == "quarantine" for entry in sidecar["models"].values())

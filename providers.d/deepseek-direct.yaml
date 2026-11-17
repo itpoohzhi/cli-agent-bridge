@@ -5,7 +5,8 @@ kind: passthrough
 enabled: true
 required: false
 priority: 20
-routing: {weight: 100}
+# Резерв для deepseek-v4.1-flash: первичный пул — opencode-go-sub1/sub2 (weight 50/50).
+routing: {weight: 0}
 owned_by: deepseek
 transport:
   bridge: {base_url: 'http://127.0.0.1:10830/sg-deepseek', api_key_env: DEEPSEEK_API_KEY}

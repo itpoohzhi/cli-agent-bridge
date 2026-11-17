@@ -278,6 +278,34 @@ def test_adapter_non_go_403_is_forwarded_not_replayed() -> None:
         upstream.close()
 
 
+def test_passthrough_fail_log_correlates_model_and_request_id() -> None:
+    dead = _Upstream(200, b"{}")
+    port = dead.port
+    dead.close()
+    logs: list[str] = []
+    adapter = PassthroughAdapter(
+        "opencode-go-sub1",
+        {"kind": "passthrough", "base_url": f"http://127.0.0.1:{port}/v1",
+         "max_concurrent": 2},
+        lambda: {}, host=SimpleNamespace(_log=logs.append),
+        limits=PassthroughLimits(), sanitize=False,
+    )
+    sink = _Sink()
+    sink.accepts_presend_errors = False
+    try:
+        adapter.handle(path="/v1/chat/completions", raw_body=b'{"stream":false}',
+                       request={"stream": False, "model": "deepseek-v4.1-flash"},
+                       headers={"X-Request-Id": "req_fail_log_1"}, sink=sink)
+    finally:
+        adapter.shutdown()
+    assert sink.status == 502
+    fails = [line for line in logs if "passthrough fail" in line]
+    assert fails, f"no passthrough fail log line in {logs!r}"
+    assert "status=502" in fails[-1]
+    assert "model=deepseek-v4.1-flash" in fails[-1]
+    assert "request_id=req_fail_log_1" in fails[-1]
+
+
 # ---- фасад: per-route изоляция и пул в `_run_routes`, presend-контракт ---------
 
 

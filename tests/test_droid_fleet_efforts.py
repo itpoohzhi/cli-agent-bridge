@@ -102,7 +102,7 @@ def test_removed_droid_models_absent_or_routed_via_opencode_go() -> None:
     assert "kimi-k3.1-pro" not in model_ids
     assert "kimi-k3.1-pro" not in droid_manifest["models_overrides"]
     assert "deepseek-v4.1-flash" in model_ids
-    assert any(m["id"] == "deepseek-v4.1-flash" and m.get("backend") == "deepseek-direct" for m in fleet["models"])
+    assert any(m["id"] == "deepseek-v4.1-flash" and m.get("backend") == "opencode-go-sub1" for m in fleet["models"])
     assert "deepseek-v4.1-flash" not in droid_manifest["models_overrides"]
     deepseek = go_manifest["models_overrides"]["deepseek-v4.1-flash"]
     assert deepseek["efforts"] == ["off", "low", "high", "max"]

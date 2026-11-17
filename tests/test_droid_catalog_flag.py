@@ -25,7 +25,7 @@ _ZEN = ("high", "max")
 _ALL = ("minimal", "low", "medium", "high", "max")
 _LMH = ("low", "medium", "high")
 # Независимый эталон droid_off: weighted-владельцы по AD-001, defaults по AD-008.
-# Sol скрыта профилем; DeepSeek принадлежит deepseek-direct независимо от флага droid.
+# Sol скрыта профилем; DeepSeek принадлежит Go-пулу (sub1) независимо от флага droid.
 BASE_MODELS = (
     ("claude-sonnet-5-5", "claude-p", ("high",), "high"), ("gemini-3.8-flash", "agy", _LMH, "high"),
     ("gemini-3.8-flash-agy", "agy", _LMH, "high"), ("gemini-4-carbon", "agy", ("off",), "off"),
@@ -34,7 +34,7 @@ BASE_MODELS = (
     ("muse-wonder-full-1.0", "muse", _ALL, "high"), ("gpt-6.1-terra", "openai-key-2", _LMH, "high"),
     ("claude-opus-5-5", "claude-p", ("high",), "high"), ("claude-haiku-5-5", "claude-p", ("high",), "high"),
     ("gemini-4-argon", "agy", _LMH, "high"), ("gemini-4-hydrogen", "agy", (*_LMH, "xhigh"), "high"),
-    ("deepseek-v4.1-flash", "deepseek-direct", ("off", "low", "high", "max"), "off"),
+    ("deepseek-v4.1-flash", "opencode-go-sub1", ("off", "low", "high", "max"), "off"),
     ("deepseek-v4.1-flash-free", "opencode-zen", _ZEN, "high"),
     ("flint-40b-free", "opencode-zen", _ZEN, "high"),
     ("mimo-v2.6-flash-free", "opencode-zen", _ZEN, "high"),
