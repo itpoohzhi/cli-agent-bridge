@@ -1,4 +1,4 @@
-"""C2-7: внутренний owner tuple, чистота и стабильность компиляции без P0."""
+"""C2-8g: P0 weight expectations and canonical routing tuple tests within P0 rollback slice."""
 
 from __future__ import annotations
 
