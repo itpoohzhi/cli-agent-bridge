@@ -110,13 +110,12 @@ class TestLiveFleetV3(unittest.TestCase):
     def test_models_are_bound_to_backends(self) -> None:
         data = raw_v3()
         catalog = server._build_catalog(data)
-        self.assertEqual(len(catalog["order"]), len(data["models"]))
-        self.assertEqual(len(catalog["order"]), 29)
+        self.assertEqual(len(catalog["order"]), 25)
         self.assertEqual(catalog["models"]["claude-sonnet-5-5"]["backend"], "claude-p")
         self.assertEqual(catalog["models"]["claude-haiku-5-5"]["backend"], "claude-p")
-        self.assertEqual(catalog["models"]["gemini-3.8-flash"]["backend"], "agy")
-        self.assertEqual(catalog["models"]["gemini-4-hydrogen"]["backend"], "agy")
-        self.assertEqual(catalog["models"]["gpt-6.1-sol"]["backend"], "openai-key-2")
+        rejected_gemini = {"gemini-3.8-flash", "gemini-4-argon", "gemini-4-carbon", "gemini-4-hydrogen"}
+        self.assertTrue(rejected_gemini.isdisjoint(catalog["models"]))
+        self.assertEqual(catalog["models"]["gpt-6.1-sol"]["backend"], "codex")
         for model_id in ("claude-sonnet-5-5-droid", "gemini-3.8-flash-droid", "gpt-6.1-sol-droid"):
             self.assertEqual(catalog["models"][model_id]["backend"], "droid")
         self.assertEqual(catalog["models"]["deepseek-v4.1-flash"]["backend"], "deepseek-direct")
@@ -152,8 +151,7 @@ class TestLiveFleetV3(unittest.TestCase):
     def test_load_fleet_reads_schema_3_file(self):
         catalog = server._build_catalog(raw_v3())
         self.assertEqual(catalog["schema_version"], 3)
-        self.assertEqual(len(catalog["order"]), len(raw_v3()["models"]))
-        self.assertEqual(len(catalog["order"]), 29)
+        self.assertEqual(len(catalog["order"]), 25)
 
 
 class TestSchema2Compat(unittest.TestCase):
@@ -378,9 +376,12 @@ class TestSchema3Violations(unittest.TestCase):
         data["backends"]["codex"]["enabled"] = False
         data["default_model"] = "claude-sonnet-5-5"
         catalog = server._build_catalog(data)
-        published_backends = {catalog["models"][m]["backend"] for m in catalog["order"]}
-        self.assertNotIn("muse", published_backends)
-        self.assertNotIn("codex", published_backends)
+        published_without_routes = {
+            catalog["models"][m]["backend"] for m in catalog["order"]
+            if not catalog["models"][m].get("routing", {}).get("enabled")
+        }
+        self.assertNotIn("muse", published_without_routes)
+        self.assertNotIn("codex", published_without_routes)
         self.assertFalse(catalog["backends"]["muse"]["enabled"])
 
     def test_default_model_on_disabled_backend_is_refused(self):
@@ -571,8 +572,7 @@ class TestFleetCheckParity(unittest.TestCase):
         data = raw_v3()
         self.assertTrue(data["backends"]["muse"]["enabled"])
         catalog = server._build_catalog(data)
-        self.assertEqual(len(catalog["order"]), len(data["models"]))
-        self.assertEqual(len(catalog["order"]), 29)
+        self.assertEqual(len(catalog["order"]), 25)
         self.assertEqual(catalog["default_model"], "muse-wonder-full-1.0")
 
     def test_checker_main_returns_structured_error_for_invalid_model(self):

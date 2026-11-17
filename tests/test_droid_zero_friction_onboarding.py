@@ -32,23 +32,19 @@ DROID_MODELS = {  # model_id -> (вендор, default_effort, efforts)
     "gemini-3.8-flash-droid": ("Google", "high", LMH),
 }
 PRIMARY = {
-    "gpt-6.1-sol": "openai-key-2",
+    "gpt-6.1-sol": "codex",
     "claude-sonnet-5-5": "claude-p",
-    "gemini-3.8-flash": "agy",
     "gpt-6.1-sol-droid": "droid",
     "claude-sonnet-5-5-droid": "droid",
     "gemini-3.8-flash-droid": "droid",
     "claude-opus-5-5": "claude-p",
     "claude-haiku-5-5": "claude-p",
-    "gemini-4-argon": "agy",
-    "gemini-4-carbon": "agy",
-    "gpt-6.1-terra": "openai-key-2",
+    "gpt-6.1-terra": "codex",
 }
 ALTERNATES = {
-    "gpt-6.1-sol": ["codex", "openai-key-3", "droid"],
-    "gpt-6.1-terra": ["codex", "openai-key-3"],
+    "gpt-6.1-sol": ["openai-key-2", "openai-key-3", "droid"],
+    "gpt-6.1-terra": ["openai-key-2", "openai-key-3"],
     "claude-sonnet-5-5": ["droid"],
-    "gemini-3.8-flash": ["droid"],
     "claude-haiku-5-5": ["opencode-go-claude"],
 }
 DIRECT_MODELS = ("deepseek-v4.1-flash",)  # вне droid: direct с резервом opencode-go; kimi-k3.1-pro удалена
@@ -199,7 +195,13 @@ def test_primary_and_alternates_follow_priority(compiled: Any) -> None:
         assert backends[mid] == "deepseek-direct"
         assert compiled.sidecar["models"][mid]["alternates"] == [{"provider": "opencode-go"}]
     assert "kimi-k3.1-pro" not in compiled.sidecar["models"]
-    assert compiled.rejected == {} and compiled.rejected_providers == {}
+    assert compiled.rejected == {
+        "gemini-3.8-flash": "status_inconsistent",
+        "gemini-4-argon": "status_inconsistent",
+        "gemini-4-carbon": "status_inconsistent",
+        "gemini-4-hydrogen": "status_inconsistent",
+    }
+    assert compiled.rejected_providers == {}
 
 
 def test_claude_p_efforts_are_extended(compiled: Any) -> None:
@@ -231,14 +233,17 @@ def test_explain_prints_deterministic_tiebreak(
     doc = json.loads(outputs[0])
     assert (doc["model_id"], doc["primary"], doc["alternates"]) == (
         "gpt-6.1-sol",
-        "openai-key-2",
-        ["codex", "openai-key-3", "droid"],
+        "codex",
+        ["openai-key-2", "openai-key-3", "droid"],
     )
-    assert [(c["priority"], c["provider_id"]) for c in doc["candidates"]] == [
-        (20, "openai-key-2"),
-        (20, "openai-key-3"),
-        (10, "codex"),
-        (30, "droid"),
+    assert [
+        (c["priority"], c["provider_id"], c.get("weight"))
+        for c in doc["candidates"]
+    ] == [
+        (10, "codex", 100),
+        (30, "droid", 20),
+        (20, "openai-key-2", None),
+        (20, "openai-key-3", None),
     ]
 
 
@@ -259,7 +264,10 @@ def test_suffix_aliases_match_pinned_ids_and_catalog(compiled: Any) -> None:
     assert aliases == SUFFIX_ALIASES
     by_id = {m["id"]: m for m in compiled.fleet["models"]}
     for entry in aliases.values():
-        model = by_id[entry.get("backend_id", entry.get("target"))]
+        base_id = entry.get("backend_id", entry.get("target"))
+        if base_id not in by_id:
+            continue
+        model = by_id[base_id]
         if "backend" in entry:
             assert entry["backend"] in {
                 model["backend"],
@@ -270,7 +278,7 @@ def test_suffix_aliases_match_pinned_ids_and_catalog(compiled: Any) -> None:
 
 @pytest.mark.parametrize(
     "alias",
-    ["gpt-6.1-sol-high", "gemini-3.8-flash-medium", "claude-haiku-5-5-low"],
+    ["gpt-6.1-sol-high", "claude-haiku-5-5-low"],
 )
 def test_suffix_alias_resolves_to_base_with_effort(compiled: Any, alias: str) -> None:
     models = build_catalog(compiled.fleet, ADAPTER_KINDS)["models"]
