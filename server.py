@@ -113,6 +113,7 @@ from core.backend_adapter import (  # noqa: E402
 )
 from core import context_resilience as ctxres  # noqa: E402
 from core import passthrough_facade as _transport_facade  # noqa: E402
+from core.route_attempts import AttemptPhase  # noqa: E402
 from core.resilience import (  # noqa: E402
     ResilienceError,
     ResilienceLease,
@@ -1918,6 +1919,10 @@ class _HandlerSink(ResponseSink):
 
     def start(self, status: int, headers: list[tuple[str, str]]) -> None:
         self.status = int(status)
+        # Клиентский ответ реально записывается здесь: с этого момента replay запрещён.
+        attempt = getattr(self._handler, "_transport_attempt", None)
+        if attempt is not None:
+            attempt.advance_to(AttemptPhase.COMMITTED)
         telemetry_note(self._handler, first_byte=True)
         if getattr(self._handler, "_headers_already_sent", False):
             return

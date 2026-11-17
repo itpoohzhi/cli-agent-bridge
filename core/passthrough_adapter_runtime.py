@@ -274,21 +274,22 @@ class _RequestRuntime:
         if response is None:
             raise RuntimeError("missing_upstream_response")
         failover = failover_from_mapping(getattr(adapter, "config", None))
-        if response.status in failover.effective_statuses() and getattr(
+        if not 200 <= response.status < 300 and getattr(
             request.sink, "accepts_presend_errors", False
         ):
             evaluation = evaluate_presend_candidate(
                 response.status, lambda: adapter._read_presend_body(response), failover,
             )
-            body = evaluation.body or b""
-            headers = tuple(adapter._response_headers(response)) + (("Content-Length", str(len(body))),)
-            self._check()
-            if evaluation.is_refusal:
-                raise PassthroughRouteRefusal(response.status, headers, body)
-            # Кандидат по статусу, но не отказ слота (например, запрет модели):
-            # тело уже прочитано, поэтому ответ отдаётся дословно здесь.
-            self.successful = adapter._emit_response(response, request.sink, (body, False))
-            return
+            if evaluation.body is not None:
+                body = evaluation.body
+                headers = tuple(adapter._response_headers(response)) + (("Content-Length", str(len(body))),)
+                self._check()
+                if evaluation.is_refusal:
+                    raise PassthroughRouteRefusal(response.status, headers, body)
+                # Кандидат по статусу, но не отказ слота (например, запрет модели):
+                # тело уже прочитано, поэтому ответ отдаётся дословно здесь.
+                self.successful = adapter._emit_response(response, request.sink, (body, False))
+                return
         self.successful = adapter._respond(
             response, request.request, request.sink, self.deadline,
             on_timeout=self.abort,

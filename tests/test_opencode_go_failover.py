@@ -312,6 +312,14 @@ def test_passthrough_fail_log_correlates_model_and_request_id() -> None:
 def _facade_run(monkeypatch: pytest.MonkeyPatch, outcomes: dict[str, int]) -> tuple[list[str], Any]:
     from core import passthrough_facade as facade
 
+    # Изолированный bucket: failover к следующему слоту требует накопленных retry-токенов.
+    monkeypatch.setattr(facade, "_RUNTIME", facade._RuntimeState())
+    facade._begin_retry_request(RetryBudgetConfig(), 1).release_unused()
+    bucket = facade._RUNTIME.bucket
+    assert bucket is not None
+    for _ in range(4):
+        bucket.admit_primary()
+
     seen: list[str] = []
     sink = SimpleNamespace(status=None, payload=b"")
     sink.start = lambda status, headers: setattr(sink, "status", status)

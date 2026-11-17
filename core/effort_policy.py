@@ -169,6 +169,19 @@ def resolve_passthrough_effort(
     return EffortResolution(alias, True) if legacy else EffortResolution()
 
 
+def pin_wire_effort(request: Mapping[str, object], effort: str) -> dict[str, object]:
+    """Явный effort в payload: replay-идентичность не зависит от route defaults.
+
+    Пустой текущий effort (отсутствует или не строка) заменяется закреплённым
+    значением, чтобы каждый маршрут отправлял тот же уровень, что видит replay-gate.
+    """
+    pinned = dict(request)
+    current = pinned.get("reasoning_effort")
+    if effort and not (isinstance(current, str) and current.strip()):
+        pinned["reasoning_effort"] = effort
+    return pinned
+
+
 def sanitize_effort_for_log(
     raw: object, limit: int = DEFAULT_LOG_EFFORT_MAX_CHARS
 ) -> str:

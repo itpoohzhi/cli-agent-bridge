@@ -1110,6 +1110,7 @@ def test_successful_sse_without_content_length_closes_connection(monkeypatch) ->
     adapter = make_adapter(1234)
     conn = unittest.mock.Mock()
     response = conn.getresponse.return_value
+    response.status = 200
     response.isclosed.return_value = True
     response.will_close = False
     response.getheader.side_effect = lambda name: {

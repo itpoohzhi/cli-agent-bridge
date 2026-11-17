@@ -9,12 +9,7 @@ from http.client import HTTPConnection, HTTPResponse
 from typing import Protocol
 
 from core.passthrough_adapter_runtime import PassthroughRouteRefusal
-from core.route_attempts import (
-    DEFAULT_ROUTE_FAILOVER_STATUSES,
-    evaluate_presend_candidate,
-    failover_from_mapping,
-    is_route_refusal_status,
-)
+from core.route_attempts import evaluate_presend_candidate, failover_from_mapping
 
 RetryOpen = Callable[[], tuple[HTTPConnection, HTTPResponse]]
 # 4-й элемент — уже прочитанное тело кандидата (`None`: тело не читалось и
@@ -59,12 +54,12 @@ def _positive_float(environ: Mapping[str, str], name: str, default: float) -> fl
 
 
 def _safe_refusal(status: int) -> bool:
-    """Распознаёт разрешённый HTTP-отказ, но не выдаёт право локального replay.
+    """Любой не-2xx до клиентского байта — кандидат на failover.
 
-    Отсутствие commit проверяет владелец попытки. Произвольный proxy payload
-    не доказывает, что POST не исполнялся, и не может разрешить повтор 502.
+    Отсутствие commit проверяет владелец попытки: сама классификация статуса
+    права локального replay не выдаёт и allowlist статусов не ведёт.
     """
-    return status in DEFAULT_ROUTE_FAILOVER_STATUSES
+    return not 200 <= status < 300
 
 
 def is_retryable_presend_payload(
@@ -74,13 +69,11 @@ def is_retryable_presend_payload(
 ) -> bool:
     """Совместимый классификатор: payload не доказывает отсутствие исполнения.
 
-    Per-route `extra_*`/`message_markers` расширяют множество отказов слота
-    (например, 403 `permission_error` и 402 у OpenCode Go); без них семантика прежняя.
+    Универсальная семантика: кандидатом на failover считается любой не-2xx.
+    Payload-маркеры и per-route `extra_*` сужают решение только там, где
+    провайдер явно объявил свой контракт отказов (`RouteFailover.opt_in`).
     """
-    return is_route_refusal_status(
-        status, body, extra_statuses=extra_statuses,
-        extra_error_types=extra_error_types, message_markers=message_markers,
-    )
+    return _safe_refusal(status)
 
 
 def compute_presend_retry_delay(
@@ -123,7 +116,7 @@ def _resolve_response(
     остаются непрочитанными, чтобы обычный response-путь передал их дословно.
     """
     failover = failover_from_mapping(getattr(adapter, "config", None))
-    if resp.status not in failover.effective_statuses():
+    if 200 <= resp.status < 300:
         return conn, resp, False, None
     if not getattr(sink, "accepts_presend_errors", False):
         return conn, resp, False, None
