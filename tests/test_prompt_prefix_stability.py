@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Generator
 import dataclasses
 from dataclasses import FrozenInstanceError
 from email.message import Message
@@ -30,6 +31,27 @@ if int(getattr(sys, "version_info", (3, 14))[1]) < 10:
 from core import prompt_prefix_stability as pps  # noqa: E402
 from core import tool_emulation  # noqa: E402
 import server  # noqa: E402
+
+EMPTY_NOTES = "## 1. Блокировки\n| Модель | Статус | Причина |\n|---|---|---|\n"
+
+
+@pytest.fixture(autouse=True)
+def isolated_model_notes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> Generator[None]:
+    """Инициализировать приватный snapshot без host model-notes и bypass."""
+    path = tmp_path / "prefix-model-notes.md"
+    path.write_text(EMPTY_NOTES, encoding="utf-8")
+    monkeypatch.setenv("BRIDGE_STATE_DIR", str(tmp_path / "prefix-notes-state"))
+    notes = server.ModelNotesFilter(path)
+    snapshot = notes.manager.snapshot
+    assert snapshot is not None and not snapshot.rules
+    monkeypatch.setattr(server, "_MODEL_NOTES_FILTER", notes)
+    yield
+    notes.close()
+    assert notes.manager.stopped.wait(2)
+    notes.manager._timer.join(2)
+    assert not notes.manager._timer.is_alive()
 
 
 def _sample_tools() -> list[object]:
@@ -240,7 +262,7 @@ def _run_guarded_post(
     raw = json.dumps(payload).encode()
     h = object.__new__(server.Handler)
     hdrs = Message()
-    hdrs["Content-Length"], hdrs["X-Bypass-Model-Filter"] = str(len(raw)), "1"
+    hdrs["Content-Length"] = str(len(raw))
     h.path, h.client_address = "/v1/chat/completions", ("127.0.0.1", 12345)
     h.rfile, h.headers = io.BytesIO(raw), hdrs
     setattr(h, "_send", lambda *_a, **_k: None)  # pyright: ignore[reportUnknownLambdaType]

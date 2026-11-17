@@ -30,6 +30,26 @@ from core import fallback_http_hook  # noqa: E402
 ALIAS = "compaction-resilient"
 QUOTA = {"error": {"code": "GoUsageLimitError", "message": "resets in 2d 10h"}}
 TEXT = "Шаг 1.\n\nИтог ✓"
+EMPTY_NOTES = "## 1. Блокировки\n| Модель | Статус | Причина |\n|---|---|---|\n"
+
+
+@pytest.fixture(autouse=True)
+def isolated_model_notes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> Generator[None]:
+    """Не зависеть от model-notes рабочего хоста и его snapshot."""
+    path = tmp_path / "fallback-model-notes.md"
+    path.write_text(EMPTY_NOTES, encoding="utf-8")
+    monkeypatch.setenv("BRIDGE_STATE_DIR", str(tmp_path / "fallback-notes-state"))
+    notes = server.ModelNotesFilter(path)
+    snapshot = notes.manager.snapshot
+    assert snapshot is not None and not snapshot.rules
+    monkeypatch.setattr(server, "_MODEL_NOTES_FILTER", notes)
+    yield
+    notes.close()
+    assert notes.manager.stopped.wait(2)
+    notes.manager._timer.join(2)
+    assert not notes.manager._timer.is_alive()
 
 
 def _chunks(model: str) -> list[dict[str, Any]]:
@@ -295,14 +315,15 @@ def test_idempotency_key_is_forwarded_as_step_job_id(gateway: Any) -> None:
 
 
 @pytest.mark.parametrize("bypass", [False, True])
-def test_bypass_model_filter_header_is_honoured(gateway: Any, monkeypatch: pytest.MonkeyPatch,
-                                                bypass: bool) -> None:
+def test_bypass_header_cannot_skip_model_notes(
+    gateway: Any, monkeypatch: pytest.MonkeyPatch, bypass: bool
+) -> None:
     h = gateway()
     first, second = [c.model for c in h.scenario.chain.candidates[:2]]
     monkeypatch.setattr(server._MODEL_NOTES_FILTER, "is_blocked", lambda model: model == first)
     extra = {"X-Bypass-Model-Filter": "1"} if bypass else None
     assert _request(h.port, _chat(False), extra=extra).status == 200
-    assert [call["model"] for call in h.scenario.calls] == [first if bypass else second]
+    assert [call["model"] for call in h.scenario.calls] == [second]
 
 
 def test_success_is_recorded_on_penalty_tracker(gateway: Any, monkeypatch: pytest.MonkeyPatch) -> None:
