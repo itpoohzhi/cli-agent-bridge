@@ -244,6 +244,11 @@ def backend_entry(manifest: ManifestLike) -> dict[str, Any]:
         value = getattr(bridge, key)
         if value is not None and value != {}:
             entry[key] = deepcopy(value)
+    failover = getattr(manifest, "failover", None)
+    if failover is not None and failover.statuses:
+        entry["failover_statuses"] = list(failover.statuses)
+        if failover.error_types:
+            entry["failover_error_types"] = list(failover.error_types)
     entry.update(upstream_params(manifest))
     return entry
 

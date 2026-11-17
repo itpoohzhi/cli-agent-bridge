@@ -15,7 +15,14 @@ from core.http_post_dispatch import _cleanup_post, _passthrough, dispatch_route
 from core.http_post_ingress import begin_post, read_post_request
 from core.http_post_routing import prepare_post_body, resolve_post_route, selected_route_allowed
 from core.passthrough_exchange import _validate_endpoint, internal_trace_scope
-from core.route_attempts import AttemptPhase, RouteAttempt, RouteRefusal, decide_attempt
+from core.route_attempts import (
+    AttemptPhase,
+    RouteAttempt,
+    RouteRefusal,
+    build_pool_exhausted_error,
+    decide_attempt,
+    failover_config_from_mapping,
+)
 from core.route_eligibility import EligibilityFacts, request_snapshot, route_eligible
 from core.route_health_policy import RetryBudgetConfig
 from core.routing_contract import ROUTING_ALGORITHM, PreSendTransientError, parse_routes
@@ -208,6 +215,18 @@ def _attempt(route: Any, spec: Any, body: Any, attempt: RouteAttempt) -> None:
         handler._transport_attempt = None
 
 
+def _pool_failover(route: Any, routes: Any) -> tuple[frozenset[int], bool]:
+    """Per-route opt-in пула: объединение `failover_statuses` бэкендов маршрутов модели."""
+    extra: set[int] = set()
+    for spec in routes:
+        adapter = route.host.BACKENDS.get(spec.backend)
+        statuses, _types = failover_config_from_mapping(
+            getattr(adapter, "config", None) if adapter is not None else None
+        )
+        extra.update(statuses)
+    return frozenset(extra), bool(extra)
+
+
 def _run_routes(route: Any, routes: Any, seed: str, policy: Any) -> None:
     config, started, last_error, state = _budget(), time.monotonic(), None, None
     routing = {"enabled": True, "algorithm": ROUTING_ALGORITHM, **route.model["routing"]}
@@ -216,10 +235,14 @@ def _run_routes(route: Any, routes: Any, seed: str, policy: Any) -> None:
     order = route_order(route.model_id, model, seed,
                         getattr(route.handler._trace, "subagent_id", None), routes)
     body, count = prepare_post_body(route), 0
+    extra_statuses, pool_opt_in = _pool_failover(route, routes)
+    refusals: list[tuple[str, RouteRefusal]] = []
     for backend in order:
         if route.host._client_gone(route.handler.connection):
             return
-        decision = decide_attempt(config, count, time.monotonic() - started, state)
+        decision = decide_attempt(
+            config, count, time.monotonic() - started, state, extra_statuses=extra_statuses,
+        )
         if not decision.allow_retry:
             break
         spec = by_backend[backend]
@@ -235,10 +258,17 @@ def _run_routes(route: Any, routes: Any, seed: str, policy: Any) -> None:
             return
         except (RouteRefusal, PreSendTransientError, AdapterPreSendError) as error:
             last_error, state = error, attempt.state
+            if isinstance(error, RouteRefusal):
+                refusals.append((backend, error))
     if isinstance(last_error, RouteRefusal):
         sink = route.host._HandlerSink(route.handler, extra_headers=route.host._trace_headers(route.handler._trace))
-        sink.start(last_error.status_code, list(last_error.response_headers))
-        sink.write(last_error.response_body)
+        if pool_opt_in and len({slot for slot, _ in refusals}) >= 2:
+            status, headers, payload = build_pool_exhausted_error(refusals)
+            sink.start(status, list(headers))
+            sink.write(payload)
+        else:
+            sink.start(last_error.status_code, list(last_error.response_headers))
+            sink.write(last_error.response_body)
     else:
         route.reject(503, "route_unavailable", "no eligible transport is available")
 

@@ -220,6 +220,11 @@ def backend_entry(manifest: ProviderManifest) -> Dict[str, Any]:
         entry["idle_timeout_s"] = bridge.idle_timeout_s
     if bridge.safety_cap_s is not None:
         entry["safety_cap_s"] = bridge.safety_cap_s
+    failover = getattr(manifest, "failover", None)
+    if failover is not None and failover.statuses:
+        entry["failover_statuses"] = list(failover.statuses)
+        if failover.error_types:
+            entry["failover_error_types"] = list(failover.error_types)
     entry.update(_upstream_params(manifest))
     return entry
 

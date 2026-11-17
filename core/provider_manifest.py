@@ -53,6 +53,7 @@ from core.manifest_validation import (
     validate_manifest_stages,
 )
 from core.param_adapter import GLOBAL_WHITELIST
+from core.route_attempts import ALLOWED_FAILOVER_STATUSES
 from core.routing_schema import RoutingConfig
 
 MANIFEST_VERSION = 1
@@ -247,6 +248,14 @@ class ProbeConfig:
 
 
 @dataclass(frozen=True)
+class FailoverConfig:
+    """Per-provider opt-in отказов слота сверх глобальных {401, 429, 503}."""
+
+    statuses: Tuple[int, ...] = ()
+    error_types: Tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class ProviderManifest:
     """Нормализованный неизменяемый манифест провайдера."""
 
@@ -268,6 +277,7 @@ class ProviderManifest:
     probe: ProbeConfig = field(default_factory=ProbeConfig)
     manifest_version: int = MANIFEST_VERSION
     routing: RoutingConfig = field(default_factory=RoutingConfig)
+    failover: FailoverConfig = field(default_factory=FailoverConfig)
 
     @property
     def max_concurrent(self) -> int:
@@ -899,6 +909,24 @@ def _validate_direct_transport(
         err.add("provider_base_url_missing")
 
 
+def _parse_failover(raw: Any, err: _Errors) -> FailoverConfig:
+    if raw is None:
+        return FailoverConfig()
+    if not isinstance(raw, dict):
+        err.add("provider_manifest_invalid")
+        return FailoverConfig()
+    raw_statuses = raw.get("statuses", [])
+    raw_types = raw.get("error_types", [])
+    statuses_ok = isinstance(raw_statuses, list) and all(
+        _is_int(value) and value in ALLOWED_FAILOVER_STATUSES for value in raw_statuses
+    )
+    types = _str_list(raw_types) if isinstance(raw_types, list) else None
+    if not statuses_ok or types is None or any(not value for value in types):
+        err.add("provider_manifest_invalid")
+        return FailoverConfig()
+    return FailoverConfig(tuple(sorted(set(raw_statuses))), tuple(types))
+
+
 def _manifest_record(
     header: ManifestHeader, context: ManifestContext[Defaults],
     transport: Tuple[TransportConfig, Tuple[AllowEntry, ...]],
@@ -923,6 +951,7 @@ def _manifest_record(
         params=_parse_params(doc.get("params"), defaults, context.env, err),
         probe=_parse_probe(doc.get("probe"), defaults, err),
         routing=manifest_routing(doc, err),
+        failover=_parse_failover(doc.get("failover"), err),
     )
 
 

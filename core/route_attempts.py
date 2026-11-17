@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Mapping
+import json
+import os
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import Enum
 from typing import Protocol
@@ -14,6 +16,141 @@ from core.route_health_policy import (
 from core.routing_contract import PreSendTransientError
 
 DEFAULT_ROUTE_FAILOVER_STATUSES = frozenset({401, 429, 503})
+# Статусы, которые провайдер вообще вправе объявить отказом слота (per-route opt-in).
+ALLOWED_FAILOVER_STATUSES = frozenset({401, 402, 403, 429, 503})
+ENV_POOL_EXHAUSTED_RETRY_AFTER_S = "BRIDGE_POOL_EXHAUSTED_RETRY_AFTER_S"
+DEFAULT_POOL_EXHAUSTED_RETRY_AFTER_S = 60
+# Маркеры тела 403, означающие исчерпание слота, а не запрет модели/роли.
+_SLOT_EXHAUSTED_MARKERS = ("credit", "subscription", "usage limit", "go usage")
+# Безопасные причины для сводной ошибки: без quota-лексики и типов, маскируемых клиентом.
+_SAFE_REASONS = {
+    401: "upstream rejected the slot key (HTTP 401)",
+    402: "payment required by upstream (HTTP 402)",
+    403: "slot not active: subscription required or access denied by upstream (HTTP 403)",
+    429: "upstream limit reached for this slot (HTTP 429)",
+    503: "upstream unavailable (HTTP 503)",
+}
+
+
+def parse_upstream_error(body: bytes) -> tuple[str, str]:
+    """Извлекает `(error.type|code, error.message)` из JSON-тела отказа; мусор — пустые строки."""
+    try:
+        payload = json.loads(body.decode("utf-8", errors="replace"))
+    except ValueError:
+        return "", ""
+    if not isinstance(payload, Mapping):
+        return "", ""
+    error = payload.get("error")
+    node: Mapping[object, object] = error if isinstance(error, Mapping) else payload
+    kind = node.get("type") or node.get("code") or ""
+    message = node.get("message") or ""
+    return (kind if isinstance(kind, str) else "", message if isinstance(message, str) else "")
+
+
+def is_route_refusal_status(
+    status: int,
+    body: bytes = b"",
+    *,
+    extra_statuses: Iterable[int] = (),
+    extra_error_types: Iterable[str] = (),
+) -> bool:
+    """Отказ слота: глобальные статусы или per-provider расширение по телу ошибки.
+
+    Расширение действует только для статусов из `extra_statuses` провайдера:
+    402 считается отказом слота сам по себе, прочие (403) — только при типе
+    ошибки из `extra_error_types` или маркере исчерпания в сообщении, чтобы
+    не-Go 403 (`internal_model_forbidden`) не повторялся другим ключом.
+    """
+    if status in DEFAULT_ROUTE_FAILOVER_STATUSES:
+        return True
+    if status not in frozenset(extra_statuses) & ALLOWED_FAILOVER_STATUSES:
+        return False
+    if status == 402:
+        return True
+    kind, message = parse_upstream_error(body)
+    if kind and kind in frozenset(extra_error_types):
+        return True
+    lowered = message.lower()
+    return any(marker in lowered for marker in _SLOT_EXHAUSTED_MARKERS)
+
+
+def effective_failover_statuses(
+    allowed_statuses: Iterable[int] = DEFAULT_ROUTE_FAILOVER_STATUSES,
+    extra_statuses: Iterable[int] = (),
+) -> frozenset[int]:
+    """Итоговое множество replay-статусов: разрешённые вызывающим плюс opt-in провайдера.
+
+    Пересечение с `ALLOWED_FAILOVER_STATUSES` сохраняет инвариант: статусы
+    вроде 502, не доказывающие отсутствие исполнения, replay не разрешают.
+    """
+    return (frozenset(allowed_statuses) | frozenset(extra_statuses)) & ALLOWED_FAILOVER_STATUSES
+
+
+def failover_config_from_mapping(
+    config: Mapping[str, object] | None,
+) -> tuple[frozenset[int], frozenset[str]]:
+    """Читает `failover_statuses`/`failover_error_types` из конфига бэкенда; мусор игнорируется."""
+    if not isinstance(config, Mapping):
+        return frozenset(), frozenset()
+    raw_statuses = config.get("failover_statuses")
+    statuses = frozenset(
+        value for value in raw_statuses
+        if type(value) is int and value in ALLOWED_FAILOVER_STATUSES
+    ) if isinstance(raw_statuses, (list, tuple, frozenset, set)) else frozenset()
+    raw_types = config.get("failover_error_types")
+    types = frozenset(
+        value for value in raw_types if isinstance(value, str) and value
+    ) if isinstance(raw_types, (list, tuple, frozenset, set)) else frozenset()
+    return statuses, types
+
+
+def _retry_after_s(headers: Sequence[tuple[str, str]]) -> int | None:
+    for name, value in headers:
+        if name.lower() == "retry-after":
+            try:
+                parsed = int(float(value.strip()))
+            except ValueError:
+                return None
+            return parsed if parsed > 0 else None
+    return None
+
+
+def build_pool_exhausted_error(
+    refusals: Sequence[tuple[str, "RouteRefusal"]],
+    *,
+    pool_label: str = "provider pool",
+    environ: Mapping[str, str] | None = None,
+) -> tuple[int, tuple[tuple[str, str], ...], bytes]:
+    """Сводная терминальная ошибка пула: HTTP 429 `rate_limit_error` с причиной по каждому слоту.
+
+    429 выбран потому, что клиент показывает его `error.message` дословно, а
+    401/403/402 маскирует статичным текстом. Причины берутся из безопасной
+    таблицы по статусу, а не из тела upstream: сырой текст может содержать
+    лексику, переключающую клиентский классификатор в маскирующий код.
+    """
+    env = os.environ if environ is None else environ
+    try:
+        default_retry = int(env.get(ENV_POOL_EXHAUSTED_RETRY_AFTER_S, "") or DEFAULT_POOL_EXHAUSTED_RETRY_AFTER_S)
+    except ValueError:
+        default_retry = DEFAULT_POOL_EXHAUSTED_RETRY_AFTER_S
+    retry_after = max(
+        [default_retry] + [value for _, error in refusals
+                           if (value := _retry_after_s(error.response_headers)) is not None]
+    )
+    parts = [
+        f"[{slot}: {_SAFE_REASONS.get(error.status_code, f'upstream HTTP {error.status_code}')}]"
+        for slot, error in refusals
+    ]
+    message = f"All {pool_label} slots exhausted: " + ", ".join(parts)
+    body = json.dumps(
+        {"error": {"type": "rate_limit_error", "message": message}}, ensure_ascii=False,
+    ).encode("utf-8")
+    headers = (
+        ("Content-Type", "application/json"),
+        ("Retry-After", str(retry_after)),
+        ("Content-Length", str(len(body))),
+    )
+    return 429, headers, body
 
 
 class AttemptPhase(str, Enum):
@@ -65,7 +202,7 @@ def _replay_safe(outcome: AttemptState | Mapping[str, object], statuses: Iterabl
     if phase == AttemptPhase.CONNECTING:
         return sent is False and status == 0
     if phase == AttemptPhase.RESPONSE_HEADERS:
-        return status in DEFAULT_ROUTE_FAILOVER_STATUSES and status in statuses
+        return status in frozenset(statuses)
     return False
 
 
@@ -75,12 +212,13 @@ def decide_attempt(
     elapsed_s: float,
     outcome: AttemptState | Mapping[str, object] | None,
     allowed_statuses: Iterable[int] = DEFAULT_ROUTE_FAILOVER_STATUSES,
+    extra_statuses: Iterable[int] = (),
 ) -> AttemptDecision:
     """Сначала общий PR17 budget, затем отдельное доказательство no-replay."""
     decision = compute_attempt_decision(config, attempt_index, elapsed_s)
     if not decision.allow_retry or outcome is None:
         return decision
-    if _replay_safe(outcome, allowed_statuses):
+    if _replay_safe(outcome, effective_failover_statuses(allowed_statuses, extra_statuses)):
         return decision
     return AttemptDecision(False, 0.0, RetryReason.NON_RETRYABLE_CATEGORY)
 
@@ -164,6 +302,7 @@ class RouteAttemptRunner:
         self, routes: Iterable[str], ports: AttemptPorts,
         config: RetryBudgetConfig, clock: Callable[[], float],
         allowed_statuses: Iterable[int] = DEFAULT_ROUTE_FAILOVER_STATUSES,
+        extra_statuses: Iterable[int] = (),
     ) -> None:
         self._routes = iter(routes)
         self._ports = ports
@@ -175,7 +314,7 @@ class RouteAttemptRunner:
         self._used = False
         self._last_state: AttemptState | None = None
         self._last_error: BaseException | None = None
-        self._statuses = DEFAULT_ROUTE_FAILOVER_STATUSES.intersection(allowed_statuses)
+        self._statuses = effective_failover_statuses(allowed_statuses, extra_statuses)
 
     def _check_cancelled(self) -> None:
         if self._ports.cancelled():

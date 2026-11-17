@@ -254,12 +254,17 @@ BACKEND_KEYS = frozenset(
         "headers_from_json",
         "per_request_headers",
         "default_body_extra",
+        "failover_statuses",
+        "failover_error_types",
     }
 )
 # Необязательные upstream-параметры raw-HTTP шва (только виды с `base_url`): откуда брать ключ и
 # заголовки, какие заголовки генерировать на каждый запрос и какие поля тела подставлять по умолчанию.
 UPSTREAM_PARAM_KEYS = frozenset(
-    {"api_key_ref", "headers_from_json", "per_request_headers", "default_body_extra"}
+    {
+        "api_key_ref", "headers_from_json", "per_request_headers", "default_body_extra",
+        "failover_statuses", "failover_error_types",
+    }
 )
 TECHNICAL_REF_KEYS = frozenset({"version", "binary_path", "binary_sha256"})
 PROXY_PORT_MIN = 1
@@ -312,6 +317,20 @@ def upstream_params_error(entry: Mapping[str, Any]) -> str:
         not isinstance(extra, dict) or not all(isinstance(k, str) for k in extra)
     ):
         return "backend_default_body_extra_invalid"
+    statuses = entry.get("failover_statuses")
+    if statuses is not None and (
+        not isinstance(statuses, list)
+        or not statuses
+        or any(
+            isinstance(value, bool) or not isinstance(value, int)
+            or value not in (401, 402, 403, 429, 503)
+            for value in statuses
+        )
+    ):
+        return "backend_failover_statuses_invalid"
+    types = entry.get("failover_error_types")
+    if types is not None and not _str_list(types):
+        return "backend_failover_error_types_invalid"
     return ""
 
 

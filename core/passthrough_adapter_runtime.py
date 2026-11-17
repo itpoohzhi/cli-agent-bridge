@@ -22,7 +22,12 @@ from core.passthrough_sliding_window import (
     FLAG_PASSTHROUGH_SLIDING_WINDOW,
     open_sliding_deadline,
 )
-from core.route_attempts import DEFAULT_ROUTE_FAILOVER_STATUSES, RouteRefusal
+from core.route_attempts import (
+    RouteRefusal,
+    effective_failover_statuses,
+    failover_config_from_mapping,
+    is_route_refusal_status,
+)
 from core.runtime_env import flag_enabled
 from core.transport_credentials import credential_ready
 
@@ -223,13 +228,24 @@ class _RequestRuntime:
         response, request, adapter = self.response, self.exchange, self.adapter
         if response is None:
             raise RuntimeError("missing_upstream_response")
-        if response.status in DEFAULT_ROUTE_FAILOVER_STATUSES and getattr(
+        extra_statuses, extra_types = failover_config_from_mapping(
+            getattr(adapter, "config", None)
+        )
+        if response.status in effective_failover_statuses(extra_statuses=extra_statuses) and getattr(
             request.sink, "accepts_presend_errors", False
         ):
             body = adapter._read_presend_body(response)
             headers = tuple(adapter._response_headers(response)) + (("Content-Length", str(len(body))),)
             self._check()
-            raise PassthroughRouteRefusal(response.status, headers, body)
+            if is_route_refusal_status(
+                response.status, body,
+                extra_statuses=extra_statuses, extra_error_types=extra_types,
+            ):
+                raise PassthroughRouteRefusal(response.status, headers, body)
+            # Кандидат по статусу, но не отказ слота (например, запрет модели):
+            # тело уже прочитано, поэтому ответ отдаётся дословно здесь.
+            self.successful = adapter._emit_response(response, request.sink, (body, False))
+            return
         self.successful = adapter._respond(
             response, request.request, request.sink, self.deadline,
             on_timeout=self.abort,

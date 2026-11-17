@@ -22,6 +22,14 @@
         "weight": {"type": "integer", "minimum": 0, "maximum": 10000}
       }
     },
+    "failover": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "statuses": {"type": "array", "items": {"type": "integer", "minimum": 400, "maximum": 599}},
+        "error_types": {"type": "array", "items": {"type": "string", "minLength": 1}}
+      }
+    },
     "transport": {
       "type": "object",
       "additionalProperties": false,

@@ -1,7 +1,7 @@
 {
   "compiled_at": "2026-11-17T04:48:25+0300",
   "compiler_version": 1,
-  "fleet_sha256": "01c88ca0b11d650b7147c6f2f46c95a1321c9ec7aa7bf10a46f20fc551df2c57",
+  "fleet_sha256": "54365093eb2b6a17b82085d3bd0b8f366104749eaa398d3de628aa3b92c286d7",
   "inputs": {
     "discovery_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
     "manifests": {
@@ -16,10 +16,12 @@
       "openai-key-2.yaml": "f3a13ea5b5b18353dda5e02e9678fd88aa2c21a18a53e44f4e8f0ce05f9f0fba",
       "openai-key-3.yaml": "eccc73e68769ab0d742b5ace825af8bbcb2d02f07068e272c608ddefd1b2177e",
       "opencode-go-claude.yaml": "7e63ccd97ae1f20179b4e03136c1b2fb50e9d0d40233df6c9465195a05779f4c",
+      "opencode-go-sub1.yaml": "2edea38ca31cda93dd333e924f5d2613c064776190c9f19badf1c00b797866a0",
+      "opencode-go-sub2.yaml": "d5ab81deff5ffef8cb0a9a6af86d05ee90575fbad5c090187ccdd5b6a86899c7",
       "opencode-go.yaml": "8d27372c95fcf802352d38e4e6f3a6c1919030ef6220d3c6c2c5808fe6077f68",
       "opencode-zen.yaml": "9239b0e1c543c23037f5407b6c64a0db04735d092ba7ccc53d197f83f91d1636"
     },
-    "manifests_sha256": "5263bb006d13bb4af0cd6b2e227def8d1b80ac4a949e696adf8c01baea9c72c1"
+    "manifests_sha256": "8e5f49df17c9d9013b766e22a7ae2201717f85d3b22f8ac710de8b0cba13401e"
   },
   "models": {
     "beam-free": {
@@ -106,6 +108,12 @@
       "alternates": [
         {
           "provider": "opencode-go"
+        },
+        {
+          "provider": "opencode-go-sub1"
+        },
+        {
+          "provider": "opencode-go-sub2"
         }
       ],
       "efforts_proven": [],
@@ -701,6 +709,94 @@
       "kind": "passthrough",
       "max_concurrent": 64,
       "quota_group": "opencode-go-claude",
+      "timeout_s": 180.0
+    },
+    "opencode-go-sub1": {
+      "allow_base_url": [
+        {
+          "host": "127.0.0.1",
+          "path_prefix": "/go/v1",
+          "port": 10830,
+          "scheme": "http"
+        }
+      ],
+      "bridge": true,
+      "direct": {
+        "http": {
+          "api_key_ref": {
+            "fallback_file": "~/.config/opencode-go-account-switch/profiles/sub1/opencode-go.key"
+          },
+          "base_url": "http://127.0.0.1:10830/go/v1",
+          "headers_from_json": {
+            "forbid_ua_prefix": [
+              "python"
+            ],
+            "key": "provider.opencode-go.options.headers",
+            "path": "~/.config/opencode/opencode.json",
+            "pick": [
+              "User-Agent"
+            ],
+            "required": []
+          },
+          "path": "/chat/completions",
+          "per_request_headers": {
+            "x-opencode-session": "{uuid4}"
+          },
+          "response": {
+            "field": "choices[0].message.content"
+          },
+          "stream": true
+        },
+        "type": "http"
+      },
+      "enabled": true,
+      "kind": "passthrough",
+      "max_concurrent": 64,
+      "quota_group": "opencode-go",
+      "timeout_s": 180.0
+    },
+    "opencode-go-sub2": {
+      "allow_base_url": [
+        {
+          "host": "127.0.0.1",
+          "path_prefix": "/go/v1",
+          "port": 10830,
+          "scheme": "http"
+        }
+      ],
+      "bridge": true,
+      "direct": {
+        "http": {
+          "api_key_ref": {
+            "fallback_file": "~/.config/opencode-go-account-switch/profiles/sub2/opencode-go.key"
+          },
+          "base_url": "http://127.0.0.1:10830/go/v1",
+          "headers_from_json": {
+            "forbid_ua_prefix": [
+              "python"
+            ],
+            "key": "provider.opencode-go.options.headers",
+            "path": "~/.config/opencode/opencode.json",
+            "pick": [
+              "User-Agent"
+            ],
+            "required": []
+          },
+          "path": "/chat/completions",
+          "per_request_headers": {
+            "x-opencode-session": "{uuid4}"
+          },
+          "response": {
+            "field": "choices[0].message.content"
+          },
+          "stream": true
+        },
+        "type": "http"
+      },
+      "enabled": true,
+      "kind": "passthrough",
+      "max_concurrent": 64,
+      "quota_group": "opencode-go",
       "timeout_s": 180.0
     },
     "opencode-zen": {

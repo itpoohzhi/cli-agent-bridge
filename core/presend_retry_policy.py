@@ -4,12 +4,17 @@ from __future__ import annotations
 
 import math
 import os
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from http.client import HTTPConnection, HTTPResponse
 from typing import Protocol
 
 from core.passthrough_adapter_runtime import PassthroughRouteRefusal
-from core.route_attempts import DEFAULT_ROUTE_FAILOVER_STATUSES
+from core.route_attempts import (
+    DEFAULT_ROUTE_FAILOVER_STATUSES,
+    effective_failover_statuses,
+    failover_config_from_mapping,
+    is_route_refusal_status,
+)
 
 RetryOpen = Callable[[], tuple[HTTPConnection, HTTPResponse]]
 PresendResult = tuple[HTTPConnection, HTTPResponse, bool]
@@ -60,10 +65,17 @@ def _safe_refusal(status: int) -> bool:
 
 
 def is_retryable_presend_payload(
-    status: int, headers: Sequence[tuple[str, str]], body: bytes
+    status: int, headers: Sequence[tuple[str, str]], body: bytes,
+    *, extra_statuses: Iterable[int] = (), extra_error_types: Iterable[str] = (),
 ) -> bool:
-    """Совместимый классификатор: payload не доказывает отсутствие исполнения."""
-    return _safe_refusal(status)
+    """Совместимый классификатор: payload не доказывает отсутствие исполнения.
+
+    Per-provider `extra_*` расширяют множество отказов слота (например, 403
+    `permission_error` и 402 у OpenCode Go); без них семантика прежняя.
+    """
+    return is_route_refusal_status(
+        status, body, extra_statuses=extra_statuses, extra_error_types=extra_error_types,
+    )
 
 
 def compute_presend_retry_delay(
@@ -105,13 +117,22 @@ def _resolve_response(
     Отсутствие commit обеспечивает caller. Терминальные ответы
     остаются непрочитанными, чтобы обычный response-путь передал их дословно.
     """
-    if not _safe_refusal(resp.status):
+    extra_statuses, extra_types = failover_config_from_mapping(
+        getattr(adapter, "config", None)
+    )
+    if resp.status not in effective_failover_statuses(extra_statuses=extra_statuses):
         return conn, resp, False
     if not getattr(sink, "accepts_presend_errors", False):
         return conn, resp, False
     if sink.client_gone():
         raise adapter._client_gone_exc()
     body = adapter._read_presend_body(resp)
+    if not is_route_refusal_status(
+        resp.status, body, extra_statuses=extra_statuses, extra_error_types=extra_types,
+    ):
+        # Тело уже прочитано: сохранить для вызывающего, ответ не отказ слота.
+        setattr(resp, "presend_body", body)
+        return conn, resp, False
     headers = tuple(adapter._response_headers(resp)) + (
         ("Content-Length", str(len(body))),
     )
