@@ -59,7 +59,7 @@ def test_stage_w2_n_both_models_use_their_own_env_and_quota_slot(slot: int) -> N
     provider_id = f"openai-key-{slot}"
     doc = _provider(provider_id)
     expected = (
-        provider_id, "passthrough", True, 50, f"OPENAI_API_KEY_{slot}",
+        provider_id, "passthrough", False, 0, f"OPENAI_API_KEY_{slot}",
         "http://127.0.0.1:10830/sg-openai", provider_id,
         ("gpt-6.1-sol", "gpt-6.1-terra"),
     )
