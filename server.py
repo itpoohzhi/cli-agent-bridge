@@ -61,6 +61,7 @@ import sys
 import threading
 import time
 import uuid
+from datetime import datetime, timezone
 from urllib.parse import parse_qs, urlparse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -72,82 +73,21 @@ sys.path.insert(0, str(ROOT / "tools"))
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))  # пакеты core/ и adapters/ рядом с server.py
 import b_guard  # noqa: E402  - охранник B: автоматический контур профилей DSH (RW-003)
-from agent_browser import (  # noqa: E402,F401  - единый loopback-контур CDP (ADR-0016): мост и CLI
-    discover_local_cdp_url,
-    is_loopback_cdp_url,
-)
-from tools.receipt_schema import (  # noqa: E402,F401
-    RECEIPT_PROBES as RECEIPT_PROBES, RECEIPT_SCHEMA, RPC_API_VERSION, SETTINGS_PROFILE as SETTINGS_PROFILE,
-    TOOLS_POLICY as TOOLS_POLICY, ReceiptV3, catalog_tool_ids, receipt_gate_problem,
-    settings_profile_digest as settings_profile_digest, tools_policy_digest as tools_policy_digest,
-    validate_model_catalog, validate_receipt_components,
-)
+from agent_browser import discover_local_cdp_url, is_loopback_cdp_url  # noqa: E402,F401
+from tools.receipt_schema import RECEIPT_PROBES as RECEIPT_PROBES, RECEIPT_SCHEMA, RPC_API_VERSION, SETTINGS_PROFILE as SETTINGS_PROFILE, TOOLS_POLICY as TOOLS_POLICY, ReceiptV3, catalog_tool_ids, receipt_gate_problem, settings_profile_digest as settings_profile_digest, tools_policy_digest as tools_policy_digest, validate_model_catalog, validate_receipt_components  # noqa: E402,F401
 
 from adapters import ADAPTER_KINDS  # noqa: E402  - реестр видов адаптеров задан в коде
-from adapters.passthrough_adapter import (  # noqa: E402
-    ClientGone,
-    PassthroughAdapter,
-    PassthroughLimits,
-    ResponseSink,
-)
-from core.backend_adapter import (  # noqa: E402
-    EFFORT_LEVELS as EFFORT_LEVELS,
-    AdapterRegistry,
-    FleetViolation,
-    ImageAttachment,
-    StreamSink,
-    Transcript,
-    TranscriptItem,
-    TurnContext,
-    ToolCall,
-    build_catalog,
-    is_bridge_secret_name,
-    strip_bridge_secrets,
-)
+from adapters.passthrough_adapter import ClientGone, PassthroughAdapter, PassthroughLimits, ResponseSink  # noqa: E402
+from core.backend_adapter import EFFORT_LEVELS as EFFORT_LEVELS, AdapterRegistry, FleetViolation, ImageAttachment, StreamSink, Transcript, TranscriptItem, TurnContext, ToolCall, build_catalog, is_bridge_secret_name, strip_bridge_secrets  # noqa: E402
 from core import context_resilience as ctxres  # noqa: E402
+from core import http_post_dispatch_guard as _post_dispatch_guard  # noqa: E402
 from core import passthrough_facade as _transport_facade  # noqa: E402
-from core.resilience import (  # noqa: E402
-    ResilienceError,
-    ResilienceLease,
-    ResilienceManager,
-)
-from core.lifecycle import (  # noqa: E402,F401 - сохраняем прежние реэкспорты фасада
-    DEFAULT_DRAIN_SECONDS,
-    HubLifecycleManager,
-    KEEPALIVE_INTERVAL_S,
-    QoSSlotManager as QoSSlotManager,
-    QUEUE_TIMEOUT_S as QOS_DEFAULT_QUEUE_TIMEOUT_S,
-    RESERVED_INTERACTIVE_SLOTS,
-    get_qos_manager,
-    has_live_parent,
-)
+from core import turn_outcome as _turn_outcome  # noqa: E402
+from core.resilience import ResilienceError, ResilienceLease, ResilienceManager  # noqa: E402
+from core.lifecycle import DEFAULT_DRAIN_SECONDS, HubLifecycleManager, KEEPALIVE_INTERVAL_S, QoSSlotManager as QoSSlotManager, QUEUE_TIMEOUT_S as QOS_DEFAULT_QUEUE_TIMEOUT_S, RESERVED_INTERACTIVE_SLOTS, get_qos_manager, has_live_parent  # noqa: E402,F401
 from core.prompt_prefix_stability import compute_tools_budget_overhead as compute_tools_budget_overhead  # noqa: E402
-from core.tool_emulation import (  # noqa: E402,F401  - общая эмуляция tools (MB-REQ-007), реэкспорт имён
-    TOOL_CALL_CLOSE,
-    TOOL_CALL_OPEN,
-    LiveParserError,
-    ToolCallParser,
-    _attachments_section,
-    _flatten_content,
-    _messages_to_prompt,
-    _normalize_arguments,
-    _normalize_tool_call,
-    _parse_tool_call_block,
-    _render_content,
-    _render_message,
-    _render_tool_call,
-    _strip_code_fence,
-    _tool_choice_name,
-    _tool_choice_none,
-    _tools_section,
-    build_tool_schemas,
-    finalize_turn,
-    sanitize_tool_call,
-)
-from core.stream_framing import (  # noqa: E402
-    build_stream_error_chunk,
-    format_stream_error_sse,
-)
+from core.tool_emulation import TOOL_CALL_CLOSE, TOOL_CALL_OPEN, LiveParserError, ToolCallParser, _attachments_section, _flatten_content, _messages_to_prompt, _normalize_arguments, _normalize_tool_call, _parse_tool_call_block, _render_content, _render_message, _render_tool_call, _strip_code_fence, _tool_choice_name, _tool_choice_none, _tools_section, build_tool_schemas, finalize_turn, sanitize_tool_call  # noqa: E402,F401
+from core.stream_framing import build_stream_error_chunk, format_stream_error_sse  # noqa: E402
 from core.turn_session_manager import (  # noqa: E402
     GapDetectedError,
     ManagedTurn,
@@ -178,6 +118,7 @@ from core.model_notes_parse import (  # noqa: E402
     read_model_notes_file,
 )
 from core.model_notes_snapshot import ModelNotesSnapshotManager  # noqa: E402
+from core.model_notes_filter import _rule_matches as _model_notes_rule_matches  # noqa: E402
 from core.published_model_owner import (  # noqa: E402
     canonical_published_models,
     publication_status,
@@ -232,6 +173,8 @@ from core.effort_policy import (  # noqa: E402
     resolve_model_effort_fields,
 )
 from core.effortless_policy import EffortValidationError as EffortValidationError, card_effort_fields, effortless_specs  # noqa: E402
+
+_transport_facade.begin_post = _post_dispatch_guard.begin_post
 CLI_CFG = CliRuntimeConfig.from_env()
 REQUEST_TELEMETRY = RequestTelemetryStore()  # DuckDB/sqlite3, неблокирующая запись, BRIDGE_TELEMETRY_* (core/defaults.py)
 
@@ -805,6 +748,8 @@ def _publication_cards(
 def _build_models_list(
     owner_tuple: tuple[str, ...] | None = None,
 ) -> list[dict[str, Any]]:
+    if _MODEL_NOTES_FILTER.is_failed_closed():
+        return []
     published = _get_published_models()
     selected = _effort_specs()
     specs = selected if flag_enabled(FLAG_EFFORT_CATALOG) else effortless_specs(selected)
@@ -1437,6 +1382,19 @@ _CHAT_PATHS = ("/v1/chat/completions", "/chat/completions")
 _LOOPBACK_PEERS = ("127.0.0.1", "::1", "::ffff:127.0.0.1")
 
 
+def _classify_turn_outcome(out: dict[str, Any], backend_err: Any) -> str:
+    if out.get("state") in _RESILIENCE_NEUTRAL_STATES:
+        return "CLIENT_ABORT"
+    status = 200 if backend_err is None and out.get("rc") == 0 else 502
+    ok = {"choices": [{"message": {"content": out.get("text") or ""}}]}
+    error = {"error": backend_err or {"type": out.get("state") or "backend_error"}}
+    payload = ok if status == 200 else error
+    response = _turn_outcome.TurnResponse(json.dumps(payload).encode(), status)
+    classifier = _turn_outcome.StreamOutcomeClassifier(response.status, response.content_type)
+    classifier.feed(response.body)
+    return classifier.finish().kind.value
+
+
 def _base_quota_model(model: str) -> str:
     return re.sub(r"-(?:minimal|low|medium|high|xhigh|max)$", "", model)
 
@@ -1608,18 +1566,49 @@ class ModelNotesFilter:
     def close(self) -> None:
         self.manager.close()
 
-    def is_blocked(self, model: str) -> bool:
+    def is_failed_closed(self) -> bool:
+        return self.status == "FAILED_CLOSED"
+
+    def is_blocked(
+        self,
+        model: str,
+        transport: str | None = None,
+        effort: str | None = None,
+    ) -> bool:
         if _QUOTA_CB_CACHE.is_blocked(model):
             return True
         notes = self.manager.snapshot
         if notes is None:
             return True
         names = {model, _base_quota_model(model)}
-        return any(rule.model in names for rule in notes.rules)
+        if transport is None and effort is None:
+            return any(rule.model in names for rule in notes.rules)
+
+        alias = re.fullmatch(
+            r"(.+)-(off|minimal|low|medium|high|xhigh|max)", model
+        )
+        if alias is not None:
+            model, alias_effort = alias.groups()
+            if effort is not None and effort != alias_effort:
+                return True
+            effort = alias_effort
+
+        now = datetime.now(timezone.utc)
+        return any(
+            _model_notes_rule_matches(rule, model, transport, effort, now)
+            for rule in notes.rules
+        )
 
 
 _MODEL_NOTES_FILTER = ModelNotesFilter()
 _PENALTY_TRACKER = get_penalty_tracker()
+
+
+def _refresh_model_notes_filter() -> None:
+    global _MODEL_NOTES_FILTER
+    previous = _MODEL_NOTES_FILTER
+    _MODEL_NOTES_FILTER = ModelNotesFilter()
+    previous.close()
 
 # Нейтральные к здоровью бэкенда исходы passthrough: таймаут шага модели и оборванный
 # стрим одного хода не означают недоступность апстрима, поэтому брейкер не штрафуется.
@@ -1983,6 +1972,7 @@ def _kill_all(*_: Any) -> None:
     closed = shutdown_all()
     # Остальные бэкенды: droid уже закрыт выше (его adapter.shutdown() — тот же shutdown_all).
     BACKENDS.shutdown(exclude=("droid",))
+    _MODEL_NOTES_FILTER.close()
     try:
         # Ходы убиты: свежие prompt/turn-файлы собственных детей больше не нужны (RW-010).
         _sweep_workspace(cutoff_s=0.0)
@@ -6518,6 +6508,23 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
                 return
 
     # ---- HTTP --------------------------------------------------------------------
+    def _handle_health_get(self, path: str) -> bool:
+        """Serves health without exposing notes contents or touching request routing."""
+        if path not in ("/health", "/v1/health"):
+            return False
+        if _MODEL_NOTES_FILTER.is_failed_closed():
+            self._send(503, {"ok": False, "notes_status": _MODEL_NOTES_FILTER.status})
+            return True
+        required = [adapter for adapter in BACKENDS.adapters() if adapter.required]
+        draining = _shutting_down or (_is_drain_enabled() and LIFECYCLE.is_draining())
+        payload = {"ok": all(adapter.is_healthy() for adapter in required),
+                   "transport": "droid-exec", "model": MODEL_ID,
+                   "active": BACKENDS.active_total(),
+                   "max_concurrent": BACKENDS.max_concurrent_total(),
+                   "tool_emulation": True, "uptime_s": int(time.time() - _started)}
+        self._send(200, payload, extra_headers={"X-Bridge-Draining": "true"} if draining else None)
+        return True
+
     def do_GET(self) -> None:  # noqa: N802
         self._trace = self._req_started_mono = None  # GET-ответы (_send) в телеметрию запросов не попадают
         path = self.path.split("?", 1)[0]
@@ -7059,23 +7066,18 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
         lease: ResilienceLease, out: dict, backend_err: Any, model_id: str = ""
     ) -> None:
         """Явный исход хода CLI-бэкенда: успех — `rc == 0` и нет ошибки бэкенда (ADR-0020 §3.2)."""
-        if backend_err is None and out.get("rc") == 0:
+        outcome = _classify_turn_outcome(out, backend_err)
+        if outcome == "OK":
             lease.record_success()
             if model_id:
                 _PENALTY_TRACKER.record_start_success(model_id)
-        elif out.get("state") in _RESILIENCE_NEUTRAL_STATES:
-            # Локальная перегрузка/хранилище моста — не вина бэкенда: брейкер не штрафуем.
+        elif outcome == "CLIENT_ABORT":
             lease.record_discard(str(out.get("state")))
         else:
             lease.record_failure()
             if model_id:
-                reason = str(
-                    out.get("error") or out.get("state") or "rc_non_zero"
-                ).strip()[:120]
-                _PENALTY_TRACKER.record_start_failure(
-                    model_id,
-                    reason,
-                )
+                reason = str(out.get("error") or out.get("state") or "rc_non_zero").strip()[:120]
+                _PENALTY_TRACKER.record_start_failure(model_id, reason)
 
     def _current_lease(self) -> ResilienceLease:
         """Lease текущего запроса; вне `_serve_resilient` (тесты, прямой вызов) — пустой (no-op)."""
@@ -7647,6 +7649,17 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
         emit("data: [DONE]\n\n")
 
 
+_LEGACY_HANDLER_GET = Handler.do_GET
+
+
+def _guarded_handler_get(self: Handler) -> None:
+    self._trace = self._req_started_mono = None
+    if self._handle_health_get(self.path.split("?", 1)[0]):
+        return
+    _LEGACY_HANDLER_GET(self)
+
+
+Handler.do_GET = _guarded_handler_get
 BridgeHandler = Handler
 
 
