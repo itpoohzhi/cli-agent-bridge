@@ -227,7 +227,7 @@ def test_failed_verdict_is_not_promoted(promote_env: Any) -> None:
 
 def test_busy_lifecycle_lock_fails_without_writing(promote_env: Any) -> None:
     providers, state, env = promote_env
-    state.mkdir(parents=True)
+    state.mkdir(parents=True, exist_ok=True)
     with open(state / ".lifecycle.lock", "a+") as handle:
         fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
         code = _probe(
@@ -248,7 +248,7 @@ def test_post_verify_mismatch_is_reported(
         state / p: ("previous " + p).encode() for p in ("catalog.lock.json", "fleet.compiled.json")
     }
     if seeded:
-        state.mkdir()
+        state.mkdir(parents=True, exist_ok=True)
         for path, data in snapshot.items():
             path.write_bytes(data)
     real = catalog_promote.compile_from_disk
