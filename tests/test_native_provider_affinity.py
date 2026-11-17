@@ -16,10 +16,9 @@ def _load_fleet():
         return json.load(f)
 
 @pytest.mark.parametrize("model_id,expected_provider", [
-    ("gemini-3.8-flash", "agy"),
     ("claude-sonnet-5-5", "claude-p"),
     ("deepseek-v4.1-flash", "deepseek-direct"),
-    ("gpt-6.1-sol", "openai-key-2"),
+    ("gpt-6.1-sol", "codex"),
 ])
 def test_native_provider_priority(model_id, expected_provider):
     cat = _load_catalog()
@@ -39,7 +38,6 @@ def test_explicit_droid_models(model_id):
     assert models[model_id].get("provider") == "droid"
 
 @pytest.mark.parametrize("model_id", [
-    "gemini-3.8-flash",
     "claude-sonnet-5-5",
     "gpt-6.1-sol",
 ])
@@ -66,7 +64,7 @@ def test_droid_upstream_model(droid_model, upstream_model):
 EXPECTED_FAMILY_PROVIDER = {
     "Google": "agy",
     "Anthropic": "claude-p",
-    "OpenAI": "openai-key-2",
+    "OpenAI": "codex",
     "DeepSeek": "deepseek-direct",
     "Meta": "muse",
 }
@@ -222,26 +220,32 @@ def test_fallback_candidate_ranking_to_droid_when_native_fails():
     from adapters import ADAPTER_KINDS
     cat = _load_catalog()
     manifests = load_manifests(ROOT / "providers.d", ADAPTER_KINDS).manifests
-    entry = explain_model(cat, manifests, "gemini-3.8-flash")
+    entry = explain_model(cat, manifests, "gpt-6.1-sol")
     assert entry is not None
-    assert entry.primary == "agy"
+    assert entry.primary == "codex"
     assert "droid" in entry.alternates
     p_map = {pid: p for p, pid in entry.candidates}
-    assert p_map["agy"] == 10
+    assert p_map["codex"] == 10
     assert p_map["droid"] == 30
-    assert p_map["agy"] < p_map["droid"]
+    assert p_map["codex"] < p_map["droid"]
 
 
 class TestNativeProviderE2ERouting(BridgeCase):
     """Сквозной HTTP-тест маршрутизации к нативному passthrough-провайдеру."""
 
     def setUp(self):
+        import server
+
         super().setUp()
+        (Path(self._tmp.name) / "notes.md").write_text(
+            "| Модель | Статус |\n|---|---|\n| __fixture_only__ | BANNED |\n",
+            encoding="utf-8",
+        )
+        server._MODEL_NOTES_FILTER = server.ModelNotesFilter(Path(self._tmp.name) / "notes.md")
         from tests.bridge_testlib import load_raw_fleet
         from tests.test_passthrough_adapter import FakeUpstream
         from adapters import ADAPTER_KINDS
         from core.backend_adapter import AdapterRegistry
-        import server
         self.upstream = FakeUpstream()
         self.addCleanup(self.upstream.close)
         data = load_raw_fleet()
@@ -279,9 +283,18 @@ class TestNativeProviderE2ERouting(BridgeCase):
 class TestDroidModelE2ERouting(BridgeCase):
     """Сквозной HTTP-тест маршрутизации *-droid через сервер Handler."""
 
+    def setUp(self):
+        import server
+
+        super().setUp()
+        (Path(self._tmp.name) / "notes.md").write_text(
+            "| Модель | Статус |\n|---|---|\n| __fixture_only__ | BANNED |\n",
+            encoding="utf-8",
+        )
+        server._MODEL_NOTES_FILTER = server.ModelNotesFilter(Path(self._tmp.name) / "notes.md")
+
     def test_droid_model_e2e_routing(self):
         cases = [
-            ("gemini-3.8-flash-droid", "gemini-3.8-flash"),
             ("gpt-6.1-sol-droid", "gpt-6.1-sol"),
             ("claude-sonnet-5-5-droid", "claude-sonnet-5-5"),
         ]

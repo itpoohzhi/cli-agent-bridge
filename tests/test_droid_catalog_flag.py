@@ -28,16 +28,14 @@ _LMH = ("low", "medium", "high")
 # Sol скрыта профилем; DeepSeek принадлежит deepseek-direct независимо от флага droid.
 BASE_MODELS = (
     ("claude-sonnet-5-5", "claude-p", ("high",), "high"),
-    ("gemini-3.8-flash", "agy", _LMH, "high"), ("gemini-4-carbon", "agy", ("off",), "off"), ("muse-ember-1.0", "muse", (*_ALL[:-1], "xhigh", "max"), "high"),
+    ("muse-ember-1.0", "muse", (*_ALL[:-1], "xhigh", "max"), "high"),
     ("muse-spark-1.3", "muse", ("max",), "max"),
     ("muse-spark-1.3-contributor", "muse", ("max",), "max"),
     ("muse-wonder-1.0", "muse", _ALL, "high"),
     ("muse-wonder-full-1.0", "muse", _ALL, "high"),
-    ("gpt-6.1-terra", "openai-key-2", _LMH, "high"),
+    ("gpt-6.1-terra", "codex", _LMH, "high"),
     ("claude-opus-5-5", "claude-p", ("high",), "high"),
     ("claude-haiku-5-5", "claude-p", ("high",), "high"),
-    ("gemini-4-argon", "agy", _LMH, "high"),
-    ("gemini-4-hydrogen", "agy", (*_LMH, "xhigh"), "high"),
     ("deepseek-v4.1-flash", "deepseek-direct", ("off", "low", "high", "max"), "off"),
     ("deepseek-v4.1-flash-free", "opencode-zen", _ZEN, "high"),
     ("flint-40b-free", "opencode-zen", _ZEN, "high"),
@@ -50,7 +48,6 @@ BASE_MODELS = (
 # Имена моделей, переключаемых гейтом, при выключенном флаге.
 BASE_NAMES = {
     "claude-sonnet-5-5": "Claude Sonnet 5.5 (Claude-p bridge)",
-    "gemini-3.8-flash": "Gemini 3.8 Flash (AGY bridge)",
 }
 BASE_DROID_BACKEND = dict(kind="droid", enabled=False, owned_by="factory-droid", max_concurrent=64)
 BASE_ALIAS: dict[str, Any] = {}
@@ -291,7 +288,7 @@ class DroidCatalogFlagTest(unittest.TestCase):
             with self.subTest(env=sorted(env)), mock.patch.dict(os.environ, env):
                 catalog = srv()._load_fleet()
                 self.assertTrue(catalog["backends"]["droid"]["enabled"])
-                self.assertEqual((catalog["models"]["gpt-6.1-sol"]["backend"], catalog["models"]["gpt-6.1-sol-droid"]["backend"]), ("openai-key-2", "droid"))
+                self.assertEqual((catalog["models"]["gpt-6.1-sol"]["backend"], catalog["models"]["gpt-6.1-sol-droid"]["backend"]), ("codex", "droid"))
                 self.assertIn("gpt-6.1-sol", catalog["models"])
                 self.assertEqual(len(catalog["aliases"]), 32)
 
