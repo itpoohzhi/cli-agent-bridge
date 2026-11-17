@@ -123,8 +123,8 @@
       "effort": "low"
     },
     "gemini-3.8-flash-medium": {
-      "backend_id": "gemini-3.8-flash",
-      "backend": "droid",
+      "backend_id": "gemini-3.8-flash-agy",
+      "backend": "agy",
       "effort": "medium"
     },
     "gemini-3.8-flash-agy-medium": {
@@ -268,20 +268,18 @@
       "api_key_env": "AGY_BRIDGE_KEY"
     },
     "claude-p": {
-      "kind": "passthrough",
+      "kind": "stdio_resident",
       "enabled": true,
       "owned_by": "claude-p-bridge",
-      "max_concurrent": 128,
-      "base_url": "http://127.0.0.1:9881/v1",
-      "api_key_env": "CLAUDE_P_BRIDGE_KEY"
+      "max_concurrent": 10,
+      "wrapper": "claude --print --input-format stream-json --output-format stream-json --verbose"
     },
     "codex": {
-      "kind": "passthrough",
+      "kind": "stdio_resident",
       "enabled": true,
       "owned_by": "openai-codex",
-      "max_concurrent": 128,
-      "base_url": "http://127.0.0.1:2455/v1",
-      "api_key_env": "CODEX_LB_API_KEY"
+      "max_concurrent": 10,
+      "wrapper": "codex app-server"
     },
     "muse": {
       "kind": "muse",

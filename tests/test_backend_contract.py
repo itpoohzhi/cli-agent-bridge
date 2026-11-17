@@ -266,8 +266,9 @@ class TestRealAdapters(unittest.TestCase):
             for model in adapter.get_models():
                 self.assertEqual(model.backend, adapter.id)
             self.assertIn(adapter.capabilities.sessions, ("resident", "none"))
-            with self.assertRaises(BackendNotSupported):
-                adapter.spawn_session(TurnContext("test", "high", "hi"))
+            if adapter.capabilities.sessions == "none":
+                with self.assertRaises(BackendNotSupported):
+                    adapter.spawn_session(TurnContext("test", "high", "hi"))
             adapter.close_session("no-such-sid")
 
     def test_droid_health_follows_receipt_state(self):
