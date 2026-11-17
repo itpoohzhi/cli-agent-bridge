@@ -16,11 +16,10 @@ import tempfile
 import threading
 import time
 import unittest
-
-from typing import cast
 from contextlib import contextmanager
 from http.server import ThreadingHTTPServer
 from pathlib import Path
+from typing import Any, cast
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -44,6 +43,20 @@ PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
 JPEG_MAGIC = b"\xff\xd8\xff\xe0"
 GIF_MAGIC = b"GIF89a"
 WEBP_MAGIC = b"RIFF\x00\x00\x00\x00WEBPVP8 "
+
+
+def isolate_gateway_policy(monkeypatch: Any, tmp_path: Path) -> Any:
+    """Подменить загруженные server-policy объекты приватными файлами теста."""
+    from core.model_penalty import ModelPenaltyTracker
+
+    notes_path = tmp_path / "notes.md"
+    notes_path.write_text("| Модель | Статус |\n|---|---|\n| __fixture_only__ | BANNED |\n", encoding="utf-8")
+    notes_filter = server.ModelNotesFilter(notes_path)
+    setattr(notes_filter, "path", notes_path)
+    monkeypatch.setattr(server, "_PENALTY_TRACKER", ModelPenaltyTracker(tmp_path / "penalties.json"))
+    monkeypatch.setattr(server, "_QUOTA_CB_CACHE", server.QuotaCircuitBreakerCache(tmp_path / "quota.json"))
+    monkeypatch.setattr(server, "_MODEL_NOTES_FILTER", notes_filter)
+    return notes_filter
 
 
 def make_png(size=64):
@@ -104,12 +117,7 @@ _DROID_LEGACY_MODELS = (
         "context_window": 256000,
         "max_tokens": 32768,
         "input": ["text"],
-        "images": {
-            "cli_registry": "explicit_supported",
-            "status": "unverified",
-            "method": None,
-            "proof": None,
-        },
+        "images": {"cli_registry": "explicit_supported", "status": "unverified", "method": None, "proof": None},
     },
     {
         "id": "glm-5.3",
@@ -120,12 +128,7 @@ _DROID_LEGACY_MODELS = (
         "context_window": 1000000,
         "max_tokens": 131072,
         "input": ["text"],
-        "images": {
-            "cli_registry": "explicit_unsupported",
-            "status": "unsupported",
-            "method": None,
-            "proof": None,
-        },
+        "images": {"cli_registry": "explicit_unsupported", "status": "unsupported", "method": None, "proof": None},
     },
     {
         "id": "deepseek-v4.1-flash",
@@ -136,12 +139,7 @@ _DROID_LEGACY_MODELS = (
         "context_window": 1000000,
         "max_tokens": 384000,
         "input": ["text"],
-        "images": {
-            "cli_registry": "explicit_supported",
-            "status": "unverified",
-            "method": None,
-            "proof": None,
-        },
+        "images": {"cli_registry": "explicit_supported", "status": "unverified", "method": None, "proof": None},
     },
 )
 

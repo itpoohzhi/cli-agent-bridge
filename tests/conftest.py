@@ -26,11 +26,9 @@ from typing import Any, Generator
 import pytest
 import pytest_asyncio
 
-# Телеметрия запросов не должна писать в ~/.dsh владельца: БД тестового прогона — во временном каталоге.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 _TELEMETRY_TMP = tempfile.mkdtemp(prefix="bridge-telemetry-tests-")
 os.environ.setdefault("BRIDGE_TELEMETRY_DB_PATH", os.path.join(_TELEMETRY_TMP, "bridge_telemetry.duckdb"))
-# Штрафы моделей и GigaRC-флаги живут в общих файлах ~/.config/cli-agent-bridge: на хосте их меняют другие
-# сессии и живые мосты, поэтому прогон берёт свои (отсутствующие) файлы — иначе тесты зависят от соседей.
 os.environ.setdefault("BRIDGE_MODEL_PENALTIES_PATH", os.path.join(_TELEMETRY_TMP, "model_penalties.json"))
 os.environ.setdefault("BRIDGE_DYNAMIC_CONFIG_PATH", os.path.join(_TELEMETRY_TMP, "dynamic_config.json"))
 # Каталог droid включается GigaRC-флагом (дефолт false); стенды droid-тестов работают с включённым,
@@ -166,7 +164,7 @@ def _reset_singletons(full: bool, dirty: list[str]) -> None:
             _drain_procs(mod, tag, dirty)
         _run_hooks(mod, full)
         if full and not tag and hasattr(mod, "_active_turns"):
-            mod._active_turns = None
+            setattr(mod, "_active_turns", None)
 
 
 @pytest_asyncio.fixture(autouse=True, loop_scope="session")
@@ -225,24 +223,27 @@ def isolated_gateway_policy(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> Generator[None, None, None]:
-    """Не читать и не изменять карантин, квоты и runtime-флаги рабочего стенда."""
-    from core.model_penalty import ModelPenaltyTracker
-
+    """Изолировать identity, state, health, model-notes и policy-файлы от рабочего стенда."""
+    monkeypatch.delenv("MODEL_NOTES_PATH", raising=False)
+    isolated_env = {
+        "CAB_HOST_ID_OVERRIDE": f"pytest-{tmp_path.name}",
+        "BRIDGE_STATE_DIR": str(tmp_path / "state"),
+        "SLOT_HEALTH_DIR": str(tmp_path / "slot-health"),
+        "BRIDGE_MODEL_NOTES_PATH": str(tmp_path / "model-notes.md"),
+    }
+    for name, value in isolated_env.items():
+        monkeypatch.setenv(name, value)
     srv = sys.modules.get("server")
+    notes_filter: Any = None
     if srv is not None:
-        monkeypatch.setattr(
-            srv, "_PENALTY_TRACKER", ModelPenaltyTracker(tmp_path / "penalties.json")
-        )
-        monkeypatch.setattr(
-            srv,
-            "_QUOTA_CB_CACHE",
-            srv.QuotaCircuitBreakerCache(tmp_path / "quota.json"),
-        )
-        monkeypatch.setattr(
-            srv, "_MODEL_NOTES_FILTER", srv.ModelNotesFilter(tmp_path / "notes.md")
-        )
+        from tests.bridge_testlib import isolate_gateway_policy as isolate_policy
+        notes_filter = isolate_policy(monkeypatch, tmp_path)
     monkeypatch.setenv("BRIDGE_DYNAMIC_CONFIG_PATH", str(tmp_path / "dynamic.json"))
     yield
+    if notes_filter is not None:
+        notes_filter.close()
+        notes_filter.manager.stopped.wait(2)
+        notes_filter.manager._timer.join(2)
 
 
 @pytest.fixture(autouse=True)
@@ -268,7 +269,6 @@ def _spawn_barrier_open() -> Generator[None, None, None]:
     proc_groups._set_spawn_blocked(False)
 
 
-# --- Телеметрия запросов: общие фикстуры юнит- и HTTP-тестов (чтобы модули тестов остались в лимите M-MOD-I1) ---
 TELEMETRY_ENGINES = ("duckdb", "sqlite3")
 _TELEMETRY_EVENT_BASE = {
     "request_id": "req-1", "client_ip": "127.0.0.1", "client_port": 5000, "user_agent": "pytest/1.0",
