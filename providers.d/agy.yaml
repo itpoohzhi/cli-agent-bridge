@@ -1,7 +1,7 @@
 # Провайдер agy: локальный мост AGY (Google Gemini), passthrough к :9887.
 manifest_version: 1
 provider_id: agy
-kind: stdio_resident
+kind: passthrough
 enabled: true
 required: false
 priority: 10
@@ -50,8 +50,8 @@ models_overrides:
     images: {cli_registry: implicit_supported, status: unverified, method: null, proof: null}
   gemini-4-carbon:
     name: Gemini 4 Carbon (AGY)
-    efforts: ['off']
-    default_effort: 'off'
+    efforts: [low, medium, high, 'off']
+    default_effort: high
     context_window: 1048576
     max_tokens: 65536
     input: [text]
