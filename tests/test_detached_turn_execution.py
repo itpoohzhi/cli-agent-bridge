@@ -17,7 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import server  # noqa: E402
 from adapters import ADAPTER_KINDS  # noqa: E402
-from bridge_testlib import BridgeCase, load_raw_fleet, wait_until  # noqa: E402
+from bridge_testlib import BridgeCase, codex_as_passthrough, load_raw_fleet, wait_until  # noqa: E402
 from core.backend_adapter import (  # noqa: E402
     AdapterRegistry,
     ToolCall,
@@ -460,9 +460,9 @@ class HubLivenessTelemetryTests(BridgeCase):
             os.environ.pop(name, None)
         self.upstream = FakeUpstream()
         self.addCleanup(self.upstream.close)
-        data = load_raw_fleet()
-        data["backends"]["codex"]["enabled"] = True
-        data["backends"]["codex"]["base_url"] = "http://127.0.0.1:%d/v1" % self.upstream.port
+        data = codex_as_passthrough(
+            load_raw_fleet(), "http://127.0.0.1:%d/v1" % self.upstream.port
+        )
         data["backends"]["codex"].pop("api_key_env", None)
         server.FLEET = server._build_catalog(data)
         saved = server.BACKENDS

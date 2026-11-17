@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 import io
+import json
 import queue
 from pathlib import Path
 from types import SimpleNamespace
@@ -23,8 +24,18 @@ from tools.receipt_schema import validate_model_catalog, validate_receipt_compon
 from tools import droid_image
 
 
-def test_receipt_components_accept_complete_qualification() -> None:
-    receipt: dict[str, Any] = make_receipt(Path("/fake/image"), "a" * 64)
+def _make_receipt(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+    """Receipt по копии флита с включённым droid (прод-`fleet.json` держит `droid=false`)."""
+    data = json.loads((server.ROOT / "fleet.json").read_text(encoding="utf-8"))
+    data["backends"]["droid"]["enabled"] = True
+    monkeypatch.setattr(server, "FLEET", server._build_catalog(data))
+    return make_receipt(Path("/fake/image"), "a" * 64)
+
+
+def test_receipt_components_accept_complete_qualification(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    receipt: dict[str, Any] = _make_receipt(monkeypatch)
     validate_receipt_components(receipt)
     server._check_receipt_quad(receipt)
 
@@ -41,8 +52,10 @@ def test_receipt_components_accept_complete_qualification() -> None:
         ("probes", "spawn"),
     ],
 )
-def test_receipt_components_reject_tampering(section: str, key: str) -> None:
-    receipt: dict[str, Any] = make_receipt(Path("/fake/image"), "a" * 64)
+def test_receipt_components_reject_tampering(
+    monkeypatch: pytest.MonkeyPatch, section: str, key: str
+) -> None:
+    receipt: dict[str, Any] = _make_receipt(monkeypatch)
     receipt[section][key] = ""
     with pytest.raises(ValueError):
         validate_receipt_components(receipt)
@@ -87,11 +100,12 @@ def test_subagent_queue_heartbeat_and_optional_callback(
 def test_empty_upstream_mapping_keeps_public_model(
     route: Callable[..., Any], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    model = dict(server.FLEET["models"]["gpt-6.1-terra"], upstream_model="")
-    monkeypatch.setitem(server.FLEET["models"], "gpt-6.1-terra", model)
-    handler = route({"model": "gpt-6.1-terra"})
+    # `gpt-6.1-terra` теперь на codex `stdio_resident`; passthrough-шов проверяем на agy-модели.
+    model = dict(server.FLEET["models"]["gemini-4-argon"], upstream_model="")
+    monkeypatch.setitem(server.FLEET["models"], "gemini-4-argon", model)
+    handler = route({"model": "gemini-4-argon"})
     handler._serve_passthrough.assert_called_once()
-    assert handler._serve_passthrough.call_args.args[2]["model"] == "gpt-6.1-terra"
+    assert handler._serve_passthrough.call_args.args[2]["model"] == "gemini-4-argon"
 
 
 @pytest.mark.parametrize("timeout", [None, 0.25])
@@ -160,23 +174,38 @@ def test_execute_deadlines_and_sliding_progress(
     assert execute_case(monkeypatch, options)["state"] == expected
 
 
-def test_gpt_6_1_sol_has_zero_codex_fallback_in_compiled_fleet() -> None:
-    """gpt-6.1-sol обслуживается только Droid: codex discovery его исключает."""
+def test_gpt_6_1_sol_compiles_to_codex_resident_with_disabled_alternates() -> None:
+    """Политика владельца: `gpt-6.1-sol` — codex `stdio_resident` weight=100; droid и ключи выключены."""
     root = server.ROOT / "providers.d"
     loaded = load_manifests(root, ADAPTER_KINDS)
     codex_manifest = next(m for m in loaded.manifests if m.provider_id == "codex")
-    assert "gpt-6.1-sol" in codex_manifest.discovery.exclude
-    overridden = [r.model_id for r in codex_manifest.models_overrides]
-    assert "gpt-6.1-sol" not in overridden
+    assert codex_manifest.kind == "stdio_resident"
+    assert codex_manifest.enabled is True
+    assert codex_manifest.routing.weight == 100
+    assert "gpt-6.1-sol" in codex_manifest.discovery.static
+    assert "gpt-6.1-sol" not in codex_manifest.discovery.exclude
+    assert "gpt-6.1-sol" in [r.model_id for r in codex_manifest.models_overrides]
+    for provider_id in ("droid", "openai-key-2", "openai-key-3"):
+        manifest = next(m for m in loaded.manifests if m.provider_id == provider_id)
+        assert manifest.enabled is False
+    for provider_id in ("openai-key-2", "openai-key-3"):
+        manifest = next(m for m in loaded.manifests if m.provider_id == provider_id)
+        assert manifest.routing.weight == 0
     ids, meta = normalize_models(
         [("gpt-6.1-sol", {}), ("gpt-6.1-terra", {})], codex_manifest, {}
     )
-    assert ids == ("gpt-6.1-terra",), meta
+    assert ids == ("gpt-6.1-sol", "gpt-6.1-terra"), meta
     found = DiscoveryResult(
         provider_id="codex", fingerprint_sha256="", model_ids=ids, meta=meta
     )
     result = compile_from_disk(root, root / "_fleet.yaml", discovery={"codex": found})
-    assert result.sidecar["models"]["gpt-6.1-sol"]["provider"] == "droid"
-    assert result.sidecar["models"]["gpt-6.1-sol"]["alternates"] == []
+    assert result.sidecar["models"]["gpt-6.1-sol"]["provider"] == "codex"
+    assert result.sidecar["models"]["gpt-6.1-sol"]["alternates"] == [
+        {"provider": "openai-key-2"},
+        {"provider": "openai-key-3"},
+        {"provider": "droid"},
+    ]
     models = cast(list[dict[str, str]], result.fleet["models"])
-    assert next(m["backend"] for m in models if m["id"] == "gpt-6.1-sol") == "droid"
+    assert next(m["backend"] for m in models if m["id"] == "gpt-6.1-sol") == "codex"
+    assert result.fleet["backends"]["codex"]["kind"] == "stdio_resident"
+    assert result.fleet["backends"]["droid"]["enabled"] is False

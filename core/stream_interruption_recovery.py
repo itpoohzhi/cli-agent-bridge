@@ -1,10 +1,8 @@
-"""Чистый agent-agnostic фасад транзиентного и доказанного каузального восстановления."""
-
+"""Agent-agnostic фасад транзиентного, functionCall и каузального восстановления."""
 from __future__ import annotations
-
 from dataclasses import dataclass, replace
 from typing import Final, cast
-
+from core.function_call_recovery import FUNCTION_CALL_ERROR_RE as FUNCTION_CALL_ERROR_RE, FUNCTION_CALL_HEAL_REASON, is_recoverable_function_call_error as is_recoverable_function_call_error
 import core.turn_outcome_policy as causal
 from core.route_health_policy import (
     TRANSIENT_STREAM_INTERRUPTION_RE as TRANSIENT_STREAM_INTERRUPTION_RE,
@@ -12,7 +10,6 @@ from core.route_health_policy import (
     is_transient_stream_interruption as is_transient_stream_interruption,
     validate_retry_config,
 )
-
 CLI_ERROR_SOURCE: Final[str] = "cli_error"
 ERROR_STATUS: Final[str] = "ERROR"
 DONE_STATUS: Final[str] = "DONE"
@@ -24,7 +21,19 @@ TRANSIENT_RETRY_REASON: Final[str] = "transient_pre_delivery_retry"
 DEFAULT_INTERRUPTION_NOTICE: Final[str] = "\n\n[⚠️ Поток прерван транзиентным сбоем транспорта; показан частичный ответ.]"
 DEFAULT_RETRY_CONFIG: Final[RetryBudgetConfig] = RetryBudgetConfig(max_attempts=2)
 MAX_ELAPSED_S: Final[float] = 1e308
-
+def _safety_meta_items(obj: object, depth: int = 0) -> list[tuple[str, object]]:
+    """Собрать вложенные причины остановки; превышение глубины — fail-closed."""
+    if depth > 10:
+        return [("depth_exceeded", "fatal_safety_error")]
+    if not isinstance(obj, (dict, list)):
+        return []
+    pairs = obj.items() if isinstance(obj, dict) else enumerate(obj)
+    return [item for k, v in pairs if str(k).lower() not in ("content", "thinking", "tool_calls")
+            for item in ([(str(k), v)] if str(k).lower() in ("block_reason", "blockreason", "finish_reason", "finishreason", "stop_reason", "stopreason")
+                         else _safety_meta_items(v, depth + 1))]
+def is_self_healable_error(text: str | None, *, source: str = "cli_error") -> bool:
+    """Транзиентный обрыв либо исправимая ошибка functionCall."""
+    return is_transient_stream_interruption(text, source=source) or is_recoverable_function_call_error(text, source=source)  # fmt: skip
 class InterruptionTailState:
     """Факты о финальном planner-шаге и транзиентных обрывах."""
     final_planner: bool = False
@@ -32,35 +41,47 @@ class InterruptionTailState:
     last_planner_step_index: int = -1
     last_error_step_index: int = -1
     had_transient_error: bool = False
+    had_safety_error: bool = False
     last_error_sha256: str = ""
     last_error_length: int = 0
     last_error_attempt: int = -1
     error_from_structured_record: bool = False
     last_completion_attempt: int = -1
     has_open_planner_after_completion: bool = False
-
+    attempt: int = -1
     def note_error_record(self, rtype: str | int, rec: dict[str, object] | str = "", idx: int | None = None, **kw: object) -> None:
-        """Принимает legacy (rtype, rec, idx) либо (seq, text=..., attempt=0)."""
+        """Без реального attempt или step_index каузальность не доказана."""
         if isinstance(rtype, int) or rtype == "ERROR_MESSAGE":
             text = kw.get("text", rec)
+            struct_safety = False
             if isinstance(rec, dict):
                 texts = (rec.get(key) for key in ("content", "message", "error"))
                 text = next(filter(None, texts), "")
+                metadata = _safety_meta_items(rec) + [(k, v) for k, v in rec.items() if str(k).lower() in ("reason", "error", "message") and v is not None]
+                struct_safety = any(causal.meta_pair_is_fatal(k, v) for k, v in metadata) or causal.is_fatal_safety_error(str(text))
             text = str(text)
-            seq = rtype if isinstance(rtype, int) else idx or 0
+            seq = rtype if isinstance(rtype, int) else idx if idx is not None else -1
             self.final_planner, self.final_planner_content = False, ""
             self.has_open_planner_after_completion = self.last_planner_step_index >= 0
-            self.had_transient_error |= is_transient_stream_interruption(text)
-            if seq >= self.last_error_step_index:
+            self.had_transient_error |= is_self_healable_error(text)
+            self.had_safety_error |= struct_safety or causal.is_fatal_safety_error(text)
+            if seq < 0 or seq >= self.last_error_step_index:
                 self.last_error_step_index = seq
                 self.last_error_sha256 = causal.error_identity_digest(text)
                 self.last_error_length = len(causal.normalize_error_identity(text))
-                attempt = kw.get("attempt", 0)
+                attempt = kw.get("attempt", self.attempt)
                 self.last_error_attempt = attempt if type(attempt) is int else -1
-                self.error_from_structured_record = True
-
-    def note_planner_record(self, rec: dict[str, object], idx: int, *, attempt: int = 0) -> None:
-        """Непустой DONE без tools завершает шаг; любой новый открытый шаг отменяет финал."""
+                self.error_from_structured_record = seq >= 0
+    def note_planner_record(self, rec: dict[str, object], idx: int | None, *, attempt: int | None = None) -> None:
+        """Непустой DONE без tools завершает шаг; запись без индекса финал не затирает."""
+        struct_safety = any(causal.meta_pair_is_fatal(k, v) for k, v in _safety_meta_items(rec))
+        if self.had_safety_error or struct_safety:
+            self.had_safety_error = True
+            self.final_planner, self.final_planner_content = False, ""
+            self.has_open_planner_after_completion = True
+            return
+        if idx is None or idx < 0:
+            return
         content = rec.get("content")
         has_tools = bool(rec.get("tool_calls"))
         text = content if isinstance(content, str) else ""
@@ -70,7 +91,7 @@ class InterruptionTailState:
         self.final_planner_content = text if self.final_planner else ""
         if self.final_planner:
             self.last_planner_step_index = max(self.last_planner_step_index, idx)
-            self.last_completion_attempt = attempt
+            self.last_completion_attempt = self.attempt if attempt is None else attempt
 
 @dataclass(frozen=True)
 class TailCausalFacts:
@@ -82,64 +103,53 @@ class TailCausalFacts:
 
 def tail_causal_facts(tail: object) -> TailCausalFacts:
     """Экспортирует каузальные факты отдельно от совместимого legacy-словаря."""
-
     def get[T](name: str, default: T) -> T:
         return cast(T, getattr(tail, name, default))
-
-    error = causal.CausalErrorIdentity(
-        get("last_error_step_index", -1), get("last_error_attempt", -1),
-        get("last_error_sha256", ""), get("last_error_length", 0),
-    )
-    completion = causal.CausalCompletionFacts(
-        get("last_planner_step_index", -1), get("last_completion_attempt", -1),
-        bool(get("final_planner", False)), bool(get("final_planner_content", "").strip()),
-    )
+    error = causal.CausalErrorIdentity(get("last_error_step_index", -1), get("last_error_attempt", -1),
+                                      get("last_error_sha256", ""), get("last_error_length", 0))
+    completion = causal.CausalCompletionFacts(get("last_planner_step_index", -1), get("last_completion_attempt", -1),
+                                             bool(get("final_planner", False)), bool(get("final_planner_content", "").strip()))
     late = error.seq >= completion.last_completion_seq and error.seq >= 0
-    return TailCausalFacts(
-        error, bool(get("error_from_structured_record", False)),
-        completion, late or bool(get("has_open_planner_after_completion", False)),
-    )
-
+    return TailCausalFacts(error, bool(get("error_from_structured_record", False)),
+                           completion, late or bool(get("has_open_planner_after_completion", False)))
 def evaluate_done_causal_recovery(causal_input: causal.CausalOutcomeInput, error: str | None = None) -> causal.CausalOutcomeDecision:
     """Одно решение разрешает reconcile и снятие ошибки; эхо берётся целиком."""
     if error is not None:
         echo = replace(causal_input.error, result_error_sha256=causal.error_identity_digest(error))
-        causal_input = replace(causal_input, error=echo)
+        causal_input = replace(causal_input, error=echo, config=replace(causal_input.config, is_fatal_safety=causal_input.config.is_fatal_safety or causal.is_fatal_safety_error(error)))
     return causal.evaluate_causal_turn_recovery(causal_input)
-
 def settle_error(error: str, cleared: str, status: str) -> str:
     """Вернуть ошибку хода на done."""
     return error or (cleared if status == ERROR_STATUS else "")
-
 def trusted_final_text(final_text: str, error: str, tail: object, causal_input: causal.CausalOutcomeInput | None = None) -> str:
     """Текст для reconcile: при неснятой ошибке — только финальный planner хвоста."""
+    if getattr(tail, "had_safety_error", False) or causal.is_fatal_safety_error(error):
+        return ""
     if error and not is_transient_stream_interruption(error):
         snapshot = tail_causal_facts(tail)
         if causal_input is None:
             return ""
-        consistent = (
-            snapshot.error == causal_input.error.identity,
-            snapshot.error_from_structured_record == causal_input.error.error_from_structured_record,
-            snapshot.completion == causal_input.completion,
-            not snapshot.has_late_error_or_open_step,
-        )
+        consistent = (snapshot.error == causal_input.error.identity,
+                      snapshot.error_from_structured_record == causal_input.error.error_from_structured_record,
+                      snapshot.completion == causal_input.completion, not snapshot.has_late_error_or_open_step)
         if not all(consistent) or not evaluate_done_causal_recovery(causal_input, error).allow_reconcile:
             return ""
     planner = str(getattr(tail, "final_planner_content", ""))
     healed = (final_text or planner) if getattr(tail, "final_planner", False) else ""
-    trusted = healed if error else final_text
-    return trusted
+    return healed if error else final_text
 
 def tail_turn_facts(tail: object, cleared_error: str = "") -> dict[str, object]:
     """Факты хода из транскрипт-хвоста для `resolve_done_turn_outcome` (без хвоста — нейтральны)."""
-    return {
+    facts: dict[str, object] = {
         "completion_done_without_tools": bool(getattr(tail, "final_planner", False)),
         "last_completion_seq": getattr(tail, "last_planner_step_index", -1),
         "last_error_seq": getattr(tail, "last_error_step_index", -1),
         "drain_complete": getattr(tail, "drain_outcome", "") != "timeout",
         "had_transient_error": bool(getattr(tail, "had_transient_error", False)) or bool(cleared_error),
     }
-
+    if getattr(tail, "had_safety_error", False):
+        facts["had_safety_error"] = True
+    return facts
 @dataclass(frozen=True)
 class TurnOutcomeResolution:
     """Итог разбора done."""
@@ -152,21 +162,17 @@ class TurnOutcomeResolution:
 
 @dataclass(frozen=True)
 class _TurnFacts:
-    rc: int
-    result_error: str
-    result_status: str
-    final_text: str
-    emitted_text: str
-    completion_done_without_tools: bool = False
-    last_completion_seq: int = -1
-    last_error_seq: int = -1
-    drain_complete: bool = False
-    had_transient_error: bool = False
-    has_unclosed_tool_call: bool = False
-    self_heal_enabled: bool = True
+    rc: int; result_error: str; result_status: str  # fmt: skip  # noqa: E702
+    final_text: str; emitted_text: str  # fmt: skip  # noqa: E702
+    had_safety_error: bool = False
+    completion_done_without_tools: bool = False; last_completion_seq: int = -1; last_error_seq: int = -1  # fmt: skip  # noqa: E501,E702
+    drain_complete: bool = False; had_transient_error: bool = False  # fmt: skip  # noqa: E702
+    has_unclosed_tool_call: bool = False; self_heal_enabled: bool = True  # fmt: skip  # noqa: E702
     causal_input: causal.CausalOutcomeInput | None = None
+_DONE_REASONS: Final[frozenset[str]] = frozenset(("clean_done", "self_healed_after_transient_interruption", FUNCTION_CALL_HEAL_REASON))  # fmt: skip
 
-_DONE_REASONS: Final[tuple[str, ...]] = ("clean_done", SELF_HEALED_REASON)
+# Машиночитаемые причины (`turn-resolved reason=…`): не секреты, маскировщик логов их не трогает.
+TURN_REASON_CODES: Final[frozenset[str]] = frozenset((*_DONE_REASONS, "self_heal_disabled", "non_transient_result_error", "unclassified_nonzero_rc", "drain_incomplete", "unclosed_tool_call", "not_recovered", "transient_pre_delivery_retry", "retry_blocked", "graceful_partial_close", "graceful_blocked"))  # fmt: skip
 
 def _heal_blocker(f: _TurnFacts, transient_error: bool) -> str:
     """Первая причина, запрещающая самоисцеление (пусто — разрешено)."""
@@ -180,31 +186,32 @@ def _is_recovered(f: _TurnFacts) -> bool:
     has_body = bool(f.final_text.strip() or f.emitted_text.strip())
     later = f.last_completion_seq > max(f.last_error_seq, -1)
     return f.completion_done_without_tools and later and has_body
-
 def resolve_done_turn_outcome(**kw: object) -> TurnOutcomeResolution:
     """Сохраняет legacy kwargs `_TurnFacts`; неизвестный аргумент даёт TypeError."""
     f = _TurnFacts(**kw)  # pyright: ignore[reportArgumentType]  # Legacy kwargs сохраняются без Any.
+    if f.had_safety_error or causal.is_fatal_safety_error(f.result_error) or (f.causal_input is not None and f.causal_input.config.is_fatal_safety):
+        error = f.result_error if causal.is_fatal_safety_error(f.result_error) else f"fatal_safety_error: {f.result_error}"
+        return TurnOutcomeResolution(ERROR_STATE, 1, error, False, "fatal_safety_error", True)
     transient = is_transient_stream_interruption(f.result_error)
+    fc_error = is_recoverable_function_call_error(f.result_error)
     if f.result_error and not transient and f.causal_input is not None:
         decision = evaluate_done_causal_recovery(f.causal_input, f.result_error)
         consistent = (f.self_heal_enabled and not f.has_unclosed_tool_call and bool(f.final_text.strip() or f.emitted_text.strip())
                       and f.rc == f.causal_input.terminal.process.returncode)
         healed = decision.clear_error and consistent
         reason = decision.reason if not decision.recovered or consistent else "inconsistent_causal_facts"
-        return TurnOutcomeResolution(
-            DONE_STATE if healed else ERROR_STATE, 0 if healed else f.rc or 1,
-            "" if healed else f.result_error, healed, reason, True,
-        )
+        return TurnOutcomeResolution(DONE_STATE if healed else ERROR_STATE, 0 if healed else f.rc or 1,
+                                     "" if healed else f.result_error, healed, reason, True)
     clean = not (f.rc or f.result_error or f.result_status == ERROR_STATUS)
-    blocker = _heal_blocker(f, transient)
-    reasons = (("clean_done", clean), (blocker, bool(blocker)), (SELF_HEALED_REASON, _is_recovered(f)), ("not_recovered", True))
+    blocker = _heal_blocker(f, transient or fc_error)
+    heal_reason = FUNCTION_CALL_HEAL_REASON if fc_error else SELF_HEALED_REASON
+    reasons = (("clean_done", clean), (blocker, bool(blocker)), (heal_reason, _is_recovered(f)), ("not_recovered", True))
     reason = next(name for name, hit in reasons if hit)
     error = f.result_error if f.result_error else f"rc={f.rc}"
-    healed = reason == SELF_HEALED_REASON
+    healed = reason in _DONE_REASONS and reason != "clean_done"
     ok_out, fail_out = (DONE_STATE, 0, ""), (ERROR_STATE, f.rc if f.rc else 1, error)
     state, rc, err = ok_out if reason in _DONE_REASONS else fail_out
     return TurnOutcomeResolution(state, rc, err, healed, reason, healed or bool(f.result_error))
-
 @dataclass(frozen=True)
 class RetryDecision:
     """Решение о повторе запроса после обрыва стрима."""
@@ -212,9 +219,7 @@ class RetryDecision:
     keep_hot_session: bool
     reason: str
     attempt_budget_s: float = 0.0
-
 RETRY_BLOCKED: Final[RetryDecision] = RetryDecision(False, False, RETRY_BLOCKED_REASON)
-
 @dataclass(frozen=True)
 class _RetryFacts:
     error_text: str
@@ -225,7 +230,6 @@ class _RetryFacts:
     source: str = CLI_ERROR_SOURCE
     elapsed_s: float = 0.0
     budget_config: RetryBudgetConfig | None = None
-
 def _valid_retry_facts(f: _RetryFacts) -> bool:
     """Проверить типы аргументов legacy-контракта; границы проверяет бюджетный контроллер."""
     typed = ((f.attempt, int), (f.elapsed_s, (int, float)), (f.delivered, bool), (f.had_tool_side_effects, bool),
@@ -233,7 +237,6 @@ def _valid_retry_facts(f: _RetryFacts) -> bool:
     exact = all(isinstance(value, expected) for value, expected in typed)
     checks = (0.0 <= f.elapsed_s <= MAX_ELAPSED_S, 0 <= f.attempt, not isinstance(f.attempt, bool), not isinstance(f.elapsed_s, bool), not isinstance(f.max_attempts, bool))
     return exact and all(checks)
-
 def _resolve_retry_cfg(f: _RetryFacts) -> RetryBudgetConfig | None:
     """Проверить конфигурацию повтора; явный legacy-лимит только сужает типизированный бюджет."""
     try:
@@ -242,7 +245,6 @@ def _resolve_retry_cfg(f: _RetryFacts) -> RetryBudgetConfig | None:
         return validate_retry_config(narrowed)
     except (ValueError, TypeError):
         return None
-
 def _retry_with_budget(f: _RetryFacts) -> RetryDecision:
     """Повтор разрешён только в пределах бюджета, суженного legacy-лимитом."""
     cfg = _resolve_retry_cfg(f)
@@ -255,7 +257,6 @@ def _retry_with_budget(f: _RetryFacts) -> RetryDecision:
         else:
             result = RetryDecision(True, True, TRANSIENT_RETRY_REASON, decision.attempt_budget_s) if decision.allow_retry else result
     return result
-
 def evaluate_stream_retry_eligibility(**kw: object) -> RetryDecision:
     """Оценить допустимость повтора стрима; горячая сессия живёт при тихом транзиентном обрыве."""
     try:
@@ -295,6 +296,4 @@ def evaluate_graceful_interruption(**kw: object) -> GracefulInterruptionDecision
     partial = f.delivered_content or f.delivered_reasoning
     ok = f.graceful_enabled and partial and transient and not f.delivered_tool_calls and not f.has_unclosed_tool_call
     channel = "content" if f.delivered_content else "reasoning_content"
-    closed = (ok, f.notice_text, channel, "stop", "graceful_partial_close")
-    blocked = (ok, "", "none", "error", "graceful_blocked")
-    return GracefulInterruptionDecision(*(closed if ok else blocked))
+    return GracefulInterruptionDecision(ok, f.notice_text if ok else "", channel if ok else "none", "stop" if ok else "error", "graceful_partial_close" if ok else "graceful_blocked")

@@ -17,7 +17,7 @@ import pytest
 
 import server
 from core import gateway_execution_policy as policy
-from tests.bridge_testlib import pid_alive, wait_until
+from tests.bridge_testlib import droidify_raw_fleet, load_raw_fleet, pid_alive, wait_until
 from tests.rpc_testlib import RpcCase
 from tests.test_request_attribution import route as route
 from tools import droid_image, droid_probe_config, receipt_schema
@@ -27,10 +27,20 @@ from tools import droid_image, droid_probe_config, receipt_schema
 def cli_route(
     monkeypatch: pytest.MonkeyPatch, route: Callable[..., Any]
 ) -> Callable[..., Any]:
+    # Прод-`fleet.json` держит `droid=false`, а `gpt-6.1-sol` — на codex: стенд возвращает droid-маршрут.
+    catalog = server._build_catalog(droidify_raw_fleet(load_raw_fleet()))
+    monkeypatch.setattr(server, "FLEET", catalog)
+    monkeypatch.setattr(
+        server,
+        "BACKENDS",
+        server.AdapterRegistry.from_fleet(
+            catalog, server.ADAPTER_KINDS, lambda: server.FLEET, server
+        ),
+    )
     for backend in ("droid", "muse"):
-        monkeypatch.setattr(
-            server.BACKENDS.get(backend), "preflight", lambda: (True, "")
-        )
+        adapter = server.BACKENDS.get(backend)
+        if adapter is not None:
+            monkeypatch.setattr(adapter, "preflight", lambda: (True, ""))
     monkeypatch.setattr(server.Handler, "_serve_json", Mock())
     monkeypatch.setattr(server.Handler, "_prompt_guard", lambda *_: (0, "-", 0))
     monkeypatch.setattr(server.Handler, "_context_gate", lambda _, req, *a: (req, None))

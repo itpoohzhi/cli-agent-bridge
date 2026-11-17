@@ -9,7 +9,7 @@ from typing import Any
 import pytest
 
 import server
-from tests.test_request_attribution import wire as wire
+from tests.test_request_attribution import notes_file as notes_file, wire as wire
 
 
 def test_deepseek_fleet_default_is_off() -> None:

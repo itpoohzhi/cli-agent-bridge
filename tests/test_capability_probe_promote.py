@@ -213,7 +213,9 @@ def test_promote_honours_explicit_state_dir(promote_env: Any, tmp_path: Path) ->
     providers, state, env = promote_env
     target = tmp_path / "elsewhere"
     assert _probe("good", providers, env, promote=True, state_dir=target) == 0
-    assert (target / "catalog.lock.json").is_file() and not state.exists()
+    assert (target / "catalog.lock.json").is_file()
+    assert not (state / "catalog.lock.json").exists()
+    assert not (state / "model-lifecycle.json").exists()
 
 
 def test_failed_verdict_is_not_promoted(promote_env: Any) -> None:

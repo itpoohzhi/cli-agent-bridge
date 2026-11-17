@@ -14,21 +14,15 @@ import pytest
 
 from core.backend_adapter import PreSendTransientError
 from core.route_health_policy import (
-    FailureCategory,
-    RetryBudgetConfig,
-    classify_provider_failure,
-    compute_attempt_decision,
+    FailureCategory, RetryBudgetConfig, classify_provider_failure, compute_attempt_decision,
 )
 from tests.test_transport_modularity import RUN
 from tests.test_transport_eligibility import (
-    gateway,
-    post,
-    request_body,
-    stage_entry,
-    success,
-    transport_options as transport_options,
+    gateway, post, request_body, stage_entry, success, transport_options as transport_options,
 )
-from tests.transport_test_support import RecordingSink, RecordingUpstream, make_adapter, semantic_equal
+from tests.transport_test_support import (
+    RecordingSink, RecordingUpstream, make_adapter, require_wave_artifacts, semantic_equal,
+)
 
 CONNECT_FAILURES = [
     ConnectionRefusedError("fixture TCP refusal"),
@@ -60,6 +54,7 @@ def _legacy_decision(config: RetryBudgetConfig, index: int, elapsed: float, outc
 
 
 def test_unknown_load_envelope_cannot_approve_first_call_bounds() -> None:
+    require_wave_artifacts(RUN)
     packet = json.loads((RUN / "architecture/architecture-packet.json").read_bytes())
     highload = packet["highload_resilience"]
     operands = highload["hl_env"]
@@ -283,14 +278,16 @@ def test_committed_sse_never_replays(
     monkeypatch: pytest.MonkeyPatch, delta: dict,
 ) -> None:
     data = b"data: " + json.dumps({"choices": [{"index": 0, "delta": delta}]}).encode() + b"\n\n"
+    request = request_body(True)
     if "tool_calls" in delta:
         data += b'data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}\n\n'
+        request["tools"] = [{"type": "function", "function": {"name": "probe", "parameters": {"type": "object"}}}]
     with RecordingUpstream() as first, RecordingUpstream() as reserve:
         first.respond = lambda handler, body: first.sse(handler, data)
         success(reserve, True)
         with gateway(monkeypatch, {"first": first, "reserve": reserve}) as (port, _):
-            status, body = post(port, request_body(True))
+            status, body = post(port, request)
         assert status == 200 and b'"content":"ok"' not in body
         assert body.count(b"committed-marker") + body.count(b"call-1") == 1
-        assert (first.post_count, first.body_bytes) == (1, len(json.dumps(request_body(True)).encode()))
+        assert (first.post_count, first.body_bytes) == (1, len(json.dumps(request).encode()))
         assert (reserve.post_count, reserve.body_bytes) == (0, 0)

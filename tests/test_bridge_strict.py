@@ -91,8 +91,26 @@ def test_token_cache_rejects_module_keys_without_file_keys(tmp_path, monkeypatch
     assert not cache.is_valid("wrong-key")
 
 
+def _allow_notes(monkeypatch):
+    """Envelope-first: notes-гейт пропускает, чтобы тест дошёл до auth."""
+    from unittest.mock import Mock
+
+    monkeypatch.setattr(
+        server,
+        "_MODEL_NOTES_FILTER",
+        Mock(
+            is_failed_closed=Mock(return_value=False),
+            is_blocked=Mock(return_value=False),
+        ),
+    )
+
+
 def test_external_peer_upstream_token_rejected_before_body(monkeypatch):
-    """Внешний IP с upstream-токеном без мастер-ключа получает 401 до чтения тела."""
+    """Внешний IP с upstream-токеном без мастер-ключа получает 401 до исполнения.
+
+    Envelope-first (V2-Safe): ограниченный конверт читается для probe/notes
+    до auth, но dispatch/исполнение без валидной авторизации не начинается.
+    """
     from email.message import Message
     from unittest.mock import Mock
 
@@ -114,16 +132,17 @@ def test_external_peer_upstream_token_rejected_before_body(monkeypatch):
     )
     monkeypatch.setattr(server, "_shutting_down", False)
     monkeypatch.setattr(server, "_is_drain_enabled", lambda: False)
+    _allow_notes(monkeypatch)
     handler = object.__new__(server.Handler)
     handler.path = "/v1/chat/completions"
     handler.client_address = ("192.0.2.1", 1234)
     handler.headers = Message()
     handler.headers["Authorization"] = "Bearer known-upstream-key"
     handler.headers["Content-Length"] = "2"
-    handler.rfile = Mock()
+    handler.rfile = Mock(read=Mock(return_value=b"{}"))
     handler._send = Mock()
     handler.do_POST()
-    handler.rfile.read.assert_not_called()
+    handler.rfile.read.assert_called_once_with(2)
     assert handler.close_connection
     handler._send.assert_called_once_with(
         401, {"error": {"message": "unauthorized", "type": "auth_error", "code": 401}}
@@ -142,6 +161,7 @@ def test_invalid_auth_rejected_before_body_and_budget(monkeypatch, peer, token, 
     monkeypatch.setattr(server, "_budget", budget)
     monkeypatch.setattr(server, "_shutting_down", False)
     monkeypatch.setattr(server, "_is_drain_enabled", lambda: False)
+    _allow_notes(monkeypatch)
     handler = object.__new__(server.Handler)
     handler.path = path
     handler.client_address = (peer, 1234)
@@ -149,11 +169,12 @@ def test_invalid_auth_rejected_before_body_and_budget(monkeypatch, peer, token, 
     if token is not None:
         handler.headers["Authorization"] = token
     handler.headers["Content-Length"] = "2"
-    handler.rfile = Mock()
+    handler.rfile = Mock(read=Mock(return_value=b"{}"))
     handler._send = Mock()
     handler.do_POST()
-    handler.rfile.read.assert_not_called()
-    budget.reserve.assert_not_called()
+    # Envelope-first: конверт прочитан и резерв взят, но 401 — до исполнения.
+    handler.rfile.read.assert_called_once_with(2)
+    budget.reserve.assert_called_once_with(2)
     assert handler.close_connection
     handler._send.assert_called_once_with(
         401, {"error": {"message": "unauthorized", "type": "auth_error", "code": 401}}
@@ -487,16 +508,17 @@ def test_non_loopback_invalid_token_rejected_before_body_read(monkeypatch):
     monkeypatch.setattr(server, "TOKEN_CACHE", Mock(is_valid=Mock(return_value=False)))
     monkeypatch.setattr(server, "_shutting_down", False)
     monkeypatch.setattr(server, "_is_drain_enabled", lambda: False)
+    _allow_notes(monkeypatch)
     handler = object.__new__(server.Handler)
     handler.path = "/v1/chat/completions"
     handler.client_address = ("192.0.2.1", 1234)
     handler.headers = Message()
     handler.headers["Authorization"] = "Bearer wrong"
     handler.headers["Content-Length"] = "2"
-    handler.rfile = Mock()
+    handler.rfile = Mock(read=Mock(return_value=b"{}"))
     handler._send = Mock()
     handler.do_POST()
-    handler.rfile.read.assert_not_called()
+    handler.rfile.read.assert_called_once_with(2)
     assert handler.close_connection
     assert handler._send.call_args.args[0] == 401
 
@@ -532,6 +554,7 @@ def test_invalid_auth_rejected_before_body_and_budget_with_tolerance_flag_enable
     monkeypatch.setattr(server, "_budget", budget)
     monkeypatch.setattr(server, "_shutting_down", False)
     monkeypatch.setattr(server, "_is_drain_enabled", lambda: False)
+    _allow_notes(monkeypatch)
     handler = object.__new__(server.Handler)
     handler.path = "/v1/chat/completions"
     handler.client_address = ("127.0.0.1", 1234)
@@ -539,11 +562,12 @@ def test_invalid_auth_rejected_before_body_and_budget_with_tolerance_flag_enable
     if token is not None:
         handler.headers["Authorization"] = token
     handler.headers["Content-Length"] = "2"
-    handler.rfile = Mock()
+    handler.rfile = Mock(read=Mock(return_value=b"{}"))
     handler._send = Mock()
     handler.do_POST()
-    handler.rfile.read.assert_not_called()
-    budget.reserve.assert_not_called()
+    # Envelope-first: конверт прочитан, tolerance-флаг auth не заменяет — 401.
+    handler.rfile.read.assert_called_once_with(2)
+    budget.reserve.assert_called_once_with(2)
     assert handler.close_connection
     handler._send.assert_called_once_with(
         401, {"error": {"message": "unauthorized", "type": "auth_error", "code": 401}}
@@ -599,8 +623,14 @@ class TestCatalogClassI(unittest.TestCase):
     def test_valid_catalogue(self):
         catalog = server._build_catalog(self.data)
         self.assertEqual(catalog["default_model"], "muse-wonder-full-1.0")
-        # 3 подписочных droid и 16 моделей остальных бэкендов.
-        self.assertEqual(len(catalog["order"]), 19)
+        # В каталог попадают модели включённых бэкендов сырого fleet.
+        enabled = {
+            name for name, cfg in self.data["backends"].items() if cfg.get("enabled")
+        }
+        expected = sum(
+            1 for m in self.data["models"] if m["backend"] in enabled
+        )
+        self.assertEqual(len(catalog["order"]), expected)
         self.assertEqual(
             server._build_catalog(copy.deepcopy(self.data))["schema_version"], 3
         )
@@ -999,10 +1029,17 @@ class TestHealthAndModels(BridgeCase):
         status, body = self._get("/v1/models")
         self.assertEqual(status, 200)
         self.assertEqual(body["object"], "list")
-        # 19 моделей каталога + legacy-моки FakeDroid вне каталога (deepseek-v4.1-flash уже в каталоге, opencode-go).
+        # Опубликованные модели стенда: каталог fleet + legacy-моки FakeDroid вне него.
         catalog_ids = {m["id"] for m in load_raw_fleet()["models"]}
         legacy_extra = [m for m in _DROID_LEGACY_MODELS if m["id"] not in catalog_ids]
-        self.assertEqual(len(body["data"]), 19 + len(legacy_extra))
+        self.assertEqual(
+            len(body["data"]),
+            len(server._get_published_models()),
+        )
+        self.assertEqual(
+            len(server._get_published_models()),
+            len(catalog_ids) + len(legacy_extra),
+        )
         self.assertTrue(
             {"gpt-6.1-terra", "gpt-6.1-sol"} <= {e["id"] for e in body["data"]}
         )

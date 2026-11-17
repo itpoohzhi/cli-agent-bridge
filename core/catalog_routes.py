@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import importlib
 import json
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
@@ -206,8 +205,8 @@ def compile_routing_tuple(
     принадлежности делегирована C1-3 без actual edges: отсутствие доступных
     рёбер не меняет идентичность каталога и не запускает healing/policy.
     """
-    # Предикаты зависят от validate_weight; обратный шов разрешается при вызове.
-    eligibility = importlib.import_module("core.route_eligibility")
+    # Делегация owner-проверки без верхнеуровневого импорта policy/state.
+    from core import route_eligibility as eligibility
     result = cast(
         _Availability,
         eligibility.aggregate_model_availability(model, (), primary_provider_id),

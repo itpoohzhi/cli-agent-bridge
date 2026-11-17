@@ -234,16 +234,19 @@ def _request_policy(route: Any) -> Any:
 
 def _model_routing(model: dict[str, Any]) -> dict[str, Any]:
     routing = model.get("routing")
-    if isinstance(routing, dict) and routing.get("legacy_backend") in (None, model["backend"]):
+    backend = model.get("backend")
+    if isinstance(routing, dict) and routing.get("legacy_backend") in (None, backend):
         return routing
-    backend = model["backend"]
-    routes = [dict(route_id=backend, backend=backend, weight=100, priority=0, params=model.get("params", {}))]
-    return {"catalog_hash": "singleton:" + backend, "routes": routes}
+    if not backend:
+        return {}
+    spec = dict(route_id=backend, backend=backend, weight=100, priority=0)
+    spec["params"] = model.get("params", {})
+    return {"catalog_hash": "singleton:" + backend, "routes": [spec]}
 
 def _dispatch(route: Any) -> None:
     routing = _model_routing(route.model)
     if not (route.host.flag_enabled(ROUTING_FLAG) and routing and routing.get("enabled", True)):
-        route.model["backend"] = routing.get("disabled_backend", route.model["backend"])
+        route.model["backend"] = routing.get("disabled_backend") or route.model.get("backend")
         dispatch_route(route)
         return
     route = replace(route, model={**route.model, "routing": routing})

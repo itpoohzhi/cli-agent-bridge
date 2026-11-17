@@ -68,12 +68,12 @@ def route(monkeypatch, tmp_path):
     return post
 
 
-@pytest.fixture
-def wire(monkeypatch, tmp_path):
-    """Два loopback HTTP-сервера: реальный фасад и записывающий upstream."""
-    records, logs = [], []
-    lock = threading.Lock()
+class _QueueingHTTPServer(ThreadingHTTPServer):
+    request_queue_size = 64
+    daemon_threads = True
 
+
+def _make_upstream_handler(records: list[tuple[dict[str, str], bytes]], lock: threading.Lock):
     class Upstream(BaseHTTPRequestHandler):
         def log_message(self, format: str, *args: object) -> None:
             return
@@ -91,47 +91,55 @@ def wire(monkeypatch, tmp_path):
                 else json.dumps(payload).encode()
             )
             self.send_response(200)
-            self.send_header(
-                "Content-Type", "text/event-stream" if stream else "application/json"
-            )
+            self.send_header("Content-Type", "text/event-stream" if stream else "application/json")
             self.send_header("Content-Length", str(len(body)))
             self.send_header("x-request-id", "upstream-other")
             self.send_header("X-SUBAGENT-ID", "upstream-child")
             self.end_headers()
             self.wfile.write(body)
 
-    class TestServer(ThreadingHTTPServer):
-        request_queue_size = 64
+    return Upstream
 
-    upstream = TestServer(("127.0.0.1", 0), Upstream)
-    upstream.daemon_threads = True
-    upstream.request_queue_size = 64
-    threading.Thread(
-        target=upstream.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True
-    ).start()
+
+def _start_loopback_server(handler_cls):
+    srv = _QueueingHTTPServer(("127.0.0.1", 0), handler_cls)
+    threading.Thread(target=srv.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True).start()
+    return srv
+
+
+def _build_wire_fleet_data(upstream_port: int) -> dict:
     data = json.loads((server.ROOT / "fleet.json").read_text())
-    for cfg in data["backends"].values():
+    upstream_url = f"http://127.0.0.1:{upstream_port}/v1"
+    for name, cfg in data["backends"].items():
         if cfg["kind"] == "passthrough":
-            cfg.update(
-                base_url=f"http://127.0.0.1:{upstream.server_port}/v1",
-                api_key="",
-                api_key_env="",
-                enabled=True,
-            )
+            cfg.update(base_url=upstream_url, api_key="", api_key_env="", enabled=True)
+        elif cfg["kind"] == "stdio_resident":
+            # Passthrough-стенд: resident-бэкенды (codex/claude-p) тоже идут на upstream.
+            data["backends"][name] = {
+                "kind": "passthrough",
+                "enabled": True,
+                "required": False,
+                "owned_by": cfg.get("owned_by", name),
+                "max_concurrent": cfg.get("max_concurrent", 128),
+                "base_url": upstream_url,
+                "api_key": "",
+                "api_key_env": "",
+            }
     # Passthrough-стенд: droid выключен, статические aliases сняты, модели droid-цепочки идут на upstream.
     data["backends"]["droid"]["enabled"], data["aliases"] = False, {}
     for m in data["models"]:
         m["backend"] = {"gemini-3.8-flash": "agy", "claude-sonnet-5-5": "claude-p"}.get(m["id"], m["backend"])
+    return data
+
+
+def _configure_wire_server(monkeypatch, tmp_path, upstream_port: int, logs: list[str]) -> None:
     monkeypatch.setenv("BRIDGE_DYNAMIC_CONFIG_PATH", str(tmp_path / "missing-dynamic.json"))
     monkeypatch.setattr(server, "_PENALTY_TRACKER", ModelPenaltyTracker(storage_path=tmp_path / "penalties.json"))
     monkeypatch.setattr(server, "_MODEL_NOTES_FILTER", server.ModelNotesFilter(tmp_path / "notes.md"))
-    fleet = server._build_catalog(data)
+    fleet = server._build_catalog(_build_wire_fleet_data(upstream_port))
     monkeypatch.setattr(server, "FLEET", fleet)
-    monkeypatch.setattr(
-        server,
-        "BACKENDS",
-        AdapterRegistry.from_fleet(fleet, ADAPTER_KINDS, lambda: server.FLEET, server),
-    )
+    backends = AdapterRegistry.from_fleet(fleet, ADAPTER_KINDS, lambda: server.FLEET, server)
+    monkeypatch.setattr(server, "BACKENDS", backends)
     monkeypatch.setattr(server, "AUTH_KEY", "hub-test-key")
     monkeypatch.setattr(server, "BRIDGE_KEY", "hub-test-key")
     install_route_auth(monkeypatch, tmp_path, "wire")
@@ -139,36 +147,37 @@ def wire(monkeypatch, tmp_path):
     monkeypatch.setattr(server, "_shutting_down", False)
     monkeypatch.setattr(server, "_is_drain_enabled", lambda: False)
     monkeypatch.setattr(server, "_is_detached_enabled", lambda: False)
+    # Стенд проверяет атрибуцию/алиасы, не internal-гейт (у него свои тесты).
+    monkeypatch.setattr(server, "INTERNAL_MODEL_IDS", ())
     monkeypatch.setattr(server, "_budget", server._ByteBudget(1_000_000))
-    bridge = TestServer(("127.0.0.1", 0), server.Handler)
-    bridge.daemon_threads = True
-    bridge.request_queue_size = 64
-    threading.Thread(
-        target=bridge.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True
-    ).start()
+
+
+def _wire_call(port: int, body=None, headers=None, path="/v1/chat/completions", method="POST"):
+    raw = body if isinstance(body, bytes) else json.dumps(body or {"model": "gemini-4-argon"}).encode()
+    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+    try:
+        conn.request(
+            method,
+            path,
+            body=raw if method == "POST" else None,
+            headers={"Authorization": "Bearer hub-test-key", "Content-Type": "application/json", **(headers or {})},
+        )
+        resp = conn.getresponse()
+        return resp.status, resp.getheaders(), resp.read()
+    finally:
+        conn.close()
+
+
+@pytest.fixture
+def wire(monkeypatch, tmp_path):
+    """Два loopback HTTP-сервера: реальный фасад и записывающий upstream."""
+    records, logs = [], []
+    upstream = _start_loopback_server(_make_upstream_handler(records, threading.Lock()))
+    _configure_wire_server(monkeypatch, tmp_path, upstream.server_port, logs)
+    bridge = _start_loopback_server(server.Handler)
 
     def call(body=None, headers=None, path="/v1/chat/completions", method="POST"):
-        raw = (
-            body
-            if isinstance(body, bytes)
-            else json.dumps(body or {"model": "gemini-4-argon"}).encode()
-        )
-        conn = http.client.HTTPConnection("127.0.0.1", bridge.server_port, timeout=10)
-        try:
-            conn.request(
-                method,
-                path,
-                body=raw if method == "POST" else None,
-                headers={
-                    "Authorization": "Bearer hub-test-key",
-                    "Content-Type": "application/json",
-                    **(headers or {}),
-                },
-            )
-            resp = conn.getresponse()
-            return resp.status, resp.getheaders(), resp.read()
-        finally:
-            conn.close()
+        return _wire_call(bridge.server_port, body=body, headers=headers, path=path, method=method)
 
     try:
         yield SimpleNamespace(call=call, records=records, logs=logs)

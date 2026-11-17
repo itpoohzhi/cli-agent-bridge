@@ -404,6 +404,9 @@ class TestDeltaAndIsolation(RpcCase):
     @mock.patch.dict("os.environ", DROID_ALLOW_HIGH_AUTONOMY="1")
     def test_tm007_settings_update_readback_and_no_silent_substitution(self):
         """TM-007: смена model/effort/autonomy на границе хода: update+read-back; подмена модели отвергается."""
+        patcher = mock.patch.object(server, "INTERNAL_MODEL_IDS", ())
+        patcher.start()
+        self.addCleanup(patcher.stop)
         chat = self.conv("chat-settings", **HIGH_SETTINGS)
         self.assertEqual(chat.ask("q0")[0], 200)
         init = self.hub.inits()[0]["params"]

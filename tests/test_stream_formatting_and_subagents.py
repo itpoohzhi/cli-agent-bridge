@@ -1191,7 +1191,7 @@ for _path in (str(_REPO_ROOT), str(_TESTS_DIR)):
 import server as hub_server  # noqa: E402
 from adapters import ADAPTER_KINDS  # noqa: E402
 from adapters.passthrough_adapter import PassthroughLimits  # noqa: E402
-from bridge_testlib import BridgeCase, install_droid_stand, load_raw_fleet  # noqa: E402
+from bridge_testlib import BridgeCase, codex_as_passthrough, install_droid_stand, load_raw_fleet  # noqa: E402
 from core.backend_adapter import AdapterRegistry  # noqa: E402
 from core.model_penalty import ModelPenaltyTracker  # noqa: E402
 from core.liveness_registry import get_registry  # noqa: E402
@@ -1326,9 +1326,9 @@ class NonstreamViaStreamHubE2ETests(BridgeCase):
             os.environ[name] = "false"
         self.upstream = _ScriptedUpstream()
         self.addCleanup(self.upstream.close)
-        data = load_raw_fleet()
-        data["backends"]["codex"]["enabled"] = True
-        data["backends"]["codex"]["base_url"] = f"http://127.0.0.1:{self.upstream.port}/v1"
+        data = codex_as_passthrough(
+            load_raw_fleet(), f"http://127.0.0.1:{self.upstream.port}/v1"
+        )
         data["backends"]["codex"].pop("api_key_env", None)
         hub_server.FLEET = hub_server._build_catalog(data)
         hub_server.BACKENDS = AdapterRegistry.from_fleet(

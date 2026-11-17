@@ -11,13 +11,26 @@ from unittest.mock import Mock
 import pytest
 
 import server
+from tests.bridge_testlib import droidify_raw_fleet, load_raw_fleet
 from tests.test_request_attribution import route as route
 from tools import droid_image, droid_probe_config, receipt_schema
 
 
 @pytest.fixture(autouse=True)
 def available_test_backend(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(server.BACKENDS.get("droid"), "preflight", lambda: (True, ""))
+    # Прод-`fleet.json` держит `droid=false`: HTTP-политика проверяется на стендовом каталоге.
+    catalog = server._build_catalog(droidify_raw_fleet(load_raw_fleet()))
+    monkeypatch.setattr(server, "FLEET", catalog)
+    monkeypatch.setattr(
+        server,
+        "BACKENDS",
+        server.AdapterRegistry.from_fleet(
+            catalog, server.ADAPTER_KINDS, lambda: server.FLEET, server
+        ),
+    )
+    adapter = server.BACKENDS.get("droid")
+    if adapter is not None:
+        monkeypatch.setattr(adapter, "preflight", lambda: (True, ""))
 
 
 @pytest.mark.parametrize("autonomy", [None, "", " ", "off", "low", "medium"])
@@ -92,7 +105,8 @@ def test_configured_autonomy_default(
 def test_judges_cannot_spawn_droid(
     route: Callable[..., Any], monkeypatch: pytest.MonkeyPatch, sid: str
 ) -> None:
-    monkeypatch.delenv("DROID_DENY_SUBAGENT_PREFIXES", raising=False)
+    # AD-001: без env судья read-only допускается (см. c25); запрет — только явный deny-список.
+    monkeypatch.setenv("DROID_DENY_SUBAGENT_PREFIXES", "panel-judge-,judge-,seat-")
     spawn = Mock(side_effect=AssertionError("Процесс судьи не должен запускаться"))
     monkeypatch.setattr(server.subprocess, "Popen", spawn)
     h = route({"model": "gemini-3.8-flash"}, {"x-sUbAgEnT-iD": sid})

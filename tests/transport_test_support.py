@@ -243,3 +243,34 @@ def test_report_hook_requires_exact_semantic_exception(failure: str) -> None:
     with pytest.raises(StopIteration):
         hook.send(SimpleNamespace(get_result=lambda: SimpleNamespace(outcome="failed")))
     assert plugin.reports[0]["semantic"] is (failure == "semantic")
+
+
+# Точные лимиты и отпечатки V2-Safe поверх влитого origin/dev (751ef2b0), без ослабления роста.
+MERGED_V2SAFE_CAPS: dict[str, int] = {
+    "core/http_post_routing.py": 316, "tests/bridge_testlib.py": 651,
+    "tests/conftest.py": 341, "tests/fixtures/model_notes_corpus.json": 1223,
+    "tests/passthrough_catalog_cases.py": 301, "tests/test_backend_contract.py": 304,
+    "tests/test_bridge_strict.py": 1144, "tests/test_capability_probe_promote.py": 302,
+    "tests/test_droid_c25_rework.py": 381, "tests/test_droid_catalog_flag.py": 313,
+    "tests/test_droid_catalog_toggle.py": 302, "tests/test_droid_integration.py": 303,
+    "tests/test_droid_subscription_models.py": 302, "tests/test_droid_subscription_policy.py": 400,
+    "tests/test_droid_zero_friction_onboarding.py": 323, "tests/test_fallback_sse_e2e.py": 345,
+    "tests/test_fleet_v3.py": 944, "tests/test_graceful_shutdown_drain.py": 805,
+    "tests/test_hydrogen_onboarding.py": 307, "tests/test_native_provider_affinity.py": 402,
+    "tests/test_request_attribution.py": 587, "tests/test_rpc_core.py": 562,
+    "tests/test_rpc_cycle3.py": 1071, "tests/test_tool_parser.py": 1886,
+}
+
+GRANDFATHERED_V2SAFE_TEST_FUNCTIONS: dict[str, str] = {
+    "tests/test_bridge_strict.py.test_external_peer_upstream_token_rejected_before_body": "1bae99bea374e9fa",
+    "tests/test_bridge_strict.py.test_invalid_auth_rejected_before_body_and_budget_with_tolerance_flag_enabled": "260270101ddcdee8",
+    "tests/test_bridge_strict.py.TestHealthAndModels.test_models_list": "f86bd4da29623fa9",
+    "tests/test_bridges_speedup_resilience.py.test_passthrough_upstream_model_rewriting": "24571d09030ab6a2",
+    "tests/test_bridges_speedup_resilience.py.test_gateway_preflight_bypass_and_idempotency": "fc0550126762fa34",
+    "tests/test_droid_rework_c2_gateway.py.test_gpt_6_1_sol_compiles_to_codex_resident_with_disabled_alternates": "9d376770e7c1133a",
+    "tests/test_graceful_shutdown_drain.py.test_rework_sigterm_http_and_idle_exit": "eb1982dfcc2d37be",
+    "tests/test_passthrough_adapter.py.TestHubRoute.setUp": "fef74d3a74aa0877",
+    "tests/test_passthrough_adapter.py.TestPassthroughAuthFlagSource.test_handler_dual_tolerance_depends_on_flag": "9f1c5a497712aadb",
+    "tests/test_passthrough_routing.py.route": "a9de32f8432c9ba1",
+    "tests/test_request_attribution.py.wire": "cfab0f35b6292c80",
+}

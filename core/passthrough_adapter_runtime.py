@@ -102,6 +102,10 @@ class _RequestRuntime:
         if self.internal:
             window = window or passthrough_window(adapter.limits, exchange.path, exchange.request)
         raw = internal if self.internal else raw
+        self.affinity_info: dict[str, str] = {}
+        self.computed_upstream_headers = adapter._upstream_headers(
+            raw, exchange.headers, affinity_out=self.affinity_info
+        )
         self.deadline, self.open_deadline = options.deadlines_fn(adapter.limits, self.internal)
         self.slide = open_sliding_deadline(
             self.deadline, adapter.limits, self.internal,
@@ -163,7 +167,7 @@ class _RequestRuntime:
             self._check()
             self.connection, self.response = passthrough_precommit.open_response(
                 adapter, cast(passthrough_precommit.PrecommitSink, request.sink), self.slide,
-                (request.path, request.raw_body, request.headers),
+                (request.path, request.raw_body, request.headers, self.computed_upstream_headers),
                 (self.open_deadline, self._on_socket, self._on_pooling, self.internal),
             )
             self._check()
@@ -205,6 +209,7 @@ class _RequestRuntime:
             presend_deadline=getattr(request.sink, "presend_deadline", None),
             on_pooling=self._on_pooling,
             fresh=True,
+            upstream_headers=self.computed_upstream_headers,
         ))
         self.response = cast(passthrough_precommit.PrecommitSink, request.sink).read_response(
             self.connection, self.slide, adapter.limits.reader_join_timeout_s
@@ -231,6 +236,8 @@ class _RequestRuntime:
             window=request.window,
             slide=self.slide,
             headers=request.headers,
+            affinity_uuid=self.affinity_info.get("affinity_uuid"),
+            affinity_scope=self.affinity_info.get("affinity_scope"),
             reopen=(
                 self._reopen_response
                 if self.internal

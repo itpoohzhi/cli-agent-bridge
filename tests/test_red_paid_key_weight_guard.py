@@ -1,6 +1,8 @@
-"""C2-11 / F-009: GREEN-контракт P0, платные ключи отключены, веса codex/droid активны.
+"""C2-11 / F-009: GREEN-контракт P0, платные ключи и droid отключены.
 
-Проверки P0 rollback: openai-key-2/3 отключены с нулевым весом, codex (100) > droid (20).
+Решение владельца: openai-key-2/3 отключены с нулевым весом, droid отключён
+(weight 20 в манифесте), codex (stdio_resident, weight 100) — единственный
+активный бэкенд gpt-6.1-sol, поэтому у модели нет маршрутов (routing: null).
 """
 
 from __future__ import annotations
@@ -54,14 +56,12 @@ def sidecar(request: pytest.FixtureRequest, compiled: CompileResult) -> dict[str
     return _json_file("catalog.lock.json")
 
 
-def _sol_routes(fleet: dict[str, Any]) -> list[dict[str, Any]]:
+def _sol_model(fleet: dict[str, Any]) -> dict[str, Any]:
     models = [record for record in fleet["models"] if record["id"] == MODEL]
     assert len(models) == 1
-    routing = models[0]["routing"]
-    assert routing["enabled"] is True
-    routes = routing["routes"]
-    assert len({route["backend"] for route in routes}) == len(routes)
-    return routes
+    # Один живой бэкенд (codex): взвешенных маршрутов нет.
+    assert models[0].get("routing") is None
+    return models[0]
 
 
 @pytest.mark.parametrize("provider", PAID_KEYS)
@@ -125,10 +125,13 @@ def test_paid_key_model_overrides_preserved(slot: int) -> None:
     }
 
 
-@pytest.mark.parametrize(("provider", "expected"), (("codex", 100), ("droid", 20)))
-def test_native_manifest_weight(provider: str, expected: int) -> None:
+@pytest.mark.parametrize(
+    ("provider", "enabled", "expected"),
+    (("codex", True, 100), ("droid", False, 20)),
+)
+def test_native_manifest_weight(provider: str, enabled: bool, expected: int) -> None:
     doc = _manifest(provider)
-    assert doc["enabled"] is True
+    assert doc["enabled"] is enabled
     weight = doc["routing"]["weight"]
     assert type(weight) is int
     assert weight == expected, f"P0: {provider} must have weight {expected}"
@@ -141,21 +144,21 @@ def test_manifest_codex_weight_exceeds_droid() -> None:
     )
 
 
-@pytest.mark.parametrize(("provider", "expected"), (("codex", 100), ("droid", 20)))
-def test_sol_native_route_weight(
-    fleet: dict[str, Any], provider: str, expected: int
-) -> None:
-    routes = {route["backend"]: route for route in _sol_routes(fleet)}
-    assert provider in routes, f"P0: missing {provider} route"
-    assert fleet["backends"][provider]["enabled"] is True
-    assert routes[provider].get("enabled", True) is True
-    assert type(routes[provider]["weight"]) is int
-    assert routes[provider]["weight"] == expected, f"P0: {provider} weight"
+def test_sol_single_active_backend_is_codex(fleet: dict[str, Any]) -> None:
+    model = _sol_model(fleet)
+    assert model["backend"] == "codex"
+    assert fleet["backends"]["codex"]["enabled"] is True
+    assert fleet["backends"]["codex"]["kind"] == "stdio_resident"
+    assert fleet["backends"]["droid"]["enabled"] is False
+    for provider in PAID_KEYS:
+        assert fleet["backends"][provider]["enabled"] is False
 
 
-def test_sol_codex_weight_exceeds_droid(fleet: dict[str, Any]) -> None:
-    weights = {route["backend"]: route["weight"] for route in _sol_routes(fleet)}
-    assert weights["codex"] > weights["droid"], "P0: codex must outweigh droid"
+def test_sol_no_droid_or_paid_routes(fleet: dict[str, Any]) -> None:
+    model = _sol_model(fleet)
+    routes = (model.get("routing") or {}).get("routes", [])
+    assert [r["backend"] for r in routes if r["backend"] in (*PAID_KEYS, "droid")] == []
+    assert model["backend"] not in (*PAID_KEYS, "droid")
 
 
 @pytest.mark.parametrize("provider", PAID_KEYS)
@@ -166,7 +169,7 @@ def test_paid_key_fleet_backend_disabled(fleet: dict[str, Any], provider: str) -
 @pytest.mark.parametrize("provider", PAID_KEYS)
 def test_paid_key_has_no_weighted_routes(fleet: dict[str, Any], provider: str) -> None:
     """Даже отключённый backend не должен сохранять ненулевой вес маршрута."""
-    _sol_routes(fleet)
+    _sol_model(fleet)
     routes = [
         (model["id"], route["weight"])
         for model in fleet["models"]
@@ -181,6 +184,21 @@ def test_paid_key_has_no_weighted_routes(fleet: dict[str, Any], provider: str) -
 @pytest.mark.parametrize("provider", PAID_KEYS)
 def test_paid_key_sidecar_disabled(sidecar: dict[str, Any], provider: str) -> None:
     assert sidecar["providers"][provider]["enabled"] is False, f"P0: {provider} enabled"
+
+
+def test_droid_fleet_and_sidecar_disabled(
+    fleet: dict[str, Any], sidecar: dict[str, Any]
+) -> None:
+    assert fleet["backends"]["droid"]["enabled"] is False
+    assert sidecar["providers"]["droid"]["enabled"] is False
+
+
+def test_sol_only_codex_active_among_candidates(sidecar: dict[str, Any]) -> None:
+    sol = sidecar["models"][MODEL]
+    candidates = {sol["provider"], *(a["provider"] for a in sol["alternates"])}
+    assert candidates == {"codex", *PAID_KEYS, "droid"}
+    active = {p for p in candidates if sidecar["providers"][p]["enabled"] is True}
+    assert active == {"codex"}
 
 
 def test_checked_in_catalog_digest_matches_fleet() -> None:

@@ -98,12 +98,12 @@ def test_aggregate_single_response_fields_and_usage() -> None:
 def test_aggregate_usage_comes_from_last_chunk_that_has_it() -> None:
     raw = (
         content("a")
-        + delta_frame({}, 0, "stop", usage={"total_tokens": 1})
-        + frame(chunk([], usage={"total_tokens": 9}))
+        + delta_frame({}, 0, "stop", usage={"prompt_tokens": 1, "completion_tokens": 0, "total_tokens": 1})
+        + frame(chunk([], usage={"prompt_tokens": 4, "completion_tokens": 5, "total_tokens": 9}))
         + frame(chunk([]))  # без usage: прежнее значение не затирается
         + DONE
     )
-    assert agg(raw)["usage"] == {"total_tokens": 9}
+    assert agg(raw)["usage"] == {"prompt_tokens": 4, "completion_tokens": 5, "total_tokens": 9}
 
 
 def test_aggregate_usage_absent_is_allowed() -> None:
@@ -483,7 +483,7 @@ def test_via_stream_rewrites_only_stream_flag_and_returns_single_json(ns_env, up
     if stream_field is not None:
         request["stream"] = stream_field
     sse_script(upstream, role_frame() + content("Hello") + content("\n\n") + content("world")
-               + finish(0, "stop") + frame(chunk([], usage={"total_tokens": 5})) + DONE)
+               + finish(0, "stop") + frame(chunk([], usage={"prompt_tokens": 2, "completion_tokens": 3, "total_tokens": 5})) + DONE)
     sink, _ = invoke(upstream, request, raw=json.dumps(request, indent=2).encode("utf-8"))
     sent = json.loads(upstream.requests[0]["body"])
     assert sent["stream"] is True
@@ -496,7 +496,7 @@ def test_via_stream_rewrites_only_stream_flag_and_returns_single_json(ns_env, up
     body = json.loads(sink.body)
     assert body["object"] == "chat.completion"
     assert message_of(body)["content"] == "Hello\n\nworld"
-    assert body["usage"] == {"total_tokens": 5}
+    assert body["usage"] == {"prompt_tokens": 2, "completion_tokens": 3, "total_tokens": 5}
     assert b"[DONE]" not in sink.body and b"data:" not in sink.body
 
 

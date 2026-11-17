@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import importlib.util
 import json
 import socket
@@ -10,10 +11,13 @@ from pathlib import Path
 import pytest
 
 import server
+from adapters import ADAPTER_KINDS
+from core.backend_adapter import AdapterRegistry
 from tools import droid_image
 
 DROID_MODEL_IDS = (
     "claude-sonnet-5-5-droid",
+    "gemini-3.8-flash",
     "gemini-3.8-flash-droid",
     "gpt-6.1-sol-droid",
 )
@@ -21,6 +25,7 @@ BASE_TOOLS = tuple(f"tool-{index}" for index in range(35))
 EXTRA_TOOL = "wait-for-script-cli"
 MODEL_EFFORTS = (
     ("low", "medium", "high", "max"),
+    ("low", "medium", "high"),
     ("low", "medium", "high"),
     ("low", "medium", "high", "max"),
 )
@@ -35,17 +40,35 @@ def fleet_data() -> dict:
     return json.loads((Path(server.ROOT) / "fleet.json").read_text(encoding="utf-8"))
 
 
+def fleet_data_with_droid_enabled() -> dict:
+    """Копия сырого флита с включённым только в памяти теста бэкендом droid."""
+    data = copy.deepcopy(fleet_data())
+    data["backends"]["droid"]["enabled"] = True
+    return data
+
+
+def test_droid_backend_disabled_in_prod_fleet() -> None:
+    """Политика владельца: в прод-`fleet.json` droid выключен и в каталог не публикуется."""
+    data = fleet_data()
+    assert data["backends"]["droid"]["enabled"] is False
+    catalog = server._build_catalog(data)
+    assert not set(DROID_MODEL_IDS) & set(catalog["models"])
+    assert server.BACKENDS.get("droid") is None
+
+
 @pytest.mark.parametrize(
     ("model_id", "efforts"), tuple(zip(DROID_MODEL_IDS, MODEL_EFFORTS))
 )
 def test_subscription_catalog(model_id: str, efforts: tuple[str, ...]) -> None:
-    catalog = server._build_catalog(fleet_data())
+    catalog = server._build_catalog(fleet_data_with_droid_enabled())
     model = catalog["models"][model_id]
     assert model["backend"] == "droid"
     assert model["efforts"] == list(efforts)
     assert model["default_effort"] == "high"
     assert model["name"].endswith("(Droid bridge)")
-    assert server.BACKENDS.adapter_for_model(model_id).id == "droid"
+    registry = AdapterRegistry.from_fleet(catalog, ADAPTER_KINDS, lambda: catalog, server)
+    adapter = registry.adapter_for_model(model_id)
+    assert adapter is not None and adapter.id == "droid"
 
 
 def test_removed_droid_models_absent_from_fleet() -> None:
@@ -61,7 +84,7 @@ def test_exact_catalog_ids_beat_effort_alias(
     monkeypatch: pytest.MonkeyPatch, model_id: str
 ) -> None:
     monkeypatch.setattr(server, "EFFORT_ALIAS_ENABLED", True)
-    catalog = server._build_catalog(fleet_data())["models"]
+    catalog = server._build_catalog(fleet_data_with_droid_enabled())["models"]
     assert server._resolve_model_alias(model_id, catalog) is None
     assert server._resolve_model_alias(model_id + "-high", catalog) == (
         model_id,

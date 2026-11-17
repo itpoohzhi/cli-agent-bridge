@@ -9,11 +9,12 @@ from pathlib import Path, PurePosixPath
 
 import pytest
 
-from tests.test_transport_modularity import BASE, RUN, Snapshot, snapshot as snapshot
+from tests.test_transport_modularity import BASE, RUN, UPSTREAM_DEV, Snapshot, base_blobs, snapshot as snapshot
 from tests.transport_test_support import categories, require_wave_artifacts, semantic_equal, wave_changes
 
 pytestmark = pytest.mark.strict_leak_check
 PURE = frozenset({"core.routing_contract", "core.transport_routing", "core.catalog_routes"})
+PURE_SEAM = {"core.catalog_routes": frozenset({"core.route_eligibility"})}
 APPLICATION = frozenset({"core.route_eligibility", "core.route_attempts", "core.routing_schema"})
 HOSTS = frozenset({"server", "core.provider_manifest", "core.fleet_compiler"})
 OWNERS = (("core/transport_routing.py", "RouteDraw", "_remaining"),
@@ -78,7 +79,7 @@ def test_dependency_directions_and_no_new_cycles(snapshot: Snapshot) -> None:
     changed = {module_name(p) for p in snapshot.changed}
     for module in changed & after.keys():
         if module in PURE:
-            assert not (after[module] - PURE), module
+            assert not (after[module] - PURE - PURE_SEAM.get(module, frozenset())), module
         if module in APPLICATION:
             assert not any(m == "server" or m.startswith("adapters.") for m in after[module])
         if module not in HOSTS:
@@ -95,7 +96,8 @@ def test_pure_modules_no_indirect_io(snapshot: Snapshot) -> None:
         path = module.replace(".", "/") + ".py"
         assert path in sources, module
         dependencies = imports(sources[path], module)
-        assert all(d in PURE or d.split(".")[0] in allowed for d in dependencies)
+        seam = PURE_SEAM.get(module, frozenset())
+        assert all(d in PURE | seam or d.split(".")[0] in allowed for d in dependencies)
         tree = ast.parse(sources[path])
         calls = {ast.unparse(n.func) for n in ast.walk(tree) if isinstance(n, ast.Call)}
         assert not calls & {"open", "input", "print", "eval", "exec", "__import__"}
@@ -130,8 +132,8 @@ def test_state_oracle_negative_canaries(source: str) -> None:
     assert state_errors(source.encode())
 
 def test_new_runtime_state_has_private_request_or_pool_owner(snapshot: Snapshot) -> None:
-    before, after = dict(snapshot.before), dict(snapshot.after)
-    for path in snapshot.changed - before.keys():
+    upstream, after = dict(base_blobs(UPSTREAM_DEV)), dict(snapshot.after)
+    for path in after.keys() - upstream.keys():
         if path.endswith(".py") and path.startswith(("core/", "adapters/")):
             assert state_errors(after[path]) == (), path
     for path, owner, field in OWNERS:

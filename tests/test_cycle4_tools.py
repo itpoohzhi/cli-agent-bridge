@@ -535,12 +535,9 @@ class TestRw013ReceiptSchema(unittest.TestCase):
                 base = Path(tmp)
                 tools = base / "tools"
                 tools.mkdir()
-                for name in (
-                    "droid_image.py",
-                    "receipt_schema.py",
-                    "droid_probe_config.py",
-                ):
+                for name in ("droid_image.py", "receipt_schema.py", "droid_probe_config.py", "droid_receipt_verify.py"):
                     shutil.copy(ROOT / "tools" / name, tools / name)
+                shutil.copytree(ROOT / "core", base / "core", ignore=shutil.ignore_patterns("__pycache__"))
                 if fleet is not None:
                     (base / "fleet.json").write_text(fleet, encoding="utf-8")
                 hub = FakeDroidHub(base / "fake")

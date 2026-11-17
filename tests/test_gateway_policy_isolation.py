@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import sys
 from email.message import Message
 from pathlib import Path
@@ -58,8 +59,10 @@ def _forbid_dispatch(monkeypatch: pytest.MonkeyPatch) -> Mock:
 
 @pytest.mark.parametrize("round_id", (0, 1))
 def test_penalty_state_is_private_and_fresh(tmp_path: Path, round_id: int) -> None:
+    policy_dir = Path(os.environ["BRIDGE_STATE_DIR"]).parent
+    assert policy_dir.parent == tmp_path.parent
     tracker = server._PENALTY_TRACKER
-    assert tracker.storage_path == tmp_path / "penalties.json"
+    assert tracker.storage_path == policy_dir / "penalties.json"
     assert tracker.get_model_status("claude-sonnet-5-5")["fails"] == 0
     tracker.manually_penalize("claude-sonnet-5-5", duration_s=60)
     assert tracker.is_penalized("claude-sonnet-5-5")[0] is True
@@ -67,9 +70,11 @@ def test_penalty_state_is_private_and_fresh(tmp_path: Path, round_id: int) -> No
 
 
 def test_runtime_policy_paths_do_not_point_to_owner_files(tmp_path: Path) -> None:
+    policy_dir = Path(os.environ["BRIDGE_STATE_DIR"]).parent
+    assert policy_dir.parent == tmp_path.parent
     notes: Any = server._MODEL_NOTES_FILTER
-    assert server._QUOTA_CB_CACHE.path == tmp_path / "quota.json"
-    assert notes.path == tmp_path / "notes.md"
+    assert server._QUOTA_CB_CACHE.path == policy_dir / "quota.json"
+    assert notes.path == policy_dir / "notes.md"
     assert notes.is_blocked("claude-sonnet-5-5") is False
 
 

@@ -41,6 +41,13 @@ def efforts(catalog: Any, model: str) -> tuple[list[str], str]:
     return card["efforts"], card["default_effort"]
 
 
+def fleet_bytes_with_droid_enabled() -> bytes:
+    """Прод-флит держит `droid=false`: ON-снимок тоггла строится из копии с `droid=true`."""
+    data = json.loads((srv().ROOT / "fleet.json").read_text("utf-8"))
+    data["backends"]["droid"]["enabled"] = True
+    return json.dumps(data).encode("utf-8")
+
+
 class DroidCatalogRuntimeToggleTest(unittest.TestCase):
     def setUp(self) -> None:
         tmp = tempfile.TemporaryDirectory()
@@ -51,6 +58,12 @@ class DroidCatalogRuntimeToggleTest(unittest.TestCase):
         self.addCleanup(patcher.stop)
         for name in (FLAG_DROID_CATALOG, FLAG_COMPILED_FLEET):
             os.environ.pop(name, None)
+        fleet_path = Path(tmp.name) / "fleet.json"
+        fleet_path.write_bytes(fleet_bytes_with_droid_enabled())
+        self.fleet_path = fleet_path
+        path_patcher = mock.patch.object(srv(), "FLEET_PATH", fleet_path)
+        path_patcher.start()
+        self.addCleanup(path_patcher.stop)
 
     def build(self, enabled: bool) -> tuple[Any, GatedRegistry]:
         set_flag(enabled)
@@ -71,7 +84,7 @@ class DroidCatalogRuntimeToggleTest(unittest.TestCase):
         # Профиль OFF скрывает базовый gpt-6.1-sol; при ON его владелец — OpenAI key 2.
         self.assertEqual("gpt-6.1-sol" in published, on)
         self.assertEqual(("droid" in [a.id for a in registry.adapters()]), on)
-        self.assertEqual(len(catalog["aliases"]), 32 if on else 0)
+        self.assertEqual(len(catalog["aliases"]), 35 if on else 0)
         backend = catalog["models"]["claude-sonnet-5-5"]["backend"]
         self.assertEqual(backend, "claude-p")
         self.assertEqual("gpt-6.1-sol" in catalog["models"], on)
@@ -100,7 +113,7 @@ class DroidCatalogRuntimeToggleTest(unittest.TestCase):
         """Compiled-каталог, выбранный `resolve_fleet_path`, тоже под гейтом и kill-switch."""
         with tempfile.TemporaryDirectory() as state:
             compiled = Path(state) / "fleet.compiled.json"
-            compiled.write_bytes((srv().ROOT / "fleet.json").read_bytes())
+            compiled.write_bytes(fleet_bytes_with_droid_enabled())
             env = {"BRIDGE_STATE_DIR": state, FLAG_COMPILED_FLEET: "true", FLAG_DROID_CATALOG: "false"}
             with mock.patch.dict(os.environ, env):
                 os.environ.pop("DROID_DSH_BRIDGE_FLEET", None)
@@ -219,7 +232,7 @@ class DroidCatalogRuntimeToggleTest(unittest.TestCase):
 
     def test_env_fleet_path_keeps_toggle(self) -> None:
         """F-005.1: заданный `DROID_DSH_BRIDGE_FLEET` не отключает рантайм-переключатель."""
-        path = srv().ROOT / "fleet.json"
+        path = self.fleet_path
         env = {"DROID_DSH_BRIDGE_FLEET": str(path)}
         with mock.patch.dict(os.environ, env), mock.patch.object(srv(), "FLEET_PATH", path):
             catalog = srv()._load_fleet()
@@ -241,7 +254,7 @@ class DroidCatalogRuntimeToggleTest(unittest.TestCase):
         self.assertNotIn("gpt-6.1-sol", catalog["models"])
         set_flag(True)
         sol = catalog["models"]["gpt-6.1-sol"]["name"]
-        self.assertEqual(sol, "GPT-6.1 Sol (OpenAI key 2)")
+        self.assertEqual(sol, "GPT-6.1 Sol (Codex resident)")
         set_flag(False)
         for model, name in names.items():
             self.assertEqual(catalog["models"][model]["name"], name)
@@ -277,7 +290,7 @@ class DroidCatalogRuntimeToggleTest(unittest.TestCase):
         self.assertIs(registry.get("codex"), codex)
 
     def test_plain_catalog_registry_has_no_hook(self) -> None:
-        plain = srv()._build_catalog(json.loads((srv().ROOT / "fleet.json").read_text("utf-8")))
+        plain = srv()._build_catalog(json.loads(fleet_bytes_with_droid_enabled()))
         registry = GatedRegistry.from_fleet(plain, ADAPTER_KINDS, lambda: plain, srv())
         self.assertIsNotNone(registry.get("droid"))
         set_flag(True)

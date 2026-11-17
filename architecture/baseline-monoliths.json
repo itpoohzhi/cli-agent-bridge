@@ -1,31 +1,31 @@
 {
   "schema_version": "1.0",
-  "base_revision": "2c4b3e4cbf6358f7507a14ba9c6cd539844112e6",
+  "base_revision": "751ef2b0bd42cadd0be41c01f93f65417f5ec031",
   "files": [
     {
       "path": "core/tool_emulation.py",
-      "lines": 2217,
-      "sha256": "4105ed6ea153e31d86ecfdc4105cbfc7ad3ebaf6e8fb37176aeb87faf0e74d29"
+      "lines": 2189,
+      "sha256": "575f2af1b065a896df2816d63fec9e1dfa30d3b4301887a950cbe2e9c74e1e13"
     },
     {
       "path": "bridges/claude-p-bridge/server.py",
       "lines": 1069,
-      "sha256": "a887977cf77d845d186a98d8d750911063472f85d4a87275aba87f01bcafcc87"
+      "sha256": "648799c5ef630948d6898e138f8b747ef77ae7745a5436141794dcd28d397df0"
     },
     {
       "path": "adapters/passthrough_adapter.py",
-      "lines": 1818,
-      "sha256": "6f2b872bfdafd54d35163ae3c54f6aa763dfbb7888a3b15fe394e3e16fe8db02"
+      "lines": 1892,
+      "sha256": "cbeac1f2a6fcd2ae1a5ae0e05ce804033b7bbfaa863807ea6d6af8c7026d2ac5"
     },
     {
       "path": "core/backend_adapter.py",
-      "lines": 1085,
-      "sha256": "9c39b0e6ff3e3c956c92347b307e49eee902e5fd52095f5725c17fa83a41a677"
+      "lines": 955,
+      "sha256": "132bc141912109987c3ec58e8f25bb054ddfc8cf2b422181b3b5284df35b685b"
     },
     {
       "path": "server.py",
-      "lines": 8930,
-      "sha256": "1da9a61d5fb7554e984b54787def3382795508ac2edb30c37aa66cc45da212ae"
+      "lines": 7848,
+      "sha256": "4525ded4330c9f8048970497e36437c6d108cea0620dd6abb42ba694df243af4"
     }
   ]
 }

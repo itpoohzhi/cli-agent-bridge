@@ -1,16 +1,17 @@
 {
-  "compiled_at": "2026-11-17T04:19:15+0300",
+  "compiled_at": "2026-11-17T17:07:45+0300",
   "compiler_version": 1,
-  "fleet_sha256": "754f4a193471d0d0e08ef229ad172a86e61f89156ce8fe113749376827aa20db",
+  "fleet_sha256": "3105eed893a3551c0a5d331a1599c049309bd3dfb4ffce1749f229f81fec4497",
   "inputs": {
     "discovery_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
     "manifests": {
-      "_fleet.yaml": "889034a7bbbafdbf2ca8d86a2010834ee3aa19f64edd0175bae7712bd832b272",
-      "agy.yaml": "b5fc4faa2afb4bdcc09897b73042fc333ee4370d6b744f412635bce76135aed7",
-      "claude-p.yaml": "cd2b0208bdac758ca6d68186b6eb65790866b6f7e29bd0fcf24ce111529318a4",
-      "codex.yaml": "a8cbb3cc17606fd933e2a423db597fd6f6a68b801a367e3938a3a015521868d9",
+      "_fleet.yaml": "20d9c9e68ea60f1de1b6d4c96c26a535897df11aca4922bd3b21b94891a590b2",
+      "agy-passthrough.yaml": "6186c9c4477ddcef24abd14daf6937c194729b9264ebba91f17faab6a2df2cd9",
+      "agy.yaml": "080b22bf492a28cf9929e8c590f47142022c93fec4f8885ca288768418ca1918",
+      "claude-p.yaml": "8ac948e1049b2ca703b010f4f54a5bec01d334caf75fd805f54fef47561246f7",
+      "codex.yaml": "14951f4182c38e4d09e688708e25e8568d3810b3981b0b94e102cd9675fac598",
       "deepseek-direct.yaml": "5decd8d0524651aa79cf0a5ef0879ee65633afd2394557b0cee8e86a96b262c7",
-      "droid.yaml": "6d73eadd0edd10a2e0a48fab0013fea2b8ce7a66f928386d9842b2ff5df482bf",
+      "droid.yaml": "5d3f8fcce33506145c139ab2f20bd25337501733e09684dfd7737277689f2a48",
       "muse.yaml": "610c34e6a064333504b3b6ec7aeed78c597d69526b56d701f6fbd42727ec3b78",
       "openai-key-2.yaml": "8c112c1f892bd25d06f59ff50870b65176632aece1ebe82cae5991c004fd09f4",
       "openai-key-3.yaml": "2108dc7da2c07a740132cd7656d8bb30368c86d4465b9116f1818dacdfc4e2b6",
@@ -18,7 +19,7 @@
       "opencode-go.yaml": "8d27372c95fcf802352d38e4e6f3a6c1919030ef6220d3c6c2c5808fe6077f68",
       "opencode-zen.yaml": "9239b0e1c543c23037f5407b6c64a0db04735d092ba7ccc53d197f83f91d1636"
     },
-    "manifests_sha256": "957cf4f023ba4db67d0747a0cb574505b099b6aeecc5dc1559707df36fd7b35b"
+    "manifests_sha256": "6e3cffbfde953a96aa41f67e6fa11807b540402f13365960e5527f8f7c1a49f7"
   },
   "models": {
     "beam-free": {
@@ -48,7 +49,7 @@
     "claude-haiku-5-5": {
       "alternates": [
         {
-          "provider": "opencode-go-claude"
+          "provider": "claude-p"
         }
       ],
       "efforts_proven": [],
@@ -56,9 +57,9 @@
       "family_source": "owned_by",
       "history": [],
       "in_fleet": true,
-      "provider": "claude-p",
+      "provider": "opencode-go-claude",
       "quorum_eligible": false,
-      "quota_group": "anthropic-claude",
+      "quota_group": "opencode-go-claude",
       "status": "quarantine"
     },
     "claude-opus-5-5": {
@@ -141,6 +142,34 @@
       "quota_group": "opencode-zen",
       "status": "quarantine"
     },
+    "gemini-3.8-flash": {
+      "alternates": [
+        {
+          "provider": "agy-passthrough"
+        }
+      ],
+      "efforts_proven": [],
+      "family": "Google",
+      "family_source": "exact_map",
+      "history": [],
+      "in_fleet": true,
+      "provider": "droid",
+      "quorum_eligible": false,
+      "quota_group": "factory-droid",
+      "status": "quarantine"
+    },
+    "gemini-3.8-flash-agy": {
+      "alternates": [],
+      "efforts_proven": [],
+      "family": "Google",
+      "family_source": "prefix",
+      "history": [],
+      "in_fleet": true,
+      "provider": "agy",
+      "quorum_eligible": false,
+      "quota_group": "google-agy",
+      "status": "quarantine"
+    },
     "gemini-3.8-flash-droid": {
       "alternates": [],
       "efforts_proven": [],
@@ -151,6 +180,54 @@
       "provider": "droid",
       "quorum_eligible": false,
       "quota_group": "factory-droid",
+      "status": "quarantine"
+    },
+    "gemini-4-argon": {
+      "alternates": [
+        {
+          "provider": "agy-passthrough"
+        }
+      ],
+      "efforts_proven": [],
+      "family": "Google",
+      "family_source": "prefix",
+      "history": [],
+      "in_fleet": true,
+      "provider": "agy",
+      "quorum_eligible": false,
+      "quota_group": "google-agy",
+      "status": "quarantine"
+    },
+    "gemini-4-carbon": {
+      "alternates": [
+        {
+          "provider": "agy-passthrough"
+        }
+      ],
+      "efforts_proven": [],
+      "family": "Google",
+      "family_source": "prefix",
+      "history": [],
+      "in_fleet": true,
+      "provider": "agy",
+      "quorum_eligible": false,
+      "quota_group": "google-agy",
+      "status": "quarantine"
+    },
+    "gemini-4-hydrogen": {
+      "alternates": [
+        {
+          "provider": "agy-passthrough"
+        }
+      ],
+      "efforts_proven": [],
+      "family": "Google",
+      "family_source": "prefix",
+      "history": [],
+      "in_fleet": true,
+      "provider": "agy",
+      "quorum_eligible": false,
+      "quota_group": "google-agy",
       "status": "quarantine"
     },
     "gpt-6.1-sol": {
@@ -398,35 +475,67 @@
       "quota_group": "google-agy",
       "timeout_s": 600.0
     },
-    "claude-p": {
+    "agy-passthrough": {
       "allow_base_url": [
         {
           "host": "127.0.0.1",
           "path_prefix": "/v1",
-          "port": 9881,
+          "port": 9887,
           "scheme": "http"
         }
       ],
       "bridge": true,
-      "enabled": true,
+      "direct": {
+        "argv_by_executable": {
+          "~/.config/agy-launch/agy-cli.sh": [
+            "-p",
+            "{prompt}",
+            "--model",
+            "{slot}",
+            "--output-format",
+            "text"
+          ],
+          "~/.local/bin/agy.real": [
+            "--model",
+            "{slot}",
+            "--effort",
+            "{effort}",
+            "--disable-slash-commands",
+            "--output-format",
+            "text"
+          ]
+        },
+        "executables": [
+          "~/.config/agy-launch/agy-cli.sh",
+          "~/.local/bin/agy.real"
+        ],
+        "output": {
+          "format": "text"
+        },
+        "prompt_via": "argv",
+        "type": "cli"
+      },
+      "enabled": false,
       "kind": "passthrough",
       "max_concurrent": 128,
+      "quota_group": "google-agy",
+      "timeout_s": 600.0
+    },
+    "claude-p": {
+      "allow_base_url": [],
+      "bridge": true,
+      "enabled": true,
+      "kind": "stdio_resident",
+      "max_concurrent": 10,
       "quota_group": "anthropic-claude",
       "timeout_s": 180.0
     },
     "codex": {
-      "allow_base_url": [
-        {
-          "host": "127.0.0.1",
-          "path_prefix": "/v1",
-          "port": 2455,
-          "scheme": "http"
-        }
-      ],
+      "allow_base_url": [],
       "bridge": true,
       "enabled": true,
-      "kind": "passthrough",
-      "max_concurrent": 128,
+      "kind": "stdio_resident",
+      "max_concurrent": 10,
       "quota_group": "openai-codex",
       "timeout_s": 180.0
     },
@@ -449,7 +558,7 @@
     "droid": {
       "allow_base_url": [],
       "bridge": true,
-      "enabled": true,
+      "enabled": false,
       "kind": "droid",
       "max_concurrent": 64,
       "quota_group": "factory-droid",
@@ -611,24 +720,7 @@
       "timeout_s": 180.0
     }
   },
-  "rejected": {
-    "gemini-3.8-flash": {
-      "provider": "agy",
-      "reason": "status_inconsistent"
-    },
-    "gemini-4-argon": {
-      "provider": "agy",
-      "reason": "status_inconsistent"
-    },
-    "gemini-4-carbon": {
-      "provider": "agy",
-      "reason": "status_inconsistent"
-    },
-    "gemini-4-hydrogen": {
-      "provider": "agy",
-      "reason": "status_inconsistent"
-    }
-  },
+  "rejected": {},
   "rejected_providers": {},
   "schema": "catalog-lock/1"
 }

@@ -104,6 +104,20 @@ def load_raw_fleet():
     return mutable_test_fleet(json.loads(Path(server.FLEET_PATH).read_text(encoding="utf-8")))
 
 
+def codex_as_passthrough(data, base_url="http://127.0.0.1:2455/v1"):
+    """Стендовый passthrough-codex: боевой fleet (origin/dev) держит codex на stdio_resident."""
+    data["backends"]["codex"] = {
+        "kind": "passthrough",
+        "enabled": True,
+        "required": False,
+        "owned_by": "openai-codex",
+        "max_concurrent": 128,
+        "base_url": base_url,
+        "api_key_env": "CODEX_LB_API_KEY",
+    }
+    return data
+
+
 # Модели, которые стенд FakeDroid обслуживает через бэкенд droid (боевой fleet.json
 # переведён на единый мост :9882, Droid там выключен).
 _DROID_STAND_MODELS = ("claude-sonnet-5-5", "gemini-3.8-flash", "gpt-6.1-sol")
@@ -467,7 +481,13 @@ class BridgeCase(unittest.TestCase):
         )
         server.RESILIENCE = server.ResilienceManager()
         server._QUOTA_CB_CACHE = server.QuotaCircuitBreakerCache(base / "quota.json")
-        server._MODEL_NOTES_FILTER = server.ModelNotesFilter(base / "notes.md")
+        # Fail-closed фильтр требует существующий валидный источник: отсутствующий файл — 503.
+        notes_path = base / "notes.md"
+        notes_path.write_text(
+            "| Модель | Статус |\n|---|---|\n| __fixture_only__ | BANNED |\n",
+            encoding="utf-8",
+        )
+        server._MODEL_NOTES_FILTER = server.ModelNotesFilter(notes_path)
         server._budget = None
 
     def _prepare_guard(self) -> None:

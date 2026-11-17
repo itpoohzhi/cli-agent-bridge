@@ -35,7 +35,7 @@ from adapters.passthrough_adapter import (  # noqa: E402
     ResponseSink,
     relay_sse,
 )
-from bridge_testlib import BridgeCase, load_raw_fleet  # noqa: E402
+from bridge_testlib import BridgeCase, codex_as_passthrough, load_raw_fleet  # noqa: E402
 from core.backend_adapter import (
     AdapterRegistry,
 )  # noqa: E402
@@ -1930,7 +1930,7 @@ class TestPassthroughAuthFlagSource(unittest.TestCase):
 
     def test_handler_dual_tolerance_depends_on_flag(self) -> None:
         """Реальный Handler допускает собственный ключ passthrough только при включённом флаге."""
-        data = load_raw_fleet()
+        data = codex_as_passthrough(load_raw_fleet())
         data["backends"]["codex"].update(enabled=True, api_key="own-test-key")
         data["backends"]["codex"].pop("api_key_env", None)
         catalog = server._build_catalog(data)
@@ -2061,10 +2061,8 @@ class TestHubRoute(BridgeCase):
         super().setUp()
         self.upstream = FakeUpstream()
         self.addCleanup(self.upstream.close)
-        data = load_raw_fleet()
-        data["backends"]["codex"]["enabled"] = True
-        data["backends"]["codex"]["base_url"] = (
-            "http://127.0.0.1:%d/v1" % self.upstream.port
+        data = codex_as_passthrough(
+            load_raw_fleet(), "http://127.0.0.1:%d/v1" % self.upstream.port
         )
         # Эти сценарии проверяют прежний контракт без настроенного upstream-ключа.
         data["backends"]["codex"].pop("api_key_env", None)

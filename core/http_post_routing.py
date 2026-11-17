@@ -101,19 +101,35 @@ def _penalty_allowed(route: PostRoute, requested_id: str) -> bool:
     route.handler._send(503, {"error": {"message": message, "type": "model_penalized", "code": 503, "penalized_until": int(stat["penalized_until"])}}, extra_headers={"Retry-After": str(retry_after)})
     return False
 
+def _provider_lookup(route: PostRoute, published: Any) -> str | None:
+    if route.model_id in published:
+        return route.model_id
+    alias = route.host._resolve_model_alias(route.model_id, published)
+    if alias is None:
+        route.handler._reject(404, "model_not_found", "model is not in the catalogue", "unknown", route.model_len)
+        return None
+    route.model_id = alias[0] if isinstance(alias, (tuple, list)) else alias
+    if route.alias is None:
+        route.alias = alias
+        route.alias_effort = alias[1] if isinstance(alias, (tuple, list)) and len(alias) > 1 else None
+    return route.model_id
+
+def _published_owner(entry: Any) -> str:
+    adapter, model = entry
+    if adapter is not None:
+        return getattr(adapter, "owned_by", "")
+    return getattr(model, "owned_by", "") or (model.get("owned_by", "") if isinstance(model, dict) else "")
+
 def _provider_allowed(route: PostRoute) -> bool:
     provider_id = route.ingress.provider_id
     if provider_id is None:
         return True
-    host = route.host
-    published = host._get_published_models()
-    if route.model_id not in published:
-        route.handler._reject(404, "model_not_found", "model is not in the catalogue", "unknown", route.model_len)
+    published = route.host._get_published_models()
+    lookup_id = _provider_lookup(route, published)
+    if lookup_id is None:
         return False
-    adapter, model = published[route.model_id]
-    owner = getattr(adapter, "owned_by", "") if adapter is not None else (getattr(model, "owned_by", "") or (model.get("owned_by", "") if isinstance(model, dict) else ""))
-    allowed = host.PROVIDER_SCOPES[provider_id]
-    if owner in ((allowed,) if isinstance(allowed, str) else allowed):
+    allowed = route.host.PROVIDER_SCOPES[provider_id]
+    if _published_owner(published[lookup_id]) in ((allowed,) if isinstance(allowed, str) else allowed):
         return True
     route.handler._reply_error(400, f"Model '{route.raw_model}' is not available for provider '{provider_id}'", code="model_not_in_provider_scope")
     return False

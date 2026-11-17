@@ -1,4 +1,5 @@
 """fleet.json schema 3: парсинг backends, привязка моделей, совместимость со schema 2 (AC-001)."""
+
 from __future__ import annotations
 import copy
 import contextlib
@@ -72,33 +73,58 @@ class TestLiveFleetV3(unittest.TestCase):
     def test_live_catalogue_is_schema_3_with_eleven_backends(self) -> None:
         catalog = server._build_catalog(raw_v3())
         self.assertEqual(catalog["schema_version"], 3)
-        self.assertEqual(catalog["backend_order"], ["agy", "claude-p", "codex", "muse", "opencode-go", "opencode-go-claude", "deepseek-direct", "openai-key-2", "openai-key-3", "droid", "opencode-zen"])
+        self.assertEqual(
+            catalog["backend_order"],
+            [
+                "agy",
+                "claude-p",
+                "codex",
+                "muse",
+                "opencode-go",
+                "opencode-go-claude",
+                "deepseek-direct",
+                "openai-key-2",
+                "openai-key-3",
+                "droid",
+                "opencode-zen",
+                "agy-passthrough",
+            ],
+        )
         self.assertEqual(catalog["backends"]["droid"]["kind"], "droid")
-        self.assertTrue(catalog["backends"]["droid"]["enabled"])
+        # Решение владельца (Волна 2): droid выключен в итоговом fleet.json.
+        self.assertFalse(catalog["backends"]["droid"]["enabled"])
         self.assertEqual(catalog["backends"]["droid"]["max_concurrent"], 64)
         self.assertFalse(catalog["backends"]["droid"]["required"])
+        for key_backend in ("openai-key-2", "openai-key-3"):
+            self.assertFalse(catalog["backends"][key_backend]["enabled"], key_backend)
         muse = catalog["backends"]["muse"]
         self.assertEqual(muse["kind"], "muse")
         self.assertTrue(muse["enabled"])
         self.assertEqual(muse["wrapper"], "~/.config/muse-launch/muse-cli.sh")
         self.assertEqual(muse["max_concurrent"], 64)
         codex = catalog["backends"]["codex"]
-        self.assertEqual(codex["kind"], "passthrough")
+        # origin/dev: codex — stdio_resident (codex app-server), вес 100 в providers.d.
+        self.assertEqual(codex["kind"], "stdio_resident")
         self.assertTrue(codex["enabled"])
-        self.assertEqual(codex["base_url"], "http://127.0.0.1:2455/v1")
+        self.assertEqual(codex["wrapper"], "codex app-server")
+        self.assertEqual(codex["max_concurrent"], 10)
 
     def test_local_bridges_are_registered_as_passthrough(self):
         """ADR 0015: agy :9887, opencode-zen :9883, claude-p :9881 заведены passthrough-бэкендами
         (необязательными; выключены, пока не перечислены их модели)."""
         catalog = server._build_catalog(raw_v3())
-        for name, port in (("agy", 9887), ("opencode-zen", 9883), ("claude-p", 9881)):
+        for name, port in (
+            ("agy", 9887),
+            ("agy-passthrough", 9887),
+            ("opencode-zen", 9883),
+        ):
             backend = catalog["backends"][name]
             self.assertEqual(backend["kind"], "passthrough", name)
             self.assertEqual(backend["base_url"], "http://127.0.0.1:%d/v1" % port, name)
             self.assertFalse(backend["required"], name)
-            self.assertTrue(
-                backend["enabled"], name
-            )  # ADR 0017: passthrough-бэкенды включены
+        # origin/dev: claude-p переведён с passthrough :9881 на stdio_resident.
+        self.assertEqual(catalog["backends"]["claude-p"]["kind"], "stdio_resident")
+        self.assertFalse(catalog["backends"]["agy-passthrough"]["enabled"])
 
     def test_default_model_is_muse_wonder_full(self):
         """ADR 0015: умолчание каталога - активная модель muse, а не выводимый Droid."""
@@ -107,37 +133,65 @@ class TestLiveFleetV3(unittest.TestCase):
         self.assertEqual(catalog["models"]["muse-wonder-full-1.0"]["backend"], "muse")
         self.assertEqual(server.FLEET["default_model"], "muse-wonder-full-1.0")
 
-    def test_models_are_bound_to_backends(self) -> None:
-        data = raw_v3()
-        catalog = server._build_catalog(data)
-        self.assertEqual(len(catalog["order"]), 25)
-        self.assertEqual(catalog["models"]["claude-sonnet-5-5"]["backend"], "claude-p")
-        self.assertEqual(catalog["models"]["claude-haiku-5-5"]["backend"], "claude-p")
-        rejected_gemini = {"gemini-3.8-flash", "gemini-4-argon", "gemini-4-carbon", "gemini-4-hydrogen"}
-        self.assertTrue(rejected_gemini.isdisjoint(catalog["models"]))
-        self.assertEqual(catalog["models"]["gpt-6.1-sol"]["backend"], "codex")
-        for model_id in ("claude-sonnet-5-5-droid", "gemini-3.8-flash-droid", "gpt-6.1-sol-droid"):
-            self.assertEqual(catalog["models"][model_id]["backend"], "droid")
-        self.assertEqual(catalog["models"]["deepseek-v4.1-flash"]["backend"], "deepseek-direct")
-        self.assertNotIn("kimi-k3.1-pro", catalog["models"])
+    def _check_droid_and_muse_models(self, catalog, raw_backends) -> None:
+        for model_id in (
+            "claude-sonnet-5-5-droid",
+            "gemini-3.8-flash-droid",
+            "gpt-6.1-sol-droid",
+            "gemini-3.8-flash",
+        ):
+            self.assertEqual(raw_backends[model_id], "droid")
+            self.assertNotIn(model_id, catalog["models"])
         for mid in MUSE_MODELS:
             model = catalog["models"][mid]
             self.assertEqual(model["backend"], "muse")
             if mid in ("muse-wonder-1.0", "muse-wonder-full-1.0"):
-                self.assertEqual(
-                    model["efforts"], ["minimal", "low", "medium", "high", "max"]
-                )
+                self.assertEqual(model["efforts"], ["minimal", "low", "medium", "high", "max"])
                 self.assertEqual(model["default_effort"], "high")
             else:
                 self.assertEqual(model["efforts"], ["max"])
                 self.assertEqual(model["default_effort"], "max")
 
-    def test_subscription_droid_models_are_published(self):
-        catalog = server._build_catalog(raw_v3())
+    def test_models_are_bound_to_backends(self) -> None:
+        data = raw_v3()
+        catalog = server._build_catalog(data)
+        # Итоговый fleet.json: 30 определений, опубликовано 26 (4 droid не публикуются,
+        # т.к. backend droid выключен решением владельца).
+        self.assertEqual(len(data["models"]), 30)
+        self.assertEqual(len(catalog["order"]), 26)
+        self.assertEqual(catalog["models"]["claude-sonnet-5-5"]["backend"], "claude-p")
+        # Haiku: legacy backend opencode-go-claude (вес 100), claude-p — роут с весом 0.
         self.assertEqual(
-            sum(m["backend"] == "droid" for m in catalog["models"].values()), 3
+            catalog["models"]["claude-haiku-5-5"]["backend"], "opencode-go-claude"
         )
-        self.assertTrue(raw_v3()["backends"]["droid"]["enabled"])
+        routes = {
+            r["backend"]: r["weight"]
+            for r in catalog["models"]["claude-haiku-5-5"]["routing"]["routes"]
+        }
+        self.assertEqual(routes, {"claude-p": 0, "opencode-go-claude": 100})
+        self.assertEqual(catalog["models"]["gemini-3.8-flash-agy"]["backend"], "agy")
+        self.assertEqual(catalog["models"]["gemini-4-hydrogen"]["backend"], "agy")
+        self.assertEqual(catalog["models"]["gemini-4-argon"]["backend"], "agy")
+        self.assertEqual(catalog["models"]["gemini-4-carbon"]["backend"], "agy")
+        # GPT: родной codex (stdio_resident), а не выключенные openai-key-2/3.
+        self.assertEqual(catalog["models"]["gpt-6.1-sol"]["backend"], "codex")
+        raw_backends = {m["id"]: m["backend"] for m in data["models"]}
+        self.assertEqual(raw_backends["gemini-3.8-flash"], "droid")
+        self.assertEqual(
+            catalog["models"]["deepseek-v4.1-flash"]["backend"], "deepseek-direct"
+        )
+        self.assertNotIn("kimi-k3.1-pro", catalog["models"])
+        self._check_droid_and_muse_models(catalog, raw_backends)
+
+    def test_subscription_droid_models_defined_but_not_published(self):
+        # При droid=false 4 определения остаются в fleet.json,
+        # но не публикуются в построенном каталоге.
+        catalog = server._build_catalog(raw_v3())
+        self.assertEqual(sum(m["backend"] == "droid" for m in raw_v3()["models"]), 4)
+        self.assertEqual(
+            sum(m["backend"] == "droid" for m in catalog["models"].values()), 0
+        )
+        self.assertFalse(raw_v3()["backends"]["droid"]["enabled"])
         self.assertEqual(catalog["default_model"], "muse-wonder-full-1.0")
         self.assertNotIn("grok-4.7", catalog["models"])
         self.assertNotIn("glm-5.3", catalog["models"])
@@ -151,7 +205,8 @@ class TestLiveFleetV3(unittest.TestCase):
     def test_load_fleet_reads_schema_3_file(self):
         catalog = server._build_catalog(raw_v3())
         self.assertEqual(catalog["schema_version"], 3)
-        self.assertEqual(len(catalog["order"]), 25)
+        self.assertEqual(len(raw_v3()["models"]), 30)
+        self.assertEqual(len(catalog["order"]), 26)
 
 
 class TestSchema2Compat(unittest.TestCase):
@@ -572,7 +627,8 @@ class TestFleetCheckParity(unittest.TestCase):
         data = raw_v3()
         self.assertTrue(data["backends"]["muse"]["enabled"])
         catalog = server._build_catalog(data)
-        self.assertEqual(len(catalog["order"]), 25)
+        self.assertEqual(len(data["models"]), 30)
+        self.assertEqual(len(catalog["order"]), 26)
         self.assertEqual(catalog["default_model"], "muse-wonder-full-1.0")
 
     def test_checker_main_returns_structured_error_for_invalid_model(self):

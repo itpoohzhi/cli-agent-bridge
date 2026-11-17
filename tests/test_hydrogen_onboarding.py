@@ -118,8 +118,12 @@ FLAG = "BRIDGE_EFFORT_CATALOG_ENABLED"
 LEGACY_EFFORTS = SIBLING_EFFORTS
 
 
-def test_hub_modalities_image_for_all_four_google_models_in_sync_with_bridge() -> None:
+def test_hub_modalities_image_for_all_four_google_models_in_sync_with_bridge(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
     """Ядро `:9882` ↔ мост AGY: modalities == ["text", "image"] == `input` fleet.json моста."""
+    monkeypatch.setenv("BRIDGE_DYNAMIC_CONFIG_PATH", str(tmp_path / "absent.json"))
+    monkeypatch.setenv("BRIDGE_DROID_CATALOG_ENABLED", "0")
     cards = {card["id"]: card for card in server._build_models_list()}
     bridge_fleet = _load_json(ROOT / "bridges" / "agy-bridge" / "fleet.json")
     for model_id in GOOGLE_MODELS:
@@ -142,6 +146,7 @@ def test_bridge_fleet_image_proof_formats_are_verified_only() -> None:
 @pytest.fixture
 def effort_flag_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> pytest.MonkeyPatch:
     monkeypatch.setenv("BRIDGE_DYNAMIC_CONFIG_PATH", str(tmp_path / "absent.json"))
+    monkeypatch.setenv("BRIDGE_DROID_CATALOG_ENABLED", "0")
     monkeypatch.setattr(server, "ADVERTISED_EFFORT_ALIASES", ())
     monkeypatch.setattr(server, "_EFFORT_SPECS_CACHE", (None, {}))
     return monkeypatch

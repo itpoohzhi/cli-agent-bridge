@@ -12,6 +12,7 @@ from typing import cast
 
 import pytest
 
+import server
 from core import gateway_execution_policy as policy
 from core import judge_role_policy as judge_policy
 from tests.bridge_testlib import make_receipt
@@ -363,8 +364,14 @@ def test_probe_facts_single_target_keeps_per_pair_evidence() -> None:
     assert facts["readback"]["confirmed"] == sorted(settings)
 
 
-def test_receipt_keeps_qualified_targets_and_rejects_tampering() -> None:
+def test_receipt_keeps_qualified_targets_and_rejects_tampering(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """F-019: поуровневая квалификация всех пар хранится в receipt и проверяема."""
+    # Прод-`fleet.json` держит `droid=false`: receipt строится по копии с включённым droid.
+    data = json.loads(droid_probe_config.FLEET_PATH.read_text(encoding="utf-8"))
+    data["backends"]["droid"]["enabled"] = True
+    monkeypatch.setattr(server, "FLEET", server._build_catalog(data))
     receipt = make_receipt(Path("/fake/image"), "a" * 64)
     expected = [
         {"model": target.model, "effort": target.effort}
@@ -372,10 +379,13 @@ def test_receipt_keeps_qualified_targets_and_rejects_tampering() -> None:
             droid_probe_config.FLEET_PATH
         )
     ]
-    assert receipt["qualified_targets"] == expected
-    assert len(expected) == 17
+    by_pair = {(entry["model"], entry["effort"]) for entry in expected}
+    assert {
+        (entry["model"], entry["effort"]) for entry in receipt["qualified_targets"]
+    } == by_pair
+    assert len(expected) == 14
     receipt_schema.validate_receipt_components(receipt)
-    partial = [entry for entry in expected if entry["model"] != "gpt-6.1-sol"]
+    partial = [entry for entry in expected if entry["model"] != "gpt-6.1-sol-droid"]
     for broken in (
         None,
         [],

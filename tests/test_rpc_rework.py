@@ -353,7 +353,7 @@ class TestDroidImageTool(RpcCase):
             self.hub.launcher.read_bytes()
         )  # fake_droid отвечает на пробы как настоящий
         source.chmod(0o755)
-        with unittest.mock.patch.dict(os.environ, {"DROID_EXTRA_PROBE_MODELS": ""}):
+        with unittest.mock.patch.dict(os.environ, {"DROID_EXTRA_PROBE_MODELS": "claude-sonnet-5-5"}):
             receipt = droid_image.install_image(source, server.WORKSPACE)
         image = Path(receipt["image_path"])
         self.assertEqual(oct(image.stat().st_mode & 0o777), "0o500")

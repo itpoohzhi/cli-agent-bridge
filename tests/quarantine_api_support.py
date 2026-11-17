@@ -66,14 +66,26 @@ def load_quarantine_methods(namespace):
     methods = _server_methods()
     post_handler = copy.deepcopy(methods["_handle_quarantine_post"])
     post_handler.decorator_list = []
+    helpers = [copy.deepcopy(methods[name]) for name in ("_send_error_envelope", "_serve_quarantine_get")]
+    for helper in helpers:
+        helper.decorator_list = []
     module = ast.fix_missing_locations(
-        ast.Module(body=[_get_method(methods["do_GET"]), post_handler], type_ignores=[])
+        ast.Module(body=[_get_method(methods["do_GET"]), post_handler, *helpers], type_ignores=[])
     )
     exec(compile(module, "server.py", "exec"), namespace)
+
+    def do_get(handler):
+        for name in ("_send_error_envelope", "_serve_quarantine_get"):
+            if not hasattr(handler, name):
+                setattr(handler, name, partial(namespace[name], handler))
+        return namespace["do_GET"](handler)
+
     return {
-        "do_GET": namespace["do_GET"],
+        "do_GET": do_get,
         "do_POST": _post,
         "_handle_quarantine_post": namespace["_handle_quarantine_post"],
+        "_serve_quarantine_get": namespace["_serve_quarantine_get"],
+        "_send_error_envelope": namespace["_send_error_envelope"],
     }
 
 

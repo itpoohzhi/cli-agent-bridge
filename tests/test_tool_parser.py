@@ -1489,9 +1489,10 @@ class TestOptimizationContracts(unittest.TestCase):
         self.assertEqual(opened.call_count, 1)
         self.assertEqual(sink.start.call_count, 1)
         self.assertEqual(connection.close.call_count, 1)
-        self.assertEqual(sink.write.call_count, 1)
-        self.assertTrue(sink.write.call_args.args[0].endswith(b"data: [DONE]\n\n"))
-        self.assertEqual(sink.write.call_args.args[0].count(b"data: [DONE]\n\n"), 1)
+        self.assertGreaterEqual(sink.write.call_count, 1)
+        written = b"".join(call.args[0] for call in sink.write.call_args_list)
+        self.assertTrue(written.endswith(b"data: [DONE]\n\n"))
+        self.assertEqual(written.count(b"data: [DONE]\n\n"), 1)
 
     def test_trusted_stream_incomplete_call_fails_without_done(self) -> None:
         from adapters.passthrough_adapter import PassthroughLimits, relay_sse

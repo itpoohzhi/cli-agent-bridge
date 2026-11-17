@@ -26,8 +26,13 @@ _ALL = ("minimal", "low", "medium", "high", "max")
 _LMH = ("low", "medium", "high")
 # Независимый эталон droid_off: weighted-владельцы по AD-001, defaults по AD-008.
 # Sol скрыта профилем; DeepSeek принадлежит deepseek-direct независимо от флага droid.
+# Итоговый fleet.json: GPT — codex (stdio_resident), не выключенные openai-key-2/3;
+# Haiku — opencode-go-claude (вес 100); Carbon в исходнике — off/default off.
 BASE_MODELS = (
     ("claude-sonnet-5-5", "claude-p", ("high",), "high"),
+    ("gemini-3.8-flash", "agy", _LMH, "high"),
+    ("gemini-3.8-flash-agy", "agy", _LMH, "high"),
+    ("gemini-4-carbon", "agy", ("off",), "off"),
     ("muse-ember-1.0", "muse", (*_ALL[:-1], "xhigh", "max"), "high"),
     ("muse-spark-1.3", "muse", ("max",), "max"),
     ("muse-spark-1.3-contributor", "muse", ("max",), "max"),
@@ -35,7 +40,9 @@ BASE_MODELS = (
     ("muse-wonder-full-1.0", "muse", _ALL, "high"),
     ("gpt-6.1-terra", "codex", _LMH, "high"),
     ("claude-opus-5-5", "claude-p", ("high",), "high"),
-    ("claude-haiku-5-5", "claude-p", ("high",), "high"),
+    ("claude-haiku-5-5", "opencode-go-claude", ("high",), "high"),
+    ("gemini-4-argon", "agy", _LMH, "high"),
+    ("gemini-4-hydrogen", "agy", (*_LMH, "xhigh"), "high"),
     ("deepseek-v4.1-flash", "deepseek-direct", ("off", "low", "high", "max"), "off"),
     ("deepseek-v4.1-flash-free", "opencode-zen", _ZEN, "high"),
     ("flint-40b-free", "opencode-zen", _ZEN, "high"),
@@ -43,11 +50,16 @@ BASE_MODELS = (
     ("nemotron-3.5-lightning-free", "opencode-zen", _ZEN, "high"),
     ("nemotron-3.5-super-vl-free", "opencode-zen", _ZEN, "high"),
     ("beam-free", "opencode-zen", _ZEN, "high"),
-    ("big-pickle", "opencode-zen", _ZEN, "high"), ("iceman-free", "opencode-zen", _ZEN, "high"), ("inkling-2-small-free", "opencode-zen", _ALL, "high"), ("longcat-2.5-free", "opencode-zen", _ZEN, "high"), ("minimax-m3.1-flash-free", "opencode-zen", (*_LMH, "xhigh", "max"), "high"),
+    ("big-pickle", "opencode-zen", _ZEN, "high"),
+    ("iceman-free", "opencode-zen", _ZEN, "high"),
+    ("inkling-2-small-free", "opencode-zen", _ALL, "high"),
+    ("longcat-2.5-free", "opencode-zen", _ZEN, "high"),
+    ("minimax-m3.1-flash-free", "opencode-zen", (*_LMH, "xhigh", "max"), "high"),
 )
 # Имена моделей, переключаемых гейтом, при выключенном флаге.
 BASE_NAMES = {
     "claude-sonnet-5-5": "Claude Sonnet 5.5 (Claude-p bridge)",
+    "gemini-3.8-flash": "Gemini 3.8 Flash (AGY bridge)",
 }
 BASE_DROID_BACKEND = dict(kind="droid", enabled=False, owned_by="factory-droid", max_concurrent=64)
 BASE_ALIAS: dict[str, Any] = {}
@@ -168,9 +180,10 @@ class DroidCatalogFlagTest(unittest.TestCase):
         raw = raw_fleet()
         gated: Any = apply_droid_catalog_gate(raw, enabled=True)
         self.assertEqual(gated, raw)
-        self.assertTrue(gated["backends"]["droid"]["enabled"])
-        self.assertEqual(list(routes(gated).values()).count("droid"), 3)
-        self.assertEqual(len(gated["aliases"]), 32)
+        # Итоговый fleet.json: droid выключен в исходнике, гейт-on его не включает.
+        self.assertFalse(gated["backends"]["droid"]["enabled"])
+        self.assertEqual(list(routes(gated).values()).count("droid"), 4)
+        self.assertEqual(len(gated["aliases"]), 35)
 
     def test_gate_off_tolerates_malformed_entries(self) -> None:
         raw: dict[str, Any] = {"schema_version": 3, "backends": {"droid": "broken"}, "models": ["broken", {"id": "x"}], "technical_ref": {"droid_off": {"models": {"x": {"backend": "agy"}}}}}
@@ -231,7 +244,8 @@ class DroidCatalogFlagTest(unittest.TestCase):
         self.assertIsInstance(built, GatedCatalog)
         self.assertFalse(built["backends"]["droid"]["enabled"])
         with mock.patch.dict(os.environ, {FLAG_DROID_CATALOG: "1"}):
-            self.assertTrue(built["backends"]["droid"]["enabled"])
+            # droid=false в исходнике: флаг переключает снимок, бэкенд остаётся выключен.
+            self.assertFalse(built["backends"]["droid"]["enabled"])
         plain = raw_fleet()
         del plain["technical_ref"]["droid_off"]
         synthetic = gated_catalog(json.dumps(plain).encode(), lambda data: data)
@@ -256,7 +270,7 @@ class DroidCatalogFlagTest(unittest.TestCase):
             self.assertIsInstance(catalog, GatedCatalog)
             self.assertFalse(catalog["backends"]["droid"]["enabled"])
             os.environ[FLAG_DROID_CATALOG] = "1"
-            self.assertTrue(catalog["backends"]["droid"]["enabled"])
+            self.assertFalse(catalog["backends"]["droid"]["enabled"])
             self.assertIn("gpt-6.1-sol", catalog["models"])
 
     def test_load_fleet_synthetic_explicit_catalog_is_plain(self) -> None:
@@ -266,7 +280,7 @@ class DroidCatalogFlagTest(unittest.TestCase):
         with mock.patch.object(srv(), "FLEET_PATH", explicit), mock.patch.object(Path, "read_bytes", return_value=json.dumps(plain).encode()):
             catalog = srv()._load_fleet()
         self.assertNotIsInstance(catalog, GatedCatalog)
-        self.assertTrue(catalog["backends"]["droid"]["enabled"])
+        self.assertFalse(catalog["backends"]["droid"]["enabled"])
         self.assertIn("gpt-6.1-sol", catalog["models"])
 
     def test_gated_catalog_methods_follow_flag(self) -> None:
@@ -287,10 +301,12 @@ class DroidCatalogFlagTest(unittest.TestCase):
             env = {FLAG_DROID_CATALOG: "1", **extra}
             with self.subTest(env=sorted(env)), mock.patch.dict(os.environ, env):
                 catalog = srv()._load_fleet()
-                self.assertTrue(catalog["backends"]["droid"]["enabled"])
-                self.assertEqual((catalog["models"]["gpt-6.1-sol"]["backend"], catalog["models"]["gpt-6.1-sol-droid"]["backend"]), ("codex", "droid"))
+                # droid=false в исходнике: sol публикуется через codex, sol-droid — нет.
+                self.assertFalse(catalog["backends"]["droid"]["enabled"])
+                self.assertEqual(catalog["models"]["gpt-6.1-sol"]["backend"], "codex")
+                self.assertNotIn("gpt-6.1-sol-droid", catalog["models"])
                 self.assertIn("gpt-6.1-sol", catalog["models"])
-                self.assertEqual(len(catalog["aliases"]), 32)
+                self.assertEqual(len(catalog["aliases"]), 35)
 
 
 if __name__ == "__main__":

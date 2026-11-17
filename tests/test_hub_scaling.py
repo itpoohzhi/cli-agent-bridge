@@ -47,8 +47,10 @@ class TestHubScalingDefaults(unittest.TestCase):
         self.assertEqual(server.SUBAGENT_MAX_CONCURRENT, 128)
         self.assertEqual(data["admission"]["max_http_connections"], 128)
         self.assertEqual(data["admission"]["max_inflight_body_bytes"], 536870912)
-        for name in ("codex", "agy", "opencode-zen", "claude-p"):
+        for name in ("agy", "opencode-zen"):
             self.assertEqual(data["backends"][name]["max_concurrent"], 128, name)
+        for name in ("codex", "claude-p"):
+            self.assertEqual(data["backends"][name]["max_concurrent"], 10, name)
         self.assertEqual(data["backends"]["muse"]["max_concurrent"], 64)
 
     def test_shipped_muse_concurrency_matches_fleet_catalog(self):

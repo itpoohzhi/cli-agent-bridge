@@ -111,7 +111,11 @@ def _http_server(handler: type[BaseHTTPRequestHandler]) -> Iterator[int]:
 
 def _configure(monkeypatch: pytest.MonkeyPatch, scenario: _Scenario, port: int) -> Any:
     raw = json.loads((ROOT / "fleet.json").read_text())
-    template = next({k: v for k, v in m.items() if k != "routing"} for m in raw["models"] if m.get("routing", {}).get("disabled_backend") == "codex")
+    # Шаблон записи модели: любая запись fleet без routing (routing синтезируется не здесь).
+    template = next(
+        ({k: v for k, v in m.items() if k != "routing"} for m in raw["models"] if m.get("routing")),
+        {k: v for k, v in raw["models"][0].items() if k != "routing"},
+    )
     raw["models"] = [
         {**template, "id": c.model, "backend": "codex", "context_window": c.context_window}
         for c in scenario.chain.candidates

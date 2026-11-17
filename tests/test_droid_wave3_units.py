@@ -46,7 +46,8 @@ _spec.loader.exec_module(cp)
 
 PROVIDERS = ROOT / "providers.d"
 FP = "f" * 64
-REQ = promote.PromoteRequest("droid", "gpt-6.1-sol", "r" * 64, FP, ("high",))
+# `gpt-6.1-sol` в актуальном каталоге принадлежит codex (`stdio_resident`), droid выключен.
+REQ = promote.PromoteRequest("codex", "gpt-6.1-sol", "r" * 64, FP, ("high",))
 
 
 def test_receipt_verdict_is_frozen_and_slotted() -> None:
@@ -148,7 +149,10 @@ def test_main_writes_to_given_paths_else_state_dir(
         fleet_compile.main(["--write", "--output", str(out), "--sidecar", str(side)])
         == 0
     )
-    assert out.is_file() and side.is_file() and not state.exists()
+    # Каталог состояния может появиться из снимка model-notes; флит туда без путей не пишется.
+    assert out.is_file() and side.is_file()
+    assert not (state / fleet_compile.FLEET_FILE).exists()
+    assert not (state / fleet_compile.SIDECAR_FILE).exists()
     printed = capsys.readouterr().out.splitlines()
     assert len(printed) == 1 and printed[0].startswith("OK: wrote ")
     assert fleet_compile.main(["--write"]) == 0

@@ -3,7 +3,7 @@
 manifest_version: 1
 provider_id: droid
 kind: droid
-enabled: true
+enabled: false
 required: false
 priority: 30
 routing: {weight: 20}
@@ -67,6 +67,7 @@ models_overrides:
     images: {cli_registry: implicit_supported, status: unverified, method: null, proof: null}
     policy_lines: [26, 88, 390, 407, 435]
   gemini-3.8-flash:
+    upstream_model: gemini-3.8-flash
     name: Gemini 3.8 Flash (Droid bridge)
     efforts: [low, medium, high]
     efforts_pin: [low, medium, high]

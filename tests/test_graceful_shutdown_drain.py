@@ -560,11 +560,19 @@ finally:
     srv.server_close()
 lifecycle.drain_completed.wait(3)
 """
+    notes_path = tmp_path / "model-notes.md"
+    notes_path.write_text(
+        "| Модель | Статус |\n|---|---|\n| __fixture_only__ | BANNED |\n",
+        encoding="utf-8",
+    )
+    env = {**os.environ, "BRIDGE_MODEL_NOTES_PATH": str(notes_path)}
+    env.pop("MODEL_NOTES_PATH", None)
     proc = subprocess.Popen(
         [sys.executable, "-u", "-c", code],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
+        env=env,
     )
     idle = stream = None
     try:

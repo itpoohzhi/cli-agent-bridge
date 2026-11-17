@@ -10,18 +10,33 @@ from unittest.mock import Mock
 import pytest
 
 import server
+from tests.bridge_testlib import droidify_raw_fleet, load_raw_fleet
 from tests.rpc_testlib import RpcCase
 from tests.test_request_attribution import route as route
+
+
+def _install_droid_stand(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Прод-`fleet.json` держит `droid=false`: политика проверяется на стендовом каталоге."""
+    catalog = server._build_catalog(droidify_raw_fleet(load_raw_fleet()))
+    monkeypatch.setattr(server, "FLEET", catalog)
+    monkeypatch.setattr(
+        server,
+        "BACKENDS",
+        server.AdapterRegistry.from_fleet(
+            catalog, server.ADAPTER_KINDS, lambda: server.FLEET, server
+        ),
+    )
 
 
 @pytest.fixture
 def cli_route(
     monkeypatch: pytest.MonkeyPatch, route: Callable[..., Any]
 ) -> Callable[..., Any]:
+    _install_droid_stand(monkeypatch)
     for backend in ("droid", "muse"):
-        monkeypatch.setattr(
-            server.BACKENDS.get(backend), "preflight", lambda: (True, "")
-        )
+        adapter = server.BACKENDS.get(backend)
+        if adapter is not None:
+            monkeypatch.setattr(adapter, "preflight", lambda: (True, ""))
     monkeypatch.setattr(server.Handler, "_serve_json", Mock())
     monkeypatch.setattr(server.Handler, "_prompt_guard", lambda *_: (0, "-", 0))
     monkeypatch.setattr(server.Handler, "_context_gate", lambda _, req, *a: (req, None))

@@ -5,11 +5,10 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import Protocol, cast
 
-from core.catalog_routes import validate_weight
 from core.gateway_execution_policy import denied_subagent
 from core.route_health_policy import NormalizedModelRoute, evaluate_route_health
 from core.route_penalty_state import Phase, State
-from core.routing_contract import RouteSpec
+from core.routing_contract import RouteSpec, validate_weight
 
 _REQUIRED_FACTS = (
     "known_backend", "enabled", "model_member", "supports_effort",

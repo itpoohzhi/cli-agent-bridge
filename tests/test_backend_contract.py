@@ -3,6 +3,7 @@
 Проверяется на фейковом адаптере и на реальных DroidAdapter/MuseAdapter: набор методов,
 маппинг модель -> адаптер, отказ от загрузки кода из конфигурации, изоляция сбоя shutdown.
 """
+
 from __future__ import annotations
 
 import sys
@@ -111,7 +112,9 @@ class TestInterface(unittest.TestCase):
         self.assertEqual(set(BackendAdapter.__abstractmethods__), set(CONTRACT_METHODS))
 
     def test_adapter_kinds_are_hard_coded_in_code(self):
-        self.assertEqual(set(ADAPTER_KINDS), {"droid", "muse", "passthrough"})
+        self.assertEqual(
+            set(ADAPTER_KINDS), {"droid", "muse", "passthrough", "stdio_resident"}
+        )
         self.assertIs(ADAPTER_KINDS["droid"], DroidAdapter)
         self.assertIs(ADAPTER_KINDS["muse"], MuseAdapter)
         self.assertIs(ADAPTER_KINDS["passthrough"], PassthroughAdapter)
@@ -193,24 +196,26 @@ class TestRealAdapters(unittest.TestCase):
 
     def test_server_registry_has_enabled_backends_from_fleet(self) -> None:
         ids = {a.id: a for a in server.BACKENDS.adapters()}
+        # Итоговый fleet.json: droid и openai-key-2/3 выключены (enabled=false),
+        # codex и claude-p — stdio_resident; в реестре только включённые бэкенды.
         self.assertEqual(set(ids), {
-            "droid", "muse", "codex", "agy", "opencode-zen", "claude-p",
+            "muse", "codex", "agy", "opencode-zen", "claude-p",
             "opencode-go", "opencode-go-claude",
             "deepseek-direct",
         })
-        self.assertIn("droid", ids)
+        self.assertNotIn("droid", ids)
         self.assertIn("muse", ids)
         routes = server.FLEET["models"]["claude-haiku-5-5"]["routing"]["routes"]
         self.assertEqual({r["backend"]: r["priority"] for r in routes}["opencode-go-claude"], 15)
 
     def test_model_routing(self) -> None:
         reg = server.BACKENDS
+        # Опубликовано 26 из 30: 4 droid-модели не публикуются при droid=false;
+        # GPT — родной codex (stdio_resident), а не выключенные openai-key-2/3.
         expected = {
             "claude-sonnet-5-5": "claude-p",
+            "gemini-3.8-flash-agy": "agy",
             "gpt-6.1-sol": "codex",
-            "claude-sonnet-5-5-droid": "droid",
-            "gemini-3.8-flash-droid": "droid",
-            "gpt-6.1-sol-droid": "droid",
             "muse-ember-1.0": "muse",
             "muse-spark-1.3": "muse",
             "muse-spark-1.3-contributor": "muse",
@@ -218,7 +223,10 @@ class TestRealAdapters(unittest.TestCase):
             "muse-wonder-full-1.0": "muse",
             "gpt-6.1-terra": "codex",
             "claude-opus-5-5": "claude-p",
-            "claude-haiku-5-5": "claude-p",
+            "claude-haiku-5-5": "opencode-go-claude",
+            "gemini-4-argon": "agy",
+            "gemini-4-carbon": "agy",
+            "gemini-4-hydrogen": "agy",
             "deepseek-v4.1-flash-free": "opencode-zen",
             "flint-40b-free": "opencode-zen",
             "mimo-v2.6-flash-free": "opencode-zen",
@@ -255,13 +263,13 @@ class TestRealAdapters(unittest.TestCase):
             self.assertIsInstance(ok, bool)
             self.assertIsInstance(reason, str)
             self.assertIsInstance(adapter.is_healthy(), bool)
-            if adapter.id != "agy":
-                self.assertTrue(adapter.get_models())
+            self.assertTrue(adapter.get_models())
             for model in adapter.get_models():
                 self.assertEqual(model.backend, adapter.id)
             self.assertIn(adapter.capabilities.sessions, ("resident", "none"))
-            with self.assertRaises(BackendNotSupported):
-                adapter.spawn_session(TurnContext("test", "high", "hi"))
+            if adapter.capabilities.sessions == "none":
+                with self.assertRaises(BackendNotSupported):
+                    adapter.spawn_session(TurnContext("test", "high", "hi"))
             adapter.close_session("no-such-sid")
 
     def test_droid_health_follows_receipt_state(self):

@@ -45,6 +45,7 @@ def test_resolve_proxy_port_precedence_matrix(monkeypatch: pytest.MonkeyPatch) -
 
 def test_resolve_proxy_port_invalid_env_uses_default(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("MUSE_PROXY_PORT", "not-a-port")
+    monkeypatch.delenv("DE_NODE_PROXY_PORT", raising=False)
     assert resolve_proxy_port() == DEFAULT_PROXY_PORT
 
 

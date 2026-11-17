@@ -300,6 +300,8 @@ class TestSpoolEnospcBothModes(ImageCase):
             for number, line in enumerate(
                 path.read_text(encoding="utf-8").splitlines(), 1
             ):
+                if "Random(507)" in line:  # сид генератора, не HTTP-статус
+                    continue
                 if pattern.search(line):
                     hits.append(f"{path.name}:{number}")
         self.assertEqual(hits, [])

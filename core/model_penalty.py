@@ -16,25 +16,65 @@ from core import route_penalty_state as routes
 from core.route_penalty_state import LeaseFenced, Phase, State
 
 
-DEFAULT_MAX_START_FAILS = int(os.environ.get("BRIDGE_MAX_START_FAILS", "3"))
-DEFAULT_INITIAL_COOLDOWN_SECONDS = float(
-    os.environ.get("BRIDGE_INITIAL_COOLDOWN_SECONDS", "10.0")
+_LOGGER = logging.getLogger(__name__)
+
+
+def _first_env(names: tuple[str, ...]) -> tuple[str, str] | None:
+    for name in names:
+        raw = os.environ.get(name, "").strip()
+        if raw:
+            return name, raw
+    return None
+
+
+def parse_env_int_safe(names: tuple[str, ...], default: int, *, minimum: int = 1) -> int:
+    """Целое из первой непустой `names`; мусор или < `minimum` -> `default` (без исключений при импорте)."""
+    found = _first_env(names)
+    if found is None:
+        return default
+    try:
+        value = int(found[1])
+    except (ValueError, OverflowError):
+        value = None
+    if value is None or value < minimum:
+        _LOGGER.warning("Invalid %s=%r; using %d", found[0], found[1][:64], default)
+        return default
+    return value
+
+
+def parse_env_float_safe(names: tuple[str, ...], default: float, *, minimum: float = 0.0) -> float:
+    """Вещественное из первой непустой `names`; нечисло, inf/nan или < `minimum` -> `default`."""
+    found = _first_env(names)
+    if found is None:
+        return default
+    try:
+        value = float(found[1])
+    except (ValueError, OverflowError):
+        value = float("nan")
+    if not (value == value and value != float("inf") and value >= minimum):
+        _LOGGER.warning("Invalid %s=%r; using %s", found[0], found[1][:64], default)
+        return default
+    return value
+
+
+DEFAULT_MAX_START_FAILS = parse_env_int_safe(("BRIDGE_MAX_START_FAILS",), 3)
+DEFAULT_INITIAL_COOLDOWN_SECONDS = parse_env_float_safe(
+    ("BRIDGE_INITIAL_COOLDOWN_SECONDS", "BRIDGE_COOLDOWN_SECONDS"), 10.0
 )
-DEFAULT_STEP2_COOLDOWN_SECONDS = float(
-    os.environ.get("BRIDGE_STEP2_COOLDOWN_SECONDS", "30.0")
+DEFAULT_STEP2_COOLDOWN_SECONDS = parse_env_float_safe(
+    ("BRIDGE_STEP2_COOLDOWN_SECONDS",), 30.0
 )
-DEFAULT_STEP3_COOLDOWN_SECONDS = float(
-    os.environ.get("BRIDGE_STEP3_COOLDOWN_SECONDS", "120.0")
+DEFAULT_STEP3_COOLDOWN_SECONDS = parse_env_float_safe(
+    ("BRIDGE_STEP3_COOLDOWN_SECONDS",), 120.0
 )
-DEFAULT_MAX_COOLDOWN_SECONDS = float(
-    os.environ.get("BRIDGE_MAX_COOLDOWN_SECONDS", "300.0")
+DEFAULT_MAX_COOLDOWN_SECONDS = parse_env_float_safe(
+    ("BRIDGE_MAX_COOLDOWN_SECONDS",), 300.0
 )
 DEFAULT_COOLDOWN_SECONDS = DEFAULT_INITIAL_COOLDOWN_SECONDS
 DEFAULT_STORAGE_PATH = Path(
     "~/.config/cli-agent-bridge/model_penalties.json"
 ).expanduser()
 
-_LOGGER = logging.getLogger(__name__)
 _T = TypeVar("_T")
 _State = dict[str, Any]
 _DISABLED_MAX_START_FAILS = 999999999

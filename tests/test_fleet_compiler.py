@@ -14,6 +14,7 @@ import pytest
 from adapters import ADAPTER_KINDS
 from core import fleet_compiler as fc
 from core.backend_adapter import build_catalog
+from core.compile_model_records import model_record
 from core.fleet_compiler import (
     CompileError,
     atomic_write_bytes,
@@ -102,9 +103,6 @@ def compile_docs(*docs: Dict[str, Any], hdr: Any = None, **kwargs: Any) -> Any:
     )
 
 
-# ---- golden: миграция providers.d == текущий fleet.json -----------------------------
-
-
 def test_golden_equivalent_to_current_fleet() -> None:
     result = compile_from_disk(kinds=ADAPTER_KINDS, now=NOW)
     assert (
@@ -130,6 +128,7 @@ def test_golden_equivalent_to_current_fleet() -> None:
 
 
 def test_golden_raw_records_identical_modulo_order() -> None:
+    assert fc.model_record is model_record
     compiled = compile_from_disk(kinds=ADAPTER_KINDS, now=NOW).fleet
     current = current_fleet()
     models_a = {m["id"]: m for m in current.pop("models")}
@@ -144,7 +143,11 @@ def test_fleet_json_schema_keys_not_extended() -> None:
     fleet = compile_from_disk(kinds=ADAPTER_KINDS, now=NOW).fleet
     assert set(fleet) <= FLEET_TOP_KEYS
     assert all(set(m) <= FLEET_MODEL_KEYS for m in fleet["models"])
-    assert all("input" not in m for m in fleet["models"])
+    assert all(
+        m.get("input", ["text"])
+        == (["text", "tools"] if m["backend"] == "agy" else ["text"])
+        for m in fleet["models"]
+    )
     assert all("required" not in b for b in fleet["backends"].values())
     for model in fleet["models"]:
         assert not {"method", "proof"} & model["images"].keys()
@@ -160,9 +163,6 @@ def test_fleet_json_schema_keys_not_extended() -> None:
     }
 
 
-# ---- детерминизм -------------------------------------------------------------------
-
-
 def test_compile_is_byte_deterministic() -> None:
     first = compile_from_disk(kinds=ADAPTER_KINDS, now=NOW)
     second = compile_from_disk(kinds=ADAPTER_KINDS, now=NOW)
@@ -170,8 +170,8 @@ def test_compile_is_byte_deterministic() -> None:
     assert fc.canonical_json(first.sidecar) == fc.canonical_json(second.sidecar)
     standard = (json.dumps(first.fleet, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
     assert render_fleet_json(first.fleet) == standard
-    assert len(standard.splitlines()) <= 1062
-    assert len(render_fleet_json(first.sidecar).splitlines()) <= 734
+    assert len(standard.splitlines()) <= 1090  # Отдельные AGY/Droid Gemini + tools + блоки routing.
+    assert len(render_fleet_json(first.sidecar).splitlines()) <= 744
 
 
 def test_input_order_does_not_change_output() -> None:

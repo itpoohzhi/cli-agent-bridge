@@ -186,7 +186,10 @@ def test_stage_w2_b_hard_eligibility_snapshot(field: str, value: Any) -> None:
 @pytest.mark.semantic_red("judge_sources_before_draw")
 @pytest.mark.parametrize("source", ["header", "body", "extra_body", "trace"])
 @pytest.mark.parametrize("role", ["panel-review-1", "judge-1", "seat-1"])
-def test_stage_w2_b_judge_sources_exclude_droid(source: str, role: str) -> None:
+def test_stage_w2_b_judge_sources_exclude_droid(
+    monkeypatch: pytest.MonkeyPatch, source: str, role: str,
+) -> None:
+    monkeypatch.setenv("DROID_DENY_SUBAGENT_PREFIXES", "panel-judge-,judge-,seat-")
     request = request_body()
     placements = {
         "header": {"headers": {"X-Subagent-Id": role}},
@@ -243,6 +246,7 @@ def test_empty_eligible_pool_is_route_unavailable(
 def test_canonical_judge_avoids_droid_before_post(
     monkeypatch: pytest.MonkeyPatch, source: str, role: str,
 ) -> None:
+    monkeypatch.setenv("DROID_DENY_SUBAGENT_PREFIXES", "panel-judge-,judge-,seat-")
     request, headers = request_body(), {}
     if source == "header":
         headers["X-Subagent-Id"] = role
@@ -274,10 +278,13 @@ def test_dynamic_role_denials(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.mark.parametrize("role", ["judge-trace-1", None, object()])
-def test_handler_trace_role_policy(role: object) -> None:
+def test_handler_trace_role_policy(
+    monkeypatch: pytest.MonkeyPatch, role: object,
+) -> None:
     from core.passthrough_facade import _request_policy
     from core.route_eligibility import route_eligible
 
+    monkeypatch.setenv("DROID_DENY_SUBAGENT_PREFIXES", "judge-")
     handler = SimpleNamespace(headers={}, _trace=SimpleNamespace(subagent_id=role))
     route = SimpleNamespace(handler=handler, request=request_body(), model_id="m", alias_effort=None)
     policy = _request_policy(route)

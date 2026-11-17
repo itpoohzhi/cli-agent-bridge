@@ -6,6 +6,7 @@ import os
 import stat
 from collections.abc import Mapping
 
+from core.env_hot_reload import get_hot_env_value
 from core.transport_settings import TransportSettings
 
 _CREDENTIAL_FIELDS = ("api_key_ref", "api_key_env", "api_key")
@@ -26,6 +27,8 @@ def _environment_key(name: object, env: Mapping[str, str]) -> str:
         return ""
     if not name.isascii() or not name.isidentifier():
         return ""
+    if env is os.environ:
+        return get_hot_env_value(name)
     return env.get(name, "")
 
 
@@ -74,7 +77,9 @@ def resolve_credential(
     limits = settings if settings is not None else TransportSettings.from_env(env)
     source = os.environ if env is None else env
     if config.get("api_key_ref") not in (None, ""):
-        value = _reference_key(config["api_key_ref"], source, limits.credential_max_bytes)
+        value = _reference_key(
+            config["api_key_ref"], source, limits.credential_max_bytes
+        )
     elif config.get("api_key_env") not in (None, ""):
         value = _environment_key(config["api_key_env"], source)
     else:

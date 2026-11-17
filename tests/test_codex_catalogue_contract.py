@@ -25,11 +25,14 @@ def root_fleet() -> dict[str, Any]:
     return json.loads((ROOT / "fleet.json").read_text(encoding="utf-8"))
 
 
-def test_codex_models_are_passthrough_and_enabled() -> None:
+def test_codex_models_are_stdio_resident_and_enabled() -> None:
+    from core.passthrough_facade import _model_routing
+
     data = root_fleet()
     codex = data["backends"]["codex"]
-    assert codex["kind"] == "passthrough"
-    assert codex["base_url"] == "http://127.0.0.1:2455/v1"
+    assert codex["kind"] == "stdio_resident"
+    assert codex["wrapper"] == "codex app-server"
+    assert "base_url" not in codex
     assert codex["enabled"] is True
     assert {m["id"] for m in data["models"] if m["backend"] == "codex"} == CODEX_IDS
     for model in data["models"]:
@@ -41,6 +44,12 @@ def test_codex_models_are_passthrough_and_enabled() -> None:
                 assert routes["codex"]["route_id"] == "codex"
                 assert routes["codex"]["weight"] == 100
                 assert model["routing"]["disabled_backend"] == "codex"
+            else:
+                synthesized = _model_routing(model)
+                assert [
+                    (route["backend"], route["weight"])
+                    for route in synthesized["routes"]
+                ] == [("codex", 100)]
 
 
 @pytest.mark.parametrize("model_id", sorted(CODEX_IDS))
@@ -69,8 +78,8 @@ def test_codex_explicit_route_membership_follows_backend_flag(enabled: bool) -> 
             assert registry.adapter_for_model("gpt-6.1-sol").id == "codex"
             assert registry.adapter_for_model("gpt-6.1-terra").id == "codex"
         else:
-            assert published & CODEX_IDS == {"gpt-6.1-sol"}
-            assert registry.adapter_for_model("gpt-6.1-sol").id == "droid"
+            assert published & CODEX_IDS == set()
+            assert registry.adapter_for_model("gpt-6.1-sol") is None
             assert registry.adapter_for_model("gpt-6.1-terra") is None
     finally:
         registry.shutdown()
@@ -82,10 +91,7 @@ def test_codex_is_only_drawn_after_positive_weight_routes(model_id: str) -> None
     before = copy.deepcopy(model)
     for seed in ("first", "second", "third"):
         order = list(route_order(model_id, model, seed))
-        if model_id == "gpt-6.1-sol":
-            assert set(order) == {"codex", "droid"}
-        else:
-            assert order == ["codex"]
+        assert order == ["codex"]
         assert len(order) == len(set(order))
     assert model == before
 

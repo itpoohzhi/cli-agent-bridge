@@ -166,16 +166,16 @@ def test_background_recovery_without_replacing_filter_or_server(
     with running(stand.handler) as server:
         assert_error(request_wire(server, PATHS[0], {"model": MODEL}), (503, "notes_unavailable"))
         refreshed = threading.Event()
-        original = Path.open
+        selected = stand.root / "selected-notes.md"
+        original = stand.srv.read_model_notes_file
 
-        def read(path: Path, mode: str = "r", *args: Any, **kwargs: Any) -> Any:
-            handle = original(path, mode, *args, **kwargs)
-            if path == stand.root / "selected-notes.md" and "r" in mode:
+        def read(path: Any, *args: Any, **kwargs: Any) -> Any:
+            if Path(path) == selected:
                 refreshed.set()
-            return handle
+            return original(path, *args, **kwargs)
 
-        monkeypatch.setattr(Path, "open", read)
-        (stand.root / "selected-notes.md").write_text(VALID_NOTES, encoding="utf-8")
+        monkeypatch.setattr(stand.srv, "read_model_notes_file", read)
+        selected.write_text(VALID_NOTES, encoding="utf-8")
         assert refreshed.wait(8), "timer never retried source without HTTP requests"
         response = _await_ok(server)
         assert response[0] == 200

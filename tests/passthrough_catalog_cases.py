@@ -59,7 +59,9 @@ class TestFleetPassthroughKind(unittest.TestCase):
         return copy.deepcopy(data)
 
     def entry_error(self, **override: Any) -> Any:
-        data = self.raw()
+        from tests.bridge_testlib import codex_as_passthrough
+
+        data = codex_as_passthrough(self.raw())
         data["backends"]["codex"].update(override)
         for key, value in list(data["backends"]["codex"].items()):
             if value is None:
@@ -70,21 +72,20 @@ class TestFleetPassthroughKind(unittest.TestCase):
             return exc.reason
         return ""
 
-    def test_live_fleet_declares_enabled_codex_passthrough_with_loopback_base_url(
-        self,
-    ) -> None:
+    def test_live_fleet_declares_enabled_codex_stdio_resident(self) -> None:
         codex = self.raw()["backends"]["codex"]
-        self.assertEqual(codex["kind"], "passthrough")
-        self.assertEqual(codex["base_url"], "http://127.0.0.1:2455/v1")
+        self.assertEqual(codex["kind"], "stdio_resident")
+        self.assertEqual(codex["wrapper"], "codex app-server")
+        self.assertNotIn("base_url", codex)
         self.assertTrue(codex["enabled"])
 
     def test_live_fleet_declares_upstream_auth_environment_names(self) -> None:
         backends = self.raw()["backends"]
         for backend, env_name in (
-            ("claude-p", "CLAUDE_P_BRIDGE_KEY"),
             ("agy", "AGY_BRIDGE_KEY"),
             ("opencode-zen", "OPENCODE_ZEN_BRIDGE_KEY"),
-            ("codex", "CODEX_LB_API_KEY"),
+            ("deepseek-direct", "DEEPSEEK_API_KEY"),
+            ("openai-key-2", "OPENAI_API_KEY_2"),
         ):
             self.assertEqual(backends[backend]["api_key_env"], env_name)
             self.assertNotIn("api_key", backends[backend])

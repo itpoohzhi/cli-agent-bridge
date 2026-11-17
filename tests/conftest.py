@@ -31,6 +31,8 @@ _TELEMETRY_TMP = tempfile.mkdtemp(prefix="bridge-telemetry-tests-")
 os.environ.setdefault("BRIDGE_TELEMETRY_DB_PATH", os.path.join(_TELEMETRY_TMP, "bridge_telemetry.duckdb"))
 os.environ.setdefault("BRIDGE_MODEL_PENALTIES_PATH", os.path.join(_TELEMETRY_TMP, "model_penalties.json"))
 os.environ.setdefault("BRIDGE_DYNAMIC_CONFIG_PATH", os.path.join(_TELEMETRY_TMP, "dynamic_config.json"))
+# Горячий `.env` (core/env_hot_reload.py) по умолчанию читает ~/.dsh/.env владельца: прогон берёт отсутствующий файл.
+os.environ.setdefault("BRIDGE_ENV_FILE_PATH", os.path.join(_TELEMETRY_TMP, "hot.env"))
 # Каталог droid включается GigaRC-флагом (дефолт false); стенды droid-тестов работают с включённым,
 # а тесты самого гейта снимают флаг явно.
 os.environ.setdefault("BRIDGE_DROID_CATALOG_ENABLED", "1")
@@ -221,15 +223,16 @@ def verify_and_reset_bridge_state(async_leak_guard: None, request: pytest.Fixtur
 @pytest.fixture(autouse=True)
 def isolated_gateway_policy(
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
+    tmp_path_factory: pytest.TempPathFactory,
 ) -> Generator[None, None, None]:
     """Изолировать identity, state, health, model-notes и policy-файлы от рабочего стенда."""
+    policy_dir = tmp_path_factory.mktemp("gateway-policy")
     monkeypatch.delenv("MODEL_NOTES_PATH", raising=False)
     isolated_env = {
-        "CAB_HOST_ID_OVERRIDE": f"pytest-{tmp_path.name}",
-        "BRIDGE_STATE_DIR": str(tmp_path / "state"),
-        "SLOT_HEALTH_DIR": str(tmp_path / "slot-health"),
-        "BRIDGE_MODEL_NOTES_PATH": str(tmp_path / "model-notes.md"),
+        "CAB_HOST_ID_OVERRIDE": f"pytest-{policy_dir.name}",
+        "BRIDGE_STATE_DIR": str(policy_dir / "state"),
+        "SLOT_HEALTH_DIR": str(policy_dir / "slot-health"),
+        "BRIDGE_MODEL_NOTES_PATH": str(policy_dir / "model-notes.md"),
     }
     for name, value in isolated_env.items():
         monkeypatch.setenv(name, value)
@@ -237,8 +240,8 @@ def isolated_gateway_policy(
     notes_filter: Any = None
     if srv is not None:
         from tests.bridge_testlib import isolate_gateway_policy as isolate_policy
-        notes_filter = isolate_policy(monkeypatch, tmp_path)
-    monkeypatch.setenv("BRIDGE_DYNAMIC_CONFIG_PATH", str(tmp_path / "dynamic.json"))
+        notes_filter = isolate_policy(monkeypatch, policy_dir)
+    monkeypatch.setenv("BRIDGE_DYNAMIC_CONFIG_PATH", str(policy_dir / "dynamic.json"))
     yield
     if notes_filter is not None:
         notes_filter.close()

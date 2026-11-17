@@ -144,6 +144,18 @@ from core.watchdog import (  # noqa: E402
     WATCHDOG_INTERVAL_S as _CORE_WATCHDOG_INTERVAL_S,
     AdaptiveTimeoutController,
 )
+from core.runtime_build_info import UNKNOWN as BUILD_UNKNOWN, RuntimeBuildInfo  # noqa: E402
+from core.log_redaction import (  # noqa: E402
+    mask_credential_context,
+    mask_long_tokens,
+    safe_log_tokens,
+)
+from core.agy_capacity_guard import (  # noqa: E402
+    CAPACITY_REASON,
+    capacity_error_body,
+    should_fast_fail_agy_capacity_503,
+    summarize_capacity_text,
+)
 from core.chat_key import SOURCES_SESSION_ID, resolve_chat_key  # noqa: E402
 from core.usage_wire import normalize_prompt_cache_details  # noqa: E402
 from core.cli_rejection import is_deterministic_cli_rejection  # noqa: E402
@@ -152,17 +164,23 @@ from core.proc_groups import spawn_registered  # noqa: E402
 from core.subbridge_lifecycle import SubbridgeHooks, SubbridgeLifecycle  # noqa: E402
 from core.stream_interruption_recovery import (  # noqa: E402
     InterruptionTailState,
+    is_self_healable_error,
     is_transient_stream_interruption,
 )
 from core.turn_finalization import (  # noqa: E402
     DoneConfig, DoneDeliveryFacts, DoneDrainFacts, DonePorts, DoneRecoveryFacts, DoneRequest,
-    DoneResultFacts, DoneRuntimePorts, DoneSnapshot, DoneTextFacts, finalize_done,
+    DoneResultFacts, DoneRuntimePorts, DoneSnapshot, DoneTextFacts, RecoveryAliases, finalize_done,
+    read_recovery_switch,
 )
 from core.tool_emulation import (  # noqa: E402
     LiveParserError, RepetitionLoopDetected, StreamNormalizer,
-    _messages_to_prompt as _core_messages_to_prompt,
-    _tool_choice_none, build_tool_schemas, sanitize_tool_call,
+    _tool_choice_none, build_tool_schemas, has_unnamed_call,
+    pure_text_protocol_instruction,
+    sanitize_tool_call,
+    tools_protocol_section,
 )
+from core.cli_turn_flags import format_print_timeout as _format_print_timeout, text_turn_cli_flags  # noqa: E402
+from core.env_hot_reload import file_signature as _file_signature  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent
 HOME = Path.home()
@@ -175,6 +193,7 @@ FLEET_PATH = Path(os.environ.get("AGY_BRIDGE_FLEET", "") or str(ROOT / "fleet.js
 ENV_MODEL = os.environ.get("AGY_BRIDGE_MODEL", "").strip()
 WORKSPACE = ROOT / "workspace"
 PRINT_TIMEOUT = os.environ.get("AGY_BRIDGE_PRINT_TIMEOUT", "0")
+
 
 def _env_float(name: str, default: float, low: float, high: float) -> float:
     """Float из окружения; пустое/невалидное/неконечное/вне [low, high] -> default."""
@@ -755,17 +774,27 @@ MIDDLE_PRUNED_MARKER = (
 # AGENTS.md/GEMINI.md/hooks.json пользователя; transcript и SQLite — внутри него.
 _AGY_HOME_LOCK = threading.Lock()
 _AGY_HOME_INITIALIZED = False
+# (st_mtime_ns, st_size) исходных auth-файлов при последней синхронизации в <clean-home>.
+_AGY_AUTH_SIGNATURES: dict[str, tuple[int, int]] = {}
 # Верифицированный (resolved) корень <clean-home>: фиксируется под _AGY_HOME_LOCK
 # при первой успешной проверке; последующая подмена пути отвергается.
 _VERIFIED_CLEAN_HOME: Path | None = None
-CLEAN_HOME_DIR = Path(
-    os.environ.get("AGY_BRIDGE_CLEAN_HOME", "")
-    or str(WORKSPACE / "runtime" / "agy-home")
-).resolve()
-BRAIN_DIR = Path(
-    os.environ.get("AGY_BRIDGE_BRAIN", "")
-    or str(CLEAN_HOME_DIR / ".gemini" / "antigravity-cli" / "brain")
-).resolve()
+CLEAN_HOME_DIR = (
+    Path(
+        os.environ.get("AGY_BRIDGE_CLEAN_HOME", "")
+        or str(WORKSPACE / "runtime" / "agy-home")
+    )
+    .expanduser()
+    .resolve()
+)
+BRAIN_DIR = (
+    Path(
+        os.environ.get("AGY_BRIDGE_BRAIN", "")
+        or str(CLEAN_HOME_DIR / ".gemini" / "antigravity-cli" / "brain")
+    )
+    .expanduser()
+    .resolve()
+)
 TRANSCRIPT_NAME = "transcript_full.jsonl"
 TRANSCRIPT_FALLBACK_NAME = "transcript.jsonl"
 TRANSCRIPT_POLL_S = get_bridge_config().transcript_poll_s
@@ -774,12 +803,16 @@ TRANSCRIPT_READ_MAX = get_bridge_config().transcript_read_max
 # Живой источник мышления: SQLite-база разговора agy (таблица `steps`, шаг
 # планировщика `step_type=15`, подполе 20.3 `step_payload` растёт в `status=8`).
 # База открывается только на чтение; транскрипт остаётся минимальным источником.
-CONV_DIR = Path(
-    os.environ.get("AGY_BRIDGE_CONVERSATIONS", "")
-    or str(CLEAN_HOME_DIR / ".gemini" / "antigravity-cli" / "conversations")
-).resolve()
+CONV_DIR = (
+    Path(
+        os.environ.get("AGY_BRIDGE_CONVERSATIONS", "")
+        or str(CLEAN_HOME_DIR / ".gemini" / "antigravity-cli" / "conversations")
+    )
+    .expanduser()
+    .resolve()
+)
 # Бинарь agy: его идентичность (mtime_ns, size) ключует семантический canary.
-AGY_BIN = os.environ.get("AGY_BRIDGE_AGY_BIN", "") or str(
+AGY_BIN = os.path.expanduser(os.environ.get("AGY_BRIDGE_AGY_BIN", "")) or str(
     HOME / ".local" / "bin" / "agy.real"
 )
 SQLITE_POLL_S = _env_float("AGY_BRIDGE_SQLITE_POLL", 0.5, 0.5, 2.0)
@@ -928,6 +961,19 @@ SESSION_MAX_TTL_S = get_bridge_config().session_max_ttl_s
 SESSION_MAX_TURNS = get_bridge_config().session_max_turns
 
 _started = time.time()
+BUILD_INFO = RuntimeBuildInfo(_REPO_ROOT)
+
+
+def _runtime_build_fields() -> dict[str, object]:
+    """Поля `/health`: git_head_sha, boot_ts, agy_binary_sha256, agy_home."""
+    return BUILD_INFO.snapshot(
+        {
+            "agy_binary_sha256": _file_sha256(AGY_BIN) or BUILD_UNKNOWN,
+            "agy_home": str(CLEAN_HOME_DIR),
+        }
+    )
+
+
 _active: dict = {}
 _active_lock = threading.Lock()
 _account_pool = AccountPool(AccountPoolConfig(max_concurrent=MAX_CONCURRENT, n_floor=1))
@@ -980,6 +1026,8 @@ _image_flag_cache: tuple[float, bool] = (0.0, False)
 _image_fallback_flag_lock = threading.Lock()
 _image_fallback_flag_cache: tuple[float, bool] = (0.0, False)
 _active_img_dirs: set[str] = set()
+# img-* каталоги, удержанные после хода с tool_call: путь -> монотонный дедлайн (под _active_lock).
+_retained_img_dirs: dict[str, float] = {}
 
 # Токеноподобные последовательности в логах: сам ключ моста и длинные hex/base64.
 _SECRET = re.compile(r"[A-Za-z0-9_\-]{24,}")
@@ -1259,21 +1307,17 @@ _LOG_EVENT_NAMES = frozenset(
 )
 
 
-def _mask_token(match: re.Match[str]) -> str:
-    token = match.group(0)
-    return token if token in _LOG_EVENT_NAMES else "***"
-
-
 def _mask_secrets(text: str) -> str:
-    """Погасить токеноподобные последовательности и сам ключ моста."""
+    """Погасить секреты и ключ моста; коды причин и `_LOG_EVENT_NAMES` остаются дословно."""
     out = str(text)
     if AUTH_KEY:
         out = out.replace(AUTH_KEY, "***")
-    return _SECRET.sub(_mask_token, out)
+    out = mask_credential_context(out)
+    return mask_long_tokens(out, _SECRET, safe_log_tokens(_LOG_EVENT_NAMES))
 
 
 def _err_summary(err: Any, limit: int = 200) -> str:
-    text = " ".join(str(err or "").split())
+    text = " ".join(_mask_secrets(str(err or "")).split())
     return text[:limit]
 
 
@@ -1532,8 +1576,85 @@ def _verify_clean_home_root(clean_home: Path) -> Path:
     return clean_home_resolved
 
 
+def _agy_gemini_files(
+    real_gemini: Path, real_cli: Path, clean_gemini: Path, clean_gemini_cli: Path
+) -> tuple[tuple[Path, Path], ...]:
+    """(источник в реальном профиле, каталог в <clean-home>) для auth/state-файлов."""
+    return (
+        (real_gemini / "jetski-standalone-oauth-token", clean_gemini), (real_gemini / "projects.json", clean_gemini),
+        (real_cli / "antigravity-oauth-token", clean_gemini_cli), (real_cli / "antigravity-account.json", clean_gemini_cli),
+        (real_cli / "installation_id", clean_gemini_cli), (real_cli / "jetski_state.pbtxt", clean_gemini_cli),
+        (real_cli / "settings.json", clean_gemini_cli),
+    )  # fmt: skip
+
+
+def _sync_agy_gemini_files(pairs: tuple[tuple[Path, Path], ...]) -> int:
+    """Копирует изменившиеся auth-файлы в <clean-home> (под _AGY_HOME_LOCK); возвращает их число.
+
+    mtime-guard действует только при первой синхронизации файла (`prev_sig is None`): более свежая
+    копия в <clean-home> (токен, обновлённый самим agy) не затирается, но подпись источника
+    запоминается. Смена подписи источника во время работы моста (переключение аккаунта) всегда
+    перезаписывает копию, а исчезновение источника (logout) удаляет ранее синхронизированную копию.
+    """
+    copied = 0
+    for src, dst in pairs:
+        key = str(src)
+        signature = _file_signature(src)
+        prev_sig = _AGY_AUTH_SIGNATURES.get(key)
+        dst_file = dst / src.name
+        if signature is None:
+            # Копия, которую мост не синхронизировал (состояние, созданное самим agy), не удаляется.
+            if prev_sig is not None and _remove_clean_home_copy(dst_file, src.name):
+                _AGY_AUTH_SIGNATURES.pop(key, None)
+            continue
+        try:
+            dst_ok = not dst_file.is_symlink() and dst_file.is_file()
+        except OSError:
+            dst_ok = False
+        # Удалённая или подменённая симлинком копия восстанавливается даже при неизменной подписи источника.
+        if dst_ok and prev_sig == signature:
+            continue
+        externally_changed = prev_sig is not None and prev_sig != signature
+        try:
+            # Симлинк на месте копии удаляется (stat пошёл бы по ссылке); файл остаётся 0600.
+            if dst_file.is_symlink():
+                dst_file.unlink()
+            if (
+                externally_changed
+                or not dst_file.exists()
+                or src.stat().st_mtime >= dst_file.stat().st_mtime
+            ):
+                _copy_private_atomic(src, dst_file)
+                copied += 1
+            else:
+                _assert_inside_clean_home(dst_file)
+                dst_file.chmod(0o600)
+        except OSError as exc:
+            # Параллельная атомарная ротация внешним agy не должна ронять запрос; подпись не фиксируется.
+            _log(f"agy-home auth sync skipped file={src.name} err={type(exc).__name__}")
+            continue
+        _AGY_AUTH_SIGNATURES[key] = signature
+    return copied
+
+
+def _remove_clean_home_copy(dst_file: Path, name: str) -> bool:
+    """Удалить копию auth-файла в <clean-home>; симлинк удаляется сам, без перехода по цели."""
+    try:
+        if dst_file.is_symlink():
+            _assert_inside_clean_home(dst_file.parent)
+            dst_file.unlink()
+        elif dst_file.exists():
+            _assert_inside_clean_home(dst_file)
+            dst_file.unlink()
+    except OSError as exc:
+        _log(f"agy-home auth removal skipped file={name} err={type(exc).__name__}")
+        return False
+    _log(f"agy-home auth removed file={name}")
+    return True
+
+
 def _prepare_agy_home() -> Path:
-    """Потокобезопасно (однократно) готовит изолированный HOME для `agy`.
+    """Потокобезопасно готовит изолированный HOME для `agy` и подтягивает ротацию токенов.
 
     Library -> ~/Library даёт доступ к Keychain macOS (без OAuth-окна браузера);
     учётные данные копируются атомарно с 0600; AGENTS.md/GEMINI.md/hooks.json
@@ -1542,10 +1663,9 @@ def _prepare_agy_home() -> Path:
     Модель владения профилем: источник истины при старте — реальный профиль
     пользователя `~/.gemini`. Мост выполняет однократный атомарный снимок
     учётных данных с правами 0600 при инициализации процесса под локом.
-    Ротация токенов в реальном профиле подхватывается при следующем
-    перезапуске процесса моста, если копия в реальном профиле не старше
-    файла в <clean-home> (mtime-guard: токен, обновлённый самим agy внутри
-    <clean-home>, не затирается). Состояние сессий и транскрипты пишутся
+    Ротация токенов подхватывается на следующем ходе по смене `(st_mtime_ns, st_size)`
+    источника (mtime-guard сохраняется); отключение — `AGY_AUTH_HOT_RELOAD_ENABLED=0`.
+    Состояние сессий и транскрипты пишутся
     исключительно в изолированный <clean-home> и не загрязняют профиль
     пользователя.
 
@@ -1555,8 +1675,20 @@ def _prepare_agy_home() -> Path:
     global _AGY_HOME_INITIALIZED
     with _AGY_HOME_LOCK:
         clean_home_resolved = _verify_clean_home_root(CLEAN_HOME_DIR)
+        real_gemini = HOME / ".gemini"
+        real_cli = real_gemini / "antigravity-cli"
+        clean_gemini = CLEAN_HOME_DIR / ".gemini"
+        clean_gemini_cli = clean_gemini / "antigravity-cli"
+        auth_pairs = _agy_gemini_files(
+            real_gemini, real_cli, clean_gemini, clean_gemini_cli
+        )
         if _AGY_HOME_INITIALIZED:
+            if _env_bool("AGY_AUTH_HOT_RELOAD_ENABLED", True):
+                refreshed = _sync_agy_gemini_files(auth_pairs)
+                if refreshed:
+                    _log(f"agy-home auth refreshed files={refreshed}")
             return clean_home_resolved
+        _AGY_AUTH_SIGNATURES.clear()
         for state_dir in (BRAIN_DIR, CONV_DIR):
             try:
                 _assert_inside_clean_home(state_dir)
@@ -1564,10 +1696,6 @@ def _prepare_agy_home() -> Path:
                 raise RuntimeError(
                     f"BRAIN_DIR/CONV_DIR resolves outside clean-home: {state_dir}"
                 ) from exc
-        real_gemini = HOME / ".gemini"
-        real_cli = real_gemini / "antigravity-cli"
-        clean_gemini = CLEAN_HOME_DIR / ".gemini"
-        clean_gemini_cli = clean_gemini / "antigravity-cli"
 
         _ensure_private_dir(CLEAN_HOME_DIR)
         _ensure_symlink(CLEAN_HOME_DIR / "Library", HOME / "Library")
@@ -1583,30 +1711,7 @@ def _prepare_agy_home() -> Path:
                 if clean_sub.is_symlink():
                     clean_sub.unlink()
                 _mirror_regular_files(src_dir, clean_sub, frozenset())
-        for src, dst in (
-            (real_gemini / "jetski-standalone-oauth-token", clean_gemini),
-            (real_gemini / "projects.json", clean_gemini),
-            (real_cli / "installation_id", clean_gemini_cli),
-            (real_cli / "jetski_state.pbtxt", clean_gemini_cli),
-            (real_cli / "settings.json", clean_gemini_cli),
-        ):
-            dst_file = dst / src.name
-            if src.is_file():
-                # mtime-guard: более свежий файл в <clean-home> (например, токен,
-                # обновлённый дочерним agy при OAuth-рефреше) не затирается
-                # устаревшей копией из реального профиля. Симлинк на месте копии
-                # не сохраняется (stat пошёл бы по ссылке): он удаляется и файл
-                # копируется заново; сохранённый файл остаётся строго 0600.
-                if dst_file.is_symlink():
-                    dst_file.unlink()
-                if (
-                    not dst_file.exists()
-                    or src.stat().st_mtime >= dst_file.stat().st_mtime
-                ):
-                    _copy_private_atomic(src, dst_file)
-                else:
-                    _assert_inside_clean_home(dst_file)
-                    dst_file.chmod(0o600)
+        _ = _sync_agy_gemini_files(auth_pairs)
         _ensure_private_dir(clean_gemini_cli / "conversations")
         _ensure_private_dir(clean_gemini_cli / "brain")
         _clean_canon_files(CLEAN_HOME_DIR)
@@ -1975,10 +2080,11 @@ def _image_gate_universal(model_id: str, effort: str | None) -> ImageReject | No
 # [Refactored] Media normalization moved to agy_runtime.media_normalizer
 
 
-def _messages_to_stripped_prompt(messages: object) -> str:
+def _messages_to_stripped_prompt(messages: object, reserve_bytes: int = 0) -> str:
     """Промпт всей истории без media: нет `[image N]`, `[attachments]`, путей и payload."""
     return _messages_to_prompt(
-        cast("list[object]", _strip_media_from_messages(messages))
+        cast("list[object]", _strip_media_from_messages(messages)),
+        reserve_bytes=reserve_bytes,
     )
 
 
@@ -2194,6 +2300,40 @@ def _stage_images(img_dir: Path, images: list[dict[str, object]]) -> None:
         raise ImageSpoolError(type(exc).__name__) from None
 
 
+def _img_dir_ttl_s() -> float:
+    """TTL удержания img-* после хода с tool_call (`AGY_IMG_DIR_TTL_S`, 300; 0 — не удерживать)."""
+    return _env_float("AGY_IMG_DIR_TTL_S", 300.0, 0.0, 86400.0)
+
+
+def _release_img_dir(img_dir: Path, retain: bool) -> None:
+    """Удалить каталог хода сразу либо удержать до TTL (клиент читает `img-<uuid>/…` после `<tool_call>`)."""
+    ttl = _img_dir_ttl_s()
+    if not (retain and ttl > 0):
+        _cleanup_img_dir(img_dir)
+        _ = _gc_retained_img_dirs()
+        return
+    with _active_lock:
+        _retained_img_dirs[str(img_dir)] = time.monotonic() + ttl
+    _log(f"image_dir_retained ttl_s={ttl:g}")
+    _ = _gc_retained_img_dirs()
+
+
+def _gc_retained_img_dirs() -> int:
+    """Удалить удержанные каталоги с истёкшим TTL и сверх `AGY_IMG_DIR_RETAIN_MAX`."""
+    cap = _env_int("AGY_IMG_DIR_RETAIN_MAX", 64, 1, 4096)
+    now = time.monotonic()
+    with _active_lock:
+        expired = [path for path, until in _retained_img_dirs.items() if until <= now]
+        live = sorted((u, p) for p, u in _retained_img_dirs.items() if p not in expired)
+        overflow = [p for _u, p in live[: max(0, len(live) - cap)]]
+    victims = [*expired, *overflow]
+    for path in victims:
+        _cleanup_img_dir(Path(path))
+    if victims:
+        _log(f"image_dir_gc removed={len(victims)} expired={len(expired)}")
+    return len(victims)
+
+
 def _cleanup_img_dir(img_dir: Path) -> None:
     """Удалить каталог хода и снять его с реестра активных (ошибка видна в журнале)."""
     try:
@@ -2206,6 +2346,7 @@ def _cleanup_img_dir(img_dir: Path) -> None:
     finally:
         with _active_lock:
             _active_img_dirs.discard(str(img_dir))
+            _ = _retained_img_dirs.pop(str(img_dir), None)
 
 
 _IMAGE_MARKER = re.compile(r"\[image \d+\]")
@@ -2326,17 +2467,43 @@ def _render_message(
     return "### %d. %s\n%s" % (counter[0], label, prepared)
 
 
+def _prompt_budget(reserve_bytes: int = 0) -> int:
+    """Бюджет истории: потолок минус резерв обёртки, не ниже `AGY_BRIDGE_PRUNE_MIN_BUDGET_BYTES` (4096)."""
+    floor = min(
+        _env_int(
+            "AGY_BRIDGE_PRUNE_MIN_BUDGET_BYTES", 4096, 512, PROMPT_MAX_NDJSON_BYTES_HIGH
+        ),
+        PROMPT_MAX_NDJSON_BYTES,
+    )
+    return max(PROMPT_MAX_NDJSON_BYTES - max(int(reserve_bytes), 0), floor)
+
+
+def _protocol_reserve_bytes(
+    emulate_tools: bool, tools: list, tool_choice: object
+) -> int:
+    """NDJSON-байты, которые обёртка протокола добавит к промпту истории."""
+    probe = "x"
+    # Верхняя оценка: формулировка для вложений длиннее базовой.
+    wrapped = (
+        _with_tools_protocol(probe, tools, tool_choice, has_attachments=True)
+        if emulate_tools
+        else _with_pure_text_protocol(probe, has_attachments=True)
+    )
+    return max(_ndjson_bytes(wrapped) - _ndjson_bytes(probe), 0)
+
+
 def _messages_to_prompt(
     messages: list,
     images: list[dict[str, object]] | None = None,
     img_start: int = 0,
+    reserve_bytes: int = 0,
 ) -> str:
     """Собрать единый текстовый промпт хода.
 
     Секцию протокола инструментов добавляет `_with_tools_protocol` (только при
     эмуляции tools). Image-части получают сквозные маркеры `[image N]` (нумерация с `img_start + 1`),
     а `images` описываются блоком `[attachments]` с абсолютными путями файлов.
-    Промпт сверх `PROMPT_MAX_NDJSON_BYTES` проходит head-pruning (ADR-0008).
+    Сверх `PROMPT_MAX_NDJSON_BYTES` минус `reserve_bytes` — head-pruning (ADR-0008).
     """
     counter = [0]
     img_counter = [img_start]
@@ -2350,7 +2517,7 @@ def _messages_to_prompt(
     text = _join_prompt_parts([b[2] for b in blocks], tail_block)
     if not text:
         return "Reply with exactly: PONG"
-    limit = PROMPT_MAX_NDJSON_BYTES
+    limit = _prompt_budget(reserve_bytes)
     if not AGY_BRIDGE_ENABLE_HEAD_PRUNING or _ndjson_bytes(text) <= limit:
         return text
     return _prune_prompt_blocks(blocks, tail_block, limit)
@@ -2807,13 +2974,24 @@ def _ensure_prompt_fits_ndjson(prompt: str, max_bytes: int | None = None) -> str
 
 
 def _get_resumed_turn_prompt(
-    messages: list, images: list[dict[str, object]] | None = None
+    messages: list,
+    images: list[dict[str, object]] | None = None,
+    reserve_bytes: int = 0,
 ) -> str:
     """Промпт хода продолжения: сообщения после последнего assistant.
 
     Маркеры сохраняют сквозные номера всей истории; `[attachments]` — только для
     изображений новых сообщений. Без assistant в истории — вся история целиком.
     """
+    return _resumed_turn_prompt(messages, images, reserve_bytes)[0]
+
+
+def _resumed_turn_prompt(
+    messages: list,
+    images: list[dict[str, object]] | None = None,
+    reserve_bytes: int = 0,
+) -> tuple[str, bool]:
+    """`(промпт, есть_вложения)`: признак вложений берётся из структуры `images`, не из текста."""
     last_asst = -1
     for i in range(len(messages) - 1, -1, -1):
         if isinstance(messages[i], dict) and messages[i].get("role") == "assistant":
@@ -2821,16 +2999,20 @@ def _get_resumed_turn_prompt(
             break
     if last_asst >= 0 and last_asst + 1 < len(messages):
         new_msgs = messages[last_asst + 1 :]
-        skipped = len(_collect_image_parts(cast("list[object]", messages[: last_asst + 1])))
+        skipped = len(
+            _collect_image_parts(cast("list[object]", messages[: last_asst + 1]))
+        )
         delta = [
             img
             for img in (images or [])
             if cast(int, img.get("msg_index", 0)) > last_asst
         ]
-        prompt = _messages_to_prompt(new_msgs, delta, skipped)
+        prompt = _messages_to_prompt(new_msgs, delta, skipped, reserve_bytes)
         if prompt:
-            return prompt
-    return _messages_to_prompt(messages, images)
+            return prompt, bool(delta)
+    return _messages_to_prompt(messages, images, reserve_bytes=reserve_bytes), bool(
+        images
+    )
 
 
 def _session_key_for(
@@ -3186,7 +3368,16 @@ _supervisor = ProcessSupervisor(
 )
 _group_alive = _supervisor.group_alive
 _kill_group = _supervisor.kill_group
-_LIFECYCLE = SubbridgeLifecycle(hooks=SubbridgeHooks(procs_fn=lambda: list(_active.copy().values()), cleanup_fn=lambda: _supervisor.kill_all([p for p in _active.copy().values() if p.returncode is None]), log_fn=_log), workspace=WORKSPACE)
+_LIFECYCLE = SubbridgeLifecycle(
+    hooks=SubbridgeHooks(
+        procs_fn=lambda: list(_active.copy().values()),
+        cleanup_fn=lambda: _supervisor.kill_all(
+            [p for p in _active.copy().values() if p.returncode is None]
+        ),
+        log_fn=_log,
+    ),
+    workspace=WORKSPACE,
+)
 
 
 # ---- Guardrails SQLite-источника мышления (AD-005, AD-006) -----------------------
@@ -3301,7 +3492,7 @@ class _RuntimeFlags(NamedTuple):
     stream_resilience_enabled: bool = True
     isolate_tool_preambles_to_reasoning: bool = True
     tool_emulation_enabled: bool = True
-    self_heal_interrupted_turn: bool = True
+    self_heal_interrupted_turn: bool = False
     graceful_interruption_on_partial: bool = True
     graceful_timeout_finish_reason: str = "stop"
 
@@ -4288,6 +4479,9 @@ class _TranscriptTail(InterruptionTailState):
 
     # ---- жизненный цикл ----------------------------------------------------------
     def start(self) -> None:
+        self.attempt = sse_body_runner.current_attempt_index()
+        if self.run_ref is not None:
+            self.run_ref.attempt = self.attempt
         self.thread.start()
 
     def _cid8(self) -> str:
@@ -4552,8 +4746,30 @@ class _TranscriptTail(InterruptionTailState):
         if rtype != "PLANNER_RESPONSE":
             self.note_error_record(rtype, rec, idx)
             return
+        self._emit_planner_record(rec, idx)
+
+    def _abort_run_safety(self) -> None:
+        """Фатальный safety-отказ: очистить очередь Run от ещё не принятого контента."""
+        run_ref = getattr(self, "run_ref", None)
+        if run_ref is not None and hasattr(run_ref, "abort_safety"):
+            run_ref.abort_safety()
+
+    def _emit_planner_record(self, rec: dict[str, object], idx: int | None) -> None:
+        """Проверить метаданные до отправки и фиксации planner-шагa."""
         if self.usage_enabled:
             self._record_usage(rec)
+        self.note_planner_record(rec, idx if idx is not None else -1)
+        if getattr(self, "had_safety_error", False):
+            self._abort_run_safety()
+            return
+        self._emit_planner_content(rec, idx)
+        if idx is None:
+            return
+        thinking = rec.get("thinking")
+        self._apply_final(idx, thinking if isinstance(thinking, str) else "")
+
+    def _emit_planner_content(self, rec: dict[str, object], idx: int | None) -> None:
+        """Передать проверенный planner-контент с прежней изоляцией преамбул."""
         content = rec.get("content")
         emit_content = self.emit_content
         has_tools = bool(rec.get("tool_calls"))
@@ -4565,29 +4781,26 @@ class _TranscriptTail(InterruptionTailState):
         isolate_tools = getattr(self, "isolate_tool_preambles", False)
         if emit_content is not None and isinstance(content, str) and content.strip():
             if has_tools and isolate_tools:
-                run_ref = getattr(self, "run_ref", None)
-                claimed = False
-                if run_ref is not None and hasattr(run_ref, "claim_preamble"):
-                    claimed = run_ref.claim_preamble(idx, source="transcript")
-                else:
-                    preambles = getattr(self, "_preambles_emitted", None)
-                    if preambles is None:
-                        preambles = self._preambles_emitted = set()
-                    key_idx = idx if idx is not None else -1
-                    if key_idx not in preambles:
-                        _add_preamble_bounded(preambles, key_idx)
-                        claimed = True
-                if claimed:
+                if self._claim_planner_preamble(idx):
                     _ = self.emit(idx if idx is not None else 0, content + "\n\n", None)
             else:
                 _ = emit_content(
                     idx, content
                 )  # live planner-текст, независимо от tool_calls
-        if idx is None:
-            return
-        self.note_planner_record(rec, idx)
-        thinking = rec.get("thinking")
-        self._apply_final(idx, thinking if isinstance(thinking, str) else "")
+
+    def _claim_planner_preamble(self, idx: int | None) -> bool:
+        """Зарегистрировать преамбулу ровно один раз перед отправкой."""
+        run_ref = getattr(self, "run_ref", None)
+        if run_ref is not None and hasattr(run_ref, "claim_preamble"):
+            return run_ref.claim_preamble(idx, source="transcript")
+        preambles = getattr(self, "_preambles_emitted", None)
+        if preambles is None:
+            preambles = self._preambles_emitted = set()
+        key_idx = idx if idx is not None else -1
+        if key_idx in preambles:
+            return False
+        _add_preamble_bounded(preambles, key_idx)
+        return True
 
     # ---- состояние шагов -----------------------------------------------------------
     def _state(self, idx: int) -> _StepState:
@@ -5125,18 +5338,33 @@ def resolve_agy_mode(req: dict) -> str:
     )
 
 
-def _with_pure_text_protocol(prompt: str) -> str:
-    """Инструкция подавления нативных инструментов agy CLI для чисто текстового хода."""
-    suppress = (
-        "[CRITICAL: DO NOT USE ANY TOOLS (no read_file, no grep, no bash, no agent tools). "
-        "Provide your analysis and answer directly as pure text.]"
+def _attachment_tool() -> str:
+    """Инструмент чтения вложений (env `AGY_BRIDGE_ATTACHMENT_TOOL`, `view_file`)."""
+    return os.environ.get("AGY_BRIDGE_ATTACHMENT_TOOL", "").strip() or "view_file"
+
+
+def _with_pure_text_protocol(prompt: str, has_attachments: bool = False) -> str:
+    """Инструкция подавления нативных инструментов agy CLI для текстового хода.
+
+    `has_attachments` задаёт вызывающий по реальным `images`: текст промпта не сканируется,
+    иначе `[attachments]` из пользовательского сообщения открыл бы исключение для чтения файлов.
+    """
+    suppress = pure_text_protocol_instruction(
+        has_attachments=has_attachments, attachment_tool=_attachment_tool()
     )
     return f"{suppress}\n\n{prompt}" if prompt else suppress
 
 
-def _with_tools_protocol(prompt: str, tools: list, tool_choice: object) -> str:
+def _with_tools_protocol(
+    prompt: str, tools: list, tool_choice: object, has_attachments: bool = False
+) -> str:
     """Промпт хода эмуляции: секция протокола `<tool_call>` ядра перед историей agy."""
-    section = _core_messages_to_prompt([], tools, tool_choice)
+    section = tools_protocol_section(
+        tools,
+        tool_choice,
+        has_attachments=has_attachments,
+        attachment_tool=_attachment_tool(),
+    )
     return f"{section}\n\n{prompt}" if prompt else section
 
 
@@ -5228,6 +5456,9 @@ class _ToolTurn:
             self.ok = False
 
     def _call(self, call: dict[str, Any]) -> None:
+        # Ошибка монотонна: после неё вызовы того же прохода `feed_text` не накапливаются и не публикуются.
+        if self.error:
+            return
         if len(self.calls) >= self._max_calls:
             raise LiveParserError(f"tool call count exceeded limit ({self._max_calls})")
         entry: dict[str, object] = {
@@ -5241,12 +5472,20 @@ class _ToolTurn:
                 ),
             },
         }
+        if has_unnamed_call(entry):
+            # Отброшенный безымянный вызов (в т.ч. внутри `parallel`) не даёт молчаливый `stop`:
+            # ход завершается tool_call_parse_error, неполный пакет не публикуется.
+            self.error = self.error or "tool call without function name dropped"
+            self.ok = False
+            return
         published = [
             dict(cast("dict[str, object]", item), index=len(self.calls) + offset)
             for offset, item in enumerate(sanitize_tool_call(entry, self._schemas))
         ]
         if len(self.calls) + len(published) > self._max_calls:
             raise LiveParserError(f"tool call count exceeded limit ({self._max_calls})")
+        if not published:
+            return
         self.calls.extend(published)
         if self.ok and not self._on_calls(published):
             self.ok = False
@@ -5389,7 +5628,8 @@ class Run:
             "--model",
             model,
             *effort_cli_args(effort),
-            "--print-timeout=" + str(PRINT_TIMEOUT),
+            "--print-timeout=" + _format_print_timeout(PRINT_TIMEOUT),
+            *text_turn_cli_flags(mode),
         ]
         # Изображения хода: каталог файлов отдельным аргументом, cwd не подменяется.
         if add_dir is not None:
@@ -5442,6 +5682,8 @@ class Run:
         self.controller.register_pgid(self.proc.pid)
         self.got_event = False  # True после первого валидного JSON-события stdout
         self.stderr_head: list = []
+        # Первая capacity-503 строка CLI: не пусто — ход прерван fast-fail.
+        self.capacity_exhausted: str = ""
         with _active_lock:
             _active[self.proc.pid] = self.proc
         self.q = queue.Queue()
@@ -5577,14 +5819,26 @@ class Run:
     def _on_tail_activity(self) -> None:
         self.note_producer_activity("transcript")
 
+    def abort_safety(self) -> None:
+        """Фатальный safety-отказ: закрыть выдачу и атомарно очистить очередь."""
+        with self._emit_lock:
+            self.drain_closed = True
+            self.has_fatal_error = True
+            with self.q.mutex:
+                self.q.queue = collections.deque(
+                    x for x in self.q.queue if x[0] not in ("text", "reasoning")
+                )
+
     def offer_content(self, source: str, step_index: object, text: str) -> bool:
         """Кандидат planner-текста в арбитр; новый суффикс уходит в очередь под _emit_lock.
 
         Сокетного ввода-вывода здесь нет: потребитель (`_execute`) пишет в сокет сам.
-        False — выдача уже закрыта terminal barrier'ом.
+        False — выдача уже закрыта terminal barrier'ом или safety-отказом.
         """
         with self._emit_lock:
             if self.drain_closed:
+                return False
+            if getattr(self._tail, "had_safety_error", False) or getattr(self, "has_fatal_error", False):
                 return False
             suffix = self._arbiter.offer(
                 source, step_index, text, self._tail.cid or self.run_cid
@@ -5732,7 +5986,10 @@ class Run:
         try:
             for raw in iter(self.proc.stderr.readline, b""):
                 line = raw.decode("utf-8", "replace").rstrip()
-                if not line or _NOISE.search(line):
+                if not line:
+                    continue
+                self._note_capacity_line(line)
+                if _NOISE.search(line):
                     continue
                 head.append(line)
                 if len(head) > 40:
@@ -5740,6 +5997,24 @@ class Run:
         except Exception:  # noqa: BLE001 — вторичный поток, ошибку терять нельзя молча
             pass
         self.err_box.append("\n".join(head).strip())
+
+    def _note_capacity_line(self, line: str) -> None:
+        """Fast-fail: первая capacity-503 строка CLI гасит процесс."""
+        if not should_fast_fail_agy_capacity_503(line):
+            return
+        # Секрет, пересекающий предел сводки, маскируется до усечения; чужая строка читается ограниченным окном.
+        summary = summarize_capacity_text(line, _mask_secrets)
+        with self._emit_lock:
+            if self.capacity_exhausted or self._done_put:
+                return
+            self.capacity_exhausted = summary
+            self.drain_closed = True
+            self._done_put = True
+            self.q.put(("capacity_exhausted", summary))
+        _log(
+            f"capacity-exhausted fast-fail pid={self.proc.pid} reason={CAPACITY_REASON}"
+        )
+        _kill_group(self.proc)
 
     def claim_preamble(self, step_idx: int | None, source: str = "transcript") -> bool:
         """Атомарно заявить право на отправку преамбулы шага.
@@ -5800,6 +6075,7 @@ class Run:
             for raw in iter(self.proc.stdout.readline, b""):
                 line = raw.decode("utf-8", "replace").strip()
                 if not line.startswith("{"):
+                    self._note_capacity_line(line)
                     continue
                 try:
                     ev = json.loads(line)
@@ -5811,7 +6087,11 @@ class Run:
                 if etype == "init":
                     init = ev.get("init") if isinstance(ev.get("init"), dict) else {}
                     tools_raw = cast(object, init.get("tools"))
-                    tools = cast("list[object]", tools_raw) if isinstance(tools_raw, list) else []
+                    tools = (
+                        cast("list[object]", tools_raw)
+                        if isinstance(tools_raw, list)
+                        else []
+                    )
                     self.q.put(
                         (
                             "init",
@@ -5824,10 +6104,16 @@ class Run:
                     )
                     self._tail.bind(str(ev.get("conversation_id") or ""))
                 elif etype == "step_update":
-                    step = ev.get("step_update") if isinstance(ev.get("step_update"), dict) else {}
+                    step = (
+                        ev.get("step_update")
+                        if isinstance(ev.get("step_update"), dict)
+                        else {}
+                    )
                     kind = step.get("step_type")
                     if kind == "tool":
-                        midstream_resilience.capture_pump_tool_step(self, step, tool_state)
+                        midstream_resilience.capture_pump_tool_step(
+                            self, step, tool_state
+                        )
                         t_idx = _as_int(step.get("step_index"))
                         if t_idx is not None:
                             tool_steps = getattr(self, "_tool_step_indices", None)
@@ -5901,13 +6187,17 @@ class Run:
                                         _ = self._emit_reasoning(step_idx or 0, suffix)
                                 else:
                                     self.q.put(("text", suffix))
-                    midstream_resilience.emit_done_tool_trace_if_any(self, step, kind, tool_state)
+                    midstream_resilience.emit_done_tool_trace_if_any(
+                        self, step, kind, tool_state
+                    )
                 elif etype == "result":
                     result = (
                         ev.get("result") if isinstance(ev.get("result"), dict) else {}
                     )
                     result_ev = result
                     final_text = str(result.get("response") or "")
+                    if str(result.get("status") or "").upper() == "ERROR":
+                        self._note_capacity_line(str(result.get("error") or ""))
                     self.q.put(
                         (
                             "result",
@@ -6262,29 +6552,12 @@ def _terminal_state(name: str, err: str = "") -> dict[str, object]:
     }
 
 
+_DONE_RECOVERY_ALIASES = RecoveryAliases(("AGY_CAUSAL_RECOVERY_ENABLED", "AGY_SELF_HEAL_INTERRUPTED_TURN"))
+
+
 def _done_recovery_aliases_enabled() -> bool:
-    """Перевести локальные имена флагов agy в запрет recovery, без кэша."""
-    env = os.environ.get("AGY_CAUSAL_RECOVERY_ENABLED", "").strip().lower()
-    if env and env not in _ENV_TRUE:
-        return False
-    try:
-        fd = os.open(DYNAMIC_CONFIG_PATH, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-    except (FileNotFoundError, NotADirectoryError):
-        return True
-    except OSError:
-        return False
-    try:
-        try:
-            if (os.fstat(fd).st_mode & 0o170000) != 0o100000:
-                return False
-            raw = os.read(fd, DYNAMIC_CONFIG_MAX_BYTES + 1)
-        finally:
-            os.close(fd)
-        data = json.loads(raw) if len(raw) <= DYNAMIC_CONFIG_MAX_BYTES else None
-        return isinstance(data, dict) and all(data.get(key, True) is True for key in (
-            "causal_recovery_enabled", "causal_turn_recovery_enabled", "BRIDGE_CAUSAL_TURN_RECOVERY_ENABLED"))
-    except (OSError, ValueError, RecursionError):
-        return False
+    """Свежий общий opt-in, включая локальные имена флагов и запреты."""
+    return read_recovery_switch(DYNAMIC_CONFIG_PATH, DYNAMIC_CONFIG_MAX_BYTES, aliases=_DONE_RECOVERY_ALIASES)
 
 
 @_LIFECYCLE.install
@@ -6305,7 +6578,9 @@ class Handler(BaseHTTPRequestHandler):
         except (TypeError, IndexError):
             return "-"
 
-    def _send(self, code: int, payload: dict) -> None:
+    def _send(
+        self, code: int, payload: dict, extra_headers: dict[str, str] | None = None
+    ) -> None:
         if self._registry_job is not None:
             return
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -6313,6 +6588,8 @@ class Handler(BaseHTTPRequestHandler):
             self.send_response(code)
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
+            for header, value in (extra_headers or {}).items():
+                self.send_header(header, value)
             self.end_headers()
             self.wfile.write(body)
         except (BrokenPipeError, ConnectionResetError, OSError):
@@ -6598,7 +6875,9 @@ class Handler(BaseHTTPRequestHandler):
                         float(TIMEOUT_S),
                     )
                 no_first_event = not run.got_event
-            FIRST_TOKEN_TIMEOUT_S = midstream_resilience.current_first_event_timeout_s(run, _config.first_token_timeout_s)
+            FIRST_TOKEN_TIMEOUT_S = midstream_resilience.current_first_event_timeout_s(
+                run, _config.first_token_timeout_s
+            )
             if no_first_event and now - run.started > FIRST_TOKEN_TIMEOUT_S:
                 return state(
                     "first_token_timeout",
@@ -6652,8 +6931,12 @@ class Handler(BaseHTTPRequestHandler):
             if kind in _ACTIVITY_KINDS:
                 run.controller.on_activity(kind)
                 if result_error:
-                    if is_transient_stream_interruption(result_error):
-                        cleared_error, result_error, result_error_at = result_error, "", 0.0
+                    if is_self_healable_error(result_error):
+                        cleared_error, result_error, result_error_at = (
+                            result_error,
+                            "",
+                            0.0,
+                        )
             if kind == "init":
                 conversation_id = str(payload.get("conversation_id") or "")
                 _log(
@@ -6686,6 +6969,8 @@ class Handler(BaseHTTPRequestHandler):
                     result_error_at = time.monotonic()
             elif kind == "pump_error":
                 return finish("pump_error", 1, str(payload))
+            elif kind == "capacity_exhausted":
+                return finish("capacity_exhausted", 1, str(payload))
             elif kind == "done":
                 return self._finish_done(
                     run, DoneRequest(payload, result_ev, (result_error, cleared_error)),
@@ -6713,12 +6998,12 @@ class Handler(BaseHTTPRequestHandler):
         return DoneSnapshot(
             DoneTextFacts(final_text, str(getattr(run, "_content_emitted_wire", "") or ""), full_error, request.errors[1]),
             DoneResultFacts(str((result_ev or {}).get("status") or "").strip().lower(),
-                            actual_rc, exited, getattr(self, "_attempt", getattr(run, "attempt", 0)),
+                            actual_rc, exited, getattr(run, "attempt", -1),
                             bool(getattr(run, "has_fatal_error", False))),
             DoneDeliveryFacts(bool(getattr(run, "content_streaming", False)), not ports.state("", 0).get("text"),
                               getattr(run, "reconcile_result", lambda text: text),
                               lambda: bool(getattr(getattr(run, "_arbiter", None), "last_result_diverged", False))),
-            DoneRecoveryFacts(bool(_new_flag("self_heal_interrupted_turn", True)) and _done_recovery_aliases_enabled(),
+            DoneRecoveryFacts(_done_recovery_aliases_enabled(),
                               tail, DoneDrainFacts(str(getattr(tail, "drain_outcome", "")), stopped), tool_status),
         )
 
@@ -6732,7 +7017,8 @@ class Handler(BaseHTTPRequestHandler):
             lambda: self._snapshot_done(run, request, ports),
             (lambda: list(drain(T_DRAIN_MAX_S))) if callable(drain) else None, stderr)
         config = DoneConfig(DYNAMIC_CONFIG_PATH, DYNAMIC_CONFIG_MAX_BYTES,
-                            bool(getattr(run, "content_streaming", False)), bool(getattr(run, "usage_enabled", False)))
+                            bool(getattr(run, "content_streaming", False)), bool(getattr(run, "usage_enabled", False)),
+                            _DONE_RECOVERY_ALIASES)
         return cast(dict, finalize_done(request, ports, runtime, config, _log))
 
     @staticmethod
@@ -6771,57 +7057,74 @@ class Handler(BaseHTTPRequestHandler):
             job.cancelled.is_set() if job is not None else _client_gone(self.connection)
         )
 
-    def _run_once(
-        self, ctx: dict, on_text, on_tool_trace, on_reasoning, keepalive
-    ) -> dict:
+    @staticmethod
+    def _run_once_callbacks(on_text, on_tool_trace, on_reasoning, keepalive) -> tuple:
+        """Сохранить позиционную и именованную форму четырёх legacy callbacks."""
+        return on_text, on_tool_trace, on_reasoning, keepalive
+
+    def _run_once(self, ctx: dict, *callbacks, **named_callbacks) -> dict:
+        """Сохранить legacy-вызов, делегируя владение job отдельному координатору."""
+        return self._run_registered_attempt(ctx, self._run_once_callbacks(*callbacks, **named_callbacks))
+
+    def _run_registered_attempt(self, ctx: dict, callbacks: tuple) -> dict:
+        """Исполнить попытку напрямую либо подписаться на producer общего job."""
         key = str(ctx.get("step_job_id") or "")
         if not key:
-            return self._run_once_impl(
-                ctx, on_text, on_tool_trace, on_reasoning, keepalive
-            )
-        registry = _JOB_REGISTRY
+            return self._run_once_impl(ctx, *callbacks)
         try:
-            job, owner = registry.attach(
+            job, owner = _JOB_REGISTRY.attach(
                 key, str(ctx["model"]), str(ctx["full_prompt"])
             )
         except JobConflict:
             return {"state": "job_conflict", "text": "", "rc": 1}
         if owner:
-            worker = copy.copy(self)
-            worker._registry_job = job
-            worker_ctx = dict(ctx)
-            worker_ctx.pop("finalize_timeout", None)
+            self._start_job_producer(ctx, job)
+        return self._read_job_events(job, callbacks)
 
-            def produce() -> None:
-                try:
-                    out = worker._run_once_impl(
+    def _start_job_producer(self, ctx: dict, job: _Job) -> None:
+        """Зафиксировать контекст попытки до отделения producer от подписчика."""
+        registry = _JOB_REGISTRY
+        worker = copy.copy(self)
+        worker._registry_job = job
+        worker_ctx = dict(ctx)
+        worker_ctx.pop("finalize_timeout", None)
+        def produce() -> None:
+            try:
+                out = sse_body_runner.invoke_at_attempt(
+                    worker_ctx.get("attempt_index", -1),
+                    lambda: worker._run_once_impl(
                         worker_ctx,
                         lambda value: registry.publish(job, "text", value),
                         lambda value: registry.publish(job, "tool_trace", value),
                         lambda value: registry.publish(job, "reasoning", value),
                         lambda: not job.cancelled.is_set(),
-                    )
-                except Exception as exc:
-                    _log(f"job-producer-error err={type(exc).__name__}")
-                    out = {"state": "pump_error", "text": "", "rc": 1}
-                try:
-                    registry.finish(job, out)
-                finally:
-                    use_cid = str(worker_ctx.get("registry_use_cid") or "")
-                    if use_cid:
-                        with _session_store_lock:
-                            _in_flight_cids.discard(use_cid)
-                    _cid_release(
-                        use_cid or str(worker_ctx.get("registry_owned_cid") or ""),
-                        str(worker_ctx.get("turn_id") or ""),
-                    )
-
-            ctx["job_owns_cid"] = True
+                    ),
+                )
+            except Exception as exc:
+                _log(f"job-producer-error err={type(exc).__name__}")
+                out = {"state": "pump_error", "text": "", "rc": 1}
             try:
-                threading.Thread(target=produce, daemon=True, name="agy-job").start()
-            except RuntimeError:
-                ctx["job_owns_cid"] = False
-                registry.finish(job, {"state": "pump_error", "text": "", "rc": 1})
+                registry.finish(job, out)
+            finally:
+                use_cid = str(worker_ctx.get("registry_use_cid") or "")
+                if use_cid:
+                    with _session_store_lock:
+                        _in_flight_cids.discard(use_cid)
+                _cid_release(
+                    use_cid or str(worker_ctx.get("registry_owned_cid") or ""),
+                    str(worker_ctx.get("turn_id") or ""),
+                )
+        ctx["job_owns_cid"] = True
+        try:
+            threading.Thread(target=produce, daemon=True, name="agy-job").start()
+        except RuntimeError:
+            ctx["job_owns_cid"] = False
+            registry.finish(job, {"state": "pump_error", "text": "", "rc": 1})
+
+    def _read_job_events(self, job: _Job, callbacks: tuple) -> dict:
+        """Доставить события подписчику, сохраняя heartbeat и гарантированный detach."""
+        on_text, on_tool_trace, on_reasoning, keepalive = callbacks
+        registry = _JOB_REGISTRY
         offset = 0
         heartbeat = _env_float(
             "BRIDGE_SSE_HEARTBEAT_INTERVAL_S", 12.0, 0.001, float("inf")
@@ -6933,7 +7236,11 @@ class Handler(BaseHTTPRequestHandler):
                 else:
                     # Флаг и proof могли смениться, пока ход ждал слот: повторная
                     # проверка до mkdir и spawn (universal — только флаг, выше).
-                    gate = None if universal else _image_gate(cast(str, model), cast(str, effort))
+                    gate = (
+                        None
+                        if universal
+                        else _image_gate(cast(str, model), cast(str, effort))
+                    )
                     if gate is not None:
                         self._log_reject(
                             gate.code, cast(str, model), cast(int, ctx["model_len"])
@@ -7094,6 +7401,9 @@ class Handler(BaseHTTPRequestHandler):
                         _JOB_REGISTRY.bind_cancel(job, None)
                 if out["state"] == "done":
                     break
+                if out["state"] == "capacity_exhausted":
+                    # Повтор бессмысленен: upstream без ёмкости.
+                    break
                 # Выдача клиенту: текст, tool_calls или уже отданное в поток мышление.
                 # JSON-режим мышление клиенту ещё не отдавал — там повтор безопасен.
                 typed_out = cast("dict[str, object]", out)
@@ -7219,7 +7529,13 @@ class Handler(BaseHTTPRequestHandler):
         finally:
             # Каталог изображений живёт весь ход (все попытки) и уходит до слота.
             if img_registered and img_dir is not None:
-                _cleanup_img_dir(img_dir)
+                emitted = ctx.get("tool_calls_emitted")
+                _release_img_dir(
+                    img_dir,
+                    retain=bool(ctx.get("emulate_tools"))
+                    and callable(emitted)
+                    and bool(emitted()),
+                )
             _slots.release()
         self._log_done(
             cast(str, ctx["model"]),
@@ -7274,7 +7590,9 @@ class Handler(BaseHTTPRequestHandler):
                 "code": 504,
             }
         if st == "first_token_timeout":
-            FIRST_TOKEN_TIMEOUT_S = midstream_resilience.first_event_timeout_for_result(out, resilience, _config.first_token_timeout_s)
+            FIRST_TOKEN_TIMEOUT_S = midstream_resilience.first_event_timeout_for_result(
+                out, resilience, _config.first_token_timeout_s
+            )
             return {
                 "message": f"first_token_timeout: agy gave no event within "
                 f"{FIRST_TOKEN_TIMEOUT_S:g}s",
@@ -7311,6 +7629,8 @@ class Handler(BaseHTTPRequestHandler):
                 "type": "proxy_error",
                 "code": 502,
             }
+        if st == "capacity_exhausted":
+            return capacity_error_body(detail=out.get("err"))
         if st == "agy_error":
             return {
                 "message": str(out.get("err") or "agy reported an error")[:500],
@@ -7361,7 +7681,15 @@ class Handler(BaseHTTPRequestHandler):
                 "uptime_s": int(time.time() - _started),
             }
             health.update(_sqlite_health_fields())
-            self._send(200, health)
+            health.update(_runtime_build_fields())
+            self._send(
+                200,
+                health,
+                extra_headers={
+                    "X-Bridge-Git-Head-Sha": str(BUILD_INFO.git_head_sha),
+                    "X-Bridge-Boot-Ts": f"{BUILD_INFO.boot_ts:.3f}",
+                },
+            )
             return
         if not _auth_ok(self):
             self._send(
@@ -7513,9 +7841,17 @@ class Handler(BaseHTTPRequestHandler):
                 )
                 return
             model = FLEET["models"][model_id]
-            decision = resolve_request_effort(req.get("reasoning_effort"), model, EFFORT_LEVELS)
+            decision = resolve_request_effort(
+                req.get("reasoning_effort"), model, EFFORT_LEVELS
+            )
             if decision.error:
-                self._reject(400, "unsupported_reasoning_effort", decision.error, model_id, model_len)
+                self._reject(
+                    400,
+                    "unsupported_reasoning_effort",
+                    decision.error,
+                    model_id,
+                    model_len,
+                )
                 return
             effort, effort_source = decision.effort, decision.source
             if "reasoning" in req and req.get("reasoning") is not None:
@@ -7528,7 +7864,25 @@ class Handler(BaseHTTPRequestHandler):
                 )
                 return
             messages_raw = cast(object, req.get("messages"))
-            messages = cast("list[object]", messages_raw) if isinstance(messages_raw, list) else []
+            messages = (
+                cast("list[object]", messages_raw)
+                if isinstance(messages_raw, list)
+                else []
+            )
+            raw_tools = req.get("tools")
+            tools = (
+                [t for t in raw_tools if isinstance(t, dict)]
+                if isinstance(raw_tools, list)
+                else []
+            )
+            tool_choice = req.get("tool_choice")
+            tools_count = 0 if _tool_choice_none(tool_choice) else len(tools)
+            # Эмуляция function calling: tools есть и tool_choice != "none".
+            emulate_tools = tools_count > 0 and _new_flag(
+                "tool_emulation_enabled", True
+            )
+            # Резерв под обёртку протокола: промпт усекается один раз.
+            reserve = _protocol_reserve_bytes(emulate_tools, tools, tool_choice)
             # Универсальная политика фиксируется один раз на принятый запрос.
             universal = _is_image_fallback_enabled()
             images: list[dict[str, object]] = []
@@ -7542,7 +7896,7 @@ class Handler(BaseHTTPRequestHandler):
                 image_parts, other_media = _media_part_counts(messages)
                 # Всегда нормализуем историю: любой cold/downgrade-путь берёт
                 # промпт только отсюда, а не из legacy `_flatten_content`.
-                stripped_full_prompt = _messages_to_stripped_prompt(messages)
+                stripped_full_prompt = _messages_to_stripped_prompt(messages, reserve)
                 if image_parts or other_media:
                     if not _is_image_input_enabled():
                         _log_image_fallback(
@@ -7608,34 +7962,31 @@ class Handler(BaseHTTPRequestHandler):
                     model_len,
                 )
                 return
-            raw_tools = req.get("tools")
-            tools = (
-                [t for t in raw_tools if isinstance(t, dict)]
-                if isinstance(raw_tools, list)
-                else []
-            )
-            tool_choice = req.get("tool_choice")
-            tools_count = 0 if _tool_choice_none(tool_choice) else len(tools)
-            # Эмуляция OpenAI function calling ядром: tools есть и tool_choice != "none".
-            emulate_tools = tools_count > 0 and _new_flag(
-                "tool_emulation_enabled", True
-            )
             if force_cold or (universal and not images):
                 full_prompt = stripped_full_prompt
             else:
-                full_prompt = _messages_to_prompt(render_messages, images)
+                full_prompt = _messages_to_prompt(
+                    render_messages, images, reserve_bytes=reserve
+                )
                 if universal:
                     stripped_full_prompt = stripped_full_prompt or full_prompt
+            full_attached = bool(images) and not force_cold
             if emulate_tools:
-                full_prompt = _with_tools_protocol(full_prompt, tools, tool_choice)
+                full_prompt = _with_tools_protocol(
+                    full_prompt, tools, tool_choice, has_attachments=full_attached
+                )
                 if stripped_full_prompt:
                     stripped_full_prompt = _with_tools_protocol(
-                        stripped_full_prompt, tools, tool_choice
+                        stripped_full_prompt, tools, tool_choice, has_attachments=False
                     )
             else:
-                full_prompt = _with_pure_text_protocol(full_prompt)
+                full_prompt = _with_pure_text_protocol(
+                    full_prompt, has_attachments=full_attached
+                )
                 if stripped_full_prompt:
-                    stripped_full_prompt = _with_pure_text_protocol(stripped_full_prompt)
+                    stripped_full_prompt = _with_pure_text_protocol(
+                        stripped_full_prompt, has_attachments=False
+                    )
             extra = (
                 req.get("extra_body") if isinstance(req.get("extra_body"), dict) else {}
             )
@@ -7655,7 +8006,9 @@ class Handler(BaseHTTPRequestHandler):
                             or not os.path.isabs(val)
                             or "\x00" in val
                             or any(
-                                ord(c) < 32 or ord(c) == 127 or 0xD800 <= ord(c) <= 0xDFFF
+                                ord(c) < 32
+                                or ord(c) == 127
+                                or 0xD800 <= ord(c) <= 0xDFFF
                                 for c in val
                             )
                         ):
@@ -7750,11 +8103,17 @@ class Handler(BaseHTTPRequestHandler):
                 if use_cid:
                     conversation_id = use_cid
                     is_resumed = True
-                    prompt = _get_resumed_turn_prompt(render_messages, images)
+                    prompt, resumed_attached = _resumed_turn_prompt(
+                        render_messages, images, reserve
+                    )
                     if emulate_tools:
-                        prompt = _with_tools_protocol(prompt, tools, tool_choice)
+                        prompt = _with_tools_protocol(
+                            prompt, tools, tool_choice, has_attachments=resumed_attached
+                        )
                     else:
-                        prompt = _with_pure_text_protocol(prompt)
+                        prompt = _with_pure_text_protocol(
+                            prompt, has_attachments=resumed_attached
+                        )
             ctx = {
                 "registry_use_cid": use_cid,
                 "registry_owned_cid": owned_cid,
@@ -7820,9 +8179,14 @@ class Handler(BaseHTTPRequestHandler):
     def _serve_json(self, ctx: dict) -> None:
         self._reset_flush_window()
         try:
-            self._serve_json_body(ctx)
+            self._json_body_runner(ctx)
         finally:
             self._reset_flush_window()
+
+    def _json_body_runner(self, ctx: dict) -> None:
+        """Установить начальную попытку JSON и передать её job-производителю."""
+        ctx["attempt_index"] = 0
+        sse_body_runner.invoke_at_attempt(0, lambda: self._serve_json_body(ctx))
 
     def _serve_json_body(self, ctx: dict) -> None:
         progress = _ToolProgress(
@@ -7868,6 +8232,7 @@ class Handler(BaseHTTPRequestHandler):
         )
         if tool_turn is not None:
             ctx["tool_stop"] = tool_turn.turn_complete
+            ctx["tool_calls_emitted"] = lambda: bool(tool_turn.calls)
 
         def build_payload(
             out: dict,
@@ -8095,6 +8460,7 @@ def _sweep_loop() -> None:
         time.sleep(SWEEP_INTERVAL_S)
         try:
             _ = _sweep_workspace()
+            _ = _gc_retained_img_dirs()
         except Exception as exc:  # noqa: BLE001 — поток зачистки не должен умирать
             _log(f"sweep_error err={type(exc).__name__}")
 

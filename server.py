@@ -35,7 +35,6 @@ BRIDGE_KEY и DROID_DSH_BRIDGE_KEY; ротация файла отзывает �
 без интерактивного логина) наследуется потомком как есть — его подкладывает
 start.sh из ~/.zshenv; `droid exec` читает его из окружения сам.
 """
-
 from __future__ import annotations
 
 import base64
@@ -75,7 +74,7 @@ if str(ROOT) not in sys.path:
 import b_guard  # noqa: E402  - охранник B: автоматический контур профилей DSH (RW-003)
 from agent_browser import discover_local_cdp_url, is_loopback_cdp_url  # noqa: E402,F401
 from tools.receipt_schema import RECEIPT_PROBES as RECEIPT_PROBES, RECEIPT_SCHEMA, RPC_API_VERSION, SETTINGS_PROFILE as SETTINGS_PROFILE, TOOLS_POLICY as TOOLS_POLICY, ReceiptV3, catalog_tool_ids, receipt_gate_problem, settings_profile_digest as settings_profile_digest, tools_policy_digest as tools_policy_digest, validate_model_catalog, validate_receipt_components  # noqa: E402,F401
-
+from core.http_accept import AdmissionBudget, configure_accepted_socket  # noqa: E402
 from adapters import ADAPTER_KINDS  # noqa: E402  - реестр видов адаптеров задан в коде
 from adapters.passthrough_adapter import ClientGone, PassthroughAdapter, PassthroughLimits, ResponseSink  # noqa: E402
 from core.backend_adapter import EFFORT_LEVELS as EFFORT_LEVELS, AdapterRegistry, FleetViolation, ImageAttachment, StreamSink, Transcript, TranscriptItem, TurnContext, ToolCall, build_catalog, is_bridge_secret_name, strip_bridge_secrets  # noqa: E402
@@ -86,6 +85,8 @@ from core import turn_outcome as _turn_outcome  # noqa: E402
 from core.resilience import ResilienceError, ResilienceLease, ResilienceManager  # noqa: E402
 from core.lifecycle import DEFAULT_DRAIN_SECONDS, HubLifecycleManager, KEEPALIVE_INTERVAL_S, QoSSlotManager as QoSSlotManager, QUEUE_TIMEOUT_S as QOS_DEFAULT_QUEUE_TIMEOUT_S, RESERVED_INTERACTIVE_SLOTS, get_qos_manager, has_live_parent  # noqa: E402,F401
 from core.prompt_prefix_stability import compute_tools_budget_overhead as compute_tools_budget_overhead  # noqa: E402
+from core.log_redaction import mask_credential_context, mask_long_tokens, safe_log_tokens  # noqa: E402
+from core.runtime_build_info import RuntimeBuildInfo  # noqa: E402
 from core.tool_emulation import TOOL_CALL_CLOSE, TOOL_CALL_OPEN, LiveParserError, ToolCallParser, _attachments_section, _flatten_content, _messages_to_prompt, _normalize_arguments, _normalize_tool_call, _parse_tool_call_block, _render_content, _render_message, _render_tool_call, _strip_code_fence, _tool_choice_name, _tool_choice_none, _tools_section, build_tool_schemas, finalize_turn, sanitize_tool_call  # noqa: E402,F401
 from core.stream_framing import build_stream_error_chunk, format_stream_error_sse  # noqa: E402
 from core.turn_session_manager import (  # noqa: E402
@@ -103,7 +104,7 @@ from core.chat_key import (  # noqa: E402
     digest_of,
     resolve_chat_key as resolve_chat_key,
 )
-from core.usage_wire import normalize_prompt_cache_details  # noqa: E402
+from core.usage_wire import build_wire_usage, extract_cache_read_tokens, positive_wire_usage  # noqa: E402
 from core.watchdog import (  # noqa: E402,F401
     DEFAULT_IDLE_TIMEOUT_S,
     DEFAULT_SAFETY_CAP_S,
@@ -130,11 +131,23 @@ from core.cli_runtime_config import (  # noqa: E402 - импорт после н
     cli_label,
     cli_number,
 )
-from core.liveness_registry import get_registry, new_passthrough_turn_id as new_passthrough_turn_id  # noqa: E402
-from core.liveness_signals import FLAG_TELEMETRY, passthrough_window as passthrough_window  # noqa: E402
+from core.liveness_registry import (  # noqa: E402
+    get_registry,
+    new_passthrough_turn_id as new_passthrough_turn_id,
+)
+from core.liveness_signals import (  # noqa: E402
+    FLAG_TELEMETRY,
+    passthrough_window as passthrough_window,
+)
 from core.runtime_env import DynamicFlagSource, flag_enabled  # noqa: E402
 from core.request_telemetry import RequestTelemetryStore  # noqa: E402
-from core.telemetry_hooks import TelemetryHooksMixin, known_model, resolve_backend_topology, telemetry_note, telemetry_tail  # noqa: E402
+from core.telemetry_hooks import (  # noqa: E402
+    TelemetryHooksMixin,
+    known_model,
+    resolve_backend_topology,
+    telemetry_note,
+    telemetry_tail,
+)
 from core.gateway_execution_policy import (  # noqa: E402
     AUTONOMY_LEVELS as AUTONOMY_LEVELS,
     AUTONOMY_OFF as AUTONOMY_OFF,
@@ -166,17 +179,30 @@ from core.passthrough_autonomy import (  # noqa: E402
     strip_passthrough_request as _strip_passthrough_env,  # noqa: F401 - поздний host-порт
 )
 from core import gated_registry as greg, quarantine_gate as qgate  # noqa: E402
-from core.droid_session_gate import ToolsGateError, admit_model, plan_tools_disable, verify_tools_disabled  # noqa: E402
+from core.droid_session_gate import (  # noqa: E402
+    ToolsGateError,
+    admit_model,
+    plan_tools_disable,
+    verify_tools_disabled,
+)
 from core.effort_policy import (  # noqa: E402
-    DEFAULT_LOG_EFFORT_MAX_CHARS, EFFORT_ORDER, FLAG_EFFORT_CATALOG as FLAG_EFFORT_CATALOG, ModelEffortSpec,
-    catalog_effort_specs, clamp_effort_downward as clamp_effort_downward, describe_clamp as describe_clamp, resolve_alias_effort,
+    DEFAULT_LOG_EFFORT_MAX_CHARS,
+    EFFORT_ORDER,
+    FLAG_EFFORT_CATALOG as FLAG_EFFORT_CATALOG,
+    ModelEffortSpec,
+    catalog_effort_specs,
+    clamp_effort_downward as clamp_effort_downward,
+    describe_clamp as describe_clamp,
+    resolve_alias_effort,
     resolve_model_effort_fields,
 )
 from core.effortless_policy import EffortValidationError as EffortValidationError, card_effort_fields, effortless_specs  # noqa: E402
 
 _transport_facade.begin_post = _post_dispatch_guard.begin_post
 CLI_CFG = CliRuntimeConfig.from_env()
-REQUEST_TELEMETRY = RequestTelemetryStore()  # DuckDB/sqlite3, неблокирующая запись, BRIDGE_TELEMETRY_* (core/defaults.py)
+REQUEST_TELEMETRY = (
+    RequestTelemetryStore()
+)  # DuckDB/sqlite3, неблокирующая запись, BRIDGE_TELEMETRY_* (core/defaults.py)
 
 
 def build_cli_model_selection(ctx: dict) -> str:
@@ -525,6 +551,7 @@ _qos_lock = threading.Condition()
 _active = {}
 _active_lock = threading.Lock()
 _started = time.time()
+BUILD_INFO = RuntimeBuildInfo(Path(__file__).resolve().parent)
 # Монотонная метка последнего успешного хода (0.0 = не было / последний провалился).
 _last_ok = [0.0]
 # Байтовый бюджет admission; включается в main() (в тестах/импорте — None).
@@ -633,7 +660,17 @@ def _refresh_acquire(key: str, now: float | None = None) -> int | None:
 
 def _get_published_models() -> dict[str, tuple[Any, Any]]:
     models_source = BACKENDS.models() if hasattr(BACKENDS, "models") else []
-    return canonical_published_models(FLEET, models_source)
+    published = canonical_published_models(FLEET, models_source)
+    for item in models_source:
+        if isinstance(item, tuple) and len(item) == 2:
+            a, m = item
+        else:
+            m = item
+            a = getattr(m, "adapter", None)
+        mid = getattr(m, "id", None) or (m.get("id") if isinstance(m, dict) else None)
+        if mid and mid not in published:
+            published[mid] = (a, m)
+    return published
 
 
 _EFFORT_SPECS_CACHE: tuple[Any, dict[str, ModelEffortSpec]] = (None, {})
@@ -719,11 +756,13 @@ def _publication_candidates(
     published: Mapping[str, object],
 ) -> list[tuple[str, str]]:
     candidates = [(model_id, model_id) for model_id in _publication_order(published)]
+    seen = {model_id for model_id, _ in candidates}
     fleet_models = FLEET.get("models", {})
     for alias_id in ADVERTISED_EFFORT_ALIASES:
         alias = _resolve_model_alias(alias_id, fleet_models)
         base_id = alias[0] if isinstance(alias, (tuple, list)) else alias
-        if base_id in published and alias_id not in published:
+        if base_id in published and alias_id not in published and alias_id not in seen:
+            seen.add(alias_id)
             candidates.append((alias_id, base_id))
     return candidates
 
@@ -905,7 +944,8 @@ def _mask_secrets(text: str) -> str:
     """Длинные токены, WebSocket URL и абсолютные пути -> ***."""
     masked = _WS_URL.sub("ws://***", text)
     masked = _FILESYSTEM_PATH.sub("***", masked)
-    return _SECRET.sub("***", masked)
+    masked = mask_credential_context(masked)
+    return mask_long_tokens(masked, _SECRET, safe_tokens=safe_log_tokens())
 
 
 def _err_summary(err: Any, limit: int = 200) -> str:
@@ -947,7 +987,9 @@ def _env_int_nonneg(name: str, default: int) -> int:
         return default
 
 
-_LOG_EFFORT_MAX = _env_limit("BRIDGE_LOG_EFFORT_MAX_CHARS", DEFAULT_LOG_EFFORT_MAX_CHARS)
+_LOG_EFFORT_MAX = _env_limit(
+    "BRIDGE_LOG_EFFORT_MAX_CHARS", DEFAULT_LOG_EFFORT_MAX_CHARS
+)
 FORWARD_ENV_MAX_KEYS = _env_limit("BRIDGE_FORWARD_ENV_MAX_KEYS", 64)
 FORWARD_ENV_MAX_VALUE = _env_limit("BRIDGE_FORWARD_ENV_MAX_VALUE", 32768)
 _FORWARD_KEY = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,127}")
@@ -3560,25 +3602,25 @@ def _map_usage(token_usage: Any) -> dict:
         "input_tokens": num("inputTokens"),
         "output_tokens": num("outputTokens"),
         "cache_creation_tokens": opt_num("cacheCreationTokens"),
-        "cache_read_tokens": opt_num("cacheReadTokens"),
+        "cache_read_tokens": extract_cache_read_tokens(tu),
         "thinking_tokens": num("thinkingTokens"),
     }
+
+
+def _usage_counter(value: Any) -> int:
+    """Счётчик токенов из внутреннего `usage`: не-целые, bool и отрицательные значения -> 0."""
+    if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+        return value
+    return 0
 
 
 def _wire_usage(
     prompt_tokens: Any, completion_tokens: Any, cache_read_tokens: Any
 ) -> dict:
     """Wire-`usage` OpenAI-контракта: `prompt_tokens_details` — только при известном кэше."""
-    wire = {
-        "prompt_tokens": prompt_tokens,
-        "completion_tokens": completion_tokens,
-        "total_tokens": prompt_tokens + completion_tokens,
-    }
-    details, inconsistent = normalize_prompt_cache_details(
-        prompt_tokens, cache_read_tokens
+    wire, inconsistent = build_wire_usage(
+        prompt_tokens, completion_tokens, cache_read_tokens, input_includes_cache=True
     )
-    if details is not None:
-        wire["prompt_tokens_details"] = details
     if inconsistent:
         _log(
             "usage_cache_inconsistent prompt_tokens=%r cache_read_tokens=%r"
@@ -5116,14 +5158,10 @@ class _ByteBudget:
     def release(self, amount: int) -> None:
         with self._lock:
             self._used = max(0, self._used - int(amount))
-
-
 _DELIVERY_BUDGET = _ByteBudget(MAX_DELIVERY_BYTES)
-
 
 class _LiveBudgetExceeded(Exception):
     """RW-011 в живом ходе: очередной кусок live-доставки не влез в бюджет памяти."""
-
 
 def release_turn_slot(handler: Any, t_held: bool, t_released: list[bool]) -> None:
     """Освобождает слоты хода под _qos_lock с оповещением ожидающих запросов."""
@@ -5136,7 +5174,6 @@ def release_turn_slot(handler: Any, t_held: bool, t_released: list[bool]) -> Non
                 _subagent_slots.release()
             _qos_lock.notify_all()
 
-
 class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     timeout = 300
@@ -5147,6 +5184,10 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
     _context_pruned: str | None = None  # X-DSH-Context-Pruned запроса (CD-003)
     _trace: RequestTrace | None = None
     _response_status = 0
+
+    def setup(self) -> None:
+        super().setup()
+        configure_accepted_socket(self.connection)
 
     def end_headers(self) -> None:
         if LIFECYCLE.is_draining():
@@ -5282,6 +5323,9 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
             error["code"] = code
         self._send(status, {"error": error}, extra_headers=headers)
 
+    def _send_error_envelope(self, status: int, message: str, err_type: str) -> None:
+        self._send(status, {"error": {"message": message, "type": err_type, "code": status}})
+
     def _send_models_payload(self, owner_tuple: tuple[str, ...] | None) -> None:
         payload = {
             "object": "list",
@@ -5311,20 +5355,20 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
         else:
             return False
 
-        if _MODEL_NOTES_FILTER.is_failed_closed():
-            self._send(
-                503,
-                {"error": {"message": "Service unavailable: notes failed closed", "type": "notes_unavailable", "code": 503}},
-            )
-            return True
-
-        # Auth-First: 401 до 404
+        # Auth-First: 401 до 404/503
         if not _auth_ok(self):
             self._reply_error(
                 401,
                 "Unauthorized",
                 "authentication_error",
                 headers={"WWW-Authenticate": "Bearer"},
+            )
+            return True
+
+        if _MODEL_NOTES_FILTER.is_failed_closed():
+            self._send(
+                503,
+                {"error": {"message": "Service unavailable: notes failed closed", "type": "notes_unavailable", "code": 503}},
             )
             return True
 
@@ -6441,64 +6485,22 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
 
     def _serve_turn_stream(self, turn_id: str) -> None:
         if not validate_turn_id(turn_id):
-            self._send(
-                400,
-                {
-                    "error": {
-                        "message": "invalid turn_id",
-                        "type": "invalid_request",
-                        "code": 400,
-                    }
-                },
-            )
+            self._send_error_envelope(400, "invalid turn_id", "invalid_request")
             return
         from_seq = self._parse_from_seq()
         if from_seq is None:
-            self._send(
-                400,
-                {
-                    "error": {
-                        "message": "invalid from_seq",
-                        "type": "invalid_request",
-                        "code": 400,
-                    }
-                },
-            )
+            self._send_error_envelope(400, "invalid from_seq", "invalid_request")
             return
         try:
-            turn = TURN_MANAGER.get_turn(
-                turn_id, owner_token_hash=_owner_token_hash(self)
-            )
+            turn = TURN_MANAGER.get_turn(turn_id, owner_token_hash=_owner_token_hash(self))
         except KeyError:
-            self._send(
-                404,
-                {
-                    "error": {
-                        "message": f"turn not found: {turn_id}",
-                        "type": "not_found",
-                        "code": 404,
-                    }
-                },
-            )
+            self._send_error_envelope(404, f"turn not found: {turn_id}", "not_found")
             return
         except PermissionError:
-            self._send(
-                403,
-                {
-                    "error": {
-                        "message": "turn belongs to another token",
-                        "type": "forbidden",
-                        "code": 403,
-                    }
-                },
-            )
+            self._send_error_envelope(403, "turn belongs to another token", "forbidden")
             return
         try:
-            turn.buffer.get_since(
-                from_seq,
-                turn_id=turn.turn_id,
-                state_dump_path=turn.state_dump_path,
-            )
+            turn.buffer.get_since(from_seq, turn_id=turn.turn_id, state_dump_path=turn.state_dump_path)
         except GapDetectedError as exc:
             self._send(410, exc.to_http_payload())
             return
@@ -6512,12 +6514,9 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
             self.close_connection = True
         except (BrokenPipeError, ConnectionResetError, OSError):
             return
-        for frame in TURN_MANAGER.iter_sse_stream(
-            turn,
-            from_seq=from_seq,
-            keepalive_interval_s=min(10.0, KEEPALIVE_S),
-            client_gone_fn=lambda: _client_gone(self.connection),
-        ):
+        frames = TURN_MANAGER.iter_sse_stream(turn, from_seq=from_seq, keepalive_interval_s=KEEPALIVE_S,
+                                               client_gone_fn=lambda: _client_gone(self.connection))
+        for frame in frames:
             if not self._emit(frame):
                 TURN_MANAGER.mark_detached(turn.turn_id)
                 return
@@ -6537,47 +6536,59 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
                    "active": BACKENDS.active_total(),
                    "max_concurrent": BACKENDS.max_concurrent_total(),
                    "tool_emulation": True, "uptime_s": int(time.time() - _started)}
-        self._send(200, payload, extra_headers={"X-Bridge-Draining": "true"} if draining else None)
+        headers = {"X-Bridge-Git-Head-Sha": str(BUILD_INFO.git_head_sha), "X-Bridge-Boot-Ts": f"{BUILD_INFO.boot_ts:.3f}", **({"X-Bridge-Draining": "true"} if draining else {})}
+        self._send(200, payload, extra_headers=headers)
+        return True
+
+    def _serve_quarantine_get(self) -> None:
+        if not _auth_ok(self):
+            self._send_error_envelope(401, "unauthorized", "auth_error")
+            return
+        catalog_models = []
+        models_source = BACKENDS.models() if hasattr(BACKENDS, "models") else []
+        for item in models_source:
+            m = item[1] if isinstance(item, tuple) and len(item) >= 2 else item
+            mid = getattr(m, "id", None) or getattr(m, "name", None) or str(m)
+            if mid and mid not in catalog_models:
+                catalog_models.append(mid)
+        self._send(200, _PENALTY_TRACKER.get_quarantine_payload(catalog_models))
+
+    def _handle_turns_get(self, path: str) -> bool:
+        if not (_is_detached_enabled() and path.startswith("/v1/turns/")):
+            return False
+        m_stream = re.fullmatch(r"/v1/turns/([^/]+)/stream", path)
+        if m_stream:
+            self._serve_turn_stream(m_stream.group(1))
+            return True
+        m_turn = re.fullmatch(r"/v1/turns/([^/]+)", path)
+        if not m_turn:
+            return False
+        turn_id = m_turn.group(1)
+        if not validate_turn_id(turn_id):
+            self._send_error_envelope(400, "invalid turn_id", "invalid_request")
+            return True
+        try:
+            snap = self._turn_snapshot(turn_id)
+        except KeyError:
+            self._send_error_envelope(404, f"turn not found: {turn_id}", "not_found")
+            return True
+        except PermissionError:
+            self._send_error_envelope(403, "turn belongs to another token", "forbidden")
+            return True
+        self._send(200, snap)
         return True
 
     def do_GET(self) -> None:  # noqa: N802
-        self._trace = self._req_started_mono = None  # GET-ответы (_send) в телеметрию запросов не попадают
+        self._trace = self._req_started_mono = (
+            None  # GET-ответы (_send) в телеметрию запросов не попадают
+        )
         path = self.path.split("?", 1)[0]
-        if path in ("/health", "/v1/health"):
-            # Контракт из семи ключей прежний (расширять запрещено); ok = AND по обязательным
-            # бэкендам (droid: невалидный receipt = spawn невозможен -> ok=false, RW-015),
-            # active и max_concurrent суммируются по включённым бэкендам.
-            required = [a for a in BACKENDS.adapters() if a.required]
-            draining = _shutting_down or (
-                _is_drain_enabled() and LIFECYCLE.is_draining()
-            )
-            self._send(
-                200,
-                {
-                    "ok": all(a.is_healthy() for a in required),
-                    "transport": "droid-exec",
-                    "model": MODEL_ID,
-                    "active": BACKENDS.active_total(),
-                    "max_concurrent": BACKENDS.max_concurrent_total(),
-                    "tool_emulation": True,
-                    "uptime_s": int(time.time() - _started),
-                },
-                extra_headers={"X-Bridge-Draining": "true"} if draining else None,
-            )
+        if self._handle_health_get(path):
             return
         if self._handle_models_get():
             return
         if not _auth_ok(self):
-            self._send(
-                401,
-                {
-                    "error": {
-                        "message": "unauthorized",
-                        "type": "auth_error",
-                        "code": 401,
-                    }
-                },
-            )
+            self._send_error_envelope(401, "unauthorized", "auth_error")
             return
         if path == "/v1/resilience":
             self._send(200, RESILIENCE.snapshot(a.id for a in BACKENDS.adapters()))
@@ -6585,88 +6596,11 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
         if path == "/v1/telemetry":
             return self._telemetry_serve_get()
         if path == "/v1/quarantine":
-            if not _auth_ok(self):
-                self._send(
-                    401,
-                    {
-                        "error": {
-                            "message": "unauthorized",
-                            "type": "auth_error",
-                            "code": 401,
-                        }
-                    },
-                )
-                return
-            catalog_models = []
-            models_source = BACKENDS.models() if hasattr(BACKENDS, "models") else []
-            for item in models_source:
-                m = item[1] if isinstance(item, tuple) and len(item) >= 2 else item
-                mid = getattr(m, "id", None) or getattr(m, "name", None) or str(m)
-                if mid and mid not in catalog_models:
-                    catalog_models.append(mid)
-            self._send(
-                200,
-                _PENALTY_TRACKER.get_quarantine_payload(catalog_models),
-            )
+            self._serve_quarantine_get()
             return
-        if _is_detached_enabled() and path.startswith("/v1/turns/"):
-            m_stream = re.fullmatch(r"/v1/turns/([^/]+)/stream", path)
-            if m_stream:
-                self._serve_turn_stream(m_stream.group(1))
-                return
-            m_turn = re.fullmatch(r"/v1/turns/([^/]+)", path)
-            if m_turn:
-                turn_id = m_turn.group(1)
-                if not validate_turn_id(turn_id):
-                    self._send(
-                        400,
-                        {
-                            "error": {
-                                "message": "invalid turn_id",
-                                "type": "invalid_request",
-                                "code": 400,
-                            }
-                        },
-                    )
-                    return
-                try:
-                    snap = self._turn_snapshot(turn_id)
-                except KeyError:
-                    self._send(
-                        404,
-                        {
-                            "error": {
-                                "message": f"turn not found: {turn_id}",
-                                "type": "not_found",
-                                "code": 404,
-                            }
-                        },
-                    )
-                    return
-                except PermissionError:
-                    self._send(
-                        403,
-                        {
-                            "error": {
-                                "message": "turn belongs to another token",
-                                "type": "forbidden",
-                                "code": 403,
-                            }
-                        },
-                    )
-                    return
-                self._send(200, snap)
-                return
-        self._send(
-            404,
-            {
-                "error": {
-                    "message": f"not found: {path}",
-                    "type": "not_found",
-                    "code": 404,
-                }
-            },
-        )
+        if self._handle_turns_get(path):
+            return
+        self._send_error_envelope(404, f"not found: {path}", "not_found")
 
     def do_DELETE(self) -> None:  # noqa: N802
         if not _auth_ok(self):
@@ -7416,7 +7350,7 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
             for frame in TURN_MANAGER.iter_sse_stream(
                 managed_turn,
                 from_seq=from_seq,
-                keepalive_interval_s=min(10.0, KEEPALIVE_S),
+                keepalive_interval_s=KEEPALIVE_S,
                 client_gone_fn=lambda: _client_gone(self.connection),
             ):
                 if not self._emit(frame):
@@ -7458,6 +7392,7 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
             code: str = "live_prefix_invalidated",
             error_type: str = "stream_error",
             finish_reason: str | None = None,
+            usage: dict | None = None,
         ) -> str:
             err_chunk = build_stream_error_chunk(
                 message=message,
@@ -7467,6 +7402,7 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
                 finish_reason=finish_reason,
                 completion_id=completion_id,
                 created=created,
+                usage=usage,
             )
             err_chunk["choices"][0]["delta"] = {}
             return "data: " + json.dumps(err_chunk, ensure_ascii=False) + "\n\n"
@@ -7541,14 +7477,20 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
                     sink_closed.set()
         except Exception as exc:  # noqa: BLE001 - RW-211: клиенту нужен конверт, а не сырой сбой
             if self._client_write_dead:
-                _log(f"client_write_dead: dispatch error suppressed err={_err_summary(repr(exc), 160)!r}")
+                _log(
+                    f"client_write_dead: dispatch error suppressed err={_err_summary(repr(exc), 160)!r}"
+                )
                 lease.record_discard("client_disconnected")
                 return
             if not live_sent[0]:
                 raise
             _log(f"live_dispatch_failed err={_err_summary(repr(exc), 160)!r}")
             lease.record_failure(exc)
-            emit(stream_error_frame(str(exc)[:500] or exc.__class__.__name__, finish_reason=None))
+            emit(
+                stream_error_frame(
+                    str(exc)[:500] or exc.__class__.__name__, finish_reason=None
+                )
+            )
             emit("data: [DONE]\n\n")
             return
         if self._client_write_dead:
@@ -7648,8 +7590,27 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
                     + "\n\n"
                 )
         elif err.get("type") == "live_prefix_invalidated" or live_sent[0] > 0:
-            if err.get("type") == "live_prefix_invalidated" or out.get("backend_kind") == "droid":
-                emit(stream_error_frame(str(err["message"]), finish_reason=None))
+            # Накопленные токены закоммиченного потока переживают терминальную ошибку (не 0/0/0).
+            err_usage = out.get("usage") or {}
+            try:
+                kept_usage = positive_wire_usage(
+                    _wire_usage(
+                        _usage_counter(err_usage.get("input_tokens")),
+                        _usage_counter(err_usage.get("output_tokens")),
+                        _usage_counter(err_usage.get("cache_read_tokens")),
+                    )
+                )
+            except (TypeError, ValueError, AttributeError):
+                kept_usage = None
+            if (
+                err.get("type") == "live_prefix_invalidated"
+                or out.get("backend_kind") == "droid"
+            ):
+                emit(
+                    stream_error_frame(
+                        str(err["message"]), finish_reason=None, usage=kept_usage
+                    )
+                )
             else:
                 emit(
                     stream_error_frame(
@@ -7657,6 +7618,7 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
                         code=str(err.get("code") or err.get("type") or "stream_error"),
                         error_type=str(err.get("type") or "server_error"),
                         finish_reason=None,
+                        usage=kept_usage,
                     )
                 )
         else:
@@ -7664,19 +7626,7 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
         emit("data: [DONE]\n\n")
 
 
-_LEGACY_HANDLER_GET = Handler.do_GET
-
-
-def _guarded_handler_get(self: Handler) -> None:
-    self._trace = self._req_started_mono = None
-    if self._handle_health_get(self.path.split("?", 1)[0]):
-        return
-    _LEGACY_HANDLER_GET(self)
-
-
-Handler.do_GET = _guarded_handler_get
 BridgeHandler = Handler
-
 
 def is_so_reuseport_enabled() -> bool:
     """Проверяет включение совместного bind через BRIDGE_SO_REUSEPORT_ENABLED."""
@@ -7687,14 +7637,18 @@ def is_so_reuseport_enabled() -> bool:
         "on",
     )
 
-
 class Server(ThreadingHTTPServer):
-    """HTTP-сервер с семафором числа соединений на уровне приёма (C-11)."""
+    """HTTP-сервер с бюджетом допуска соединений на уровне приёма (C-11)."""
 
     # ThreadingMixIn отслеживает non-daemon потоки: выход main не обрывает SSE.
     daemon_threads = False
     request_queue_size = 64
     allow_reuse_address = True
+
+    def get_request(self) -> tuple[Any, Any]:
+        sock, addr = super().get_request()
+        configure_accepted_socket(sock)
+        return sock, addr
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         self._listener_close_lock = threading.Lock()
@@ -7703,9 +7657,8 @@ class Server(ThreadingHTTPServer):
         self._connections: dict[socket.socket, bool] = {}
         self._closing_connections = False
         super().__init__(*args, **kwargs)
-        self._conn_sem = threading.BoundedSemaphore(
-            int(FLEET["admission"]["max_http_connections"])
-        )
+        # admission_limit и резервы UI/заголовков — из BridgeIOConfig/BRIDGE_*
+        self._admission_budget = AdmissionBudget()
 
     def server_bind(self) -> None:
         """Разрешает совместный bind до привязки сокета, если ОС поддерживает его."""
@@ -7769,7 +7722,8 @@ class Server(ThreadingHTTPServer):
         request.sendall(head + body)
 
     def process_request(self, request: Any, client_address: Any) -> None:
-        if not self._conn_sem.acquire(blocking=False):
+        ticket = str(id(request))
+        if not self._admission_budget.acquire(ticket):
             try:
                 peer = f"{client_address[0]}:{client_address[1]}"
             except (TypeError, IndexError):
@@ -7789,7 +7743,7 @@ class Server(ThreadingHTTPServer):
         except Exception:
             with self._connections_lock:
                 self._connections.pop(request, None)
-            self._conn_sem.release()
+            self._admission_budget.release(ticket)
             self.shutdown_request(request)
             raise
 
@@ -7799,7 +7753,7 @@ class Server(ThreadingHTTPServer):
         finally:
             with self._connections_lock:
                 self._connections.pop(request, None)
-            self._conn_sem.release()
+            self._admission_budget.release(str(id(request)))
 
 
 def _sweep_workspace(cutoff_s: float = 3600.0) -> None:

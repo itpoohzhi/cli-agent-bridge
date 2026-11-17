@@ -14,6 +14,7 @@ import importlib.util
 import json
 import secrets
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 from unittest.mock import Mock
 
@@ -30,6 +31,14 @@ from core.route_health_policy import (
 )
 from tests.test_request_attribution import wire as wire
 from tests.transport_test_support import semantic_equal
+
+
+@pytest.fixture(autouse=True)
+def notes_file(tmp_path: Path) -> None:
+    (tmp_path / "notes.md").write_text(
+        "## 1. Блокировки\n| Модель | Статус | Причина |\n|---|---|---|\n",
+        encoding="utf-8",
+    )
 
 
 def _model() -> dict[str, Any]:
@@ -236,7 +245,7 @@ def test_hydrogen_xhigh_alias_keeps_native_family_and_effort(wire: Any) -> None:
 def test_explicit_droid_judge_denial_survives_late_host_catalog_patch(
     wire: Any, monkeypatch: pytest.MonkeyPatch, source: str,
 ) -> None:
-    monkeypatch.delenv("DROID_DENY_SUBAGENT_PREFIXES", raising=False)
+    monkeypatch.setenv("DROID_DENY_SUBAGENT_PREFIXES", "panel-judge-,judge-,seat-")
     model_id = "gpt-6.1-terra-droid"
     model = {**server.FLEET["models"]["gpt-6.1-terra"], "id": model_id, "backend": "droid"}
     monkeypatch.setitem(server.FLEET["models"], model_id, model)

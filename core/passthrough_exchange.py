@@ -11,7 +11,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from string import ascii_lowercase, digits
-from typing import Protocol, TypedDict, Unpack
+from typing import NotRequired, Protocol, TypedDict, Unpack
 from urllib.parse import SplitResult, urlsplit
 
 from core.backend_adapter import PreSendTransientError, _base_url_allowed
@@ -63,7 +63,9 @@ class ExchangeAdapter(Protocol):
     @property
     def limits(self) -> ExchangeLimits: ...
 
-    def _upstream_headers(self) -> Mapping[str, str]: ...
+    def _upstream_headers(
+        self, raw_body: bytes = b"", headers: Mapping[str, str] | None = None,
+    ) -> Mapping[str, str]: ...
 
 
 class OpenRequestOptions(TypedDict, total=False):
@@ -75,6 +77,7 @@ class OpenRequestOptions(TypedDict, total=False):
     on_reuse: Callable[[bool], None] | None
     on_pooling: Callable[[bool], None] | None
     fresh: bool
+    upstream_headers: NotRequired[Mapping[str, str] | None]
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -87,6 +90,7 @@ class OpenOptions:
     on_reuse: Callable[[bool], None] | None = None
     on_pooling: Callable[[bool], None] | None = None
     fresh: bool = False
+    upstream_headers: Mapping[str, str] | None = None
 
 
 def _remaining(limits: ExchangeLimits, deadline: float | None) -> float:
@@ -174,11 +178,23 @@ def _route_credential(config: Mapping[str, object]) -> str:
 
 
 def _wire_headers(
-    adapter: ExchangeAdapter, headers: Mapping[str, str], size: int, pooling: bool,
+    adapter: ExchangeAdapter,
+    headers: Mapping[str, str],
+    size: int,
+    pooling: bool,
+    upstream_headers: Mapping[str, str] | None = None,
 ) -> dict[str, str]:
-    configured = adapter._upstream_headers()
+    configured = (
+        adapter._upstream_headers()
+        if upstream_headers is None
+        else upstream_headers
+    )
     credential = _route_credential(adapter.config)
     forwarded = outbound_headers(headers, configured, credential)
+    if upstream_headers:
+        replaced = {name.lower() for name in upstream_headers}
+        forwarded = {k: v for k, v in forwarded.items() if k.lower() not in replaced}
+        forwarded.update(upstream_headers)
     subagent_id = _INTERNAL_SUBAGENT.get()
     if (
         subagent_id
@@ -224,7 +240,12 @@ def open_request(
         _notify_connection(connection, options, enabled, reused)
         # Credential и config читаются заново после connect, непосредственно до send.
         _validate_endpoint(adapter)
-        forwarded = _wire_headers(adapter, headers, len(raw_body), enabled)
+        upstream_headers = options.upstream_headers
+        if upstream_headers is None:
+            upstream_headers = adapter._upstream_headers(raw_body, headers)
+        forwarded = _wire_headers(
+            adapter, headers, len(raw_body), enabled, upstream_headers=upstream_headers,
+        )
         remaining = _remaining(adapter.limits, options.deadline)
         if connection.sock is not None:
             connection.sock.settimeout(min(adapter.limits.read_timeout_s, remaining))
