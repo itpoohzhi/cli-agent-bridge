@@ -1,0 +1,18 @@
+{
+  "run_id": "tv2safe-20261116",
+  "slice": "P0",
+  "base": "5ecd42a181c6e7217471659e75e008ab18355da7",
+  "commit_count": 10,
+  "commits": [
+    {"wave": "C2-8", "sha": "0b48ba2830ed105aff44bbd6553d6b8877ff87f0", "title": "disable dead provider keys 2 & 3"},
+    {"wave": "C2-9", "sha": "44bbc8a1c1e5542f2e642bce1c98374b3d16d117", "title": "codex (100) and droid (20) routing weights"},
+    {"wave": "C2-10", "sha": "6509a6ec8e04f01cbd784d3099609df9c5236953", "title": "recompiled fleet.json and catalog.lock.json"},
+    {"wave": "C2-8b", "sha": "9715f977cc9117e002f51f150852d29be5cf5a40", "title": "tests/test_dead_provider_keys.py"},
+    {"wave": "C2-8c", "sha": "7ed6a9cf0662485823231fa545921cbe434e2544", "title": "tests/test_codex_catalogue_contract.py & tests/test_backend_contract.py"},
+    {"wave": "C2-8d", "sha": "447a53a51be9b7a76351805a9e3227816cd90717", "title": "tests/test_fleet_v3.py & tests/test_droid_zero_friction_onboarding.py"},
+    {"wave": "C2-8e", "sha": "293d9ef92c5c90f4b838fef76bafc1483db61064", "title": "tests/test_droid_catalog_flag.py & tests/test_native_provider_affinity.py"},
+    {"wave": "C2-8f", "sha": "5e918233300b8c9b69b1a8df5e4ba9e5d3cb2d89", "title": "tests/test_capability_probe_promote.py & tests/test_provider_manifest_schema.py"},
+    {"wave": "C2-8g", "sha": "80b3b9715be85cfb1f30966527c5208370a2c256", "title": "tests/test_routing_catalog.py"},
+    {"wave": "C2-11", "sha": "0d4590e84c1712f823301c868904fa9c038b78c9", "title": "tests/test_red_paid_key_weight_guard.py"}
+  ]
+}
