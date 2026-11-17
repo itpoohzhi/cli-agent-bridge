@@ -5282,6 +5282,23 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
             error["code"] = code
         self._send(status, {"error": error}, extra_headers=headers)
 
+    def _send_models_payload(self, owner_tuple: tuple[str, ...] | None) -> None:
+        payload = {
+            "object": "list",
+            "data": __import__(
+                "core.fallback_http_hook", fromlist=["append_models"]
+            ).append_models(_build_models_list(owner_tuple), owner_tuple),
+        }
+        etag = _etag(payload)
+        if _etag_matches(self.headers.get("If-None-Match"), etag):
+            self.send_response(304)
+            self.send_header("ETag", etag)
+            self.end_headers()
+            return
+        self._send(
+            200, payload, extra_headers={"ETag": etag, "Cache-Control": "no-cache"}
+        )
+
     def _handle_models_get(self) -> bool:
         """GET /v1/models[?provider=] и /v1/providers/{id}/v1/models."""
         url = urlparse(self.path)
@@ -5293,6 +5310,13 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
             provider_id = (query.get("provider") or [None])[0]
         else:
             return False
+
+        if _MODEL_NOTES_FILTER.is_failed_closed():
+            self._send(
+                503,
+                {"error": {"message": "Service unavailable: notes failed closed", "type": "notes_unavailable", "code": 503}},
+            )
+            return True
 
         # Auth-First: 401 до 404
         if not _auth_ok(self):
@@ -5312,16 +5336,7 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
             owner = PROVIDER_SCOPES[provider_id]
             owner_tuple = (owner,) if isinstance(owner, str) else owner
 
-        payload = {"object": "list", "data": __import__("core.fallback_http_hook", fromlist=["append_models"]).append_models(_build_models_list(owner_tuple), owner_tuple)}
-        etag = _etag(payload)
-        if _etag_matches(self.headers.get("If-None-Match"), etag):
-            self.send_response(304)
-            self.send_header("ETag", etag)
-            self.end_headers()
-            return True
-        self._send(
-            200, payload, extra_headers={"ETag": etag, "Cache-Control": "no-cache"}
-        )
+        self._send_models_payload(owner_tuple)
         return True
 
     def _handle_quarantine_post(self) -> None:

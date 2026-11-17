@@ -27,15 +27,15 @@ from core.backend_adapter import AdapterRegistry  # noqa: E402
 from core.model_penalty import ModelPenaltyTracker  # noqa: E402
 
 ALIASES = (
-    "gemini-4-argon-high",
-    "gemini-4-argon-medium",
-    "gemini-4-argon-low",
-    "gpt-6.1-terra-high",
-    "gpt-6.1-terra-medium",
-    "gpt-6.1-terra-low",
-    "claude-opus-5-5-high",
-    "deepseek-v4.1-flash-free-max",
+    "gemini-4-argon-high", "gemini-4-argon-medium", "gemini-4-argon-low",
+    "gpt-6.1-terra-high", "gpt-6.1-terra-medium", "gpt-6.1-terra-low",
+    "claude-opus-5-5-high", "deepseek-v4.1-flash-free-max",
 )
+
+
+@pytest.fixture(autouse=True)
+def notes_file(tmp_path):
+    (tmp_path / "notes.md").write_text("## 1. Блокировки\n| Модель | Статус | Причина |\n|---|---|---|\n", encoding="utf-8")
 
 
 @pytest.fixture
@@ -124,12 +124,7 @@ def wire(monkeypatch, tmp_path):
         m["backend"] = {"gemini-3.8-flash": "agy", "claude-sonnet-5-5": "claude-p"}.get(m["id"], m["backend"])
     monkeypatch.setenv("BRIDGE_DYNAMIC_CONFIG_PATH", str(tmp_path / "missing-dynamic.json"))
     monkeypatch.setattr(server, "_PENALTY_TRACKER", ModelPenaltyTracker(storage_path=tmp_path / "penalties.json"))
-    notes_path = tmp_path / "notes.md"
-    notes_path.write_text(
-        "## 1. Блокировки\n| Модель | Статус | Причина |\n|---|---|---|\n",
-        encoding="utf-8",
-    )
-    monkeypatch.setattr(server, "_MODEL_NOTES_FILTER", server.ModelNotesFilter(notes_path))
+    monkeypatch.setattr(server, "_MODEL_NOTES_FILTER", server.ModelNotesFilter(tmp_path / "notes.md"))
     fleet = server._build_catalog(data)
     monkeypatch.setattr(server, "FLEET", fleet)
     monkeypatch.setattr(

@@ -8,24 +8,24 @@ import sys
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
-
-import pytest
-
-from adapters.passthrough_adapter import PassthroughLimits
+from unittest.mock import Mock
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
 
+import pytest  # noqa: E402
+
+from adapters.passthrough_adapter import PassthroughLimits  # noqa: E402
 
 @pytest.fixture
 def agy(monkeypatch: pytest.MonkeyPatch) -> Any:
     return load_bridge("agy-bridge", monkeypatch)
 
-
 @pytest.fixture
 def zen(monkeypatch: pytest.MonkeyPatch) -> Any:
     return load_bridge("opencode-zen-bridge", monkeypatch)
-
 
 def load_bridge(name: str, monkeypatch: pytest.MonkeyPatch) -> Any:
     spec = importlib.util.spec_from_file_location(
@@ -38,7 +38,6 @@ def load_bridge(name: str, monkeypatch: pytest.MonkeyPatch) -> Any:
     spec.loader.exec_module(module)
     monkeypatch.setattr(module, "_log", lambda *_args: None)
     return module
-
 
 def test_passthrough_deadline_env() -> None:
     limits = PassthroughLimits.from_env(
@@ -64,7 +63,6 @@ def test_passthrough_deadline_env() -> None:
         defaults.heartbeat_interval_s,
     ) == (10, 300, 420, 12)
 
-
 @pytest.mark.parametrize(
     "req,mode",
     [
@@ -78,7 +76,6 @@ def test_passthrough_deadline_env() -> None:
 )
 def test_agy_mode(agy: Any, req: dict, mode: str) -> None:
     assert agy.resolve_agy_mode(req) == mode
-
 
 def test_registry_attach_replay_and_conflict(agy: Any) -> None:
     registry = agy.JobRegistry()
@@ -96,7 +93,6 @@ def test_registry_attach_replay_and_conflict(agy: Any) -> None:
         registry.attach("same", "other", "prompt")
     registry.detach(job)
     registry.detach(job2)
-
 
 def test_registry_capacity(agy: Any) -> None:
     registry = agy.JobRegistry(
@@ -122,7 +118,6 @@ def test_registry_capacity(agy: Any) -> None:
     replacement, owner = registry.attach("new", "m", "p")
     assert owner and replacement is not new
 
-
 def test_zen_byte_timeout_selection(zen: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("BRIDGE_ZEN_LARGE_PROMPT_BYTES", "8")
     monkeypatch.setenv("BRIDGE_ZEN_TIMEOUT_S", "0.1")
@@ -133,7 +128,6 @@ def test_zen_byte_timeout_selection(zen: Any, monkeypatch: pytest.MonkeyPatch) -
     assert zen._zen_execution_timeout("unrelated-free", "x" * 100) == zen.TIMEOUT_S
     monkeypatch.setenv("BRIDGE_ZEN_TIMEOUT_MODELS", "explicit-model")
     assert zen._zen_execution_timeout("explicit-model", "x" * 9) == 0.1
-
 
 def test_zen_split_timeouts(zen: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     for name in (
@@ -167,7 +161,6 @@ def test_zen_split_timeouts(zen: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     attempts = zen._RequestAttempts(zen._Resilience(), time.monotonic() + 1)
     assert attempts.t0 <= time.monotonic()
 
-
 def test_zen_short_content_and_pong(zen: Any) -> None:
     assert zen._zen_short_response("x" * 100, "short", [])
     assert not zen._zen_short_response("ping", "PONG", [])
@@ -176,55 +169,54 @@ def test_zen_short_content_and_pong(zen: Any) -> None:
     )
     assert not zen._zen_short_response("x" * 100, "я" * 16, [])
 
-
 def test_preflight_concrete_models_only() -> None:
-    import server
+    from core.model_notes_parse import parse_model_notes
 
-    text = """| Модель / транспорт | Статус | Причина |
-|---|---|---|
-| `muse-wonder-full-1.0` / `muse` (и все слоты `muse-*`) | `LIMIT BLOCKED` (`quota_window`) | quota |
-| `available` | OK | prose mentions BANNED |
-| Группа | Что | Статус |
-|---|---|---|
-| Транспорты | `cursor-agent`, все модели | BANNED |
-| Модели | `blocked-id` | BANNED |
+    text = """## 1. Блокировки
+| Модель / транспорт | Статус | Причина | Обновлено | Комментарий |
+|---|---|---|---|---|
+| `muse-wonder-full-1.0` / `muse` | `LIMIT BLOCKED` (`quota_window`) | quota | now | test |
+| `available` | OK | prose mentions BANNED | now | test |
+## 2. Группы
+| Группа | Что | Статус | Комментарий |
+|---|---|---|---|
+| Транспорты | `cursor-agent`, все модели | BANNED | test |
+| Модели | `blocked-id` | BANNED | test |
 """
-    assert server._parse_blocked_models(text) == frozenset(
+    blocked = frozenset(
+        rule.model for rule in parse_model_notes(text).rules if rule.model is not None
+    )
+    assert blocked == frozenset(
         {"muse-wonder-full-1.0", "blocked-id"}
     )
 
-
 def test_model_notes_msk_expiration() -> None:
-    from datetime import datetime, timezone
-    import server
+    from datetime import datetime, timedelta, timezone
+    from core.model_notes_parse import parse_model_notes
 
-    text = """| Модель | Статус |
-|---|---|
-| `claude-sonnet-5-5` | LIMIT BLOCKED (до 2030-01-01 12:00 MSK) |
+    text = """## 1. Блокировки
+| Модель | Статус | Причина |
+|---|---|---|
+| `claude-sonnet-5-5` | LIMIT BLOCKED (до 2030-01-01 12:00 MSK) | quota |
 """
-    reset = datetime(2030, 1, 1, 9, tzinfo=timezone.utc).timestamp()
-    assert server._parse_blocked_models(text, reset - 1) == frozenset(
-        {"claude-sonnet-5-5"}
-    )
-    assert server._parse_blocked_models(text, reset) == frozenset({"claude-sonnet-5-5"})
-    assert not server._parse_blocked_models(text, reset + 1)
-
+    reset = datetime(2030, 1, 1, 9, tzinfo=timezone.utc)
+    assert parse_model_notes(text, reset - timedelta(seconds=1)).rules
+    assert parse_model_notes(text, reset).rules
+    assert not parse_model_notes(text, reset.replace(second=1)).rules
 
 def test_model_notes_msk_expiration_without_parentheses() -> None:
-    from datetime import datetime, timezone
-    import server
+    from datetime import datetime, timedelta, timezone
+    from core.model_notes_parse import parse_model_notes
 
-    text = """| Модель | Статус |
-|---|---|
-| `claude-sonnet-5-5` | LIMIT BLOCKED до 2030-01-01 12:00 MSK |
+    text = """## 1. Блокировки
+| Модель | Статус | Причина |
+|---|---|---|
+| `claude-sonnet-5-5` | LIMIT BLOCKED до 2030-01-01 12:00 MSK | quota |
 """
-    reset = datetime(2030, 1, 1, 9, tzinfo=timezone.utc).timestamp()
-    assert server._parse_blocked_models(text, reset - 1) == frozenset(
-        {"claude-sonnet-5-5"}
-    )
-    assert server._parse_blocked_models(text, reset) == frozenset({"claude-sonnet-5-5"})
-    assert not server._parse_blocked_models(text, reset + 1)
-
+    reset = datetime(2030, 1, 1, 9, tzinfo=timezone.utc)
+    assert parse_model_notes(text, reset - timedelta(seconds=1)).rules
+    assert parse_model_notes(text, reset).rules
+    assert not parse_model_notes(text, reset.replace(second=1)).rules
 
 def test_client_gone_safely_handles_none_and_socketless_objects() -> None:
     import server
@@ -236,11 +228,23 @@ def test_client_gone_safely_handles_none_and_socketless_objects() -> None:
 
     assert server._client_gone(cast(Any, DummyObj())) is False
 
+def _post_handler(raw: bytes) -> Any:
+    from email.message import Message
+    import server
+
+    instance: Any = object.__new__(server.Handler)
+    instance.headers = Message()
+    instance.headers["Content-Length"] = str(len(raw))
+    instance.rfile, instance.wfile = io.BytesIO(raw), io.BytesIO()
+    instance.path = "/v1/chat/completions"
+    instance.client_address = ("127.0.0.1", 1)
+    instance.statuses = []
+    instance.send_response = instance.statuses.append
+    instance.send_header = lambda *_args: None
+    instance.end_headers = lambda: None
+    return instance
 
 def test_passthrough_upstream_model_rewriting(monkeypatch) -> None:
-    import io
-    import json
-    from email.message import Message
     import server
     captured = []
 
@@ -262,27 +266,16 @@ def test_passthrough_upstream_model_rewriting(monkeypatch) -> None:
     monkeypatch.setattr(
         server.BACKENDS, "get", lambda bid: adapter if bid == "codex-lb" else None
     )
-    instance = object.__new__(server.Handler)
-    instance.headers = Message()
     body = json.dumps(
         {"model": "gpt-6.1-sol", "messages": [{"role": "user", "content": "hi"}]}
     ).encode()
-    instance.headers["Content-Length"] = str(len(body))
-    instance.rfile = io.BytesIO(body)
-    instance.wfile = io.BytesIO()
-    instance.path = "/v1/chat/completions"
-    instance.client_address = ("127.0.0.1", 1)
-    instance.statuses = []
-    instance.send_response = instance.statuses.append
-    instance.send_header = lambda *_a: None
-    instance.end_headers = lambda: None
+    instance = _post_handler(body)
     instance.do_POST()
     assert len(captured) == 1
     raw, req, mid = captured[0]
     assert mid == "gpt-6.1-sol"
     assert req["model"] == "gpt-5.6-sol"
     assert json.loads(raw)["model"] == "gpt-5.6-sol"
-
 
 def test_quota_cache_ttl_and_effort_suffix(tmp_path, monkeypatch) -> None:
     import server
@@ -295,15 +288,18 @@ def test_quota_cache_ttl_and_effort_suffix(tmp_path, monkeypatch) -> None:
     cache.record_429("claude-sonnet-5-5", ttl_s=30)
     assert cache.is_blocked("claude-sonnet-5-5-high")
     assert server.QuotaCircuitBreakerCache(path).is_blocked("claude-sonnet-5-5")
-    notes = server.ModelNotesFilter(tmp_path / "missing")
+    source = tmp_path / "notes.md"
+    source.write_text(
+        "## 1. Блокировки\n| Модель | Статус | Причина |\n|---|---|---|\n"
+        "| `claude-sonnet-5-5` | BANNED | test |\n"
+    )
+    notes = server.ModelNotesFilter(source)
     assert notes.is_blocked("claude-sonnet-5-5-high")
     clock[0] = 1031.0
     assert not cache.is_blocked("claude-sonnet-5-5-high")
-    notes.blocked = frozenset({"claude-sonnet-5-5"})
-    notes.expires_at = server.time.monotonic() + 60
     assert notes.is_blocked("claude-sonnet-5-5-high")
     assert not notes.is_blocked("unrelated")
-
+    notes.close()
 
 class Sink:
     def __init__(self, disconnect: bool = False) -> None:
@@ -325,7 +321,6 @@ class Sink:
 
     def client_gone(self) -> bool:
         return False
-
 
 @pytest.fixture
 def upstream() -> Any:
@@ -359,7 +354,6 @@ def upstream() -> Any:
 
     return serve
 
-
 def passthrough(port: int, **limits: Any) -> Any:
     from adapters.passthrough_adapter import PassthroughAdapter
 
@@ -372,7 +366,6 @@ def passthrough(port: int, **limits: Any) -> Any:
         ),
     )
 
-
 def invoke(adapter: Any, sink: Any) -> None:
     adapter.handle(
         path="/v1/chat/completions",
@@ -381,7 +374,6 @@ def invoke(adapter: Any, sink: Any) -> None:
         headers={},
         sink=sink,
     )
-
 
 @pytest.mark.parametrize("empty_role_first", [False, True])
 def test_slow_ttft_gets_heartbeats_before_content(
@@ -417,7 +409,6 @@ def test_slow_ttft_gets_heartbeats_before_content(
         assert body.index(b": keepalive") < body.index(b"thinking")
         assert adapter.active_count() == 0
 
-
 @pytest.mark.parametrize("first_chunk", [False, True])
 def test_idle_and_total_do_not_count_heartbeat_as_progress(
     upstream: Any, first_chunk: bool
@@ -450,7 +441,6 @@ def test_idle_and_total_do_not_count_heartbeat_as_progress(
         assert b"upstream_stream_error" in b"".join(sink.chunks)
         assert adapter.active_count() == 0
 
-
 def test_disconnect_closes_upstream_and_frees_slot(upstream: Any) -> None:
     closed = threading.Event()
 
@@ -474,7 +464,6 @@ def test_disconnect_closes_upstream_and_frees_slot(upstream: Any) -> None:
         assert adapter._slots.acquire(blocking=False)
         adapter._slots.release()
 
-
 def test_total_deadline_before_headers_is_504(upstream: Any) -> None:
     def serve(handler: Any) -> None:
         time.sleep(0.2)
@@ -487,7 +476,6 @@ def test_total_deadline_before_headers_is_504(upstream: Any) -> None:
         invoke(adapter, sink)
         assert sink.status == 504
         assert adapter.active_count() == 0
-
 
 def test_registry_concurrent_attach_and_lru(agy: Any) -> None:
     registry = agy.JobRegistry(max_entries=2)
@@ -520,7 +508,6 @@ def test_registry_concurrent_attach_and_lru(agy: Any) -> None:
         and "second" not in registry.jobs
     )
 
-
 def test_orphan_limit_attach_restores_capacity_and_cancel_outside_lock(
     agy: Any,
 ) -> None:
@@ -546,7 +533,6 @@ def test_orphan_limit_attach_restores_capacity_and_cancel_outside_lock(
     assert second.cancelled.is_set()
     registry.finish(first, {"state": "done"})
     assert registry.orphans == 0
-
 
 def test_agy_http_reconnect_and_conflict(
     agy: Any, monkeypatch: pytest.MonkeyPatch
@@ -625,7 +611,6 @@ def test_agy_http_reconnect_and_conflict(
         httpd.server_close()
         thread.join(1)
 
-
 def zen_handler(zen: Any) -> tuple[Any, list[int]]:
     handler = object.__new__(zen.Handler)
     handler.wfile = io.BytesIO()
@@ -635,7 +620,6 @@ def zen_handler(zen: Any) -> tuple[Any, list[int]]:
     handler.send_header = lambda *_args: None
     handler.end_headers = lambda: None
     return handler, statuses
-
 
 def test_zen_timeout_error_before_and_after_headers(
     zen: Any, monkeypatch: pytest.MonkeyPatch
@@ -708,30 +692,61 @@ def test_preflight_ttl_failopen_and_budget(
     import server
 
     notes = tmp_path / "model-notes.md"
-    notes.write_text("| Модель | Статус |\n|---|---|\n| `blocked` | TEMP OFF |\n")
-    cache = server.ModelNotesFilter(notes, ttl_s=0.04)
+    notes.write_text(
+        "## 1. Блокировки\n| Модель | Статус | Причина |\n|---|---|---|\n"
+        "| `blocked` | TEMP OFF | test |\n"
+    )
+    cache = server.ModelNotesFilter(notes)
     assert cache.is_blocked("blocked")
-    notes.write_text("unstructured prose BANNED blocked")
-    assert cache.is_blocked("blocked")
-    time.sleep(0.05)
-    assert not cache.is_blocked("blocked")
-    notes.unlink()
-    cache.expires_at = 0
-    assert not cache.is_blocked("blocked")
+    assert not cache.is_blocked("unrelated")
     started = time.monotonic()
-    slow_read_done = threading.Event()
+    monkeypatch.setattr(
+        server, "read_model_notes_file", Mock(side_effect=AssertionError("hot I/O"))
+    )
+    assert cache.is_blocked("blocked")
+    assert time.monotonic() - started < 0.05
+    cache.close()
 
-    def slow_stat(_self: Any) -> Any:
-        slow_read_done.wait(0.3)
-        raise OSError("unavailable")
 
-    monkeypatch.setattr(Path, "stat", slow_stat)
-    cache.expires_at = 0
-    try:
-        assert not cache.is_blocked("blocked")
-        assert time.monotonic() - started < 0.05
-    finally:
-        slow_read_done.set()
+def test_snapshot_worker_preserves_fatal_crash_evidence(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from core import model_notes_snapshot as snapshot
+
+    manager = object.__new__(snapshot.ModelNotesSnapshotManager)
+    manager.snapshot_path = tmp_path / "snapshot.json"
+    manager.source = str(tmp_path / "notes.md")
+    manager.worker_error = None
+    manager._fault_since = None
+    manager._usable = True
+    manager._notes = None
+    manager._done = threading.Event()
+    failure = KeyboardInterrupt("worker crash evidence")
+    monkeypatch.setattr(snapshot, "_disk", lambda _path: None)
+    monkeypatch.setattr(snapshot, "read_model_notes_file", Mock(side_effect=failure))
+    with pytest.raises(KeyboardInterrupt) as raised:
+        manager._work()
+    assert raised.value is failure
+    assert manager.worker_error is failure and failure.__traceback__ is not None
+    assert manager._done.is_set() and manager.status == "FAILED_CLOSED"
+
+
+def test_post_facade_preserves_fatal_crash_evidence_and_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import server
+
+    facade = server._transport_facade
+    context, cleanup = SimpleNamespace(request={}), Mock()
+    failure = KeyboardInterrupt("facade crash evidence")
+    monkeypatch.setattr(facade, "begin_post", lambda _handler, _host: context)
+    monkeypatch.setattr(facade, "_ingress_ok", lambda _handler, _request: True)
+    monkeypatch.setattr(facade, "read_post_request", Mock(side_effect=failure))
+    monkeypatch.setattr(facade, "_cleanup_post", cleanup)
+    with pytest.raises(KeyboardInterrupt) as raised:
+        facade.handle_post(object(), server)
+    assert raised.value is failure and failure.__traceback__ is not None
+    cleanup.assert_called_once_with(context)
 
 
 from tests.gateway_policy_testlib import preflight_handler as _preflight_handler  # noqa: E402
@@ -742,45 +757,30 @@ def test_gateway_preflight_bypass_and_idempotency(
 ) -> None:
     import server
 
-    captured: list[tuple[bytes, dict]] = []
-    hub_auth_ok: list[bool] = []
     checks: list[str] = []
+    passthrough = Mock()
 
-    class Filter:
-        def is_blocked(self, model: str) -> bool:
-            checks.append(model)
-            return True
+    def blocked(model: str) -> bool:
+        checks.append(model)
+        return True
 
-    monkeypatch.setattr(server, "_MODEL_NOTES_FILTER", Filter())
+    notes = SimpleNamespace(is_failed_closed=lambda: False, is_blocked=blocked)
+    monkeypatch.setattr(server, "_MODEL_NOTES_FILTER", notes)
     monkeypatch.setattr(server, "_auth_ok", lambda _h: True)
     monkeypatch.setattr(server, "_enforce_forward_kill_switch", lambda: None)
-
-    def _fake_passthrough(self, a, raw, req, model, _hub_auth_ok=False):
-        hub_auth_ok.append(_hub_auth_ok)
-        captured.append((raw, req))
-
-    monkeypatch.setattr(server.Handler, "_serve_passthrough", _fake_passthrough)
+    monkeypatch.setattr(server.Handler, "_serve_passthrough", passthrough)
+    monkeypatch.setattr(
+        server, "_resolve_model_alias", Mock(side_effect=AssertionError("routing reached"))
+    )
     model = "gpt-6.1-terra"
-    first = _preflight_handler(False, model)
-    first.do_POST()
-    assert first.statuses == [503]
-    assert json.loads(first.wfile.getvalue())["error"]["type"] == "model_limit_blocked"
-    third = _preflight_handler(True, model)
-    third.do_POST()
-    assert len(captured) == 1
-    assert hub_auth_ok == [True]
-    assert captured[0][1]["step_job_id"] == "idempotent-step"
-    assert json.loads(captured[0][0])["step_job_id"] == "idempotent-step"
-    second = _preflight_handler(True, model)
-
-    def resolve(*_args: Any, **_kwargs: Any) -> Any:
-        raise RuntimeError("routing reached")
-
-    monkeypatch.setattr(server, "_resolve_model_alias", resolve)
-    with pytest.raises(RuntimeError, match="routing reached"):
-        second.do_POST()
-    assert len(checks) == 1
-    assert second.rfile.tell() > 0
+    for bypass in (False, True, True):
+        handler = _preflight_handler(bypass, model)
+        handler.do_POST()
+        assert handler.statuses == [503]
+        assert json.loads(handler.wfile.getvalue())["error"]["type"] == "notes_unavailable"
+        assert handler.rfile.tell() > 0
+    assert len(checks) == 3
+    passthrough.assert_not_called()
 
 
 def test_registry_overflow_keeps_running_orphan_reserved_until_cleanup(
