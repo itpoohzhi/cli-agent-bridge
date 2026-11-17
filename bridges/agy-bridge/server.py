@@ -169,7 +169,8 @@ from core.stream_interruption_recovery import (  # noqa: E402
 )
 from core.turn_finalization import (  # noqa: E402
     DoneConfig, DoneDeliveryFacts, DoneDrainFacts, DonePorts, DoneRecoveryFacts, DoneRequest,
-    DoneResultFacts, DoneRuntimePorts, DoneSnapshot, DoneTextFacts, finalize_done,
+    DoneResultFacts, DoneRuntimePorts, DoneSnapshot, DoneTextFacts, RecoveryAliases, finalize_done,
+    read_recovery_switch,
 )
 from core.tool_emulation import (  # noqa: E402
     LiveParserError, RepetitionLoopDetected, StreamNormalizer,
@@ -3491,7 +3492,7 @@ class _RuntimeFlags(NamedTuple):
     stream_resilience_enabled: bool = True
     isolate_tool_preambles_to_reasoning: bool = True
     tool_emulation_enabled: bool = True
-    self_heal_interrupted_turn: bool = True
+    self_heal_interrupted_turn: bool = False
     graceful_interruption_on_partial: bool = True
     graceful_timeout_finish_reason: str = "stop"
 
@@ -4478,6 +4479,9 @@ class _TranscriptTail(InterruptionTailState):
 
     # ---- жизненный цикл ----------------------------------------------------------
     def start(self) -> None:
+        self.attempt = sse_body_runner.current_attempt_index()
+        if self.run_ref is not None:
+            self.run_ref.attempt = self.attempt
         self.thread.start()
 
     def _cid8(self) -> str:
@@ -4742,8 +4746,30 @@ class _TranscriptTail(InterruptionTailState):
         if rtype != "PLANNER_RESPONSE":
             self.note_error_record(rtype, rec, idx)
             return
+        self._emit_planner_record(rec, idx)
+
+    def _abort_run_safety(self) -> None:
+        """Фатальный safety-отказ: очистить очередь Run от ещё не принятого контента."""
+        run_ref = getattr(self, "run_ref", None)
+        if run_ref is not None and hasattr(run_ref, "abort_safety"):
+            run_ref.abort_safety()
+
+    def _emit_planner_record(self, rec: dict[str, object], idx: int | None) -> None:
+        """Проверить метаданные до отправки и фиксации planner-шагa."""
         if self.usage_enabled:
             self._record_usage(rec)
+        self.note_planner_record(rec, idx if idx is not None else -1)
+        if getattr(self, "had_safety_error", False):
+            self._abort_run_safety()
+            return
+        self._emit_planner_content(rec, idx)
+        if idx is None:
+            return
+        thinking = rec.get("thinking")
+        self._apply_final(idx, thinking if isinstance(thinking, str) else "")
+
+    def _emit_planner_content(self, rec: dict[str, object], idx: int | None) -> None:
+        """Передать проверенный planner-контент с прежней изоляцией преамбул."""
         content = rec.get("content")
         emit_content = self.emit_content
         has_tools = bool(rec.get("tool_calls"))
@@ -4755,29 +4781,26 @@ class _TranscriptTail(InterruptionTailState):
         isolate_tools = getattr(self, "isolate_tool_preambles", False)
         if emit_content is not None and isinstance(content, str) and content.strip():
             if has_tools and isolate_tools:
-                run_ref = getattr(self, "run_ref", None)
-                claimed = False
-                if run_ref is not None and hasattr(run_ref, "claim_preamble"):
-                    claimed = run_ref.claim_preamble(idx, source="transcript")
-                else:
-                    preambles = getattr(self, "_preambles_emitted", None)
-                    if preambles is None:
-                        preambles = self._preambles_emitted = set()
-                    key_idx = idx if idx is not None else -1
-                    if key_idx not in preambles:
-                        _add_preamble_bounded(preambles, key_idx)
-                        claimed = True
-                if claimed:
+                if self._claim_planner_preamble(idx):
                     _ = self.emit(idx if idx is not None else 0, content + "\n\n", None)
             else:
                 _ = emit_content(
                     idx, content
                 )  # live planner-текст, независимо от tool_calls
-        if idx is None:
-            return
-        self.note_planner_record(rec, idx)
-        thinking = rec.get("thinking")
-        self._apply_final(idx, thinking if isinstance(thinking, str) else "")
+
+    def _claim_planner_preamble(self, idx: int | None) -> bool:
+        """Зарегистрировать преамбулу ровно один раз перед отправкой."""
+        run_ref = getattr(self, "run_ref", None)
+        if run_ref is not None and hasattr(run_ref, "claim_preamble"):
+            return run_ref.claim_preamble(idx, source="transcript")
+        preambles = getattr(self, "_preambles_emitted", None)
+        if preambles is None:
+            preambles = self._preambles_emitted = set()
+        key_idx = idx if idx is not None else -1
+        if key_idx in preambles:
+            return False
+        _add_preamble_bounded(preambles, key_idx)
+        return True
 
     # ---- состояние шагов -----------------------------------------------------------
     def _state(self, idx: int) -> _StepState:
@@ -5796,14 +5819,26 @@ class Run:
     def _on_tail_activity(self) -> None:
         self.note_producer_activity("transcript")
 
+    def abort_safety(self) -> None:
+        """Фатальный safety-отказ: закрыть выдачу и атомарно очистить очередь."""
+        with self._emit_lock:
+            self.drain_closed = True
+            self.has_fatal_error = True
+            with self.q.mutex:
+                self.q.queue = collections.deque(
+                    x for x in self.q.queue if x[0] not in ("text", "reasoning")
+                )
+
     def offer_content(self, source: str, step_index: object, text: str) -> bool:
         """Кандидат planner-текста в арбитр; новый суффикс уходит в очередь под _emit_lock.
 
         Сокетного ввода-вывода здесь нет: потребитель (`_execute`) пишет в сокет сам.
-        False — выдача уже закрыта terminal barrier'ом.
+        False — выдача уже закрыта terminal barrier'ом или safety-отказом.
         """
         with self._emit_lock:
             if self.drain_closed:
+                return False
+            if getattr(self._tail, "had_safety_error", False) or getattr(self, "has_fatal_error", False):
                 return False
             suffix = self._arbiter.offer(
                 source, step_index, text, self._tail.cid or self.run_cid
@@ -6517,29 +6552,12 @@ def _terminal_state(name: str, err: str = "") -> dict[str, object]:
     }
 
 
+_DONE_RECOVERY_ALIASES = RecoveryAliases(("AGY_CAUSAL_RECOVERY_ENABLED", "AGY_SELF_HEAL_INTERRUPTED_TURN"))
+
+
 def _done_recovery_aliases_enabled() -> bool:
-    """Перевести локальные имена флагов agy в запрет recovery, без кэша."""
-    env = os.environ.get("AGY_CAUSAL_RECOVERY_ENABLED", "").strip().lower()
-    if env and env not in _ENV_TRUE:
-        return False
-    try:
-        fd = os.open(DYNAMIC_CONFIG_PATH, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-    except (FileNotFoundError, NotADirectoryError):
-        return True
-    except OSError:
-        return False
-    try:
-        try:
-            if (os.fstat(fd).st_mode & 0o170000) != 0o100000:
-                return False
-            raw = os.read(fd, DYNAMIC_CONFIG_MAX_BYTES + 1)
-        finally:
-            os.close(fd)
-        data = json.loads(raw) if len(raw) <= DYNAMIC_CONFIG_MAX_BYTES else None
-        return isinstance(data, dict) and all(data.get(key, True) is True for key in (
-            "causal_recovery_enabled", "causal_turn_recovery_enabled", "BRIDGE_CAUSAL_TURN_RECOVERY_ENABLED"))
-    except (OSError, ValueError, RecursionError):
-        return False
+    """Свежий общий opt-in, включая локальные имена флагов и запреты."""
+    return read_recovery_switch(DYNAMIC_CONFIG_PATH, DYNAMIC_CONFIG_MAX_BYTES, aliases=_DONE_RECOVERY_ALIASES)
 
 
 @_LIFECYCLE.install
@@ -6980,12 +6998,12 @@ class Handler(BaseHTTPRequestHandler):
         return DoneSnapshot(
             DoneTextFacts(final_text, str(getattr(run, "_content_emitted_wire", "") or ""), full_error, request.errors[1]),
             DoneResultFacts(str((result_ev or {}).get("status") or "").strip().lower(),
-                            actual_rc, exited, getattr(self, "_attempt", getattr(run, "attempt", 0)),
+                            actual_rc, exited, getattr(run, "attempt", -1),
                             bool(getattr(run, "has_fatal_error", False))),
             DoneDeliveryFacts(bool(getattr(run, "content_streaming", False)), not ports.state("", 0).get("text"),
                               getattr(run, "reconcile_result", lambda text: text),
                               lambda: bool(getattr(getattr(run, "_arbiter", None), "last_result_diverged", False))),
-            DoneRecoveryFacts(bool(_new_flag("self_heal_interrupted_turn", True)) and _done_recovery_aliases_enabled(),
+            DoneRecoveryFacts(_done_recovery_aliases_enabled(),
                               tail, DoneDrainFacts(str(getattr(tail, "drain_outcome", "")), stopped), tool_status),
         )
 
@@ -6999,7 +7017,8 @@ class Handler(BaseHTTPRequestHandler):
             lambda: self._snapshot_done(run, request, ports),
             (lambda: list(drain(T_DRAIN_MAX_S))) if callable(drain) else None, stderr)
         config = DoneConfig(DYNAMIC_CONFIG_PATH, DYNAMIC_CONFIG_MAX_BYTES,
-                            bool(getattr(run, "content_streaming", False)), bool(getattr(run, "usage_enabled", False)))
+                            bool(getattr(run, "content_streaming", False)), bool(getattr(run, "usage_enabled", False)),
+                            _DONE_RECOVERY_ALIASES)
         return cast(dict, finalize_done(request, ports, runtime, config, _log))
 
     @staticmethod
@@ -7038,57 +7057,74 @@ class Handler(BaseHTTPRequestHandler):
             job.cancelled.is_set() if job is not None else _client_gone(self.connection)
         )
 
-    def _run_once(
-        self, ctx: dict, on_text, on_tool_trace, on_reasoning, keepalive
-    ) -> dict:
+    @staticmethod
+    def _run_once_callbacks(on_text, on_tool_trace, on_reasoning, keepalive) -> tuple:
+        """Сохранить позиционную и именованную форму четырёх legacy callbacks."""
+        return on_text, on_tool_trace, on_reasoning, keepalive
+
+    def _run_once(self, ctx: dict, *callbacks, **named_callbacks) -> dict:
+        """Сохранить legacy-вызов, делегируя владение job отдельному координатору."""
+        return self._run_registered_attempt(ctx, self._run_once_callbacks(*callbacks, **named_callbacks))
+
+    def _run_registered_attempt(self, ctx: dict, callbacks: tuple) -> dict:
+        """Исполнить попытку напрямую либо подписаться на producer общего job."""
         key = str(ctx.get("step_job_id") or "")
         if not key:
-            return self._run_once_impl(
-                ctx, on_text, on_tool_trace, on_reasoning, keepalive
-            )
-        registry = _JOB_REGISTRY
+            return self._run_once_impl(ctx, *callbacks)
         try:
-            job, owner = registry.attach(
+            job, owner = _JOB_REGISTRY.attach(
                 key, str(ctx["model"]), str(ctx["full_prompt"])
             )
         except JobConflict:
             return {"state": "job_conflict", "text": "", "rc": 1}
         if owner:
-            worker = copy.copy(self)
-            worker._registry_job = job
-            worker_ctx = dict(ctx)
-            worker_ctx.pop("finalize_timeout", None)
+            self._start_job_producer(ctx, job)
+        return self._read_job_events(job, callbacks)
 
-            def produce() -> None:
-                try:
-                    out = worker._run_once_impl(
+    def _start_job_producer(self, ctx: dict, job: _Job) -> None:
+        """Зафиксировать контекст попытки до отделения producer от подписчика."""
+        registry = _JOB_REGISTRY
+        worker = copy.copy(self)
+        worker._registry_job = job
+        worker_ctx = dict(ctx)
+        worker_ctx.pop("finalize_timeout", None)
+        def produce() -> None:
+            try:
+                out = sse_body_runner.invoke_at_attempt(
+                    worker_ctx.get("attempt_index", -1),
+                    lambda: worker._run_once_impl(
                         worker_ctx,
                         lambda value: registry.publish(job, "text", value),
                         lambda value: registry.publish(job, "tool_trace", value),
                         lambda value: registry.publish(job, "reasoning", value),
                         lambda: not job.cancelled.is_set(),
-                    )
-                except Exception as exc:
-                    _log(f"job-producer-error err={type(exc).__name__}")
-                    out = {"state": "pump_error", "text": "", "rc": 1}
-                try:
-                    registry.finish(job, out)
-                finally:
-                    use_cid = str(worker_ctx.get("registry_use_cid") or "")
-                    if use_cid:
-                        with _session_store_lock:
-                            _in_flight_cids.discard(use_cid)
-                    _cid_release(
-                        use_cid or str(worker_ctx.get("registry_owned_cid") or ""),
-                        str(worker_ctx.get("turn_id") or ""),
-                    )
-
-            ctx["job_owns_cid"] = True
+                    ),
+                )
+            except Exception as exc:
+                _log(f"job-producer-error err={type(exc).__name__}")
+                out = {"state": "pump_error", "text": "", "rc": 1}
             try:
-                threading.Thread(target=produce, daemon=True, name="agy-job").start()
-            except RuntimeError:
-                ctx["job_owns_cid"] = False
-                registry.finish(job, {"state": "pump_error", "text": "", "rc": 1})
+                registry.finish(job, out)
+            finally:
+                use_cid = str(worker_ctx.get("registry_use_cid") or "")
+                if use_cid:
+                    with _session_store_lock:
+                        _in_flight_cids.discard(use_cid)
+                _cid_release(
+                    use_cid or str(worker_ctx.get("registry_owned_cid") or ""),
+                    str(worker_ctx.get("turn_id") or ""),
+                )
+        ctx["job_owns_cid"] = True
+        try:
+            threading.Thread(target=produce, daemon=True, name="agy-job").start()
+        except RuntimeError:
+            ctx["job_owns_cid"] = False
+            registry.finish(job, {"state": "pump_error", "text": "", "rc": 1})
+
+    def _read_job_events(self, job: _Job, callbacks: tuple) -> dict:
+        """Доставить события подписчику, сохраняя heartbeat и гарантированный detach."""
+        on_text, on_tool_trace, on_reasoning, keepalive = callbacks
+        registry = _JOB_REGISTRY
         offset = 0
         heartbeat = _env_float(
             "BRIDGE_SSE_HEARTBEAT_INTERVAL_S", 12.0, 0.001, float("inf")
@@ -8143,9 +8179,14 @@ class Handler(BaseHTTPRequestHandler):
     def _serve_json(self, ctx: dict) -> None:
         self._reset_flush_window()
         try:
-            self._serve_json_body(ctx)
+            self._json_body_runner(ctx)
         finally:
             self._reset_flush_window()
+
+    def _json_body_runner(self, ctx: dict) -> None:
+        """Установить начальную попытку JSON и передать её job-производителю."""
+        ctx["attempt_index"] = 0
+        sse_body_runner.invoke_at_attempt(0, lambda: self._serve_json_body(ctx))
 
     def _serve_json_body(self, ctx: dict) -> None:
         progress = _ToolProgress(

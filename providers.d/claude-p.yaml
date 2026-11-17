@@ -1,23 +1,19 @@
-# Провайдер claude-p: мост claude -p (Anthropic), passthrough к :9881. Файл claude-p.yaml: provider_id = ключ backends.claude-p в fleet.json.
+# Провайдер claude-p: Claude Code CLI в resident stdio пуле.
 manifest_version: 1
 provider_id: claude-p
-kind: passthrough
+kind: stdio_resident
 enabled: true
 required: false
 priority: 10
-routing: {weight: 100}
+routing: {weight: 0}
 owned_by: claude-p-bridge
 transport:
-  bridge: {base_url: 'http://127.0.0.1:9881/v1', api_key_env: CLAUDE_P_BRIDGE_KEY}
-allow_base_url:
-- {scheme: http, host: 127.0.0.1, port: 9881, path_prefix: /v1}
-limits: {max_concurrent: 128, quota_group: anthropic-claude, timeout_s: 180}
+  bridge:
+    wrapper: 'claude --print --input-format stream-json --output-format stream-json --verbose'
+limits: {max_concurrent: 10, quota_group: anthropic-claude, timeout_s: 180}
 discovery:
-  method: http
-  http: {path: /models, id_field: 'data[].id'}
-  include: [claude-*]
-  exclude: ['*-free']
-  refresh_interval_s: 900
+  method: static
+  static: [claude-sonnet-5-5, claude-opus-5-5, claude-haiku-5-5]
 family_rule: {type: owned_by, owned_by: Anthropic}
 models_overrides:
   claude-sonnet-5-5:

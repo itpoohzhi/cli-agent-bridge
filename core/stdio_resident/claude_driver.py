@@ -1,0 +1,170 @@
+"""Claude Code CLI stream-json protocol driver for resident stdio processes."""
+
+# pyright: reportAny=false, reportExplicitAny=false
+
+from __future__ import annotations
+
+import json
+from collections.abc import Mapping
+from typing import Any, ClassVar, cast, override
+
+from core.stdio_resident.protocol_driver import (
+    DecodedChunk,
+    DriverCapabilities,
+    StreamJsonDriver,
+)
+
+
+class ClaudeStreamJsonDriver(StreamJsonDriver):
+    """Translate Claude Code stream-json frames to the resident core contract."""
+
+    _capabilities: ClassVar[DriverCapabilities] = DriverCapabilities(
+        protocol_name="claude-stream-json",
+        supports_soft_cancel=True,
+        supports_multi_turn=True,
+    )
+
+    @override
+    def build_argv(self, base_argv: list[str], options: Mapping[str, Any]) -> list[str]:
+        argv = list(base_argv)
+        if not self._has_flag(argv, "--print"):
+            argv.append("--print")
+        if not self._has_flag(argv, "--input-format"):
+            argv.extend(("--input-format", "stream-json"))
+        if not self._has_flag(argv, "--output-format"):
+            argv.extend(("--output-format", "stream-json"))
+
+        managed_options = {"print", "input_format", "output_format"}
+        for name, value in options.items():
+            normalized_name = name.removeprefix("--").replace("-", "_")
+            if normalized_name in managed_options or value is None or value is False:
+                continue
+            flag = name if name.startswith("--") else f"--{name.replace('_', '-')}"
+            if self._has_flag(argv, flag):
+                continue
+            argv.append(flag)
+            if value is not True:
+                argv.append(str(value))
+        return argv
+
+    @override
+    def encode_turn(
+        self,
+        prompt: str,
+        turn_context: Mapping[str, Any] | None = None,
+    ) -> bytes:
+        payload: dict[str, Any] = {
+            "type": "user",
+            "message": {"role": "user", "content": prompt},
+        }
+        if turn_context:
+            payload.update(turn_context)
+        return (json.dumps(payload, ensure_ascii=False) + "\n").encode()
+
+    @override
+    def decode_line(self, raw_line: str) -> DecodedChunk | None:
+        payload = self._parse_object(raw_line)
+        if payload is None:
+            return None
+
+        text = ""
+        reasoning = ""
+        event = self._mapping(payload.get("event"))
+        if payload.get("type") == "stream_event" and event is not None:
+            if event.get("type") == "content_block_delta":
+                delta = self._mapping(event.get("delta"))
+                if delta is not None and delta.get("type") == "text_delta":
+                    text = self._string(delta.get("text"))
+                elif delta is not None and delta.get("type") == "thinking_delta":
+                    reasoning = self._string(delta.get("thinking"))
+
+        is_terminal = payload.get("type") == "result"
+        is_error = payload.get("is_error") is True or payload.get("status") == "error"
+        if is_terminal:
+            result = payload.get("result")
+            text = result if isinstance(result, str) else self._string(payload.get("text"))
+
+        tool_calls = self._extract_claude_tool_calls(payload, event)
+        tool_stop = bool(tool_calls) or self._has_tool_stop(payload, event)
+        return DecodedChunk(
+            text=text,
+            reasoning=reasoning,
+            tool_calls=tool_calls,
+            is_terminal=is_terminal,
+            is_tool_stop=tool_stop,
+            raw=payload if is_error else {},
+        )
+
+    @override
+    def is_terminal(self, raw_line: str, decoded: DecodedChunk | None) -> bool:
+        if decoded is not None and decoded.is_terminal:
+            return True
+        payload = self._parse_object(raw_line)
+        return payload is not None and payload.get("type") == "result"
+
+    @override
+    def is_tool_stop(self, raw_line: str, decoded: DecodedChunk | None) -> bool:
+        if decoded is not None:
+            return decoded.is_tool_stop
+        payload = self._parse_object(raw_line)
+        if payload is None:
+            return False
+        event = self._mapping(payload.get("event"))
+        return bool(self._extract_claude_tool_calls(payload, event)) or self._has_tool_stop(
+            payload, event
+        )
+
+    @override
+    def build_cancel_payload(self) -> bytes | None:
+        return b'{"type": "cancel"}\n'
+
+    def handshake(self, handle: Any, timeout_s: float = 10.0) -> bool:
+        """Confirm that the resident Claude process is still alive."""
+
+        _ = timeout_s
+        return bool(handle.is_alive())
+
+    @staticmethod
+    def _has_flag(argv: list[str], flag: str) -> bool:
+        return any(item == flag or item.startswith(f"{flag}=") for item in argv)
+
+    @staticmethod
+    def _mapping(value: Any) -> dict[str, Any] | None:
+        return cast(dict[str, Any], value) if isinstance(value, dict) else None
+
+    @staticmethod
+    def _string(value: Any) -> str:
+        return value if isinstance(value, str) else ""
+
+    @classmethod
+    def _extract_claude_tool_calls(
+        cls,
+        payload: Mapping[str, Any],
+        event: Mapping[str, Any] | None,
+    ) -> list[dict[str, Any]]:
+        calls = cls._extract_tool_calls(payload)
+        if event is not None:
+            calls.extend(cls._extract_tool_calls(event))
+            if event.get("type") == "content_block_start":
+                content_block = cls._mapping(event.get("content_block"))
+                if content_block is not None and content_block.get("type") == "tool_use":
+                    calls.append(content_block)
+        return calls
+
+    @classmethod
+    def _has_tool_stop(
+        cls,
+        payload: Mapping[str, Any],
+        event: Mapping[str, Any] | None,
+    ) -> bool:
+        containers = [payload]
+        if event is not None:
+            containers.append(event)
+            delta = cls._mapping(event.get("delta"))
+            if delta is not None:
+                containers.append(delta)
+        return any(
+            item.get("type") == "tool_turn_stop"
+            or item.get("stop_reason") == "tool_use"
+            for item in containers
+        )

@@ -123,8 +123,8 @@
       "effort": "low"
     },
     "gemini-3.8-flash-medium": {
-      "backend_id": "gemini-3.8-flash",
-      "backend": "droid",
+      "backend_id": "gemini-3.8-flash-agy",
+      "backend": "agy",
       "effort": "medium"
     },
     "gemini-3.8-flash-agy-medium": {
@@ -144,17 +144,17 @@
     },
     "claude-sonnet-5-5-low": {
       "backend_id": "claude-sonnet-5-5",
-      "backend": "claude-p",
+      "backend": "droid",
       "effort": "low"
     },
     "claude-sonnet-5-5-medium": {
       "backend_id": "claude-sonnet-5-5",
-      "backend": "claude-p",
+      "backend": "droid",
       "effort": "medium"
     },
     "claude-sonnet-5-5-high": {
       "backend_id": "claude-sonnet-5-5",
-      "backend": "claude-p",
+      "backend": "droid",
       "effort": "high"
     },
     "claude-sonnet-5-5-max": {
@@ -260,26 +260,26 @@
   },
   "backends": {
     "agy": {
-      "kind": "stdio_resident",
+      "kind": "passthrough",
       "enabled": true,
       "owned_by": "agy-bridge",
-      "max_concurrent": 128
+      "max_concurrent": 128,
+      "base_url": "http://127.0.0.1:9887/v1",
+      "api_key_env": "AGY_BRIDGE_KEY"
     },
     "claude-p": {
-      "kind": "passthrough",
+      "kind": "stdio_resident",
       "enabled": true,
       "owned_by": "claude-p-bridge",
-      "max_concurrent": 128,
-      "base_url": "http://127.0.0.1:9881/v1",
-      "api_key_env": "CLAUDE_P_BRIDGE_KEY"
+      "max_concurrent": 10,
+      "wrapper": "claude --print --input-format stream-json --output-format stream-json --verbose"
     },
     "codex": {
-      "kind": "passthrough",
+      "kind": "stdio_resident",
       "enabled": true,
       "owned_by": "openai-codex",
-      "max_concurrent": 128,
-      "base_url": "http://127.0.0.1:2455/v1",
-      "api_key_env": "CODEX_LB_API_KEY"
+      "max_concurrent": 10,
+      "wrapper": "codex app-server"
     },
     "muse": {
       "kind": "muse",
@@ -317,7 +317,7 @@
         ]
       },
       "per_request_headers": {
-        "x-opencode-session": "{session_affinity}"
+        "x-opencode-session": "{uuid4}"
       },
       "default_body_extra": {
         "thinking": {
@@ -345,7 +345,7 @@
         ]
       },
       "per_request_headers": {
-        "x-opencode-session": "{session_affinity}"
+        "x-opencode-session": "{uuid4}"
       }
     },
     "deepseek-direct": {
@@ -374,7 +374,7 @@
     },
     "droid": {
       "kind": "droid",
-      "enabled": true,
+      "enabled": false,
       "owned_by": "factory-droid",
       "max_concurrent": 64
     },
@@ -408,6 +408,10 @@
       "default_effort": "high",
       "context_window": 1048576,
       "max_tokens": 65536,
+      "input": [
+        "text",
+        "tools"
+      ],
       "images": {
         "status": "unverified"
       },
@@ -425,6 +429,10 @@
       "default_effort": "high",
       "context_window": 1048576,
       "max_tokens": 65536,
+      "input": [
+        "text",
+        "tools"
+      ],
       "images": {
         "status": "unverified"
       }
@@ -434,11 +442,18 @@
       "backend": "agy",
       "name": "Gemini 4 Carbon (AGY)",
       "efforts": [
+        "low",
+        "medium",
+        "high",
         "off"
       ],
-      "default_effort": "off",
+      "default_effort": "high",
       "context_window": 1048576,
       "max_tokens": 65536,
+      "input": [
+        "text",
+        "tools"
+      ],
       "images": {
         "status": "unverified"
       }
@@ -456,45 +471,12 @@
       "default_effort": "high",
       "context_window": 1048576,
       "max_tokens": 65536,
-      "images": {
-        "status": "unverified"
-      }
-    },
-    {
-      "id": "claude-haiku-5-5",
-      "backend": "claude-p",
-      "name": "Claude Haiku 5.5 (Claude-p bridge)",
-      "efforts": [
-        "low",
-        "medium",
-        "high"
+      "input": [
+        "text",
+        "tools"
       ],
-      "default_effort": "low",
-      "context_window": 1000000,
-      "max_tokens": 128000,
       "images": {
         "status": "unverified"
-      },
-      "routing": {
-        "algorithm": "weighted-sha256-v1",
-        "enabled": true,
-        "catalog_hash": "9ee778fa614c6e4bc1c555a006827b096790504f996472b2947632b4b19359f5",
-        "legacy_backend": "claude-p",
-        "disabled_backend": "claude-p",
-        "routes": [
-          {
-            "route_id": "claude-p",
-            "backend": "claude-p",
-            "weight": 100,
-            "priority": 10
-          },
-          {
-            "route_id": "opencode-go-claude",
-            "backend": "opencode-go-claude",
-            "weight": 100,
-            "priority": 15
-          }
-        ]
       }
     },
     {
@@ -528,27 +510,6 @@
       "max_tokens": 128000,
       "images": {
         "status": "unverified"
-      },
-      "routing": {
-        "algorithm": "weighted-sha256-v1",
-        "enabled": true,
-        "catalog_hash": "a3f47ee2ec963cf44b9c4d559858c2e78b28961ee375ddbc07faabf7e9e7402d",
-        "legacy_backend": "claude-p",
-        "disabled_backend": "claude-p",
-        "routes": [
-          {
-            "route_id": "claude-p",
-            "backend": "claude-p",
-            "weight": 100,
-            "priority": 10
-          },
-          {
-            "route_id": "droid",
-            "backend": "droid",
-            "weight": 0,
-            "priority": 30
-          }
-        ]
       }
     },
     {
@@ -651,6 +612,43 @@
       ]
     },
     {
+      "id": "claude-haiku-5-5",
+      "backend": "opencode-go-claude",
+      "name": "Claude Haiku 5.5 (OpenCode Go georouter)",
+      "efforts": [
+        "low",
+        "medium",
+        "high"
+      ],
+      "default_effort": "low",
+      "context_window": 1000000,
+      "max_tokens": 128000,
+      "images": {
+        "status": "unverified"
+      },
+      "routing": {
+        "algorithm": "weighted-sha256-v1",
+        "enabled": true,
+        "catalog_hash": "62ec7d99822503e8d463871b583316dce26e4856bf9c6f37e351a8887e989af5",
+        "legacy_backend": "opencode-go-claude",
+        "disabled_backend": "claude-p",
+        "routes": [
+          {
+            "route_id": "claude-p",
+            "backend": "claude-p",
+            "weight": 0,
+            "priority": 10
+          },
+          {
+            "route_id": "opencode-go-claude",
+            "backend": "opencode-go-claude",
+            "weight": 100,
+            "priority": 15
+          }
+        ]
+      }
+    },
+    {
       "id": "deepseek-v4.1-flash",
       "backend": "deepseek-direct",
       "name": "DeepSeek V4.1 Flash (direct)",
@@ -717,12 +715,6 @@
             "backend": "codex",
             "weight": 0,
             "priority": 10
-          },
-          {
-            "route_id": "droid",
-            "backend": "droid",
-            "weight": 0,
-            "priority": 30
           },
           {
             "route_id": "openai-key-2",

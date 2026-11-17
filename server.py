@@ -732,7 +732,7 @@ def _get_published_models() -> dict[str, tuple[Any, Any]]:
             m = item
             a = getattr(m, "adapter", None)
         mid = getattr(m, "id", None) or (m.get("id") if isinstance(m, dict) else None)
-        if mid:
+        if mid and mid not in published:
             published[mid] = (a, m)
     return published
 

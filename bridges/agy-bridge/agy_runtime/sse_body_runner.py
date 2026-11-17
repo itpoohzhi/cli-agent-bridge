@@ -1,11 +1,10 @@
 # fmt: off
 """Оркестрация SSE: публикация границ хода, безопасный replay и единый финал."""
-# Фасад передаёт динамические callbacks; доступ к ledger — контракт извлечения.
 # pyright: reportAny=false, reportExplicitAny=false, reportPrivateUsage=false
 from __future__ import annotations
 import json
 import threading
-from typing import Any, final
+from typing import Any, Callable, final
 from agy_runtime.midstream_resilience import AgyToolTraceCollector, _owner_time
 from agy_runtime.sse_stream_helpers import SseStreamSession
 from core.route_health_policy import redact_diagnostic_text
@@ -13,8 +12,17 @@ from core.agy_capacity_guard import CAPACITY_REASON
 from core.usage_wire import positive_wire_usage
 from core.stream_resilience_policy import can_safely_replay_turn, is_present, is_uncommitted_step
 from core.stream_resilience_runtime import MidstreamReplayOrchestrator
-def _defer_finalization(_out: dict[str, Any]) -> None:
-    pass
+_attempt_scope = threading.local()
+def current_attempt_index() -> int:
+    """Индекс только текущего вызова; producer получает его до запуска потока."""
+    return getattr(_attempt_scope, "index", -1)
+def invoke_at_attempt[T](index: int, invoke: Callable[[], T]) -> T:
+    """Перенести явный индекс на исполняющий поток и восстановить прежний scope."""
+    previous_index, _attempt_scope.index = current_attempt_index(), index if type(index) is int else -1
+    try:
+        return invoke()
+    finally:
+        _attempt_scope.index = previous_index
 @final
 class _SseBodyRunner:
     def __init__(self, session: SseStreamSession) -> None:
@@ -68,9 +76,7 @@ class _SseBodyRunner:
         s = self.s
         s.stream_text, s.stream_reasoning = self.stage, self.stage_reasoning
         if is_present(s.tool_turn):
-            s.tool_turn = s.hooks[3](
-                next(filter(None, (s.ctx.get("tools"),)), list[dict[str, Any]]()),
-                self.stage, self.stage_reasoning, self.stage_calls, )
+            s.tool_turn = s.hooks[3](next(filter(None, (s.ctx.get("tools"),)), list[dict[str, Any]]()), self.stage, self.stage_reasoning, self.stage_calls)
             s.stream_text = s.tool_turn.feed
             s.stream_reasoning = s.tool_turn.feed_reasoning
             s.ctx["tool_stop"] = s.tool_turn.turn_complete
@@ -86,6 +92,7 @@ class _SseBodyRunner:
             return "unknown"
     def attempt(self, index: int, budget: float) -> dict[str, Any]:
         s, ctx, prev_stop = self.s, self.s.ctx, self.stop
+        ctx["attempt_index"] = index
         if self.buffering:
             s.buffer.rollback_uncommitted()
             self.prepare_buffer()
@@ -96,7 +103,7 @@ class _SseBodyRunner:
         if self.buffering:
             ctx["tool_stop"] = self.tool_stop
         try:
-            out = self._invoke()
+            out = invoke_at_attempt(index, self._invoke)
         finally:
             self.stop = prev_stop
             if not is_present(stop):
@@ -104,17 +111,14 @@ class _SseBodyRunner:
             else:
                 ctx["tool_stop"] = stop
         if all((self.expired(), not self.cancelled())):
-            out.update( state="timeout", rc=124, err="retry_budget_exhausted",
-                timeout_limit_s=budget, )
+            out.update(state="timeout", rc=124, err="retry_budget_exhausted", timeout_limit_s=budget)
         self.deadline, self.last_out = float("inf"), out
         if self.buffering:
             self.reconcile_trace(out)
         return out
     def _invoke(self) -> dict[str, Any]:
-        s = self.s
-        ready = threading.Event()
-        watcher = threading.Thread(target=s.coordinator.await_headers_or_flush,
-                                   args=(ready,), daemon=True, name="agy-precommit")
+        s, ready = self.s, threading.Event()
+        watcher = threading.Thread(target=s.coordinator.await_headers_or_flush, args=(ready,), daemon=True, name="agy-precommit")
         watcher.start()
         try:
             out = s.handler._run_once(s.ctx, self.text, self.trace, self.reasoning, self.keepalive)
@@ -173,7 +177,7 @@ class _SseBodyRunner:
         s, ctx = self.s, self.s.ctx
         proceed = True
         if self.buffering:
-            ctx["finalize_timeout"] = _defer_finalization
+            ctx["finalize_timeout"] = lambda _out: None
             out = dict(self.replay.run_with_resilience(self.attempt, s.ledger, s.keepalive, self.cancelled))
             if all( ( dict(cancelled=True).get(str(out.get("state")), False),
                     not self.cancelled(), ) ):
@@ -213,11 +217,9 @@ class _SseBodyRunner:
             self._finish_response(out, err, reason)
     def _finish_response(self, out: dict[str, Any], err: Any, reason: str) -> None:
         s = self.s
-        presend = all( ( (is_present(err)), not s.ctx["stream_committed"],
-                any((s.resilience, s.ctx.get("step_job_id"))), ) )
+        presend = all(((is_present(err)), not s.ctx["stream_committed"], any((s.resilience, s.ctx.get("step_job_id")))))
         if presend:
-            clean = { k: redact_diagnostic_text(v) if isinstance(v, str) else v
-                for k, v in err.items() }
+            clean = {k: redact_diagnostic_text(v) if isinstance(v, str) else v for k, v in err.items()}
             code = 502
             if any((s.ctx.get("step_job_id"), err.get("type") == CAPACITY_REASON)):
                 code = int(err.get("code") if err.get("code") else 502)
@@ -239,9 +241,7 @@ class _SseBodyRunner:
         ok = s.emit(s.chunk({}, reason, conversation_id=cid))
         if any((ok, not s.resilience)):
             ok = True
-            usage = s.handler._usage_payload(
-                next(filter(None, (out.get("usage"),)), dict[str, Any]()),
-                out.get("usage_resolved"), )
+            usage = s.handler._usage_payload(next(filter(None, (out.get("usage"),)), dict[str, Any]()), out.get("usage_resolved"))
             if any((usage.get("prompt_tokens"), usage.get("completion_tokens"))):
                 ok = s.emit(s.chunk({}, reason, usage=usage, conversation_id=cid))
         return ok

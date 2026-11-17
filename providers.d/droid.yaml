@@ -3,10 +3,10 @@
 manifest_version: 1
 provider_id: droid
 kind: droid
-enabled: true
+enabled: false
 required: false
 priority: 30
-routing: {weight: 0}
+routing: {weight: 50}
 owned_by: factory-droid
 transport:
   bridge: {}

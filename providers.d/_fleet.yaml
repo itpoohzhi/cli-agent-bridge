@@ -27,13 +27,13 @@ aliases:
   gemini-4-argon-high: {backend_id: gemini-4-argon, backend: agy, effort: high}
   gemini-3.8-flash-low: {backend_id: gemini-3.8-flash, backend: droid, effort: low}
   gemini-3.8-flash-agy-low: {backend_id: gemini-3.8-flash-agy, backend: agy, effort: low}
-  gemini-3.8-flash-medium: {backend_id: gemini-3.8-flash, backend: droid, effort: medium}
+  gemini-3.8-flash-medium: {backend_id: gemini-3.8-flash-agy, backend: agy, effort: medium}
   gemini-3.8-flash-agy-medium: {backend_id: gemini-3.8-flash-agy, backend: agy, effort: medium}
   gemini-3.8-flash-high: {backend_id: gemini-3.8-flash, backend: droid, effort: high}
   gemini-3.8-flash-agy-high: {backend_id: gemini-3.8-flash-agy, backend: agy, effort: high}
-  claude-sonnet-5-5-low: {backend_id: claude-sonnet-5-5, backend: claude-p, effort: low}
-  claude-sonnet-5-5-medium: {backend_id: claude-sonnet-5-5, backend: claude-p, effort: medium}
-  claude-sonnet-5-5-high: {backend_id: claude-sonnet-5-5, backend: claude-p, effort: high}
+  claude-sonnet-5-5-low: {backend_id: claude-sonnet-5-5, backend: droid, effort: low}
+  claude-sonnet-5-5-medium: {backend_id: claude-sonnet-5-5, backend: droid, effort: medium}
+  claude-sonnet-5-5-high: {backend_id: claude-sonnet-5-5, backend: droid, effort: high}
   claude-sonnet-5-5-max: {backend_id: claude-sonnet-5-5, backend: claude-p, effort: max}
   claude-opus-5-5-medium: {backend_id: claude-opus-5-5, backend: claude-p, effort: medium}
   claude-opus-5-5-high: {backend_id: claude-opus-5-5, backend: claude-p, effort: high}

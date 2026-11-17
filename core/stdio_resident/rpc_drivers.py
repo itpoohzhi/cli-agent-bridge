@@ -220,9 +220,20 @@ class AcpDriver(StreamJsonDriver):
 def create_protocol_driver(protocol_name: str) -> StdioProtocolDriver:
     """Create the driver registered for ``protocol_name``."""
 
+    if protocol_name in {"claude-stream-json", "claude_stream_json"}:
+        from core.stdio_resident.claude_driver import ClaudeStreamJsonDriver
+
+        return ClaudeStreamJsonDriver()
+    if protocol_name in {"codex-app-server", "codex_app_server"}:
+        from core.stdio_resident.codex_driver import CodexAppServerDriver
+
+        return CodexAppServerDriver()
+
     drivers: dict[str, type[StdioProtocolDriver]] = {
         "stream-json": StreamJsonDriver,
+        "stream_json": StreamJsonDriver,
         "stream-jsonrpc": StreamJsonRpcDriver,
+        "stream_jsonrpc": StreamJsonRpcDriver,
         "acp": AcpDriver,
     }
     try:

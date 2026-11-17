@@ -1,17 +1,17 @@
 {
-  "compiled_at": "2026-11-16T19:28:45+0300",
+  "compiled_at": "2026-11-17T04:48:25+0300",
   "compiler_version": 1,
-  "fleet_sha256": "536c2d67c85b16fa135e4d2c38549580657d250920aadc1657a43cc37c772704",
+  "fleet_sha256": "01c88ca0b11d650b7147c6f2f46c95a1321c9ec7aa7bf10a46f20fc551df2c57",
   "inputs": {
     "discovery_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
     "manifests": {
-      "_fleet.yaml": "eff0416cd144dd33d31198eb132e829fefc0b081594ddbfde4657ddf08c993ee",
+      "_fleet.yaml": "20d9c9e68ea60f1de1b6d4c96c26a535897df11aca4922bd3b21b94891a590b2",
       "agy-passthrough.yaml": "6186c9c4477ddcef24abd14daf6937c194729b9264ebba91f17faab6a2df2cd9",
-      "agy.yaml": "53b2f891eb0ce7ad91a97cc282f11f1bfa54f7128ec4c983a2c92ec944a5cc55",
-      "claude-p.yaml": "cd2b0208bdac758ca6d68186b6eb65790866b6f7e29bd0fcf24ce111529318a4",
-      "codex.yaml": "e7f1a1fe67c877cea6b5d5577d38dd975ef4bb09d2429df3ff3eb61b38a57447",
+      "agy.yaml": "d7ca0b66b7ea9612ca770187c0358fcac734935015a2ab45dddd390ae8c58de9",
+      "claude-p.yaml": "8ac948e1049b2ca703b010f4f54a5bec01d334caf75fd805f54fef47561246f7",
+      "codex.yaml": "62caf30d9ce2f621f35d41e3ff3fb5d2066fe0e78190097cf27956b86babc7b1",
       "deepseek-direct.yaml": "5decd8d0524651aa79cf0a5ef0879ee65633afd2394557b0cee8e86a96b262c7",
-      "droid.yaml": "1b5fb0def2d41feb65638161f6a5b9827894eca6c055f361750e5e3001e5177c",
+      "droid.yaml": "d2e2381093c695824123749e302d57028a113b7a522d7b29a8cdcc6b1c661e47",
       "muse.yaml": "610c34e6a064333504b3b6ec7aeed78c597d69526b56d701f6fbd42727ec3b78",
       "openai-key-2.yaml": "f3a13ea5b5b18353dda5e02e9678fd88aa2c21a18a53e44f4e8f0ce05f9f0fba",
       "openai-key-3.yaml": "eccc73e68769ab0d742b5ace825af8bbcb2d02f07068e272c608ddefd1b2177e",
@@ -19,7 +19,7 @@
       "opencode-go.yaml": "8d27372c95fcf802352d38e4e6f3a6c1919030ef6220d3c6c2c5808fe6077f68",
       "opencode-zen.yaml": "9239b0e1c543c23037f5407b6c64a0db04735d092ba7ccc53d197f83f91d1636"
     },
-    "manifests_sha256": "c29a6c76abba67dcd937a72f74fc92bccdbe0cc47738de2087b080da62542231"
+    "manifests_sha256": "5263bb006d13bb4af0cd6b2e227def8d1b80ac4a949e696adf8c01baea9c72c1"
   },
   "models": {
     "beam-free": {
@@ -49,7 +49,7 @@
     "claude-haiku-5-5": {
       "alternates": [
         {
-          "provider": "opencode-go-claude"
+          "provider": "claude-p"
         }
       ],
       "efforts_proven": [],
@@ -57,9 +57,9 @@
       "family_source": "owned_by",
       "history": [],
       "in_fleet": true,
-      "provider": "claude-p",
+      "provider": "opencode-go-claude",
       "quorum_eligible": false,
-      "quota_group": "anthropic-claude",
+      "quota_group": "opencode-go-claude",
       "status": "quarantine"
     },
     "claude-opus-5-5": {
@@ -470,7 +470,7 @@
         "type": "cli"
       },
       "enabled": true,
-      "kind": "stdio_resident",
+      "kind": "passthrough",
       "max_concurrent": 128,
       "quota_group": "google-agy",
       "timeout_s": 600.0
@@ -522,34 +522,20 @@
       "timeout_s": 600.0
     },
     "claude-p": {
-      "allow_base_url": [
-        {
-          "host": "127.0.0.1",
-          "path_prefix": "/v1",
-          "port": 9881,
-          "scheme": "http"
-        }
-      ],
+      "allow_base_url": [],
       "bridge": true,
       "enabled": true,
-      "kind": "passthrough",
-      "max_concurrent": 128,
+      "kind": "stdio_resident",
+      "max_concurrent": 10,
       "quota_group": "anthropic-claude",
       "timeout_s": 180.0
     },
     "codex": {
-      "allow_base_url": [
-        {
-          "host": "127.0.0.1",
-          "path_prefix": "/v1",
-          "port": 2455,
-          "scheme": "http"
-        }
-      ],
+      "allow_base_url": [],
       "bridge": true,
       "enabled": true,
-      "kind": "passthrough",
-      "max_concurrent": 128,
+      "kind": "stdio_resident",
+      "max_concurrent": 10,
       "quota_group": "openai-codex",
       "timeout_s": 180.0
     },
@@ -572,7 +558,7 @@
     "droid": {
       "allow_base_url": [],
       "bridge": true,
-      "enabled": true,
+      "enabled": false,
       "kind": "droid",
       "max_concurrent": 64,
       "quota_group": "factory-droid",
