@@ -10,6 +10,7 @@ class SlotState(Enum):
     """Lifecycle state of a resident process slot."""
 
     SPAWNING = auto()
+    HANDSHAKE = auto()
     READY = auto()
     BUSY = auto()
     CANCELING = auto()
@@ -22,6 +23,8 @@ class SlotEvent(Enum):
     """Input event accepted by the slot state machine."""
 
     InitOk = auto()
+    HandshakeOk = auto()
+    HandshakeFailed = auto()
     Lease = auto()
     TurnTerminal = auto()
     CancelRequested = auto()
@@ -61,16 +64,41 @@ def step_slot_fsm(
 
     if state is SlotState.SPAWNING:
         if event is SlotEvent.InitOk:
-            return SlotState.READY, []
+            return SlotState.HANDSHAKE, []
         if event is SlotEvent.Lease:
             return SlotState.SPAWNING, [SlotEffect.Reject]
         if event in (SlotEvent.Drain, SlotEvent.Invalidate, SlotEvent.Shutdown):
             return SlotState.CLOSED, [SlotEffect.Teardown]
-        if event in (SlotEvent.WriteError, SlotEvent.Eof, SlotEvent.TtlExpired):
+        if event in (
+            SlotEvent.WriteError,
+            SlotEvent.Eof,
+            SlotEvent.TtlExpired,
+            SlotEvent.HandshakeFailed,
+        ):
             return SlotState.BROKEN, [SlotEffect.Teardown, SlotEffect.ReportError]
         return SlotState.SPAWNING, []
 
+    if state is SlotState.HANDSHAKE:
+        if event is SlotEvent.HandshakeOk:
+            return SlotState.READY, []
+        if event is SlotEvent.Lease:
+            return SlotState.HANDSHAKE, [SlotEffect.Reject]
+        if event in (SlotEvent.Drain, SlotEvent.Invalidate, SlotEvent.Shutdown):
+            return SlotState.CLOSED, [SlotEffect.Teardown]
+        if event in (
+            SlotEvent.HandshakeFailed,
+            SlotEvent.WriteError,
+            SlotEvent.Eof,
+            SlotEvent.TtlExpired,
+        ):
+            return SlotState.BROKEN, [SlotEffect.Teardown, SlotEffect.ReportError]
+        return SlotState.HANDSHAKE, []
+
     if state is SlotState.READY:
+        if event is SlotEvent.HandshakeOk:
+            return SlotState.READY, []
+        if event is SlotEvent.HandshakeFailed:
+            return SlotState.BROKEN, [SlotEffect.Teardown, SlotEffect.ReportError]
         if event is SlotEvent.Lease:
             return SlotState.BUSY, [SlotEffect.BindTurn, SlotEffect.SendTurn]
         if event in (
@@ -86,6 +114,14 @@ def step_slot_fsm(
         return SlotState.READY, []
 
     if state is SlotState.BUSY:
+        if event is SlotEvent.HandshakeOk:
+            return SlotState.BUSY, []
+        if event is SlotEvent.HandshakeFailed:
+            return SlotState.BROKEN, [
+                SlotEffect.DiscardBuffer,
+                SlotEffect.Teardown,
+                SlotEffect.ReportError,
+            ]
         if event is SlotEvent.TurnTerminal:
             return SlotState.READY, [
                 SlotEffect.CommitTurn,
@@ -120,10 +156,15 @@ def step_slot_fsm(
         if event in (
             SlotEvent.CancelRequested,
             SlotEvent.InitOk,
+            SlotEvent.HandshakeOk,
             SlotEvent.TeardownDone,
         ):
             return SlotState.CANCELING, []
-        if event in (SlotEvent.WriteError, SlotEvent.Eof):
+        if event in (
+            SlotEvent.HandshakeFailed,
+            SlotEvent.WriteError,
+            SlotEvent.Eof,
+        ):
             return SlotState.CLOSED, [
                 SlotEffect.DiscardBuffer,
                 SlotEffect.Teardown,
@@ -144,6 +185,8 @@ def step_slot_fsm(
             ]
 
     if state is SlotState.DRAINING:
+        if event is SlotEvent.HandshakeOk:
+            return SlotState.DRAINING, []
         if event is SlotEvent.TurnTerminal:
             return SlotState.CLOSED, [
                 SlotEffect.CommitTurn,
@@ -155,7 +198,11 @@ def step_slot_fsm(
                 SlotEffect.DiscardBuffer,
                 SlotEffect.Teardown,
             ]
-        if event in (SlotEvent.WriteError, SlotEvent.Eof):
+        if event in (
+            SlotEvent.HandshakeFailed,
+            SlotEvent.WriteError,
+            SlotEvent.Eof,
+        ):
             return SlotState.BROKEN, [
                 SlotEffect.DiscardBuffer,
                 SlotEffect.Teardown,
@@ -166,11 +213,15 @@ def step_slot_fsm(
         return SlotState.DRAINING, []
 
     if state is SlotState.BROKEN:
+        if event in (SlotEvent.HandshakeOk, SlotEvent.HandshakeFailed):
+            return SlotState.BROKEN, []
         if event is SlotEvent.TeardownDone:
             return SlotState.CLOSED, [SlotEffect.ReleaseSlot]
         return SlotState.BROKEN, []
 
     if state is SlotState.CLOSED:
+        if event in (SlotEvent.HandshakeOk, SlotEvent.HandshakeFailed):
+            return SlotState.CLOSED, []
         if event is SlotEvent.TeardownDone:
             return SlotState.CLOSED, [SlotEffect.ReleaseSlot]
         return SlotState.CLOSED, []

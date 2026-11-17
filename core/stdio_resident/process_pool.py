@@ -211,6 +211,14 @@ class ResidentProcessPool:
             last_used_mono=time.monotonic(),
         )
         _ = self._transition(entry, SlotEvent.InitOk)
+        if entry.handle.is_alive():
+            _ = self._transition(entry, SlotEvent.HandshakeOk)
+        else:
+            _ = self._transition(entry, SlotEvent.HandshakeFailed)
+            self._terminate(entry, self._config.cancel_grace_s)
+            raise StdioProcessTerminated(
+                "resident process terminated during handshake"
+            )
         self._slots[entry.slot_id] = entry
         self._lease(entry)
         return entry
