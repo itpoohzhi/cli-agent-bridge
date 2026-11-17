@@ -1,7 +1,6 @@
-"""C0-3 / F-009: RED-контракт P0, без включения платных ключей и правки конфигов.
+"""C2-11 / F-009: GREEN-контракт P0, платные ключи отключены, веса codex/droid активны.
 
-Ожидания станут GREEN после C2-8..C2-11. Здесь нет xfail и semantic_red:
-на W0 падать должны именно проверки enabled/weight, а не collection.
+Проверки P0 rollback: openai-key-2/3 отключены с нулевым весом, codex (100) > droid (20).
 """
 
 from __future__ import annotations
