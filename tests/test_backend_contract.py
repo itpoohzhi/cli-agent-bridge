@@ -249,7 +249,7 @@ class TestRealAdapters(unittest.TestCase):
         expected = {
             "gpt-6.1-sol": "openai-key-2",
             "gpt-6.1-terra": "openai-key-2",
-            "deepseek-v4.1-flash": "deepseek-direct",
+            "deepseek-v4.1-flash": "opencode-go-sub1",
         }
         for mid, backend in expected.items():
             self.assertEqual(catalog["models"][mid]["backend"], backend, mid)

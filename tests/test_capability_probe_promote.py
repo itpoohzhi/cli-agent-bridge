@@ -81,7 +81,7 @@ def test_select_manifest_on_real_providers() -> None:
     manifests = load_manifests(PROVIDERS, ADAPTER_KINDS).manifests
     for model, provider in (
         ("gpt-6.1-sol", "openai-key-2"),
-        ("deepseek-v4.1-flash", "deepseek-direct"),
+        ("deepseek-v4.1-flash", "opencode-go-sub1"),
         ("gpt-6.1-terra", "openai-key-2"),
         ("gemini-4-argon", "agy"),
     ):

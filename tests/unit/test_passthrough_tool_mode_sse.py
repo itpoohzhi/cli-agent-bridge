@@ -1,4 +1,4 @@
-"""VER-004: SSE, однобайтовые разбиения и EOF шести passthrough-конфигураций."""
+"""VER-004: SSE, однобайтовые разбиения и EOF passthrough-конфигураций."""
 
 from __future__ import annotations
 

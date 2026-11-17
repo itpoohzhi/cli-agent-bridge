@@ -218,7 +218,7 @@ def test_stage_w2_n_openai_credential_slot_mapping(slot: int) -> None:
 def test_stage_w2_o_deepseek_slot_and_policy_fingerprint() -> None:
     doc = raw_provider("deepseek-direct")
     actual = (doc.get("routing"), doc.get("transport", {}).get("bridge"), sorted(doc.get("models_overrides", {})))
-    semantic_equal(actual, ({"weight": 100}, {"base_url": "http://127.0.0.1:10830/sg-deepseek",
+    semantic_equal(actual, ({"weight": 0}, {"base_url": "http://127.0.0.1:10830/sg-deepseek",
                    "api_key_env": "DEEPSEEK_API_KEY"}, ["deepseek-v4.1-flash"]), "deepseek_slot_and_policy")
     assert doc["limits"]["quota_group"] == "deepseek-direct"
     header = read_yaml_file(ROOT / "providers.d" / "_fleet.yaml")
@@ -275,7 +275,7 @@ def test_stage_w2_t_generated_artifacts_route_owners_and_digest() -> None:
     lock = json.loads((ROOT / "catalog.lock.json").read_bytes())
     models = {record["id"]: record for record in fleet["models"]}
     actual = {mid: models[mid].get("routing", {}).get("legacy_backend") for mid in ("gpt-6.1-sol", "gpt-6.1-terra", "deepseek-v4.1-flash")}
-    semantic_equal(actual, {"gpt-6.1-sol": "openai-key-2", "gpt-6.1-terra": "openai-key-2", "deepseek-v4.1-flash": "deepseek-direct"},
+    semantic_equal(actual, {"gpt-6.1-sol": "openai-key-2", "gpt-6.1-terra": "openai-key-2", "deepseek-v4.1-flash": "opencode-go-sub1"},
                    "generated_weighted_catalog")
     assert lock["fleet_sha256"] == hashlib.sha256((ROOT / "fleet.json").read_bytes()).hexdigest()
     for mid, owner in actual.items():

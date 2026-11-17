@@ -31,6 +31,7 @@ from typing import (
 from urllib.parse import unquote, urlsplit
 from core import backend_routing_models as _routing_models
 from core.effort_policy import EFFORT_LEVELS as _RANKED_EFFORT_LEVELS
+from core.route_attempts import ALLOWED_FAILOVER_STATUSES
 from core.routing_contract import FleetViolation as FleetViolation
 
 # Версия контракта: адаптер обязан подтверждать её в qualify() (несовпадение = модели недоступны).
@@ -254,12 +255,21 @@ BACKEND_KEYS = frozenset(
         "headers_from_json",
         "per_request_headers",
         "default_body_extra",
+        "failover_statuses",
+        "failover_error_types",
+        "failover_message_markers",
+        "failover_pool",
+        "failover_pool_label",
     }
 )
 # Необязательные upstream-параметры raw-HTTP шва (только виды с `base_url`): откуда брать ключ и
 # заголовки, какие заголовки генерировать на каждый запрос и какие поля тела подставлять по умолчанию.
 UPSTREAM_PARAM_KEYS = frozenset(
-    {"api_key_ref", "headers_from_json", "per_request_headers", "default_body_extra"}
+    {
+        "api_key_ref", "headers_from_json", "per_request_headers", "default_body_extra",
+        "failover_statuses", "failover_error_types", "failover_message_markers",
+        "failover_pool", "failover_pool_label",
+    }
 )
 TECHNICAL_REF_KEYS = frozenset({"version", "binary_path", "binary_sha256"})
 PROXY_PORT_MIN = 1
@@ -312,6 +322,34 @@ def upstream_params_error(entry: Mapping[str, Any]) -> str:
         not isinstance(extra, dict) or not all(isinstance(k, str) for k in extra)
     ):
         return "backend_default_body_extra_invalid"
+    statuses = entry.get("failover_statuses")
+    if statuses is not None and (
+        not isinstance(statuses, list)
+        or not statuses
+        or any(
+            isinstance(value, bool) or not isinstance(value, int)
+            or value not in ALLOWED_FAILOVER_STATUSES
+            for value in statuses
+        )
+    ):
+        return "backend_failover_statuses_invalid"
+    types = entry.get("failover_error_types")
+    if types is not None and not _str_list(types):
+        return "backend_failover_error_types_invalid"
+    markers = entry.get("failover_message_markers")
+    if markers is not None and not _str_list(markers):
+        return "backend_failover_message_markers_invalid"
+    for key in ("failover_pool", "failover_pool_label"):
+        value = entry.get(key)
+        if value is not None and (not isinstance(value, str) or not value):
+            return f"backend_{key}_invalid"
+    if statuses is None and any(
+        entry.get(key) is not None
+        for key in ("failover_error_types", "failover_message_markers",
+                    "failover_pool", "failover_pool_label")
+    ):
+        # Тот же инвариант, что в манифесте: детали failover без статусов мертвы.
+        return "backend_failover_statuses_invalid"
     return ""
 
 

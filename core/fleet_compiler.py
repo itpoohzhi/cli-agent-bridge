@@ -46,6 +46,7 @@ from core.model_lifecycle import (
 from core.provider_manifest import (
     ManifestError,
     ProviderManifest,
+    failover_backend_entry,
     load_manifests,
     providers_dir,
     read_yaml_file,
@@ -220,6 +221,7 @@ def backend_entry(manifest: ProviderManifest) -> Dict[str, Any]:
         entry["idle_timeout_s"] = bridge.idle_timeout_s
     if bridge.safety_cap_s is not None:
         entry["safety_cap_s"] = bridge.safety_cap_s
+    entry.update(failover_backend_entry(getattr(manifest, "failover", None)))
     entry.update(_upstream_params(manifest))
     return entry
 

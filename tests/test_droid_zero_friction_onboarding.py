@@ -293,7 +293,7 @@ def test_suffix_alias_resolves_to_base_with_effort(compiled: Any, alias: str) ->
 
 def test_deepseek_flash_is_not_redirected_to_free(compiled: Any) -> None:
     models = build_catalog(compiled.fleet, ADAPTER_KINDS)["models"]
-    assert models["deepseek-v4.1-flash"]["backend"] == "deepseek-direct"  # не droid
+    assert models["deepseek-v4.1-flash"]["backend"] == "opencode-go-sub1"  # не droid
     assert "deepseek-v4.1-flash" not in _aliases()
     assert (
         "deepseek-v4.1-flash-free" in models

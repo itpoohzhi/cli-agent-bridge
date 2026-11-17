@@ -325,6 +325,98 @@
         }
       }
     },
+    "opencode-go-sub1": {
+      "kind": "passthrough",
+      "enabled": true,
+      "owned_by": "opencode-go",
+      "max_concurrent": 64,
+      "base_url": "http://127.0.0.1:10830/go/v1",
+      "failover_statuses": [
+        402,
+        403
+      ],
+      "failover_error_types": [
+        "permission_error",
+        "credit_exhausted",
+        "payment_required"
+      ],
+      "failover_message_markers": [
+        "credit",
+        "subscription",
+        "usage limit",
+        "go usage",
+        "payment"
+      ],
+      "failover_pool": "opencode-go",
+      "failover_pool_label": "OpenCode Go",
+      "api_key_ref": "file:~/.config/opencode-go-account-switch/profiles/sub1/opencode-go.key",
+      "headers_from_json": {
+        "file": "~/.config/opencode/opencode.json",
+        "json_path": [
+          "provider",
+          "opencode-go",
+          "options",
+          "headers"
+        ],
+        "pick": [
+          "User-Agent"
+        ]
+      },
+      "per_request_headers": {
+        "x-opencode-session": "{uuid4}"
+      },
+      "default_body_extra": {
+        "thinking": {
+          "type": "disabled"
+        }
+      }
+    },
+    "opencode-go-sub2": {
+      "kind": "passthrough",
+      "enabled": true,
+      "owned_by": "opencode-go",
+      "max_concurrent": 64,
+      "base_url": "http://127.0.0.1:10830/go/v1",
+      "failover_statuses": [
+        402,
+        403
+      ],
+      "failover_error_types": [
+        "permission_error",
+        "credit_exhausted",
+        "payment_required"
+      ],
+      "failover_message_markers": [
+        "credit",
+        "subscription",
+        "usage limit",
+        "go usage",
+        "payment"
+      ],
+      "failover_pool": "opencode-go",
+      "failover_pool_label": "OpenCode Go",
+      "api_key_ref": "file:~/.config/opencode-go-account-switch/profiles/sub2/opencode-go.key",
+      "headers_from_json": {
+        "file": "~/.config/opencode/opencode.json",
+        "json_path": [
+          "provider",
+          "opencode-go",
+          "options",
+          "headers"
+        ],
+        "pick": [
+          "User-Agent"
+        ]
+      },
+      "per_request_headers": {
+        "x-opencode-session": "{uuid4}"
+      },
+      "default_body_extra": {
+        "thinking": {
+          "type": "disabled"
+        }
+      }
+    },
     "opencode-go-claude": {
       "kind": "passthrough",
       "enabled": true,
@@ -612,6 +704,62 @@
       ]
     },
     {
+      "id": "deepseek-v4.1-flash",
+      "backend": "opencode-go-sub1",
+      "name": "DeepSeek V4.1 Flash (OpenCode Go sub1)",
+      "efforts": [
+        "off",
+        "low",
+        "high",
+        "max"
+      ],
+      "default_effort": "off",
+      "context_window": 1000000,
+      "max_tokens": 384000,
+      "images": {
+        "cli_registry": "explicit_supported",
+        "status": "unverified"
+      },
+      "policy_lines": [
+        106,
+        394,
+        432
+      ],
+      "routing": {
+        "algorithm": "weighted-sha256-v1",
+        "enabled": true,
+        "catalog_hash": "5e85567a835e0f55cac11a1bf7b9f57eccdedb8c3f4e93c878452105f6f897a8",
+        "legacy_backend": "opencode-go-sub1",
+        "disabled_backend": "opencode-go",
+        "routes": [
+          {
+            "route_id": "deepseek-direct",
+            "backend": "deepseek-direct",
+            "weight": 0,
+            "priority": 20
+          },
+          {
+            "route_id": "opencode-go",
+            "backend": "opencode-go",
+            "weight": 0,
+            "priority": 10
+          },
+          {
+            "route_id": "opencode-go-sub1",
+            "backend": "opencode-go-sub1",
+            "weight": 50,
+            "priority": 11
+          },
+          {
+            "route_id": "opencode-go-sub2",
+            "backend": "opencode-go-sub2",
+            "weight": 50,
+            "priority": 12
+          }
+        ]
+      }
+    },
+    {
       "id": "claude-haiku-5-5",
       "backend": "opencode-go-claude",
       "name": "Claude Haiku 5.5 (OpenCode Go georouter)",
@@ -644,45 +792,6 @@
             "backend": "opencode-go-claude",
             "weight": 100,
             "priority": 15
-          }
-        ]
-      }
-    },
-    {
-      "id": "deepseek-v4.1-flash",
-      "backend": "deepseek-direct",
-      "name": "DeepSeek V4.1 Flash (direct)",
-      "efforts": [
-        "off",
-        "low",
-        "high",
-        "max"
-      ],
-      "default_effort": "off",
-      "context_window": 1000000,
-      "max_tokens": 384000,
-      "images": {
-        "cli_registry": "explicit_supported",
-        "status": "unverified"
-      },
-      "routing": {
-        "algorithm": "weighted-sha256-v1",
-        "enabled": true,
-        "catalog_hash": "0e1061aa272b458e402e229d654d806cace425d7b8e16d10526d1ecb96ff0f3a",
-        "legacy_backend": "deepseek-direct",
-        "disabled_backend": "opencode-go",
-        "routes": [
-          {
-            "route_id": "deepseek-direct",
-            "backend": "deepseek-direct",
-            "weight": 100,
-            "priority": 20
-          },
-          {
-            "route_id": "opencode-go",
-            "backend": "opencode-go",
-            "weight": 0,
-            "priority": 10
           }
         ]
       }

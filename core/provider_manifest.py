@@ -53,6 +53,7 @@ from core.manifest_validation import (
     validate_manifest_stages,
 )
 from core.param_adapter import GLOBAL_WHITELIST
+from core.route_attempts import ALLOWED_FAILOVER_STATUSES
 from core.routing_schema import RoutingConfig
 
 MANIFEST_VERSION = 1
@@ -247,6 +248,44 @@ class ProbeConfig:
 
 
 @dataclass(frozen=True)
+class FailoverConfig:
+    """Per-provider opt-in отказов слота сверх глобальных {401, 429, 503}.
+
+    `message_markers` — декларативные маркеры исчерпания в сообщении ошибки
+    конкретного провайдера (ядро своих маркеров не держит). `pool`/`pool_label`
+    группируют независимые слоты для сводной ошибки 429, не смешиваясь с
+    `limits.quota_group` учёта квот (у независимых аккаунтов он разный).
+    """
+
+    statuses: Tuple[int, ...] = ()
+    error_types: Tuple[str, ...] = ()
+    message_markers: Tuple[str, ...] = ()
+    pool: str = ""
+    pool_label: str = ""
+
+
+def failover_backend_entry(failover: Any) -> Dict[str, Any]:
+    """Единая генерация `failover_*` записи бэкенда для обоих компиляторов fleet."""
+    statuses = getattr(failover, "statuses", ()) if failover is not None else ()
+    if not statuses:
+        return {}
+    entry: Dict[str, Any] = {"failover_statuses": list(statuses)}
+    for key, values in (
+        ("failover_error_types", getattr(failover, "error_types", ())),
+        ("failover_message_markers", getattr(failover, "message_markers", ())),
+    ):
+        if values:
+            entry[key] = list(values)
+    for key, value in (
+        ("failover_pool", getattr(failover, "pool", "")),
+        ("failover_pool_label", getattr(failover, "pool_label", "")),
+    ):
+        if value:
+            entry[key] = value
+    return entry
+
+
+@dataclass(frozen=True)
 class ProviderManifest:
     """Нормализованный неизменяемый манифест провайдера."""
 
@@ -268,6 +307,7 @@ class ProviderManifest:
     probe: ProbeConfig = field(default_factory=ProbeConfig)
     manifest_version: int = MANIFEST_VERSION
     routing: RoutingConfig = field(default_factory=RoutingConfig)
+    failover: FailoverConfig = field(default_factory=FailoverConfig)
 
     @property
     def max_concurrent(self) -> int:
@@ -899,6 +939,46 @@ def _validate_direct_transport(
         err.add("provider_base_url_missing")
 
 
+_FAILOVER_KEYS = ("statuses", "error_types", "message_markers", "pool", "pool_label")
+
+
+def _parse_failover(raw: Any, err: _Errors) -> FailoverConfig:
+    if raw is None:
+        return FailoverConfig()
+    if not isinstance(raw, dict) or set(raw) - set(_FAILOVER_KEYS):
+        err.add("provider_manifest_invalid")
+        return FailoverConfig()
+    raw_statuses = raw.get("statuses", [])
+    raw_types = raw.get("error_types", [])
+    raw_markers = raw.get("message_markers", [])
+    pool, pool_label = raw.get("pool", ""), raw.get("pool_label", "")
+    statuses_ok = isinstance(raw_statuses, list) and all(
+        _is_int(value) and value in ALLOWED_FAILOVER_STATUSES for value in raw_statuses
+    )
+    types = _str_list(raw_types) if isinstance(raw_types, list) else None
+    markers = _str_list(raw_markers) if isinstance(raw_markers, list) else None
+    pool_ok = isinstance(pool, str) and (not pool or QUOTA_GROUP_RE.fullmatch(pool))
+    label_ok = isinstance(pool_label, str)
+    if (
+        not statuses_ok or types is None or markers is None or not pool_ok or not label_ok
+        or any(not value for value in types) or any(not value for value in markers)
+    ):
+        err.add("provider_manifest_invalid")
+        return FailoverConfig()
+    statuses = tuple(sorted(set(raw_statuses)))
+    if not statuses and (types or markers or pool or pool_label):
+        # Типы/маркеры/пул без объявленных статусов мертвы: несогласованный opt-in.
+        err.add("provider_manifest_invalid")
+        return FailoverConfig()
+    return FailoverConfig(
+        statuses=statuses,
+        error_types=tuple(types),
+        message_markers=tuple(marker.lower() for marker in markers),
+        pool=pool,
+        pool_label=pool_label,
+    )
+
+
 def _manifest_record(
     header: ManifestHeader, context: ManifestContext[Defaults],
     transport: Tuple[TransportConfig, Tuple[AllowEntry, ...]],
@@ -923,6 +1003,7 @@ def _manifest_record(
         params=_parse_params(doc.get("params"), defaults, context.env, err),
         probe=_parse_probe(doc.get("probe"), defaults, err),
         routing=manifest_routing(doc, err),
+        failover=_parse_failover(doc.get("failover"), err),
     )
 
 

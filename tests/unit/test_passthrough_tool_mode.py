@@ -1,4 +1,4 @@
-"""VER-004: JSON и общие проверки шести passthrough-конфигураций."""
+"""VER-004: JSON и общие проверки passthrough-конфигураций."""
 
 from __future__ import annotations
 

@@ -170,8 +170,8 @@ def test_compile_is_byte_deterministic() -> None:
     assert fc.canonical_json(first.sidecar) == fc.canonical_json(second.sidecar)
     standard = (json.dumps(first.fleet, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
     assert render_fleet_json(first.fleet) == standard
-    assert len(standard.splitlines()) <= 1090  # Отдельные AGY/Droid Gemini + tools + блоки routing.
-    assert len(render_fleet_json(first.sidecar).splitlines()) <= 744
+    assert len(standard.splitlines()) <= 1160  # Отдельные AGY/Droid Gemini + tools + блоки routing + слоты OpenCode Go sub1/sub2 с декларативным failover (F-003/F-004).
+    assert len(render_fleet_json(first.sidecar).splitlines()) <= 850
 
 
 def test_input_order_does_not_change_output() -> None:
@@ -573,7 +573,7 @@ def test_sidecar_shape() -> None:
     assert sidecar["models"]["gpt-6.1-sol"]["family"] == "OpenAI"
     assert sidecar["models"]["claude-sonnet-5-5"]["family"] == "Anthropic"
     assert sidecar["models"]["muse-wonder-full-1.0"]["family"] == "Meta"
-    assert sidecar["models"]["deepseek-v4.1-flash"]["provider"] == "deepseek-direct"
+    assert sidecar["models"]["deepseek-v4.1-flash"]["provider"] == "opencode-go-sub1"
     assert "kimi-k3.1-pro" not in sidecar["models"]
     assert sidecar["models"]["deepseek-v4.1-flash"]["family"] == "DeepSeek"
     assert all(entry["status"] == "quarantine" for entry in sidecar["models"].values())

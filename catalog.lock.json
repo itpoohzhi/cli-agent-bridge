@@ -1,7 +1,7 @@
 {
-  "compiled_at": "2026-11-17T04:48:25+0300",
+  "compiled_at": "2026-11-17T13:52:03+0300",
   "compiler_version": 1,
-  "fleet_sha256": "01c88ca0b11d650b7147c6f2f46c95a1321c9ec7aa7bf10a46f20fc551df2c57",
+  "fleet_sha256": "2521c4b30adefff6c899967eb4a3d0bdf037ce41f4513622e057c016df248e11",
   "inputs": {
     "discovery_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
     "manifests": {
@@ -10,16 +10,18 @@
       "agy.yaml": "d7ca0b66b7ea9612ca770187c0358fcac734935015a2ab45dddd390ae8c58de9",
       "claude-p.yaml": "8ac948e1049b2ca703b010f4f54a5bec01d334caf75fd805f54fef47561246f7",
       "codex.yaml": "62caf30d9ce2f621f35d41e3ff3fb5d2066fe0e78190097cf27956b86babc7b1",
-      "deepseek-direct.yaml": "5decd8d0524651aa79cf0a5ef0879ee65633afd2394557b0cee8e86a96b262c7",
+      "deepseek-direct.yaml": "3fcf9d693dde7a5891a62f5b819818fa8c1ec9a30cf89c587ef9f73db9913e20",
       "droid.yaml": "d2e2381093c695824123749e302d57028a113b7a522d7b29a8cdcc6b1c661e47",
       "muse.yaml": "610c34e6a064333504b3b6ec7aeed78c597d69526b56d701f6fbd42727ec3b78",
       "openai-key-2.yaml": "f3a13ea5b5b18353dda5e02e9678fd88aa2c21a18a53e44f4e8f0ce05f9f0fba",
       "openai-key-3.yaml": "eccc73e68769ab0d742b5ace825af8bbcb2d02f07068e272c608ddefd1b2177e",
       "opencode-go-claude.yaml": "7e63ccd97ae1f20179b4e03136c1b2fb50e9d0d40233df6c9465195a05779f4c",
+      "opencode-go-sub1.yaml": "f7f4225e7a59357d9a26bb04fda0410d8a5f1cd5b085718db49dcef57a26320c",
+      "opencode-go-sub2.yaml": "273d966b5d5ee55c8df36a82406f3b42b8c1ba1e3e9c4be171a670dbc73b3065",
       "opencode-go.yaml": "8d27372c95fcf802352d38e4e6f3a6c1919030ef6220d3c6c2c5808fe6077f68",
       "opencode-zen.yaml": "9239b0e1c543c23037f5407b6c64a0db04735d092ba7ccc53d197f83f91d1636"
     },
-    "manifests_sha256": "5263bb006d13bb4af0cd6b2e227def8d1b80ac4a949e696adf8c01baea9c72c1"
+    "manifests_sha256": "98a516655efb9ef34e2a1783998cf541cb8fd89e9e99a6629fea7b69fcb8512f"
   },
   "models": {
     "beam-free": {
@@ -106,6 +108,12 @@
       "alternates": [
         {
           "provider": "opencode-go"
+        },
+        {
+          "provider": "opencode-go-sub2"
+        },
+        {
+          "provider": "deepseek-direct"
         }
       ],
       "efforts_proven": [],
@@ -113,9 +121,9 @@
       "family_source": "exact_map",
       "history": [],
       "in_fleet": true,
-      "provider": "deepseek-direct",
+      "provider": "opencode-go-sub1",
       "quorum_eligible": false,
-      "quota_group": "deepseek-direct",
+      "quota_group": "opencode-go-sub1",
       "status": "quarantine"
     },
     "deepseek-v4.1-flash-free": {
@@ -701,6 +709,94 @@
       "kind": "passthrough",
       "max_concurrent": 64,
       "quota_group": "opencode-go-claude",
+      "timeout_s": 180.0
+    },
+    "opencode-go-sub1": {
+      "allow_base_url": [
+        {
+          "host": "127.0.0.1",
+          "path_prefix": "/go/v1",
+          "port": 10830,
+          "scheme": "http"
+        }
+      ],
+      "bridge": true,
+      "direct": {
+        "http": {
+          "api_key_ref": {
+            "fallback_file": "~/.config/opencode-go-account-switch/profiles/sub1/opencode-go.key"
+          },
+          "base_url": "http://127.0.0.1:10830/go/v1",
+          "headers_from_json": {
+            "forbid_ua_prefix": [
+              "python"
+            ],
+            "key": "provider.opencode-go.options.headers",
+            "path": "~/.config/opencode/opencode.json",
+            "pick": [
+              "User-Agent"
+            ],
+            "required": []
+          },
+          "path": "/chat/completions",
+          "per_request_headers": {
+            "x-opencode-session": "{uuid4}"
+          },
+          "response": {
+            "field": "choices[0].message.content"
+          },
+          "stream": true
+        },
+        "type": "http"
+      },
+      "enabled": true,
+      "kind": "passthrough",
+      "max_concurrent": 64,
+      "quota_group": "opencode-go-sub1",
+      "timeout_s": 180.0
+    },
+    "opencode-go-sub2": {
+      "allow_base_url": [
+        {
+          "host": "127.0.0.1",
+          "path_prefix": "/go/v1",
+          "port": 10830,
+          "scheme": "http"
+        }
+      ],
+      "bridge": true,
+      "direct": {
+        "http": {
+          "api_key_ref": {
+            "fallback_file": "~/.config/opencode-go-account-switch/profiles/sub2/opencode-go.key"
+          },
+          "base_url": "http://127.0.0.1:10830/go/v1",
+          "headers_from_json": {
+            "forbid_ua_prefix": [
+              "python"
+            ],
+            "key": "provider.opencode-go.options.headers",
+            "path": "~/.config/opencode/opencode.json",
+            "pick": [
+              "User-Agent"
+            ],
+            "required": []
+          },
+          "path": "/chat/completions",
+          "per_request_headers": {
+            "x-opencode-session": "{uuid4}"
+          },
+          "response": {
+            "field": "choices[0].message.content"
+          },
+          "stream": true
+        },
+        "type": "http"
+      },
+      "enabled": true,
+      "kind": "passthrough",
+      "max_concurrent": 64,
+      "quota_group": "opencode-go-sub2",
       "timeout_s": 180.0
     },
     "opencode-zen": {

@@ -4,15 +4,23 @@ from __future__ import annotations
 
 import math
 import os
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from http.client import HTTPConnection, HTTPResponse
 from typing import Protocol
 
 from core.passthrough_adapter_runtime import PassthroughRouteRefusal
-from core.route_attempts import DEFAULT_ROUTE_FAILOVER_STATUSES
+from core.route_attempts import (
+    DEFAULT_ROUTE_FAILOVER_STATUSES,
+    evaluate_presend_candidate,
+    failover_from_mapping,
+    is_route_refusal_status,
+)
 
 RetryOpen = Callable[[], tuple[HTTPConnection, HTTPResponse]]
-PresendResult = tuple[HTTPConnection, HTTPResponse, bool]
+# 4-й элемент — уже прочитанное тело кандидата (`None`: тело не читалось и
+# терминальный ответ отдаёт обычный response-путь). Тело никогда не вешается
+# атрибутом на системный `HTTPResponse`.
+PresendResult = tuple[HTTPConnection, HTTPResponse, bool, bytes | None]
 
 
 class PresendAdapter(Protocol):
@@ -60,10 +68,19 @@ def _safe_refusal(status: int) -> bool:
 
 
 def is_retryable_presend_payload(
-    status: int, headers: Sequence[tuple[str, str]], body: bytes
+    status: int, headers: Sequence[tuple[str, str]], body: bytes,
+    *, extra_statuses: Iterable[int] = (), extra_error_types: Iterable[str] = (),
+    message_markers: Iterable[str] = (),
 ) -> bool:
-    """Совместимый классификатор: payload не доказывает отсутствие исполнения."""
-    return _safe_refusal(status)
+    """Совместимый классификатор: payload не доказывает отсутствие исполнения.
+
+    Per-route `extra_*`/`message_markers` расширяют множество отказов слота
+    (например, 403 `permission_error` и 402 у OpenCode Go); без них семантика прежняя.
+    """
+    return is_route_refusal_status(
+        status, body, extra_statuses=extra_statuses,
+        extra_error_types=extra_error_types, message_markers=message_markers,
+    )
 
 
 def compute_presend_retry_delay(
@@ -105,13 +122,20 @@ def _resolve_response(
     Отсутствие commit обеспечивает caller. Терминальные ответы
     остаются непрочитанными, чтобы обычный response-путь передал их дословно.
     """
-    if not _safe_refusal(resp.status):
-        return conn, resp, False
+    failover = failover_from_mapping(getattr(adapter, "config", None))
+    if resp.status not in failover.effective_statuses():
+        return conn, resp, False, None
     if not getattr(sink, "accepts_presend_errors", False):
-        return conn, resp, False
+        return conn, resp, False, None
     if sink.client_gone():
         raise adapter._client_gone_exc()
-    body = adapter._read_presend_body(resp)
+    evaluation = evaluate_presend_candidate(
+        resp.status, lambda: adapter._read_presend_body(resp), failover,
+    )
+    body = evaluation.body or b""
+    if not evaluation.is_refusal:
+        # Тело уже прочитано: вернуть явно вызывающему, ответ не отказ слота.
+        return conn, resp, False, evaluation.body
     headers = tuple(adapter._response_headers(resp)) + (
         ("Content-Length", str(len(body))),
     )

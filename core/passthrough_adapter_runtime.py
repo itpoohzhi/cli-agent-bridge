@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import http.client
 import os
+import re
 import socket
 import threading
 import time
@@ -22,7 +23,11 @@ from core.passthrough_sliding_window import (
     FLAG_PASSTHROUGH_SLIDING_WINDOW,
     open_sliding_deadline,
 )
-from core.route_attempts import DEFAULT_ROUTE_FAILOVER_STATUSES, RouteRefusal
+from core.route_attempts import (
+    RouteRefusal,
+    evaluate_presend_candidate,
+    failover_from_mapping,
+)
 from core.runtime_env import flag_enabled
 from core.transport_credentials import credential_ready
 
@@ -71,6 +76,44 @@ class PassthroughRouteRefusal(RouteRefusal, PreSendTransientError):  # pyright: 
             self, "route_refused", status_code=status,
             response_headers=headers, response_body=body,
         )
+
+
+_FAIL_TOKEN_RE = re.compile(r"[A-Za-z0-9_.:@/-]{1,128}")
+
+
+def _fail_token(value: Any) -> str:
+    """Только короткий идентификатор без разделителей строк допускается в fail-лог."""
+    return value if isinstance(value, str) and _FAIL_TOKEN_RE.fullmatch(value) else "-"
+
+
+def fail_context(
+    request: Mapping[str, Any] | None,
+    headers: Mapping[str, str] | None,
+    host: Any = None,
+) -> tuple[str, str]:
+    """Безопасные (model, request_id) для строки `passthrough fail` без секретов.
+
+    Источники request_id повторяют приоритет атрибуции хаба: заголовок
+    (имя — из host.REQUEST_ID_HEADER, дефолт X-Request-Id), затем
+    extra_body.request_id, затем request_id тела.
+    """
+    header_name = getattr(host, "REQUEST_ID_HEADER", None)
+    if not isinstance(header_name, str) or not header_name:
+        header_name = "X-Request-Id"
+    request_map = request if isinstance(request, Mapping) else {}
+    lowered = (
+        {str(key).lower(): value for key, value in headers.items()}
+        if isinstance(headers, Mapping)
+        else {}
+    )
+    request_id: Any = lowered.get(header_name.lower())
+    if request_id is None:
+        extra = request_map.get("extra_body")
+        if isinstance(extra, Mapping):
+            request_id = extra.get("request_id")
+    if request_id is None:
+        request_id = request_map.get("request_id")
+    return _fail_token(request_map.get("model")), _fail_token(request_id)
 
 
 def _pooling_enabled() -> bool:
@@ -174,13 +217,20 @@ class _RequestRuntime:
         except PreSendTransientError as error:
             if getattr(request.sink, "accepts_presend_errors", False):
                 raise
+            model, request_id = fail_context(request.request, request.headers, adapter.host)
             adapter._fail_io(
                 request.sink,
                 error.status_code == 504 or isinstance(error.__cause__, TimeoutError),
+                model=model,
+                request_id=request_id,
             )
             return False
         except (OSError, http.client.HTTPException) as error:
-            adapter._fail_io(request.sink, self._is_timeout_error(error))
+            model, request_id = fail_context(request.request, request.headers, adapter.host)
+            adapter._fail_io(
+                request.sink, self._is_timeout_error(error),
+                model=model, request_id=request_id,
+            )
             return False
         return True
 
@@ -223,13 +273,22 @@ class _RequestRuntime:
         response, request, adapter = self.response, self.exchange, self.adapter
         if response is None:
             raise RuntimeError("missing_upstream_response")
-        if response.status in DEFAULT_ROUTE_FAILOVER_STATUSES and getattr(
+        failover = failover_from_mapping(getattr(adapter, "config", None))
+        if response.status in failover.effective_statuses() and getattr(
             request.sink, "accepts_presend_errors", False
         ):
-            body = adapter._read_presend_body(response)
+            evaluation = evaluate_presend_candidate(
+                response.status, lambda: adapter._read_presend_body(response), failover,
+            )
+            body = evaluation.body or b""
             headers = tuple(adapter._response_headers(response)) + (("Content-Length", str(len(body))),)
             self._check()
-            raise PassthroughRouteRefusal(response.status, headers, body)
+            if evaluation.is_refusal:
+                raise PassthroughRouteRefusal(response.status, headers, body)
+            # Кандидат по статусу, но не отказ слота (например, запрет модели):
+            # тело уже прочитано, поэтому ответ отдаётся дословно здесь.
+            self.successful = adapter._emit_response(response, request.sink, (body, False))
+            return
         self.successful = adapter._respond(
             response, request.request, request.sink, self.deadline,
             on_timeout=self.abort,
@@ -278,14 +337,16 @@ def handle_request(
 ) -> None:
     """Исполняет один POST и освобождает слот даже при исключении cleanup."""
     if not credential_ready(adapter.config):
-        adapter._fail(exchange.sink, 503, "route_unavailable", "upstream credential unavailable")
+        model, request_id = fail_context(exchange.request, exchange.headers, adapter.host)
+        adapter._fail(exchange.sink, 503, "route_unavailable", "upstream credential unavailable", model=model, request_id=request_id)
         return
     settings = options or RuntimeOptions()
     runtime = _RequestRuntime(adapter, exchange, settings)
     queue_default = float(getattr(adapter.host, "QUEUE_TIMEOUT_S", settings.queue_timeout_s))
     remaining = runtime.open_deadline - time.monotonic()
     if not adapter._slots.acquire(timeout=max(0.0, min(queue_default, remaining))):
-        adapter._fail(exchange.sink, 503, "overloaded", "passthrough backend is saturated")
+        model, request_id = fail_context(exchange.request, exchange.headers, adapter.host)
+        adapter._fail(exchange.sink, 503, "overloaded", "passthrough backend is saturated", model=model, request_id=request_id)
         return
     with adapter._lock:
         adapter._active += 1

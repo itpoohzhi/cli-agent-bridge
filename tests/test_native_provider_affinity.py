@@ -28,7 +28,7 @@ def _load_fleet():
         ("gemini-3.8-flash-agy", "agy"),
         ("gemini-3.8-flash", "droid"),
         ("claude-sonnet-5-5", "claude-p"),
-        ("deepseek-v4.1-flash", "deepseek-direct"),
+        ("deepseek-v4.1-flash", "opencode-go-sub1"),
         ("gpt-6.1-sol", "openai-key-2"),
     ],
 )

@@ -1,4 +1,4 @@
-"""VER-004: общий tool-mode шов шести реальных passthrough-конфигураций."""
+"""VER-004: общий tool-mode шов всех реальных passthrough-конфигураций."""
 
 from __future__ import annotations
 
@@ -30,12 +30,16 @@ from tests.unit._passthrough_tool_sink import (  # noqa: E402
 )
 
 BACKENDS = (
-    "claude-p",
     "agy",
-    "codex",
-    "opencode-zen",
+    "agy-passthrough",
+    "deepseek-direct",
+    "openai-key-2",
+    "openai-key-3",
     "opencode-go",
     "opencode-go-claude",
+    "opencode-go-sub1",
+    "opencode-go-sub2",
+    "opencode-zen",
 )
 POLICY_ENV = "BRIDGE_TOOLLESS_TOOL_TAG_POLICY"
 LITERAL = '<tool_call>{"name":"x"}</tool_call> <invoke> </tool_call> пример'
