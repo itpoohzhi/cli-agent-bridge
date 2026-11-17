@@ -2,10 +2,10 @@
 manifest_version: 1
 provider_id: openai-key-2
 kind: passthrough
-enabled: true
+enabled: false
 required: false
 priority: 20
-routing: {weight: 50}
+routing: {weight: 0}
 owned_by: openai-direct
 transport:
   bridge: {base_url: 'http://127.0.0.1:10830/sg-openai', api_key_env: OPENAI_API_KEY_2}
