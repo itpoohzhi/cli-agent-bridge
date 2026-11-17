@@ -1,24 +1,24 @@
 {
-  "compiled_at": "2026-11-15T00:19:20+0300",
+  "compiled_at": "2026-11-17T04:19:15+0300",
   "compiler_version": 1,
-  "fleet_sha256": "b9d7a8dd6776abad0690ce01566088bbde31500298133d97817b8bb7a82d2c7a",
+  "fleet_sha256": "754f4a193471d0d0e08ef229ad172a86e61f89156ce8fe113749376827aa20db",
   "inputs": {
     "discovery_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
     "manifests": {
       "_fleet.yaml": "889034a7bbbafdbf2ca8d86a2010834ee3aa19f64edd0175bae7712bd832b272",
-      "agy.yaml": "16d3044cfcda0fc59a785d701d1997535e5e299352f70fce6b481109a091ce15",
+      "agy.yaml": "b5fc4faa2afb4bdcc09897b73042fc333ee4370d6b744f412635bce76135aed7",
       "claude-p.yaml": "cd2b0208bdac758ca6d68186b6eb65790866b6f7e29bd0fcf24ce111529318a4",
-      "codex.yaml": "e7f1a1fe67c877cea6b5d5577d38dd975ef4bb09d2429df3ff3eb61b38a57447",
+      "codex.yaml": "a8cbb3cc17606fd933e2a423db597fd6f6a68b801a367e3938a3a015521868d9",
       "deepseek-direct.yaml": "5decd8d0524651aa79cf0a5ef0879ee65633afd2394557b0cee8e86a96b262c7",
-      "droid.yaml": "59e0d87ef9e998b878b6115ebf3844b0c3dbac27a927bacc28a6835798b1117f",
+      "droid.yaml": "6d73eadd0edd10a2e0a48fab0013fea2b8ce7a66f928386d9842b2ff5df482bf",
       "muse.yaml": "610c34e6a064333504b3b6ec7aeed78c597d69526b56d701f6fbd42727ec3b78",
-      "openai-key-2.yaml": "f3a13ea5b5b18353dda5e02e9678fd88aa2c21a18a53e44f4e8f0ce05f9f0fba",
-      "openai-key-3.yaml": "eccc73e68769ab0d742b5ace825af8bbcb2d02f07068e272c608ddefd1b2177e",
+      "openai-key-2.yaml": "8c112c1f892bd25d06f59ff50870b65176632aece1ebe82cae5991c004fd09f4",
+      "openai-key-3.yaml": "2108dc7da2c07a740132cd7656d8bb30368c86d4465b9116f1818dacdfc4e2b6",
       "opencode-go-claude.yaml": "7e63ccd97ae1f20179b4e03136c1b2fb50e9d0d40233df6c9465195a05779f4c",
       "opencode-go.yaml": "8d27372c95fcf802352d38e4e6f3a6c1919030ef6220d3c6c2c5808fe6077f68",
       "opencode-zen.yaml": "9239b0e1c543c23037f5407b6c64a0db04735d092ba7ccc53d197f83f91d1636"
     },
-    "manifests_sha256": "b7d5cabe8383f5d822743b70a009343fb58439e87bc603cdb5edcb86176ad91d"
+    "manifests_sha256": "957cf4f023ba4db67d0747a0cb574505b099b6aeecc5dc1559707df36fd7b35b"
   },
   "models": {
     "beam-free": {
@@ -141,22 +141,6 @@
       "quota_group": "opencode-zen",
       "status": "quarantine"
     },
-    "gemini-3.8-flash": {
-      "alternates": [
-        {
-          "provider": "droid"
-        }
-      ],
-      "efforts_proven": [],
-      "family": "Google",
-      "family_source": "prefix",
-      "history": [],
-      "in_fleet": true,
-      "provider": "agy",
-      "quorum_eligible": false,
-      "quota_group": "google-agy",
-      "status": "quarantine"
-    },
     "gemini-3.8-flash-droid": {
       "alternates": [],
       "efforts_proven": [],
@@ -169,46 +153,10 @@
       "quota_group": "factory-droid",
       "status": "quarantine"
     },
-    "gemini-4-argon": {
-      "alternates": [],
-      "efforts_proven": [],
-      "family": "Google",
-      "family_source": "prefix",
-      "history": [],
-      "in_fleet": true,
-      "provider": "agy",
-      "quorum_eligible": false,
-      "quota_group": "google-agy",
-      "status": "quarantine"
-    },
-    "gemini-4-carbon": {
-      "alternates": [],
-      "efforts_proven": [],
-      "family": "Google",
-      "family_source": "prefix",
-      "history": [],
-      "in_fleet": true,
-      "provider": "agy",
-      "quorum_eligible": false,
-      "quota_group": "google-agy",
-      "status": "quarantine"
-    },
-    "gemini-4-hydrogen": {
-      "alternates": [],
-      "efforts_proven": [],
-      "family": "Google",
-      "family_source": "prefix",
-      "history": [],
-      "in_fleet": true,
-      "provider": "agy",
-      "quorum_eligible": false,
-      "quota_group": "google-agy",
-      "status": "quarantine"
-    },
     "gpt-6.1-sol": {
       "alternates": [
         {
-          "provider": "codex"
+          "provider": "openai-key-2"
         },
         {
           "provider": "openai-key-3"
@@ -219,12 +167,12 @@
       ],
       "efforts_proven": [],
       "family": "OpenAI",
-      "family_source": "exact_map",
+      "family_source": "prefix",
       "history": [],
       "in_fleet": true,
-      "provider": "openai-key-2",
+      "provider": "codex",
       "quorum_eligible": false,
-      "quota_group": "openai-key-2",
+      "quota_group": "openai-codex",
       "status": "quarantine"
     },
     "gpt-6.1-sol-droid": {
@@ -242,7 +190,7 @@
     "gpt-6.1-terra": {
       "alternates": [
         {
-          "provider": "codex"
+          "provider": "openai-key-2"
         },
         {
           "provider": "openai-key-3"
@@ -250,12 +198,12 @@
       ],
       "efforts_proven": [],
       "family": "OpenAI",
-      "family_source": "exact_map",
+      "family_source": "prefix",
       "history": [],
       "in_fleet": true,
-      "provider": "openai-key-2",
+      "provider": "codex",
       "quorum_eligible": false,
-      "quota_group": "openai-key-2",
+      "quota_group": "openai-codex",
       "status": "quarantine"
     },
     "iceman-free": {
@@ -526,7 +474,7 @@
         }
       ],
       "bridge": true,
-      "enabled": true,
+      "enabled": false,
       "kind": "passthrough",
       "max_concurrent": 1,
       "quota_group": "openai-key-2",
@@ -542,7 +490,7 @@
         }
       ],
       "bridge": true,
-      "enabled": true,
+      "enabled": false,
       "kind": "passthrough",
       "max_concurrent": 1,
       "quota_group": "openai-key-3",
@@ -663,7 +611,24 @@
       "timeout_s": 180.0
     }
   },
-  "rejected": {},
+  "rejected": {
+    "gemini-3.8-flash": {
+      "provider": "agy",
+      "reason": "status_inconsistent"
+    },
+    "gemini-4-argon": {
+      "provider": "agy",
+      "reason": "status_inconsistent"
+    },
+    "gemini-4-carbon": {
+      "provider": "agy",
+      "reason": "status_inconsistent"
+    },
+    "gemini-4-hydrogen": {
+      "provider": "agy",
+      "reason": "status_inconsistent"
+    }
+  },
   "rejected_providers": {},
   "schema": "catalog-lock/1"
 }

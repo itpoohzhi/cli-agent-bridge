@@ -345,7 +345,7 @@
     },
     "openai-key-2": {
       "kind": "passthrough",
-      "enabled": true,
+      "enabled": false,
       "owned_by": "openai-direct",
       "max_concurrent": 1,
       "base_url": "http://127.0.0.1:10830/sg-openai",
@@ -353,7 +353,7 @@
     },
     "openai-key-3": {
       "kind": "passthrough",
-      "enabled": true,
+      "enabled": false,
       "owned_by": "openai-direct",
       "max_concurrent": 1,
       "base_url": "http://127.0.0.1:10830/sg-openai",
@@ -375,90 +375,6 @@
     }
   },
   "models": [
-    {
-      "id": "gemini-3.8-flash",
-      "backend": "agy",
-      "name": "Gemini 3.8 Flash (AGY bridge)",
-      "efforts": [
-        "low",
-        "medium",
-        "high"
-      ],
-      "default_effort": "high",
-      "context_window": 1048576,
-      "max_tokens": 65536,
-      "images": {
-        "status": "unverified"
-      },
-      "routing": {
-        "algorithm": "weighted-sha256-v1",
-        "enabled": true,
-        "catalog_hash": "acd043cd148c00556455eec24f42e55de524d7829906c3ed36e0c867e41cd6fd",
-        "legacy_backend": "agy",
-        "disabled_backend": "agy",
-        "routes": [
-          {
-            "route_id": "agy",
-            "backend": "agy",
-            "weight": 100,
-            "priority": 10
-          },
-          {
-            "route_id": "droid",
-            "backend": "droid",
-            "weight": 0,
-            "priority": 30
-          }
-        ]
-      }
-    },
-    {
-      "id": "gemini-4-argon",
-      "backend": "agy",
-      "name": "Gemini 4 Argon (AGY bridge)",
-      "efforts": [
-        "low",
-        "medium",
-        "high"
-      ],
-      "default_effort": "high",
-      "context_window": 1048576,
-      "max_tokens": 65536,
-      "images": {
-        "status": "unverified"
-      }
-    },
-    {
-      "id": "gemini-4-carbon",
-      "backend": "agy",
-      "name": "Gemini 4 Carbon (AGY)",
-      "efforts": [
-        "off"
-      ],
-      "default_effort": "off",
-      "context_window": 1048576,
-      "max_tokens": 65536,
-      "images": {
-        "status": "unverified"
-      }
-    },
-    {
-      "id": "gemini-4-hydrogen",
-      "backend": "agy",
-      "name": "Gemini 4 Hydrogen (AGY)",
-      "efforts": [
-        "low",
-        "medium",
-        "high",
-        "xhigh"
-      ],
-      "default_effort": "high",
-      "context_window": 1048576,
-      "max_tokens": 65536,
-      "images": {
-        "status": "unverified"
-      }
-    },
     {
       "id": "claude-haiku-5-5",
       "backend": "claude-p",
@@ -531,7 +447,7 @@
       "routing": {
         "algorithm": "weighted-sha256-v1",
         "enabled": true,
-        "catalog_hash": "a3f47ee2ec963cf44b9c4d559858c2e78b28961ee375ddbc07faabf7e9e7402d",
+        "catalog_hash": "5d3c7daadccb1baea2ccd9b8746048dc6ceebd5085c15a1eb5fd40283f9b4155",
         "legacy_backend": "claude-p",
         "disabled_backend": "claude-p",
         "routes": [
@@ -544,10 +460,64 @@
           {
             "route_id": "droid",
             "backend": "droid",
-            "weight": 0,
+            "weight": 20,
             "priority": 30
           }
         ]
+      }
+    },
+    {
+      "id": "gpt-6.1-sol",
+      "backend": "codex",
+      "name": "GPT-6.1 Sol (Codex passthrough)",
+      "efforts": [
+        "low",
+        "medium",
+        "high",
+        "max"
+      ],
+      "default_effort": "high",
+      "context_window": 272000,
+      "max_tokens": 128000,
+      "images": {
+        "status": "unverified"
+      },
+      "routing": {
+        "algorithm": "weighted-sha256-v1",
+        "enabled": true,
+        "catalog_hash": "b7c34b220f9f2c1f7a693cad1226d8208898a0c47b5aeb35637a8b0ed7c2a3d4",
+        "legacy_backend": "codex",
+        "disabled_backend": "codex",
+        "routes": [
+          {
+            "route_id": "codex",
+            "backend": "codex",
+            "weight": 100,
+            "priority": 10
+          },
+          {
+            "route_id": "droid",
+            "backend": "droid",
+            "weight": 20,
+            "priority": 30
+          }
+        ]
+      }
+    },
+    {
+      "id": "gpt-6.1-terra",
+      "backend": "codex",
+      "name": "GPT-6.1 Terra (Codex passthrough)",
+      "efforts": [
+        "low",
+        "medium",
+        "high"
+      ],
+      "default_effort": "high",
+      "context_window": 500000,
+      "max_tokens": 128000,
+      "images": {
+        "status": "unverified"
       }
     },
     {
@@ -684,99 +654,6 @@
             "backend": "opencode-go",
             "weight": 0,
             "priority": 10
-          }
-        ]
-      }
-    },
-    {
-      "id": "gpt-6.1-sol",
-      "backend": "openai-key-2",
-      "name": "GPT-6.1 Sol (OpenAI key 2)",
-      "efforts": [
-        "low",
-        "medium",
-        "high",
-        "max"
-      ],
-      "default_effort": "high",
-      "context_window": 272000,
-      "max_tokens": 128000,
-      "images": {
-        "status": "unverified"
-      },
-      "routing": {
-        "algorithm": "weighted-sha256-v1",
-        "enabled": true,
-        "catalog_hash": "6549c1ad9b2b814b158503e244f2b44a5ca8391743da3388949ba2693c669561",
-        "legacy_backend": "openai-key-2",
-        "disabled_backend": "codex",
-        "routes": [
-          {
-            "route_id": "codex",
-            "backend": "codex",
-            "weight": 0,
-            "priority": 10
-          },
-          {
-            "route_id": "droid",
-            "backend": "droid",
-            "weight": 0,
-            "priority": 30
-          },
-          {
-            "route_id": "openai-key-2",
-            "backend": "openai-key-2",
-            "weight": 50,
-            "priority": 20
-          },
-          {
-            "route_id": "openai-key-3",
-            "backend": "openai-key-3",
-            "weight": 50,
-            "priority": 20
-          }
-        ]
-      }
-    },
-    {
-      "id": "gpt-6.1-terra",
-      "backend": "openai-key-2",
-      "name": "GPT-6.1 Terra (OpenAI key 2)",
-      "efforts": [
-        "low",
-        "medium",
-        "high"
-      ],
-      "default_effort": "high",
-      "context_window": 500000,
-      "max_tokens": 128000,
-      "images": {
-        "status": "unverified"
-      },
-      "routing": {
-        "algorithm": "weighted-sha256-v1",
-        "enabled": true,
-        "catalog_hash": "6549c1ad9b2b814b158503e244f2b44a5ca8391743da3388949ba2693c669561",
-        "legacy_backend": "openai-key-2",
-        "disabled_backend": "codex",
-        "routes": [
-          {
-            "route_id": "codex",
-            "backend": "codex",
-            "weight": 0,
-            "priority": 10
-          },
-          {
-            "route_id": "openai-key-2",
-            "backend": "openai-key-2",
-            "weight": 50,
-            "priority": 20
-          },
-          {
-            "route_id": "openai-key-3",
-            "backend": "openai-key-3",
-            "weight": 50,
-            "priority": 20
           }
         ]
       }
