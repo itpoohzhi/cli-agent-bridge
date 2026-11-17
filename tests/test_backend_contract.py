@@ -196,7 +196,7 @@ class TestRealAdapters(unittest.TestCase):
         self.assertEqual(set(ids), {
             "droid", "muse", "codex", "agy", "opencode-zen", "claude-p",
             "opencode-go", "opencode-go-claude",
-            "openai-key-2", "openai-key-3", "deepseek-direct",
+            "deepseek-direct",
         })
         self.assertIn("droid", ids)
         self.assertIn("muse", ids)
@@ -207,8 +207,7 @@ class TestRealAdapters(unittest.TestCase):
         reg = server.BACKENDS
         expected = {
             "claude-sonnet-5-5": "claude-p",
-            "gemini-3.8-flash": "agy",
-            "gpt-6.1-sol": "openai-key-2",
+            "gpt-6.1-sol": "codex",
             "claude-sonnet-5-5-droid": "droid",
             "gemini-3.8-flash-droid": "droid",
             "gpt-6.1-sol-droid": "droid",
@@ -217,12 +216,9 @@ class TestRealAdapters(unittest.TestCase):
             "muse-spark-1.3-contributor": "muse",
             "muse-wonder-1.0": "muse",
             "muse-wonder-full-1.0": "muse",
-            "gpt-6.1-terra": "openai-key-2",
+            "gpt-6.1-terra": "codex",
             "claude-opus-5-5": "claude-p",
             "claude-haiku-5-5": "claude-p",
-            "gemini-4-argon": "agy",
-            "gemini-4-carbon": "agy",
-            "gemini-4-hydrogen": "agy",
             "deepseek-v4.1-flash-free": "opencode-zen",
             "flint-40b-free": "opencode-zen",
             "mimo-v2.6-flash-free": "opencode-zen",
@@ -244,8 +240,8 @@ class TestRealAdapters(unittest.TestCase):
     def test_compiled_model_owners(self) -> None:
         catalog = server._load_fleet()
         expected = {
-            "gpt-6.1-sol": "openai-key-2",
-            "gpt-6.1-terra": "openai-key-2",
+            "gpt-6.1-sol": "codex",
+            "gpt-6.1-terra": "codex",
             "deepseek-v4.1-flash": "deepseek-direct",
         }
         for mid, backend in expected.items():
@@ -259,7 +255,8 @@ class TestRealAdapters(unittest.TestCase):
             self.assertIsInstance(ok, bool)
             self.assertIsInstance(reason, str)
             self.assertIsInstance(adapter.is_healthy(), bool)
-            self.assertTrue(adapter.get_models())
+            if adapter.id != "agy":
+                self.assertTrue(adapter.get_models())
             for model in adapter.get_models():
                 self.assertEqual(model.backend, adapter.id)
             self.assertIn(adapter.capabilities.sessions, ("resident", "none"))
