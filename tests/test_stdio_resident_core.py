@@ -21,7 +21,7 @@ from core.stdio_resident.types import (  # noqa: E402
 
 
 def test_slot_fsm_covers_complete_state_event_matrix() -> None:
-    """Every one of the 7 x 13 input pairs has a typed transition."""
+    """Every one of the 8 x 15 input pairs has a typed transition."""
 
     pairs = 0
     for state in SlotState:
@@ -33,7 +33,34 @@ def test_slot_fsm_covers_complete_state_event_matrix() -> None:
             assert all(isinstance(effect, SlotEffect) for effect in effects)
             pairs += 1
 
-    assert pairs == 91
+    assert pairs == len(SlotState) * len(SlotEvent)
+    assert pairs == 120  # 8 states x 15 events
+
+
+def test_handshake_state_transitions() -> None:
+    """Verify FSM transitions into and out of HANDSHAKE state."""
+    next_state, effects = step_slot_fsm(SlotState.SPAWNING, SlotEvent.InitOk)
+    assert next_state is SlotState.HANDSHAKE
+    assert effects == []
+
+    next_state, effects = step_slot_fsm(SlotState.HANDSHAKE, SlotEvent.HandshakeOk)
+    assert next_state is SlotState.READY
+    assert effects == []
+
+    next_state, effects = step_slot_fsm(
+        SlotState.HANDSHAKE,
+        SlotEvent.HandshakeFailed,
+    )
+    assert next_state is SlotState.BROKEN
+    assert effects == [SlotEffect.Teardown, SlotEffect.ReportError]
+
+    next_state, effects = step_slot_fsm(SlotState.HANDSHAKE, SlotEvent.Lease)
+    assert next_state is SlotState.HANDSHAKE
+    assert effects == [SlotEffect.Reject]
+
+    next_state, effects = step_slot_fsm(SlotState.HANDSHAKE, SlotEvent.Shutdown)
+    assert next_state is SlotState.CLOSED
+    assert effects == [SlotEffect.Teardown]
 
 
 def test_busy_cancel_request_starts_canceling_protocol() -> None:
