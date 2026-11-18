@@ -36,7 +36,7 @@ def _headers(handler: Any, host: Any, call: PassthroughCall) -> dict[str, str]:
     headers = dict(handler.headers.items())
     if host.REQUEST_ATTRIBUTION_ENABLED:
         names = {host.REQUEST_ID_HEADER.lower(), host.SUBAGENT_ID_HEADER.lower()}
-        headers = {key: value for key, value in headers.items() if key.lower() not in names} | host._trace_headers(handler._trace)
+        headers = {key: value for key, value in headers.items() if key.lower() not in names} | dict(host._trace_headers(handler._trace))
     if call.hub_auth_ok and not getattr(call.adapter, "_upstream_key", None):
         headers = {key: value for key, value in headers.items() if key.lower() not in {"authorization", "x-api-key", "x-turn-owner-token"}}
     headers.update({"X-Bridge-No-Retry": "1", **build_georouter_headers({"retry_owner": BRIDGE_OWNER})})
