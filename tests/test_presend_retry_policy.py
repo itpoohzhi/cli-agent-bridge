@@ -29,8 +29,6 @@ from core.presend_retry_policy import (
     is_retryable_presend_payload,
     resolve_presend_response,
 )
-from core.route_attempts import DEFAULT_ROUTE_FAILOVER_STATUSES
-
 
 class _Upstream:
     """Локальный HTTP-сервер со счётчиком физических запросов."""
@@ -149,7 +147,7 @@ def test_retryable_502_is_forwarded_verbatim_without_replay(
         upstream.close()
 
 
-@pytest.mark.parametrize("status", [401, 429, 503])
+@pytest.mark.parametrize("status", [401, 429, 503, 500, 502, 504])
 def test_route_refusal_propagates_without_sleep_or_replay(
     monkeypatch: pytest.MonkeyPatch, status: int
 ) -> None:
@@ -218,7 +216,8 @@ def test_retry_setting_does_not_allow_502_replay(
 
 
 @pytest.mark.parametrize(("status", "expected"), [(401, True), (429, True), (503, True),
-                                                (502, False), (500, False)])
+                                                (502, True), (500, True), (599, True),
+                                                (200, False), (204, False), (299, False)])
 @pytest.mark.parametrize(
     "body",
     [
@@ -230,7 +229,7 @@ def test_retry_setting_does_not_allow_502_replay(
     ],
 )
 def test_retryable_payload_classifier(status: int, body: bytes, expected: bool) -> None:
-    assert DEFAULT_ROUTE_FAILOVER_STATUSES == frozenset({401, 429, 503})
+    """F-004: классификация — любой не-2xx, без status-allowlist."""
     assert is_retryable_presend_payload(status, (), body) is expected
 
 
@@ -246,7 +245,7 @@ def test_retry_delay_uses_retry_after_floor_and_exponential_cap() -> None:
     assert compute_presend_retry_delay((("Retry-After", "1"),), 0, env) == 2.2
 
 
-@pytest.mark.parametrize("status", [401, 429, 503])
+@pytest.mark.parametrize("status", [401, 429, 503, 500, 502, 504])
 def test_sink_accepting_presend_errors_gets_original_response(status: int) -> None:
     body = b'{"type":"proxy_connect_failed","retryable":true}'
     response = _Response(status, body)
@@ -265,7 +264,7 @@ def test_sink_accepting_presend_errors_gets_original_response(status: int) -> No
 
 @pytest.mark.parametrize(("status", "accepts"), [
     (401, False), (429, False), (503, False), (502, False), (500, False),
-    (502, True), (500, True), (200, True),
+    (200, True), (204, True), (299, True),
 ])
 def test_response_without_route_refusal_is_not_read_or_replayed(status: int, accepts: bool) -> None:
     conn = HTTPConnection("127.0.0.1")

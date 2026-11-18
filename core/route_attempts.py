@@ -1,18 +1,14 @@
 """Фазы POST и один владелец бюджета/lease без вложенных повторов."""
-
 from __future__ import annotations
 
 import json
 import os
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
-from typing import Protocol
-
-from core.route_health_policy import (
-    AttemptDecision, RetryBudgetConfig, RetryReason, compute_attempt_decision,
-    validate_retry_config,
-)
+from typing import Final, Protocol
+from core.retry_control import MAX_TOTAL_ATTEMPTS_LIMIT
+from core.route_health_policy import AttemptDecision, RetryBudgetConfig, RetryReason, compute_attempt_decision, validate_retry_config
 from core.routing_contract import PreSendTransientError
 
 DEFAULT_ROUTE_FAILOVER_STATUSES = frozenset({401, 429, 503})
@@ -131,6 +127,20 @@ class RouteFailover:
             extra_error_types=self.error_types, message_markers=self.message_markers,
         )
 
+    def is_refusal(self, status: int, body: bytes = b"") -> bool:
+        """Универсальный отказ слота, сужаемый только явным контрактом провайдера.
+
+        Любой не-2xx — кандидат на pre-commit failover. Провайдер вправе объявить,
+        что конкретный статус (например 403 у OpenCode Go) означает отказ слота
+        лишь при совпадении payload-подписи; остальные статусы остаются
+        универсальными, поэтому allowlist статусов не требуется.
+        """
+        if 200 <= status < 300:
+            return False
+        if status in self.statuses and (self.error_types or self.message_markers):
+            return self.matches(status, body)
+        return True
+
 
 def _str_values(raw: object) -> tuple[str, ...]:
     if not isinstance(raw, (list, tuple, frozenset, set)):
@@ -179,15 +189,17 @@ class PresendEvaluation:
 def evaluate_presend_candidate(
     status: int, read_body: Callable[[], bytes], failover: RouteFailover,
 ) -> PresendEvaluation:
-    """Единый presend-классификатор: читает тело только у кандидата по статусу.
+    """Единый presend-классификатор: читает тело только у не-2xx кандидата.
 
     Уже прочитанное тело возвращается вызывающему явно (`body`), а не вешается
-    атрибутом на системный `HTTPResponse`; терминальные ответы не читаются.
+    атрибутом на системный `HTTPResponse`; терминальные 2xx не читаются.
+    Универсальная семантика: любой не-2xx — кандидат, решение об отказе слота
+    принимает `RouteFailover.is_refusal` (явный контракт провайдера сужает).
     """
-    if status not in failover.effective_statuses():
+    if 200 <= status < 300:
         return PresendEvaluation(False, None)
     body = read_body()
-    return PresendEvaluation(failover.matches(status, body), body)
+    return PresendEvaluation(failover.is_refusal(status, body), body)
 
 
 def _retry_after_s(headers: Sequence[tuple[str, str]]) -> int | None:
@@ -239,9 +251,12 @@ def build_pool_exhausted_error(
     return 429, headers, body
 
 
+BRIDGE_OWNER: Final[str] = "BRIDGE_OWNER"
+GEOROUTER_NO_RETRY_HEADER: Final[str] = "X-Georouter-No-Retry"
+STATELESS_REPLAY_ENDPOINTS: Final[frozenset[str]] = frozenset({"/v1/chat/completions", "/cloudcode/v1internal:streamGenerateContent"})
+
 class AttemptPhase(str, Enum):
     """Монотонные фазы: начало SENDING уже означает возможное исполнение."""
-
     ELIGIBLE = "ELIGIBLE"
     CONNECTING = "CONNECTING"
     SENDING = "SENDING"
@@ -249,40 +264,34 @@ class AttemptPhase(str, Enum):
     COMMITTED = "COMMITTED"
     TERMINAL = "TERMINAL"
 
+_PHASE_ORDER: Final[tuple[AttemptPhase, ...]] = tuple(AttemptPhase)
 
 @dataclass(frozen=True, slots=True)
 class AttemptState:
     """Накопленные факты попытки; commit и начало write необратимы."""
-
     phase: AttemptPhase = AttemptPhase.ELIGIBLE
     body_sent: bool = False
     committed: bool = False
     status_code: int = 0
-
+    timed_out: bool = False
+    truncated: bool = False
+    tool_side_effects: bool = False
 
 def transition(state: AttemptState, phase: AttemptPhase, status_code: int = 0) -> AttemptState:
     """Чистый переход, не разрешающий возврат в безопасную pre-send фазу."""
-    order = tuple(AttemptPhase)
+    order = _PHASE_ORDER
     current, target = order.index(state.phase), order.index(phase)
     if target != current + 1 and phase != AttemptPhase.TERMINAL:
         raise ValueError("attempt_phase_transition_invalid")
-    return AttemptState(
-        phase, state.body_sent or phase == AttemptPhase.SENDING,
-        state.committed or phase == AttemptPhase.COMMITTED,
-        status_code or state.status_code,
-    )
+    return replace(state, phase=phase, body_sent=state.body_sent or phase == AttemptPhase.SENDING, committed=state.committed or phase == AttemptPhase.COMMITTED, status_code=status_code or state.status_code)
 
-
-def _replay_safe(outcome: AttemptState | Mapping[str, object], statuses: Iterable[int]) -> bool:
+def _replay_safe(
+    outcome: AttemptState | Mapping[str, object], statuses: Iterable[int],
+) -> bool:
     if isinstance(outcome, AttemptState):
-        phase, sent, committed, status = (
-            outcome.phase, outcome.body_sent, outcome.committed, outcome.status_code,
-        )
+        phase, sent, committed, status = outcome.phase, outcome.body_sent, outcome.committed, outcome.status_code
     else:
-        phase, sent, committed, status = (
-            outcome.get("phase"), outcome.get("body_sent"),
-            outcome.get("committed", True), outcome.get("status_code"),
-        )
+        phase, sent, committed, status = outcome.get("phase"), outcome.get("body_sent"), outcome.get("committed", True), outcome.get("status_code")
     if committed is not False or type(status) is not int or type(sent) is not bool:
         return False
     if phase == AttemptPhase.CONNECTING:
@@ -314,78 +323,56 @@ def decide_attempt(
         return decision
     return AttemptDecision(False, 0.0, RetryReason.NON_RETRYABLE_CATEGORY)
 
-
 class RouteRefusal(RuntimeError):
     """Явный HTTP-отказ до commit; произвольный retryable payload не подходит."""
-
-    def __init__(
-        self, status_code: int, response_headers: tuple[tuple[str, str], ...] = (),
-        response_body: bytes = b"",
-    ) -> None:
+    def __init__(self, status_code: int, response_headers: tuple[tuple[str, str], ...] = (), response_body: bytes = b"") -> None:
         super().__init__("route_refused")
-        self.status_code = status_code
-        self.response_headers = response_headers
-        self.response_body = response_body
-
+        self.status_code: int = status_code
+        self.response_headers: tuple[tuple[str, str], ...] = response_headers
+        self.response_body: bytes = response_body
 
 class RouteUnavailable(RuntimeError):
     """Нет допущенной попытки или исчерпан исходный бюджет."""
 
-
 class AttemptCancelled(RuntimeError):
     """Клиент ушёл; это discard, а не отказ origin."""
 
-
 class AttemptLease(Protocol):
     """Единственный владелец record/release; close обязан быть ограниченным."""
-
     def finish(self, state: AttemptState, error: BaseException | None) -> None: ...
-
     def close(self) -> None: ...
-
 
 class AttemptPorts(Protocol):
     """Транспорт и существующий resilience/token budget остаются снаружи."""
-
     def ready(self, backend: str) -> bool: ...
-
     def acquire(self, backend: str, remaining_deadline_s: float) -> AttemptLease | None: ...
-
     def execute(self, backend: str, attempt: RouteAttempt) -> object: ...
-
     def retry_token(self) -> bool:
         """Неблокирующий debit общего process-wide retry budget."""
         ...
-
     def cancelled(self) -> bool: ...
 
-
 class RouteAttempt:
-    """Контекст одной физической попытки; execute отмечает фазы до I/O.
-
-    budget_s/deadline_s применяются к connect/send, но не убивают активный
-    ответ. Поток использует существующее sliding activity window адаптера.
-    Любые local presend/nonstream/capacity retries внутри execute запрещены.
-    """
-
+    """Контекст одной физической попытки; execute отмечает фазы до I/O. budget_s/deadline_s применяются к connect/send, но не убивают активный ответ; local presend/nonstream/capacity retries внутри execute запрещены."""
     def __init__(self, budget_s: float, deadline_s: float, clock: Callable[[], float]) -> None:
-        self.budget_s = budget_s
-        self.deadline_s = deadline_s
-        self._state = AttemptState()
-        self.local_retries_enabled = False
-        self._clock = clock
-
+        self.budget_s: float = budget_s
+        self.deadline_s: float = deadline_s
+        self._state: AttemptState = AttemptState()
+        self.local_retries_enabled: bool = False
+        self._clock: Callable[[], float] = clock
     def advance(self, phase: AttemptPhase, status_code: int = 0) -> None:
         self._state = transition(self._state, phase, status_code)
-
+    def advance_to(self, target: AttemptPhase, status_code: int = 0) -> None:
+        """Идёт вперёд до target, не повторяя фазы, которые уже сдвинул serve_passthrough."""
+        while _PHASE_ORDER.index(self._state.phase) < _PHASE_ORDER.index(target):
+            following = _PHASE_ORDER[_PHASE_ORDER.index(self._state.phase) + 1]
+            self.advance(following, status_code if following is AttemptPhase.RESPONSE_HEADERS else 0)
     @property
     def state(self) -> AttemptState:
         return self._state
-
     def remaining_s(self) -> float:
         """Порт перепроверяет остаток перед connect/send и после ожиданий."""
         return max(0.0, self.deadline_s - self._clock())
-
 
 class RouteAttemptRunner:
     """Одноразовый request owner, без общего списка посещённых маршрутов."""
@@ -423,7 +410,6 @@ class RouteAttemptRunner:
     def _check_cancelled(self) -> None:
         if self._ports.cancelled():
             raise AttemptCancelled("client_gone")
-
     def _context(self) -> RouteAttempt:
         self._check_cancelled()
         now = self._clock()
@@ -434,7 +420,6 @@ class RouteAttemptRunner:
         if not decision.allow_retry:
             raise RouteUnavailable(decision.reason.value)
         return RouteAttempt(decision.attempt_budget_s, now + decision.attempt_budget_s, self._clock)
-
     def _execute(self, backend: str, lease: AttemptLease) -> tuple[bool, object]:
         attempt = RouteAttempt(0.0, self._started_s, self._clock)
         error: BaseException | None = None
@@ -458,10 +443,7 @@ class RouteAttemptRunner:
             raise
         finally:
             self._release(lease, attempt, error)
-
-    def _release(
-        self, lease: AttemptLease, attempt: RouteAttempt, error: BaseException | None,
-    ) -> None:
+    def _release(self, lease: AttemptLease, attempt: RouteAttempt, error: BaseException | None) -> None:
         # Ошибка cleanup не является разрешением повторить даже безопасный POST.
         state, last_state = attempt.state, self._last_state
         self._last_state = None
@@ -471,7 +453,6 @@ class RouteAttemptRunner:
         finally:
             lease.close()
         self._last_state = last_state
-
     def _retryable_error(self, error: BaseException) -> bool:
         state = self._last_state
         if state is None:
@@ -496,7 +477,6 @@ class RouteAttemptRunner:
         if lease is None:
             return False, None
         return self._execute(backend, lease)
-
     def run(self) -> object:
         """Посещает backend один раз; только доказанный отказ допускает следующий."""
         if self._used:
@@ -508,7 +488,6 @@ class RouteAttemptRunner:
             if self._last_error is not None:
                 raise self._last_error from None
             raise
-
     def _run_routes(self) -> object:
         for backend in self._routes:
             self._check_cancelled()
@@ -527,3 +506,84 @@ class RouteAttemptRunner:
         if self._last_error is not None:
             raise self._last_error
         raise RouteUnavailable("route_unavailable")
+
+@dataclass(frozen=True, slots=True)
+class RequestIdentity:
+    """Неподменяемая идентичность запроса: модель и effort на всех попытках."""
+    canonical_model_id: str = ""
+    effort: str = ""
+    @classmethod
+    def from_facts(cls, facts: Mapping[str, object]) -> RequestIdentity:
+        model, effort = facts.get("canonical_model_id"), facts.get("effort")
+        return cls(model if isinstance(model, str) else "", effort if isinstance(effort, str) else "")
+    @property
+    def is_valid(self) -> bool:
+        return bool(self.canonical_model_id and self.effort)
+
+@dataclass(slots=True)
+class FailoverFSM:
+    """Монотонные fences: закрытый забор назад не открывается."""
+    downstream_committed: bool = False
+    tool_side_effects: bool | None = False
+    wire_send_started: bool = False
+    @classmethod
+    def from_facts(cls, facts: Mapping[str, object]) -> FailoverFSM:
+        fsm = cls()
+        fsm.observe(facts)
+        return fsm
+    def observe(self, facts: Mapping[str, object]) -> None:
+        if "downstream_committed" in facts and facts["downstream_committed"] is not False:
+            self.downstream_committed = True
+        if "tool_side_effects" in facts and facts["tool_side_effects"] is not False and self.tool_side_effects is not True:
+            self.tool_side_effects = True if facts["tool_side_effects"] is True else None
+        if facts.get("wire_send_started") is True:
+            self.wire_send_started = True
+    def commit_downstream(self) -> None:
+        self.downstream_committed = True
+    def record_tool_side_effects(self, value: bool | None = True) -> None:
+        if value is not False and self.tool_side_effects is not True:
+            self.tool_side_effects = value
+    @property
+    def fenced(self) -> bool:
+        return self.downstream_committed or self.tool_side_effects is not False
+
+def normalize_replay_endpoint(endpoint: str) -> str:
+    """Live-path нормализация: query-string не меняет stateless-семантику POST."""
+    return endpoint.split("?", 1)[0] if isinstance(endpoint, str) else ""
+
+def _cap_attempts(value: object) -> int:
+    return min(value, MAX_TOTAL_ATTEMPTS_LIMIT) if type(value) is int and value >= 1 else 1
+
+def _is_failure(facts: Mapping[str, object]) -> bool:
+    """Success — любой 2xx int (bool не статус); таймаут/обрыв всегда failure."""
+    status = facts.get("status_code")
+    success = isinstance(status, int) and not isinstance(status, bool) and 200 <= status < 300
+    return facts.get("timed_out") is True or facts.get("truncated") is True or not success
+
+def evaluate_replay(facts: Mapping[str, object]) -> dict[str, object]:
+    """Единый оценщик replay: любой non-200/timeout/truncation доходит сюда; статус-allowlist нет — решают fences, точный stateless endpoint при начатой wire-отправке, BRIDGE_OWNER и жёсткий cap из retry_control."""
+    identity, fsm, cap = RequestIdentity.from_facts(facts), FailoverFSM.from_facts(facts), _cap_attempts(facts.get("max_total_attempts"))
+    wire = facts.get("wire_send_started")
+    endpoint_ok = wire is False or (wire is True and facts.get("endpoint") in STATELESS_REPLAY_ENDPOINTS)
+    allowed = facts.get("retry_owner") == BRIDGE_OWNER and identity.is_valid and not fsm.fenced and endpoint_ok and cap >= 2 and _is_failure(facts)
+    return {"evaluator_invoked": True, "replay_allowed": allowed, "max_total_attempts": cap, "canonical_model_id": identity.canonical_model_id, "effort": identity.effort, "retry_owner": facts.get("retry_owner"), "nested_retry_allowed": False, "downstream_committed": fsm.downstream_committed, "tool_side_effects": fsm.tool_side_effects, "wire_send_started": fsm.wire_send_started}
+
+def build_georouter_headers(facts: Mapping[str, object]) -> dict[str, str]:
+    """BRIDGE_OWNER запрещает вложенный retry геороутера одним заголовком."""
+    return {GEOROUTER_NO_RETRY_HEADER: "1"} if facts.get("retry_owner") == BRIDGE_OWNER else {}
+
+def run_failover(facts: Mapping[str, object], attempt: Callable[[str, str], Mapping[str, object]]) -> dict[str, object]:
+    """Исполняет попытки с одной идентичностью; fences монотонны, cap жёсткий."""
+    identity, fsm = RequestIdentity.from_facts(facts), FailoverFSM.from_facts(facts)
+    initial, cap = evaluate_replay(facts), _cap_attempts(facts.get("max_total_attempts"))
+    attempts, last = 0, dict[str, object]()
+    while attempts < cap:
+        last = dict(attempt(identity.canonical_model_id, identity.effort))
+        attempts += 1
+        fsm.observe(last)
+        if attempts >= cap or not _is_failure(last):
+            break
+        merged: dict[str, object] = {**facts, **last, "canonical_model_id": identity.canonical_model_id, "effort": identity.effort, "retry_owner": facts.get("retry_owner"), "max_total_attempts": cap, "downstream_committed": fsm.downstream_committed, "tool_side_effects": fsm.tool_side_effects, "wire_send_started": True if fsm.wire_send_started else facts.get("wire_send_started")}
+        if evaluate_replay(merged)["replay_allowed"] is not True:
+            break
+    return {**initial, "physical_attempts": attempts, "status_code": last.get("status_code"), "downstream_committed": fsm.downstream_committed, "tool_side_effects": fsm.tool_side_effects}

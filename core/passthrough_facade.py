@@ -1,7 +1,5 @@
 """Композиция HTTP и passthrough через живые порты server, без обратного импорта."""
-
 from __future__ import annotations
-
 import os
 import threading
 import time
@@ -9,82 +7,63 @@ from collections.abc import Mapping
 from copy import copy
 from dataclasses import dataclass, field, fields, replace
 from typing import Any
-
 from core.backend_adapter import PreSendTransientError as AdapterPreSendError
+from core.effort_policy import pin_wire_effort
 from core.http_post_dispatch import _cleanup_post, _passthrough, dispatch_route
 from core.http_post_ingress import begin_post, read_post_request
 from core.http_post_routing import prepare_post_body, resolve_post_route, selected_route_allowed
 from core.passthrough_exchange import _validate_endpoint, internal_trace_scope
-from core.route_attempts import (
-    AttemptPhase,
-    RouteAttempt,
-    RouteFailover,
-    RouteRefusal,
-    build_pool_exhausted_error,
-    decide_attempt,
-    failover_from_mapping,
-)
+from core.retry_control import MAX_RETRY_RATIO, MAX_TOTAL_ATTEMPTS_LIMIT, CircuitPolicy, HealthDomain, RetryReservation, RetrySizing, RetryTokenBucket, RouteCandidate, RouteCircuitBreaker, validate_retry_sizing
+from core.route_attempts import BRIDGE_OWNER, STATELESS_REPLAY_ENDPOINTS, AttemptPhase, AttemptState, RouteAttempt, RouteFailover, RouteRefusal, build_georouter_headers, build_pool_exhausted_error, evaluate_replay, failover_from_mapping, normalize_replay_endpoint
 from core.route_eligibility import EligibilityFacts, request_snapshot, route_eligible
-from core.route_health_policy import RetryBudgetConfig
+from core.route_health_policy import RetryBudgetConfig, compute_attempt_decision
 from core.routing_contract import ROUTING_ALGORITHM, PreSendTransientError, parse_routes
 from core.runtime_env import NumSpec, parse_number
 from core.transport_credentials import credential_ready
 from core.transport_routing import route_order
 from core.transport_settings import ROUTING_FLAG, resolve_transport_seed
 
-
 @dataclass(frozen=True)
 class PassthroughCall:
     """Прежние аргументы HTTP-шва без изменения публичного метода handler."""
-
     adapter: Any
     raw: bytes
     request: dict[str, Any]
     model_id: str
     hub_auth_ok: bool = False
 
-
 def _headers(handler: Any, host: Any, call: PassthroughCall) -> dict[str, str]:
     headers = dict(handler.headers.items())
     if host.REQUEST_ATTRIBUTION_ENABLED:
         names = {host.REQUEST_ID_HEADER.lower(), host.SUBAGENT_ID_HEADER.lower()}
-        headers = {key: value for key, value in headers.items() if key.lower() not in names}
-        headers.update(host._trace_headers(handler._trace))
+        headers = {key: value for key, value in headers.items() if key.lower() not in names} | dict(host._trace_headers(handler._trace))
     if call.hub_auth_ok and not getattr(call.adapter, "_upstream_key", None):
-        headers = {key: value for key, value in headers.items()
-                   if key.lower() not in {"authorization", "x-api-key", "x-turn-owner-token"}}
-    headers["X-Bridge-No-Retry"] = "1"
+        headers = {key: value for key, value in headers.items() if key.lower() not in {"authorization", "x-api-key", "x-turn-owner-token"}}
+    headers.update({"X-Bridge-No-Retry": "1", **build_georouter_headers({"retry_owner": BRIDGE_OWNER})})
     return headers
-
-
-def _canonical_model(host: Any, model_id: str) -> str:
-    models = host.FLEET.get("models", {}) if isinstance(host.FLEET, dict) else {}
-    return (host._resolve_model_alias(model_id, models) or (model_id,))[0]
-
 
 def _outcome(handler: Any, host: Any, sink: Any, model_id: str) -> None:
     lease = handler._current_lease()
-    model_id = _canonical_model(host, model_id)
+    models = host.FLEET.get("models", {}) if isinstance(host.FLEET, dict) else {}
+    model_id = (host._resolve_model_alias(model_id, models) or (model_id,))[0]
     error_type_fn = getattr(sink, "error_type", None)
     error_type = error_type_fn() if callable(error_type_fn) else ""
     discard = host._passthrough_discard_reason(sink.status, error_type)
+    quota = sink.status in (429, 402, 408)
     # ADR-0020 §3.2: обрыв клиента, таймаут шага и оборванный стрим нейтральны.
     if sink._client_gone_flag or discard:
         lease.record_discard("client_disconnected" if sink._client_gone_flag else discard)
-    elif sink.status in (429, 402, 408):
-        # Квота/лимит/таймаут старта относятся к модели, а не к здоровью origin.
-        lease.record_success()
-        host._PENALTY_TRACKER.record_start_failure(model_id, f"http_{sink.status}")
     elif 200 <= sink.status < 300 and not error_type:
         lease.record_success()
         host._PENALTY_TRACKER.record_start_success(model_id)
-    elif 400 <= sink.status < 500:
-        # Ошибка клиента не открывает circuit breaker.
+    elif quota or 400 <= sink.status < 500:
+        # Квота/лимит/старт-таймаут и ошибки клиента относятся к модели, не к здоровью origin.
         lease.record_success()
+        if quota:
+            host._PENALTY_TRACKER.record_start_failure(model_id, f"http_{sink.status}")
     else:
         lease.record_failure()
         host._PENALTY_TRACKER.record_start_failure(model_id, error_type or f"http_{sink.status}")
-
 
 def serve_passthrough(handler: Any, host: Any, call: PassthroughCall) -> None:
     """Сохраняет headers, liveness, telemetry и единственную фиксацию исхода."""
@@ -98,19 +77,15 @@ def serve_passthrough(handler: Any, host: Any, call: PassthroughCall) -> None:
     headers = [*extra_headers, ("X-Turn-Id", live_id)] if live_id else extra_headers
     sink = host._HandlerSink(handler, extra_headers=headers)
     attempt = getattr(handler, "_transport_attempt", None)
-    sink.accepts_presend_errors = attempt is not None and not getattr(handler, "_headers_already_sent", False)
-    sink.presend_deadline = attempt.deadline_s if attempt is not None else None
+    sink.accepts_presend_errors, sink.presend_deadline = attempt is not None and not getattr(handler, "_headers_already_sent", False), attempt.deadline_s if attempt is not None else None
     try:
         if live_id:
             host.get_registry().register(live_id, host._owner_token_hash(handler), window)
         with internal_trace_scope(extra_headers):
-            adapter.handle(path=handler.path, raw_body=raw, request=request,
-                           headers=_headers(handler, host, call), sink=sink,
-                           **({"window": window} if live_id else {}))
+            adapter.handle(path=handler.path, raw_body=raw, request=request, headers=_headers(handler, host, call), sink=sink, **({"window": window} if live_id else {}))
         _outcome(handler, host, sink, call.model_id)
     except RouteRefusal as error:
-        attempt.advance(AttemptPhase.SENDING)
-        attempt.advance(AttemptPhase.RESPONSE_HEADERS, error.status_code)
+        attempt.advance_to(AttemptPhase.RESPONSE_HEADERS, error.status_code)
         sink.status = error.status_code
         _outcome(handler, host, sink, call.model_id)
         raise
@@ -119,28 +94,20 @@ def serve_passthrough(handler: Any, host: Any, call: PassthroughCall) -> None:
         handler._telemetry_passthrough_done(sink.status)
         host._log(f"done route=passthrough status={sink.status} {handler._trace_log_fields()} elapsed_ms={int((time.monotonic() - started) * 1000)}")
 
-
 def _plain_params(value: Any) -> Any:
     if isinstance(value, Mapping):
         return {key: _plain_params(item) for key, item in value.items()}
-    if isinstance(value, tuple):
-        return [_plain_params(item) for item in value]
-    return value
-
+    return [_plain_params(item) for item in value] if isinstance(value, tuple) else value
 
 def _selected(route: Any, spec: Any) -> tuple[Any, Any]:
     model = {**route.model, "backend": spec.backend, "params": _plain_params(spec.params)}
-    model.update({name: value for name in ("upstream_model", "default_effort", "context_window", "max_tokens")
-                  if (value := getattr(spec, name)) is not None})
-    for name in ("efforts", "input"):
-        if value := getattr(spec, name):
-            model[name] = list(value)
+    model.update({name: value for name in ("upstream_model", "default_effort", "context_window", "max_tokens") if (value := getattr(spec, name)) is not None})
+    model.update({name: list(value) for name in ("efforts", "input") if (value := getattr(spec, name))})
     adapter = route.host.BACKENDS.get(spec.backend)
     if adapter is not None and spec.credential_ref is not None:
         adapter = copy(adapter)
         adapter.config = {**adapter.config, "api_key_ref": spec.credential_ref}
     return replace(route, model=model), adapter
-
 
 def _eligible(route: Any, spec: Any, policy: Any) -> bool:
     selected, adapter = _selected(route, spec)
@@ -153,72 +120,110 @@ def _eligible(route: Any, spec: Any, policy: Any) -> bool:
         preflight, healthy = adapter.preflight()[0], adapter.is_healthy()
         member = any(model.id == route.model_id for model in adapter.get_models())
         circuit = route.host.RESILIENCE.snapshot((spec.backend,))["backends"][spec.backend]
-        ready = all((adapter.config.get("enabled", True), preflight, healthy, member,
-                     not passthrough or credential_ready(adapter.config)))
+        ready = all((adapter.config.get("enabled", True), preflight, healthy, member, not passthrough or credential_ready(adapter.config)))
         # preflight/is_healthy выше — свежие локальные проверки, не кэш probe.
-        facts = EligibilityFacts(
-            ready=ready, circuit_open=circuit["state"] == "OPEN", blocked_models=(),
-            probe_age_s=0.0, max_stale_age_s=0.0, env_drift_keys=(),
-            supports_images="image" in selected.model.get("input", ()),
-            backend_kind=adapter.kind,
-        )
+        facts = EligibilityFacts(ready=ready, circuit_open=circuit["state"] == "OPEN", blocked_models=(), probe_age_s=0.0, max_stale_age_s=0.0, env_drift_keys=(), supports_images="image" in selected.model.get("input", ()), backend_kind=adapter.kind)
         return route_eligible(spec, facts, policy)
     except (ValueError, OSError):
         return False
 
+@dataclass
+class _RuntimeState:
+    """Process-wide retry bucket и circuit breaker: состояние переживает запросы."""
+    lock: Any = field(default_factory=threading.Lock)
+    bucket: RetryTokenBucket | None = None
+    sizing: RetrySizing | None = None
+    breaker: RouteCircuitBreaker | None = None
 
-def _budget() -> RetryBudgetConfig:
-    defaults = RetryBudgetConfig()
-    return RetryBudgetConfig(**{
-        field.name: type(getattr(defaults, field.name))(
-            os.environ.get("BRIDGE_TRANSPORT_" + field.name.upper(), getattr(defaults, field.name))
-        ) for field in fields(defaults)
-    })
+_RUNTIME = _RuntimeState()
 
-
-@dataclass(slots=True)
-class _RetryBucket:
-    tokens: float = 0.0
-    updated_at: float = 0.0
-    lock: threading.Lock = field(default_factory=threading.Lock)
-
-
-_RETRY_BUCKET = _RetryBucket()
-
-
-def _retry_token(config: RetryBudgetConfig) -> bool:
-    """Общий неблокирующий bucket с настраиваемыми burst и скоростью refill."""
-    now = time.monotonic()
+def _begin_retry_request(config: RetryBudgetConfig, eligible_routes: int) -> RetryReservation:
+    """Старт logical request: sizing из окружения, admit_primary и upfront-резервация."""
     prefix, env = "BRIDGE_TRANSPORT_RETRY_BUCKET_", os.environ
     capacity = parse_number(env, NumSpec((prefix + "CAPACITY",), 100, 1, float("inf")))
-    rate = parse_number(env, NumSpec((prefix + "RATE_S",), config.max_attempts, 0, float("inf")))
-    with _RETRY_BUCKET.lock:
-        tokens, previous = _RETRY_BUCKET.tokens, _RETRY_BUCKET.updated_at
-        tokens = capacity if not previous else min(capacity, tokens + (now - previous) * rate)
-        allowed = tokens >= 1
-        _RETRY_BUCKET.tokens, _RETRY_BUCKET.updated_at = tokens - int(allowed), now
-        return allowed
+    ratio = parse_number(env, NumSpec((prefix + "RATIO",), MAX_RETRY_RATIO, 0, float("inf")))
+    with _RUNTIME.lock:
+        sizing = validate_retry_sizing({"capacity": capacity, "retry_ratio": ratio, "max_total_attempts": min(config.max_attempts, MAX_TOTAL_ATTEMPTS_LIMIT)})
+        if _RUNTIME.bucket is None or sizing != _RUNTIME.sizing:
+            _RUNTIME.bucket, _RUNTIME.sizing = RetryTokenBucket(sizing), sizing
+        _RUNTIME.bucket.admit_primary()
+        return _RUNTIME.bucket.reserve(eligible_routes)
 
+def _retry_token(reservation: RetryReservation | None) -> bool:
+    """Только расход собственной резервации запроса; без неё — отказ."""
+    return reservation.consume() if reservation is not None else False
+
+def _breaker() -> RouteCircuitBreaker:
+    """Singleton сохраняет здоровье доменов; порог и cooldown задаются только окружением."""
+    prefix, env = "BRIDGE_TRANSPORT_CIRCUIT_", os.environ
+    policy = CircuitPolicy(parse_number(env, NumSpec((prefix + "FAILURE_THRESHOLD",), 3, 1, 1000, integer=True)), parse_number(env, NumSpec((prefix + "COOLDOWN_S",), 30.0, 0, float("inf"))))
+    with _RUNTIME.lock:
+        _RUNTIME.breaker = _RUNTIME.breaker or RouteCircuitBreaker(policy)
+        return _RUNTIME.breaker
+
+def _route_request(route: Any) -> Mapping[str, Any]:
+    """Payload маршрута; отсутствие `request` (деградированный маршрут) не падает."""
+    request = getattr(route, "request", None)
+    return request if isinstance(request, Mapping) else {}
+
+def _effort(route: Any) -> str:
+    request = _route_request(route)
+    model = getattr(route, "model", None)
+    values = (request.get("reasoning_effort"), getattr(route, "alias_effort", None), model.get("default_effort") if isinstance(model, Mapping) else None)
+    return next((value for value in values if isinstance(value, str) and value), "")
+
+def _pin_effort(route: Any) -> Any:
+    """Закрепляет replay-effort в payload до наложения параметров маршрута."""
+    request = getattr(route, "request", None)
+    if not isinstance(request, Mapping):
+        return route
+    if not (effort := _effort(route)) or request.get("reasoning_effort") == effort:
+        return route
+    route.request = pin_wire_effort(dict(request), effort)
+    return route
 
 def _attempt(route: Any, spec: Any, body: Any, attempt: RouteAttempt) -> None:
     selected, adapter = _selected(route, spec)
-    handler = route.handler
-    handler._transport_attempt = attempt
+    route.handler._transport_attempt = attempt
     try:
         if isinstance(adapter, route.host.PassthroughAdapter) and spec.credential_ref is not None:
             # Только credential overlay требует локального adapter; реестр не меняется.
-            if not selected_route_allowed(selected):
-                return
-            _passthrough(selected, adapter, body)
+            if selected_route_allowed(selected):
+                _passthrough(selected, adapter, body)
         else:
             dispatch_route(selected, body)
     finally:
-        handler._transport_attempt = None
+        route.handler._transport_attempt = None
 
+def _replay_gate(
+    route: Any, state: AttemptState | None, config: RetryBudgetConfig,
+    declared: RouteFailover | None = None,
+) -> bool:
+    """Fail-closed: без известного effort и без реальных фактов попытки replay запрещён."""
+    if state is None:
+        return True
+    if (
+        not _effort(route)
+        and declared is not None
+        and declared.opt_in
+        and state.status_code in declared.statuses
+        and not state.committed
+    ):
+        # Маршрут явно объявил этот статус отказом слота: переход к следующему
+        # слоту того же объявления — не replay исполненного запроса, а failover.
+        return True
+    path = getattr(route.handler, "path", None)
+    effort = _effort(route)
+    endpoint = normalize_replay_endpoint(path) if isinstance(path, str) else ""
+    if not effort:
+        return False
+    facts: dict[str, object] = {"status_code": state.status_code, "timed_out": state.timed_out, "truncated": state.truncated, "wire_send_started": state.body_sent, "endpoint": endpoint, "tool_side_effects": state.tool_side_effects or endpoint not in STATELESS_REPLAY_ENDPOINTS, "downstream_committed": state.committed, "retry_owner": BRIDGE_OWNER, "max_total_attempts": config.max_attempts, "canonical_model_id": route.model_id, "effort": effort}
+    return evaluate_replay(facts)["replay_allowed"] is True
 
 def _route_failover(route: Any, backend: str) -> RouteFailover:
     """Per-route opt-in: контракт только этого бэкенда, без объединения по модели."""
-    adapter = route.host.BACKENDS.get(backend)
+    registries = getattr(route.host, "BACKENDS", None)
+    adapter = registries.get(backend) if isinstance(registries, Mapping) else None
     return failover_from_mapping(
         getattr(adapter, "config", None) if adapter is not None else None
     )
@@ -240,85 +245,90 @@ def _exhausted_pool(
 
 
 def _run_routes(route: Any, routes: Any, seed: str, policy: Any) -> None:
-    config, started, last_error, state = _budget(), time.monotonic(), None, None
-    routing = {"enabled": True, "algorithm": ROUTING_ALGORITHM, **route.model["routing"]}
-    model = {**route.model, "routing": routing}
+    defaults = RetryBudgetConfig()
+    config = RetryBudgetConfig(**{field.name: type(getattr(defaults, field.name))(os.environ.get("BRIDGE_TRANSPORT_" + field.name.upper(), getattr(defaults, field.name))) for field in fields(defaults)})
+    config, started, last_error, state = replace(config, max_attempts=min(config.max_attempts, MAX_TOTAL_ATTEMPTS_LIMIT)), time.monotonic(), None, None
     by_backend = {spec.backend: spec for spec in routes}
-    order = route_order(route.model_id, model, seed,
-                        getattr(route.handler._trace, "subagent_id", None), routes)
-    body, count = prepare_post_body(route), 0
+    model = {**route.model, "routing": {"enabled": True, "algorithm": ROUTING_ALGORITHM, **route.model["routing"]}}
+    order = tuple(route_order(route.model_id, model, seed, getattr(route.handler._trace, "subagent_id", None), routes))
+    route = _pin_effort(route)
+    body, count, breaker, reservation = prepare_post_body(route), 0, _breaker(), _begin_retry_request(config, len(order))
     refusals: list[tuple[str, RouteRefusal, RouteFailover]] = []
-    previous_failover = RouteFailover()
-    for backend in order:
-        if route.host._client_gone(route.handler.connection):
+    declared: RouteFailover | None = None
+    try:
+        for backend in order:
+            if route.host._client_gone(route.handler.connection):
+                return
+            spec, now = by_backend[backend], time.monotonic()
+            decision = compute_attempt_decision(config, count, now - started)
+            if not decision.allow_retry or not _replay_gate(route, state, config, declared):
+                break
+            if not _eligible(route, spec, policy):
+                continue
+            candidate = RouteCandidate(route_id=spec.backend, origin=route.model_id, node=spec.backend, credential_scope=getattr(spec, "credential_ref", None) or "unscoped", identity=f"{route.model_id}:{_effort(route)}")
+            probe = breaker.try_acquire(candidate, now)
+            if probe is None:
+                # Открытый circuit пропускает маршрут без списания попытки.
+                continue
+            if count and not _retry_token(reservation):
+                _ = breaker.release_probe(probe)
+                break
+            count += 1
+            failover = _route_failover(route, backend)
+            attempt = RouteAttempt(decision.attempt_budget_s, now + decision.attempt_budget_s, time.monotonic)
+            attempt.advance(AttemptPhase.CONNECTING)
+            try:
+                _attempt(route, spec, body, attempt)
+            except (RouteRefusal, PreSendTransientError, AdapterPreSendError) as error:
+                # Клиентский 4xx (кроме 403/429 — здоровье маршрута) не отравляет circuit.
+                if not (isinstance(error, RouteRefusal) and 400 <= error.status_code < 500 and error.status_code not in (403, 429)):
+                    breaker.record_failure(candidate, HealthDomain.ROUTE, time.monotonic())
+                _ = breaker.release_probe(probe)
+                if isinstance(error, RouteRefusal):
+                    attempt.advance_to(AttemptPhase.RESPONSE_HEADERS, error.status_code)
+                    if failover.opt_in:
+                        refusals.append((backend, error, failover))
+                        declared = failover
+                # timed_out — наблюдённый факт дедлайна попытки; commit/side-effects уже в state.
+                state = replace(attempt.state, timed_out=not isinstance(error, RouteRefusal) and attempt.remaining_s() <= 0)
+                last_error = error
+                continue
+            breaker.record_success(candidate, HealthDomain.ROUTE)
+            _ = probe.succeed(time.monotonic())
+            attempt.advance_to(AttemptPhase.COMMITTED)
             return
-        # Исход предыдущей попытки судит контракт её собственного бэкенда:
-        # non-opt-in маршрут не наследует failover-статусы соседа по модели.
-        decision = decide_attempt(
-            config, count, time.monotonic() - started, state, failover=previous_failover,
-        )
-        if not decision.allow_retry:
-            break
-        spec = by_backend[backend]
-        if not _eligible(route, spec, policy):
-            continue
-        if count and not _retry_token(config):
-            break
-        count += 1
-        failover = _route_failover(route, backend)
-        attempt = RouteAttempt(decision.attempt_budget_s, time.monotonic() + decision.attempt_budget_s, time.monotonic)
-        attempt.advance(AttemptPhase.CONNECTING)
-        try:
-            _attempt(route, spec, body, attempt)
-            return
-        except (RouteRefusal, PreSendTransientError, AdapterPreSendError) as error:
-            last_error, state = error, attempt.state
-            previous_failover = failover
-            if isinstance(error, RouteRefusal) and failover.opt_in:
-                refusals.append((backend, error, failover))
-    if isinstance(last_error, RouteRefusal):
-        sink = route.host._HandlerSink(route.handler, extra_headers=route.host._trace_headers(route.handler._trace))
-        pool = _exhausted_pool(refusals)
-        if pool is not None:
-            pool_label, pool_refusals = pool
-            status, headers, payload = build_pool_exhausted_error(
-                pool_refusals, pool_label=pool_label,
-            )
-            sink.start(status, list(headers))
-            sink.write(payload)
+        if isinstance(last_error, RouteRefusal):
+            sink = route.host._HandlerSink(route.handler, extra_headers=route.host._trace_headers(route.handler._trace))
+            pool = _exhausted_pool(refusals)
+            if pool is None:
+                sink.start(last_error.status_code, list(last_error.response_headers))
+                sink.write(last_error.response_body)
+            else:
+                pool_label, pool_refusals = pool
+                status, headers, payload = build_pool_exhausted_error(pool_refusals, pool_label=pool_label)
+                sink.start(status, list(headers))
+                sink.write(payload)
         else:
-            sink.start(last_error.status_code, list(last_error.response_headers))
-            sink.write(last_error.response_body)
-    else:
-        route.reject(503, "route_unavailable", "no eligible transport is available")
-
+            route.reject(503, "route_unavailable", "no eligible transport is available")
+    finally:
+        _ = reservation.release_unused()
 
 def _request_policy(route: Any) -> Any:
     """Объединяет все источники ролей: header не может скрыть роль в body."""
     request = {**route.request, "canonical_model_id": route.model_id}
     if request.get("reasoning_effort") is None and route.alias_effort is not None:
         request["reasoning_effort"] = route.alias_effort
-    policy = request_snapshot(request)
-    trace_role = getattr(getattr(route.handler, "_trace", None), "subagent_id", None)
-    header_policy = request_snapshot({"model": route.model_id, "headers": dict(route.handler.headers.items()),
-                                      "trace_subagent_id": trace_role if isinstance(trace_role, str) else None})
+    policy, trace_role = request_snapshot(request), getattr(getattr(route.handler, "_trace", None), "subagent_id", None)
+    header_policy = request_snapshot({"model": route.model_id, "headers": dict(route.handler.headers.items()), "trace_subagent_id": trace_role if isinstance(trace_role, str) else None})
     return replace(policy, role_ids=policy.role_ids + header_policy.role_ids, excluded=policy.excluded | header_policy.excluded)
 
-
 def _model_routing(model: dict[str, Any]) -> dict[str, Any]:
-    routing = model.get("routing")
-    backend = model.get("backend")
-    if isinstance(routing, dict) and (
-        routing.get("legacy_backend") in (None, backend)
-        or backend == routing.get("disabled_backend")
-    ):
+    routing, backend = model.get("routing"), model.get("backend")
+    if isinstance(routing, dict) and (routing.get("legacy_backend") in (None, backend) or backend == routing.get("disabled_backend")):
         return routing
     if not backend:
         return {}
-    spec = dict(route_id=backend, backend=backend, weight=100, priority=0)
-    spec["params"] = model.get("params", {})
-    return {"catalog_hash": "singleton:" + backend, "routes": [spec]}
-
+    return {"catalog_hash": "singleton:" + backend, "routes": [dict(route_id=backend, backend=backend, weight=100, priority=0, params=model.get("params", {}))]}
 
 def _dispatch(route: Any) -> None:
     routing = _model_routing(route.model)
@@ -334,10 +344,8 @@ def _dispatch(route: Any) -> None:
     if not routes:
         route.reject(503, "route_unavailable", "no eligible transport is available")
         return
-    seed = resolve_transport_seed(dict(route.handler.headers.items()),
-                                  {**route.request, **route.ingress.transport_controls})
+    seed = resolve_transport_seed(dict(route.handler.headers.items()), {**route.request, **route.ingress.transport_controls})
     _run_routes(route, routes, seed, policy)
-
 
 def handle_post(handler: Any, host: Any) -> None:
     """Общие auth/admission/alias и routing для всех API/CLI-входов."""
@@ -345,10 +353,8 @@ def handle_post(handler: Any, host: Any) -> None:
     if context is None:
         return
     try:
-        if read_post_request(context):
-            route = resolve_post_route(context)
-            if route is not None:
-                _dispatch(route)
+        if (route := resolve_post_route(context) if read_post_request(context) else None) is not None:
+            _dispatch(route)
     except ValueError:
         handler._reject(400, "invalid_request", "invalid transport controls")
     finally:
