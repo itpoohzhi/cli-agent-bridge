@@ -241,7 +241,16 @@ class NonstreamAggregator:
             if isinstance(choice.get("finish_reason"), str) and choice["finish_reason"]:
                 state["finish"] = choice["finish_reason"]
 
-    def _check_complete(self) -> None:
+    def _check_complete(self, *, client_gone: bool = False) -> None:
+        if client_gone and (
+            not self.done
+            or self._signals == 0
+            or not self._choices
+            or any(not state["finish"] for state in self._choices.values())
+        ):
+            raise NonstreamError(
+                499, "client_closed", "client disconnected before stream end"
+            )
         if not self.done:
             raise _bad("upstream_incomplete_stream", "stream ended before [DONE]")
         if self._signals == 0 or not self._choices:
@@ -249,8 +258,8 @@ class NonstreamAggregator:
         if any(not state["finish"] for state in self._choices.values()):
             raise _bad("upstream_incomplete_stream", "choice has no finish_reason")
 
-    def finalize(self) -> _Obj:
-        self._check_complete()
+    def finalize(self, *, client_gone: bool = False) -> _Obj:
+        self._check_complete(client_gone=client_gone)
         meta = self._meta
         out: _Obj = {
             "id": meta.get("id") or "chatcmpl-passthrough",
@@ -267,8 +276,10 @@ class NonstreamAggregator:
             out["usage"] = _wire_usage(self._usage)
         return out
 
-    def encode(self) -> bytes:
-        body = json.dumps(self.finalize(), ensure_ascii=False).encode("utf-8")
+    def encode(self, *, client_gone: bool = False) -> bytes:
+        body = json.dumps(
+            self.finalize(client_gone=client_gone), ensure_ascii=False
+        ).encode("utf-8")
         if len(body) > self._max:
             raise self._too_large()
         return body
@@ -279,6 +290,7 @@ def aggregate_events(
     on_signal: SignalHook | None,
     max_body_bytes: int,
     expired: Callable[[], str] | None = None,
+    client_gone: Callable[[], bool] | None = None,
 ) -> bytes:
     """SSE up to [DONE] -> body; else 502/504."""
     agg = NonstreamAggregator(max_body_bytes)
@@ -288,10 +300,14 @@ def aggregate_events(
             agg.add_event(raw, data, on_signal)
             if agg.done:
                 break
-        return agg.encode()
+        return agg.encode(
+            client_gone=bool(client_gone()) if client_gone is not None else False
+        )
     except (TimeoutError, socket.timeout):
         raise timeout from None
     except (NonstreamError, OSError, http.client.HTTPException) as exc:
+        if client_gone is not None and client_gone():
+            raise NonstreamError(499, "client_closed", "client disconnected before stream end") from None
         if expired is not None and expired():
             raise timeout from None
         if isinstance(exc, NonstreamError):

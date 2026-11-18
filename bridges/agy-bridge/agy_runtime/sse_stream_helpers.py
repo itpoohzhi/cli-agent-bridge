@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import json
+import os
 import uuid
 from typing import Any, cast, final
 
@@ -135,7 +136,16 @@ class SseStreamSession:
         if self.hooks[0]("emit_tool_trace"):
             marker = self.progress.marker(event, commit=False)
             if is_present(marker):
-                ok = self.on_reasoning(marker)
+                channel = (
+                    getattr(self, "tool_trace_channel", None)
+                    or (self.config.get("tool_trace_channel") if isinstance(self.config, dict) else getattr(self.config, "tool_trace_channel", None))
+                    or os.environ.get("AGY_BRIDGE_TOOL_TRACE_CHANNEL", "reasoning")
+                )
+                if str(channel).strip().lower() == "content":
+                    clean_marker = f"\n\n{marker.strip()}\n\n"
+                    ok = self.on_text(clean_marker)
+                else:
+                    ok = self.on_reasoning(marker)
                 if ok:
                     self.progress.commit()
         return ok

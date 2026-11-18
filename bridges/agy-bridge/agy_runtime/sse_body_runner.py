@@ -10,6 +10,7 @@ from agy_runtime.sse_stream_helpers import SseStreamSession
 from core.route_health_policy import redact_diagnostic_text
 from core.agy_capacity_guard import CAPACITY_REASON
 from core.usage_wire import positive_wire_usage
+from core.tool_channel_fsm import normalize_staged_fragments
 from core.stream_resilience_policy import can_safely_replay_turn, is_present, is_uncommitted_step
 from core.stream_resilience_runtime import MidstreamReplayOrchestrator
 _attempt_scope = threading.local()
@@ -148,7 +149,7 @@ class _SseBodyRunner:
                 s.buffer.rollback_uncommitted()
                 return True
         callbacks = dict(content=s.on_text, reasoning_content=s.on_reasoning)
-        pending = s.buffer.commit_fragments()
+        pending = normalize_staged_fragments(s.buffer.commit_fragments())
         ok = True
         for channel, value in pending:
             callback = dict(callbacks, tool_calls=lambda v: s.on_calls(json.loads(v)))[channel]
@@ -179,8 +180,7 @@ class _SseBodyRunner:
         if self.buffering:
             ctx["finalize_timeout"] = lambda _out: None
             out = dict(self.replay.run_with_resilience(self.attempt, s.ledger, s.keepalive, self.cancelled))
-            if all( ( dict(cancelled=True).get(str(out.get("state")), False),
-                    not self.cancelled(), ) ):
+            if all((dict(cancelled=True).get(str(out.get("state")), False), not self.cancelled())):
                 out = ( self.last_out if self.last_out
                     else dict(state="pump_error", rc=1, err="retry cancelled") )
             success = out.get("state") == "done"

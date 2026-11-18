@@ -1327,6 +1327,7 @@ class NonstreamViaStreamHubE2ETests(BridgeCase):
         self.upstream = _ScriptedUpstream()
         self.addCleanup(self.upstream.close)
         data = load_raw_fleet()
+        data["backends"]["codex"]["kind"] = "passthrough"
         data["backends"]["codex"]["enabled"] = True
         data["backends"]["codex"]["base_url"] = f"http://127.0.0.1:{self.upstream.port}/v1"
         data["backends"]["codex"].pop("api_key_env", None)

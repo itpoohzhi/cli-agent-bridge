@@ -2,7 +2,7 @@
 manifest_version: 1
 provider_id: openai-key-2
 kind: passthrough
-enabled: true
+enabled: false
 required: false
 priority: 20
 routing: {weight: 50}

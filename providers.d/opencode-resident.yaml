@@ -1,0 +1,46 @@
+# Провайдер opencode-resident: OpenCode ACP в resident stdio пуле.
+manifest_version: 1
+provider_id: opencode-resident
+kind: stdio_resident
+enabled: true
+required: false
+priority: 15
+routing: {weight: 100}
+owned_by: opencode
+transport:
+  bridge:
+    wrapper: 'opencode acp'
+    options:
+      protocol: opencode-acp
+      step_dedup: arbiter
+limits: {max_concurrent: 16, quota_group: opencode, timeout_s: 600}
+discovery:
+  method: static
+  static:
+    - opencode-go/deepseek-v4.1-flash
+    - opencode-go/claude-haiku-5-5
+family_rule:
+  type: prefix
+  prefix:
+    verified: true
+    map:
+      opencode-go/deepseek: DeepSeek
+      opencode-go/claude: Anthropic
+models_overrides:
+  opencode-go/deepseek-v4.1-flash:
+    name: DeepSeek V4.1 Flash (OpenCode resident)
+    efforts: [low, medium, high]
+    default_effort: medium
+    context_window: 131072
+    max_tokens: 8192
+    input: [text]
+  opencode-go/claude-haiku-5-5:
+    name: Claude Haiku 5.5 (OpenCode resident)
+    efforts: [low, medium, high]
+    default_effort: medium
+    context_window: 200000
+    max_tokens: 8192
+    input: [text]
+params:
+  effort_field: reasoning_effort
+  adaptive_whitelist: [reasoning_effort, thinking, temperature, top_p]

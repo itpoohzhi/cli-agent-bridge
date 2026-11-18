@@ -275,7 +275,7 @@ def test_stage_w2_t_generated_artifacts_route_owners_and_digest() -> None:
     lock = json.loads((ROOT / "catalog.lock.json").read_bytes())
     models = {record["id"]: record for record in fleet["models"]}
     actual = {mid: models[mid].get("routing", {}).get("legacy_backend") for mid in ("gpt-6.1-sol", "gpt-6.1-terra", "deepseek-v4.1-flash")}
-    semantic_equal(actual, {"gpt-6.1-sol": "openai-key-2", "gpt-6.1-terra": "openai-key-2", "deepseek-v4.1-flash": "opencode-go-sub1"},
+    semantic_equal(actual, {"gpt-6.1-sol": "openai-key-3", "gpt-6.1-terra": "openai-key-3", "deepseek-v4.1-flash": "opencode-go-sub1"},
                    "generated_weighted_catalog")
     assert lock["fleet_sha256"] == hashlib.sha256((ROOT / "fleet.json").read_bytes()).hexdigest()
     for mid, owner in actual.items():

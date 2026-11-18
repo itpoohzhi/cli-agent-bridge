@@ -1,7 +1,7 @@
-# Провайдер muse: CLI-бинарник Meta Muse (serve-режим), pin технического образа обязателен.
+# Провайдер muse: CLI-бинарник Meta Muse (resident stdio пул, msp-v1), pin технического образа обязателен.
 manifest_version: 1
 provider_id: muse
-kind: muse
+kind: stdio_resident
 enabled: true
 required: false
 priority: 10
@@ -11,14 +11,12 @@ transport:
   bridge:
     wrapper: ~/.config/muse-launch/muse-cli.sh
     proxy_port: 10816
-    options: {streaming_mode: serve}
 limits: {max_concurrent: 64, quota_group: meta-muse, pin_required: true, timeout_s: 600}
-# `binary_path` пинит неизменяемый bash-лаунчер `~/.local/bin/muse` (sha256 ниже), который запускает актуальный
-# движок `muse-bin-1.4.15-R8339.1`; версия ниже — версия движка (Muse Code 1.4.15), лаунчер правит только владелец.
+# `binary_path` пинит бинарник/лаунчер `~/.local/bin/muse` (sha256 ниже); версия ниже — версия Muse Code (1.4.23), правки только владельцем.
 fingerprint:
   binary_path: ~/.local/bin/muse
-  binary_sha256: c6db294799a190ca380da274beb3b9c0e160e0da9681a3d364ce8b0e5fa3a4bc
-  version: 1.4.15
+  binary_sha256: ffb95b823e2a71f49ce98f9ddcb7cd7c731b77615aae9f5f253819c69453079f
+  version: "1.4.23"
 discovery: {method: static}
 family_rule:
   type: exact_map

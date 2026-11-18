@@ -246,9 +246,9 @@ class AgyToolingTests(unittest.TestCase):
         self.assertEqual(call["function"]["name"], "write_file")
         self.assertEqual(json.loads(call["function"]["arguments"]), _CALL_ARGS)
         content = "".join(str(d.get("content") or "") for d in deltas)
-        self.assertNotIn("<tool_call>", content)
-        self.assertNotIn("</tool_call>", content)
-        self.assertIn("Создаю файл.", content)
+        reasoning = "".join(str(d.get("reasoning_content") or "") for d in deltas)
+        self.assertNotIn("<tool_call>", content + reasoning)
+        self.assertIn("Создаю файл.", reasoning)
         finishes = [c["choices"][0]["finish_reason"] for c in chunks]
         self.assertIn("tool_calls", finishes)
         self.assertNotIn("stop", finishes)
@@ -273,7 +273,7 @@ class AgyToolingTests(unittest.TestCase):
         self.assertEqual(calls[0]["function"]["name"], "write_file")
         self.assertEqual(json.loads(calls[0]["function"]["arguments"]), _CALL_ARGS)
         self.assertNotIn("<tool_call>", str(message.get("content") or ""))
-        self.assertEqual(message["content"], "Создаю файл.")
+        self.assertIn("Создаю файл.", str(message.get("reasoning_content") or ""))
 
     def test_text_only_request_returns_stop_finish_reason(self) -> None:
         self._scenario(["Привет", ", мир."])
@@ -535,7 +535,7 @@ class AgyToolingTests(unittest.TestCase):
         ):
             turn = _ToolTurn([], lambda _c: True, lambda _r: True, lambda _k: True)
             self.assertEqual(turn._settle_timeout_s, 5.0)
-            self.assertEqual(turn._max_calls, 32)
+            self.assertEqual(turn._max_calls, 64)
 
     def test_tool_turn_activity_wrappers_and_keepalive(self) -> None:
         bridge = _load_bridge()

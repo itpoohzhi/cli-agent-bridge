@@ -267,7 +267,7 @@ class PassthroughLimits:
             max_parallel_depth=pi(env, ENV_MAX_PARALLEL_DEPTH, d_pd),
             max_body_bytes=pi(env, ENV_MAX_BODY_BYTES, DEFAULT_MAX_BODY_BYTES),
             accumulator_max_bytes=pi(env, ENV_ACC_MAX_BYTES, DEFAULT_ACC_MAX_BYTES),
-            accumulator_max_keys=pi(env, ENV_ACC_MAX_KEYS, DEFAULT_ACC_MAX_KEYS),
+            accumulator_max_keys=pi(env, ENV_ACC_MAX_KEYS, max(DEFAULT_ACC_MAX_KEYS, pi(env, ENV_MAX_PARALLEL_CALLS, d_pc))),
             accumulator_max_process_bytes=pi(env, ENV_ACC_MAX_PROCESS_BYTES, d_ap),
             connect_timeout_s=pf(env, "BRIDGE_CONNECT_TIMEOUT_S", c_def),
             read_timeout_s=pf(env, ENV_READ_TIMEOUT_S, DEFAULT_READ_TIMEOUT_S),
@@ -376,8 +376,9 @@ class _GuardedSink(ResponseSink):
         ) or StreamGuard()
 
     def _drain(self) -> None:
-        for record in cast(list[dict[str, object]], self.guard.drain()):
-            self.sink.write(cast(bytes, record["_wire"]))
+        records = cast(list[dict[str, object]], self.guard.drain())
+        if records:
+            self.sink.write(b"".join(cast(bytes, r["_wire"]) for r in records))
 
     def write(self, frame: bytes) -> None:
         try:
@@ -390,11 +391,11 @@ class _GuardedSink(ResponseSink):
                     return
                 if data is not None and data.strip() == "[DONE]":
                     self.guard.close()
-                self._drain()
+            self._drain()
         except BaseException:
             _ = self.guard.submit({"error": {}, "_wire": b""})
             self.guard.close()
-            _ = self.guard.drain()
+            self._drain()
             raise
 
     def close(self) -> None:
@@ -756,11 +757,8 @@ class _SseRelay:
         self.trusted = bool(options.get("trusted_tools", False))
         self.outcome: StreamOutcome = options.get("state") or StreamOutcome()
         self.acc = ToolCallAccumulator(limits, options.get("process"))
-        self.seen: set[int] = set()
-        self.finished: set[int] = set()
-        self.last_chunk: dict[str, Any] = {}
-        self.guards: dict[int, RepetitionGuard] = {}
-        self.texts: dict[int, _ResponseText] = {}
+        self.seen, self.finished, self.tool_choices = set(), set(), set()
+        self.last_chunk, self.guards, self.texts = {}, {}, {}
 
     def write(self, frame: bytes) -> None:
         self.outcome.committed = True
@@ -827,9 +825,14 @@ class _SseRelay:
             text = self._text_for(index)
             delta = text.feed(delta)
             self._add_parsed_calls(index)
+            if "tool_calls" in delta or self.acc.has_choice(index):
+                self.tool_choices.add(index)
             content = delta.get("content")
             if isinstance(content, str):
-                self._check_repetition(index, content)
+                if index in self.tool_choices and not content.strip():
+                    delta = {k: v for k, v in delta.items() if k != "content"}
+                else:
+                    self._check_repetition(index, content)
             choice["delta"] = delta
         if choice.get("finish_reason"):
             self.finished.add(index)
@@ -1447,6 +1450,7 @@ class PassthroughAdapter(BackendAdapter):
                 reopen=callback,
                 deadline=deadline,
                 mode_spec=options["mode_spec"],
+                client_gone_fn=options.get("client_gone_fn"),
             )
         else:
             body = _read_bounded(resp, self.limits.max_body_bytes)
@@ -1551,6 +1555,7 @@ class PassthroughAdapter(BackendAdapter):
             sanitize=sanitize,
             mode_spec=self._request_mode(request),
             tool_schemas=build_tool_schemas(request.get("tools")) if sanitize else None,
+            client_gone_fn=sink.client_gone,
         )
         content_type = (resp.getheader("Content-Type") or "").lower()
         aggregate = getattr(kw.get("window"), "internal_stream", False)
@@ -1599,6 +1604,8 @@ class PassthroughAdapter(BackendAdapter):
         window: LivenessWindow,
         sig_box: list[int],
         mode_spec: NormalizerModeSpec = DEFAULT_EMULATE_SPEC,
+        *,
+        client_gone_fn: Callable[[], bool] | None = None,
     ) -> bytes:
         lim = self.limits
 
@@ -1613,7 +1620,13 @@ class PassthroughAdapter(BackendAdapter):
         try:
             events = iter_sse_events(reader.readline, lim.max_body_bytes)
             events = _checked_events(events, mode_spec, lim)
-            return aggregate_events(events, on_sig, lim.max_body_bytes, window.expired)
+            return aggregate_events(
+                events,
+                on_sig,
+                lim.max_body_bytes,
+                window.expired,
+                client_gone=client_gone_fn,
+            )
         finally:
             reader.close()
 
@@ -1636,6 +1649,7 @@ class PassthroughAdapter(BackendAdapter):
                 window,
                 [0],
                 options.get("mode_spec", DEFAULT_EMULATE_SPEC),
+                client_gone_fn=options.get("client_gone_fn"),
             ),
         )
 
@@ -1655,8 +1669,11 @@ class PassthroughAdapter(BackendAdapter):
                 window,
                 sig_box,
                 kw.get("mode_spec", DEFAULT_EMULATE_SPEC),
+                client_gone_fn=kw.get("client_gone_fn"),
             )
         except NonstreamError as exc:
+            if exc.status == 499:
+                raise
             pol = NonstreamRetryPolicy.from_env()
             sess = str(getattr(self.capabilities, "sessions", SESSIONS_NONE))
             ok_guard = should_retry_incomplete_nonstream(

@@ -45,9 +45,9 @@ def test_root_openai_models_have_direct_canonical_owner(model_id: str) -> None:
     data = root_fleet()
     models = {model["id"]: model for model in data["models"]}
     catalog = build_catalog(data, ADAPTER_KINDS)
-    assert models[model_id]["backend"] == "openai-key-2"
-    assert models[model_id]["routing"]["legacy_backend"] == "openai-key-2"
-    assert catalog["models"][model_id]["backend"] == "openai-key-2"
+    assert models[model_id]["backend"] == "openai-key-3"
+    assert models[model_id]["routing"]["legacy_backend"] == "openai-key-3"
+    assert catalog["models"][model_id]["backend"] == "openai-key-3"
 
 
 @pytest.mark.parametrize("enabled", [False, True])
@@ -62,7 +62,7 @@ def test_codex_explicit_route_membership_follows_backend_flag(enabled: bool) -> 
         published = {model.id for _, model in registry.models()}
         assert published & CODEX_IDS == CODEX_IDS
         for model_id in CODEX_IDS:
-            assert registry.adapter_for_model(model_id).id == "openai-key-2"
+            assert registry.adapter_for_model(model_id).id == "openai-key-3"
     finally:
         registry.shutdown()
 
@@ -73,8 +73,8 @@ def test_codex_is_only_drawn_after_positive_weight_routes(model_id: str) -> None
     before = copy.deepcopy(model)
     for seed in ("first", "second", "third"):
         order = list(route_order(model_id, model, seed))
-        assert set(order[:2]) == {"openai-key-2", "openai-key-3"}
-        assert order[2] == "codex"
+        assert order[0] == "openai-key-3"
+        assert order[1] == "codex"
         assert len(order) == len(set(order))
     assert model == before
 
@@ -88,7 +88,7 @@ def test_flag_off_retains_native_codex_order(
     model = next(model for model in root_fleet()["models"] if model["id"] == model_id)
     model["routing"]["enabled"] = False
     assert list(route_order(model_id, model, "flag-off")) == ["codex"]
-    assert model["backend"] == "openai-key-2"
+    assert model["backend"] == "openai-key-3"
 
 
 @pytest.mark.parametrize("enabled", [False, True])

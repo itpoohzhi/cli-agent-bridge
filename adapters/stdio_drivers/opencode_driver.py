@@ -1,0 +1,300 @@
+"""OpenCode ACP (Agent Client Protocol) resident stdio protocol driver."""
+
+# pyright: reportAny=false, reportExplicitAny=false
+
+from __future__ import annotations
+
+import collections.abc
+import hashlib
+import json
+import os
+import threading
+import time
+from collections.abc import Mapping
+from dataclasses import dataclass
+from typing import Any, ClassVar, cast, override
+
+from core.stdio_resident.protocol_driver import (
+    DecodedChunk,
+    DriverCapabilities,
+)
+from core.stdio_resident.rpc_drivers import AcpDriver
+
+_OPENCODE_ENV_ALLOWLIST: tuple[str, ...] = (
+    "PATH", "HOME", "LANG", "LC_ALL", "TMPDIR", "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY",
+    "XDG_DATA_HOME", "XDG_CONFIG_HOME", "OPENCODE_CONFIG", "OPENCODE_CONFIG_CONTENT", "DEEPSEEK_API_KEY", "OPENCODE_API_KEY",
+)
+
+
+@dataclass
+class OpenCodeDecodedChunk(DecodedChunk):
+    """Normalized protocol frame with ACP error and permission reply handling."""
+
+    error: str | None = None
+    reply_bytes: bytes | None = None
+
+
+def _merge_config_content(existing_raw: str) -> str:
+    config_obj: dict[str, Any] = {}
+    if existing_raw:
+        try:
+            parsed = json.loads(existing_raw)
+            if isinstance(parsed, dict):
+                config_obj = parsed
+        except (json.JSONDecodeError, TypeError):
+            config_obj = {}
+    config_obj.setdefault("permission", {"*": "allow"})
+    return json.dumps(config_obj, ensure_ascii=False)
+
+
+class OpenCodeAcpDriver(AcpDriver):
+    """Driver translating OpenCode ACP JSON-RPC 2.0 stdio communication."""
+
+    _capabilities: ClassVar[DriverCapabilities] = DriverCapabilities(
+        protocol_name="opencode-acp", supports_soft_cancel=True, supports_multi_turn=True,
+    )
+
+    def __init__(self, config: Mapping[str, Any] | None = None) -> None:
+        super().__init__()
+        self._config = dict(config or {})
+        self._id_counter = 0
+        self._id_lock = threading.Lock()
+        self._active_session_id: str | None = None
+        self._active_prompt_id: int | None = None
+        self._last_error: dict[str, Any] | None = None
+
+    def _allocate_id(self) -> int:
+        with self._id_lock:
+            self._id_counter += 1
+            return self._id_counter
+
+    @property
+    def capabilities(self) -> DriverCapabilities:
+        return self._capabilities
+
+    @property
+    def active_session_id(self) -> str | None:
+        return self._active_session_id
+
+    @override
+    def build_argv(self, base_argv: list[str], options: Mapping[str, Any]) -> list[str]:
+        argv = list(base_argv)
+        if "acp" not in argv:
+            argv.append("acp")
+        return argv
+
+    @override
+    def build_env(
+        self, base_env: Mapping[str, str] | None, turn_sandbox: str | None = None
+    ) -> dict[str, str]:
+        source = os.environ if base_env is None else base_env
+        env: dict[str, str] = {k: source[k] for k in _OPENCODE_ENV_ALLOWLIST if k in source}
+        env["OPENCODE_DB"] = ":memory:"
+        if turn_sandbox:
+            env["TMPDIR"] = turn_sandbox
+        raw_config = source.get("OPENCODE_CONFIG_CONTENT", "")
+        env["OPENCODE_CONFIG_CONTENT"] = _merge_config_content(raw_config)
+        return env
+
+    def handshake_payload(self) -> tuple[int, bytes]:
+        req_id = self._allocate_id()
+        payload = {
+            "jsonrpc": "2.0",
+            "id": req_id,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": 1,
+                "clientInfo": {"name": "cli-agent-bridge", "version": "1.0"},
+                "clientCapabilities": {},
+            },
+        }
+        return req_id, (json.dumps(payload, ensure_ascii=False) + "\n").encode()
+
+    def _wait_response(self, handle: Any, req_id: int, timeout_s: float) -> dict[str, Any] | None:
+        deadline = None if timeout_s <= 0 else time.monotonic() + timeout_s
+        while True:
+            remaining = None if deadline is None else max(0.0, deadline - time.monotonic())
+            if deadline is not None and remaining == 0.0:
+                return None
+            line_obj = handle.read_line(timeout_s=remaining)
+            if line_obj is None:
+                return None
+            parsed = self._parse_object(line_obj.line)
+            if parsed and parsed.get("id") == req_id:
+                return parsed
+
+    def run_handshake(self, handle: Any, timeout_s: float = 10.0) -> bool:
+        """Run ACP initialize handshake over the resident process handle."""
+        req_id, data = self.handshake_payload()
+        try:
+            handle.write(data)
+            resp = self._wait_response(handle, req_id, timeout_s)
+            return resp is not None and "error" not in resp
+        except Exception:
+            return False
+
+    def build_session_new_payload(
+        self, cwd: str, model: str, effort: str | None = None
+    ) -> tuple[int, bytes]:
+        req_id = self._allocate_id()
+        params: dict[str, Any] = {"cwd": cwd, "model": model, "mcpServers": []}
+        if effort:
+            params["effort"] = effort
+        payload = {"jsonrpc": "2.0", "id": req_id, "method": "session/new", "params": params}
+        return req_id, (json.dumps(payload, ensure_ascii=False) + "\n").encode()
+
+    def _handle_session_response(self, resp: dict[str, Any] | None) -> bool:
+        if not resp:
+            return False
+        if "error" in resp:
+            self._last_error = self._mapping(resp["error"])
+            return False
+        res = resp.get("result")
+        if isinstance(res, dict) and "sessionId" in res:
+            self._active_session_id = str(res["sessionId"])
+            return True
+        return False
+
+    def prepare_turn(
+        self, handle: Any, turn_context: Any, timeout_s: float = 10.0
+    ) -> bool:
+        """Ensure an active ACP session exists before the prompt turn."""
+        if self._active_session_id is not None:
+            return True
+        ctx = dict(turn_context) if isinstance(turn_context, collections.abc.Mapping) else {}
+        cwd, model = str(ctx.get("cwd") or os.getcwd()), str(ctx.get("model") or "default")
+        req_id, data = self.build_session_new_payload(cwd, model, ctx.get("effort"))
+        try:
+            handle.write(data)
+            resp = self._wait_response(handle, req_id, timeout_s)
+            return self._handle_session_response(resp)
+        except Exception:
+            return False
+
+    @override
+    def encode_turn(
+        self,
+        prompt: str,
+        turn_context: Mapping[str, Any] | None = None,
+    ) -> bytes:
+        context = dict(turn_context or {})
+        session_id = (
+            context.get("sessionId")
+            or context.get("session_id")
+            or self._active_session_id
+            or "default"
+        )
+        req_id = self._allocate_id()
+        self._active_prompt_id = req_id
+
+        payload = {
+            "jsonrpc": "2.0",
+            "id": req_id,
+            "method": "session/prompt",
+            "params": {
+                "sessionId": session_id,
+                "prompt": [{"type": "text", "text": prompt}],
+            },
+        }
+        return (json.dumps(payload, ensure_ascii=False) + "\n").encode()
+
+    def _parse_update(self, params: Mapping[str, Any]) -> tuple[str, str, list[dict[str, Any]], bool]:
+        update = self._mapping(params.get("update")) or {}
+        kind = update.get("sessionUpdate") or update.get("type")
+        if kind in ("content_part_delta", "delta"):
+            delta = self._mapping(update.get("delta")) or update
+            text = self._extract_string(delta, ("text", "content"))
+            reasoning = self._extract_string(delta, ("reasoning", "thought"))
+            return text, reasoning, [], False
+        if kind in ("agent_message_chunk", "message_chunk", "agent_message"):
+            text = self._extract_string(update, ("content", "text", "delta"))
+            return text, "", [], False
+        if kind in ("agent_thought_chunk", "thought_chunk", "agent_thought"):
+            thought = self._extract_string(update, ("content", "thought", "reasoning", "delta"))
+            return "", thought, [], False
+        if kind == "tool_call":
+            call = self._mapping(update.get("toolCall")) or update
+            return "", "", [call], True
+        return "", "", [], False
+
+    @override
+    def decode_line(self, raw_line: str) -> DecodedChunk | None:
+        payload = self._parse_object(raw_line)
+        if payload is None or payload.get("jsonrpc") != "2.0":
+            return None
+
+        if "error" in payload:
+            err_dict = self._mapping(payload["error"])
+            err_msg = str(err_dict.get("message") if err_dict else payload["error"])
+            return OpenCodeDecodedChunk(error=err_msg, is_terminal=True, raw=payload)
+
+        res = payload.get("result")
+        if isinstance(res, dict) and "sessionId" in res:
+            self._active_session_id = str(res["sessionId"])
+
+        method = payload.get("method")
+        if method == "session/request_permission":
+            req_id = payload.get("id")
+            reply = json.dumps({"jsonrpc": "2.0", "id": req_id, "result": {"decision": "allow"}}) + "\n"
+            return OpenCodeDecodedChunk(reply_bytes=reply.encode("utf-8"), raw=payload)
+
+        params = self._mapping(payload.get("params")) or {}
+        text, reasoning, tool_calls, is_tool_stop = ("", "", [], False)
+        if method == "session/update":
+            text, reasoning, tool_calls, is_tool_stop = self._parse_update(params)
+
+        is_terminal = self._check_terminal(payload)
+        return OpenCodeDecodedChunk(
+            text=text,
+            reasoning=reasoning,
+            tool_calls=tool_calls,
+            is_terminal=is_terminal,
+            is_tool_stop=is_tool_stop,
+            raw=payload,
+        )
+
+    def _check_terminal(self, payload: Mapping[str, Any]) -> bool:
+        if self._active_prompt_id is not None and payload.get("id") == self._active_prompt_id:
+            self._active_prompt_id = None
+            return True
+        return False
+
+    @override
+    def is_terminal(self, raw_line: str, decoded: DecodedChunk | None) -> bool:
+        if decoded is not None and decoded.is_terminal:
+            return True
+        payload = self._parse_object(raw_line)
+        if not payload or payload.get("jsonrpc") != "2.0":
+            return False
+        return self._check_terminal(payload)
+
+    @override
+    def is_tool_stop(self, raw_line: str, decoded: DecodedChunk | None) -> bool:
+        if decoded is not None:
+            return decoded.is_tool_stop
+        payload = self._parse_object(raw_line)
+        if not payload or payload.get("jsonrpc") != "2.0":
+            return False
+        params = self._mapping(payload.get("params")) or {}
+        update = self._mapping(params.get("update")) or {}
+        return update.get("sessionUpdate") == "tool_call"
+
+    @override
+    def build_cancel_payload(self) -> bytes | None:
+        payload = {
+            "jsonrpc": "2.0",
+            "method": "session/cancel",
+            "params": {"sessionId": self._active_session_id or "default"},
+        }
+        return (json.dumps(payload, ensure_ascii=False) + "\n").encode()
+
+    def set_session_id(self, session_id: str) -> None:
+        self._active_session_id = session_id
+
+    def compute_fingerprint(self) -> str:
+        data = f"opencode-acp:{self._config.get('binary', 'opencode')}"
+        return hashlib.sha256(data.encode()).hexdigest()
+
+    @staticmethod
+    def _mapping(value: object) -> dict[str, Any] | None:
+        return cast(dict[str, Any], value) if isinstance(value, dict) else None

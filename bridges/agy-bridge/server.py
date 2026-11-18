@@ -117,7 +117,7 @@ from agy_runtime.process_supervisor import (  # noqa: E402 # pyright: ignore[rep
     ProcessSupervisor,
     ProcessSupervisorConfig,
 )
-from agy_runtime.account_pool import AccountPool, AccountPoolConfig  # noqa: E402 # pyright: ignore[reportImplicitRelativeImport]
+from agy_runtime.retry_budget import should_allow_retry_attempt  # noqa: E402 # pyright: ignore[reportImplicitRelativeImport]
 from agy_runtime.stream_relay import StreamRelay  # noqa: E402 # pyright: ignore[reportImplicitRelativeImport]
 from agy_runtime.arbiter_types import _StepState  # noqa: E402 # pyright: ignore[reportImplicitRelativeImport]
 from agy_runtime.content_arbiter import _ContentArbiter  # noqa: E402 # pyright: ignore[reportImplicitRelativeImport]
@@ -179,6 +179,8 @@ from core.tool_emulation import (  # noqa: E402
     sanitize_tool_call,
     tools_protocol_section,
 )
+from core.tool_call_schema_policy import ToolCallLimitExceededError, build_tool_turn_error_body  # noqa: E402
+from core.message_history_sanitizer import sanitize_chat_messages  # noqa: E402
 from core.cli_turn_flags import format_print_timeout as _format_print_timeout, text_turn_cli_flags  # noqa: E402
 from core.env_hot_reload import file_signature as _file_signature  # noqa: E402
 
@@ -635,7 +637,6 @@ class _FairSlotSemaphore:
 
 
 def reload_bridge_config() -> _BridgeConfig:
-    global _config, _slots, _account_pool
     """Перечитать окружение, обновить снимок и глобальные константы (для тестов)."""
     global _config, _slots
     config = _build_bridge_config()
@@ -976,7 +977,6 @@ def _runtime_build_fields() -> dict[str, object]:
 
 _active: dict = {}
 _active_lock = threading.Lock()
-_account_pool = AccountPool(AccountPoolConfig(max_concurrent=MAX_CONCURRENT, n_floor=1))
 _slots = _FairSlotSemaphore(MAX_CONCURRENT)
 _budget = None
 _last_ok = [0.0]
@@ -5415,7 +5415,8 @@ class _ToolTurn:
         self.ok = True
         self._is_repetition_loop = False
         self._finished = False
-        self._max_calls = _safe_int_env("AGY_MAX_TOOL_CALLS", 32)
+        self._max_calls = _safe_int_env("AGY_MAX_TOOL_CALLS", 64)
+        self._limit_error: ToolCallLimitExceededError | None = None
         self._max_bytes = _safe_int_env("AGY_MAX_TOOL_BYTES", 10 * 1024 * 1024)
         self._settle_timeout_s = _safe_float_env("AGY_TOOL_SETTLE_TIMEOUT_S", 5.0)
         self._stall_timeout_s = _safe_float_env("AGY_TOOL_CALL_STALL_TIMEOUT_S", 30.0)
@@ -5460,7 +5461,7 @@ class _ToolTurn:
         if self.error:
             return
         if len(self.calls) >= self._max_calls:
-            raise LiveParserError(f"tool call count exceeded limit ({self._max_calls})")
+            return self._limit(len(self.calls) + 1)
         entry: dict[str, object] = {
             "index": len(self.calls),
             "id": str(call.get("id") or "call_" + uuid.uuid4().hex[:24]),
@@ -5483,12 +5484,18 @@ class _ToolTurn:
             for offset, item in enumerate(sanitize_tool_call(entry, self._schemas))
         ]
         if len(self.calls) + len(published) > self._max_calls:
-            raise LiveParserError(f"tool call count exceeded limit ({self._max_calls})")
+            return self._limit(len(self.calls) + len(published))
         if not published:
             return
         self.calls.extend(published)
         if self.ok and not self._on_calls(published):
             self.ok = False
+
+    def _limit(self, observed: int) -> None:
+        """Превышение лимита вызовов — отдельный класс ошибки, не parse_error."""
+        msg = f"tool call count exceeded limit ({self._max_calls})"
+        self._limit_error = ToolCallLimitExceededError("calls", observed, self._max_calls, msg)
+        self.error = msg
 
     def feed(self, text: str) -> bool:
         """Принять дельту; ошибки разбора и превышение лимитов — fail-closed."""
@@ -5557,23 +5564,11 @@ class _ToolTurn:
         return False
 
     def error_body(self) -> dict[str, Any]:
-        err_msg = self.error or ""
-        if (
-            getattr(self, "_is_repetition_loop", False)
-            or "upstream_repetition_loop" in err_msg
-        ):
-            return {
-                "message": "upstream repetition loop detected",
-                "detail": err_msg[:500],
-                "type": "upstream_repetition_loop",
-                "code": 502,
-            }
-        return {
-            "message": "agy emitted a malformed tool call",
-            "detail": err_msg[:500],
-            "type": "tool_call_parse_error",
-            "code": 502,
-        }
+        return build_tool_turn_error_body(
+            (self.error or "")[:500],
+            is_repetition_loop=self._is_repetition_loop,
+            limit_error=self._limit_error,
+        )
 
 
 class Run:
@@ -7281,15 +7276,18 @@ class Handler(BaseHTTPRequestHandler):
                         img_registered = False
             _retry_credit()
             for attempt in (1, 2):
-                if (
-                    self._registry_job is not None
-                    and self._registry_job.cancelled.is_set()
-                ):
-                    out = _terminal_state("client_gone")
-                    break
-                policy = _build_timeout_policy(t_req_start)
-                if policy is not None and not policy.can_start:
-                    # Бюджет запроса исчерпан: новой попытки нет, остаток не перезапускается.
+                cancelled = (
+                    self._registry_job is not None and self._registry_job.cancelled.is_set()
+                )
+                policy = None if cancelled else _build_timeout_policy(t_req_start)
+                allowed, reason = should_allow_retry_attempt(
+                    attempt=attempt, cancelled=cancelled, can_start=policy is None or policy.can_start
+                )
+                if not allowed:
+                    if reason == "client_gone":
+                        out = _terminal_state(reason)
+                        break
+                    assert policy is not None
                     _log(f"request-budget-exhausted attempt={attempt} {tag}")
                     if attempt == 1:
                         out = {
@@ -7670,7 +7668,8 @@ class Handler(BaseHTTPRequestHandler):
                 "active": active,
                 "max_concurrent": MAX_CONCURRENT,
                 "hot_sessions": len(_session_store),
-                "tool_emulation": False,
+                "tool_emulation": True,
+                "max_tool_calls": _safe_int_env("AGY_MAX_TOOL_CALLS", 64),
                 "tool_translation": False,
                 "native_tools": True,
                 "images": any(effective.values()),
@@ -8501,8 +8500,6 @@ if __name__ == "__main__":
 __all__ = [
     "ProcessSupervisor",
     "ProcessSupervisorConfig",
-    "AccountPool",
-    "AccountPoolConfig",
     "StreamRelay",
     "_StepState",
     "_ContentArbiter",
