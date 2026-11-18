@@ -174,10 +174,12 @@ def _effort(route: Any) -> str:
 
 def _pin_effort(route: Any) -> Any:
     """Закрепляет replay-effort в payload до наложения параметров маршрута."""
-    request = _route_request(route)
-    if not request or not (effort := _effort(route)) or request.get("reasoning_effort") == effort:
+    request = getattr(route, "request", None)
+    if not isinstance(request, Mapping):
         return route
-    route.request = pin_wire_effort(request, effort)
+    if not (effort := _effort(route)) or request.get("reasoning_effort") == effort:
+        return route
+    route.request = pin_wire_effort(dict(request), effort)
     return route
 
 def _attempt(route: Any, spec: Any, body: Any, attempt: RouteAttempt) -> None:
