@@ -59,7 +59,7 @@ def test_stage_w2_n_both_models_use_their_own_env_and_quota_slot(slot: int) -> N
     provider_id = f"openai-key-{slot}"
     doc = _provider(provider_id)
     expected = (
-        provider_id, "passthrough", True, 50, f"OPENAI_API_KEY_{slot}",
+        provider_id, "passthrough", slot != 2, 50, f"OPENAI_API_KEY_{slot}",
         "http://127.0.0.1:10830/sg-openai", provider_id,
         ("gpt-6.1-sol", "gpt-6.1-terra"),
     )
@@ -118,7 +118,7 @@ def test_anthropic_client_placeholder_is_preserved_not_mistaken_for_upstream_aut
 
 
 @pytest.mark.parametrize("provider_id,path_prefix", [
-    ("openai-key-2", "/sg-openai"), ("openai-key-3", "/sg-openai"),
+    ("openai-key-3", "/sg-openai"),
     ("deepseek-direct", "/sg-deepseek"),
 ])
 @pytest.mark.semantic_red("requested_loopback_provider_boundary")

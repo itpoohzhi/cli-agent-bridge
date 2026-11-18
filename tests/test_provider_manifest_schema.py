@@ -89,7 +89,7 @@ def test_shipped_manifests_all_valid() -> None:
         (
             "agy agy-passthrough claude-p codex deepseek-direct droid muse "
             "openai-key-2 openai-key-3 opencode-go opencode-go-claude "
-            "opencode-go-sub1 opencode-go-sub2 opencode-zen"
+            "opencode-go-sub1 opencode-go-sub2 opencode-resident opencode-zen"
         ).split()
     )
 

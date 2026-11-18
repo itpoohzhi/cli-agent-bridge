@@ -13,7 +13,7 @@ from core.transport_routing import RouteDraw, route_order
 
 ROOT = Path(__file__).resolve().parents[1]
 EXPECTED_WEIGHTS: dict[str, dict[str, int]] = {
-    "gpt-6.1-sol": {"codex": 0, "droid": 50, "openai-key-2": 50, "openai-key-3": 50},
+    "gpt-6.1-sol": {"codex": 0, "droid": 50, "openai-key-3": 50},
     "claude-sonnet-5-5": {"claude-p": 0, "droid": 50},
 }
 SEEDS = tuple(f"review-seed-{index}" for index in range(64))
@@ -57,7 +57,7 @@ def test_blocked_routes_stay_in_reserve() -> None:
 @pytest.mark.parametrize(
     ("model_id", "legacy", "disabled"),
     [
-        ("gpt-6.1-sol", "openai-key-2", "codex"),
+        ("gpt-6.1-sol", "openai-key-3", "codex"),
         ("claude-sonnet-5-5", "droid", "claude-p"),
     ],
 )

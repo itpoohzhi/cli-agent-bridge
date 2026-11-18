@@ -8,6 +8,7 @@ from copy import copy
 from dataclasses import dataclass, field, fields, replace
 from typing import Any
 from core.backend_adapter import PreSendTransientError as AdapterPreSendError
+from core.model_modalities import supports_images
 from core.effort_policy import pin_wire_effort
 from core.http_post_dispatch import _cleanup_post, _passthrough, dispatch_route
 from core.http_post_ingress import begin_post, read_post_request
@@ -122,7 +123,7 @@ def _eligible(route: Any, spec: Any, policy: Any) -> bool:
         circuit = route.host.RESILIENCE.snapshot((spec.backend,))["backends"][spec.backend]
         ready = all((adapter.config.get("enabled", True), preflight, healthy, member, not passthrough or credential_ready(adapter.config)))
         # preflight/is_healthy выше — свежие локальные проверки, не кэш probe.
-        facts = EligibilityFacts(ready=ready, circuit_open=circuit["state"] == "OPEN", blocked_models=(), probe_age_s=0.0, max_stale_age_s=0.0, env_drift_keys=(), supports_images="image" in selected.model.get("input", ()), backend_kind=adapter.kind)
+        facts = EligibilityFacts(ready=ready, circuit_open=circuit["state"] == "OPEN", blocked_models=(), probe_age_s=0.0, max_stale_age_s=0.0, env_drift_keys=(), supports_images=supports_images(selected.model, getattr(route, "model_id", "")), backend_kind=adapter.kind)
         return route_eligible(spec, facts, policy)
     except (ValueError, OSError):
         return False

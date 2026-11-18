@@ -47,7 +47,7 @@ class StdioResidentAdapter(BackendAdapter):
         base_url_allowed=False,
         api_key_env_allowed=False,
         options_schema={
-            "protocol": ("stream-json", "stream-jsonrpc", "acp"),
+            "protocol": ("stream-json", "stream-jsonrpc", "acp", "msp-v1", "opencode-acp"),
             "step_dedup": ("arbiter", "off"),
         },
     )
@@ -82,10 +82,11 @@ class StdioResidentAdapter(BackendAdapter):
         )
         self._has_catalog_source: bool = catalog_source is not None
         self._options: dict[str, Any] = self._extract_options(actual_config)
-        protocol_name = str(self._options.get("protocol", "stream-json"))
+        from adapters.stdio_drivers import infer_protocol
+        self._protocol: str = infer_protocol(actual_id, actual_config, self._options)
         self._config: StdioPoolConfig = StdioPoolConfig.from_env()
         self._pool: ResidentProcessPool = ResidentProcessPool(self._config)
-        self._driver: StdioProtocolDriver = create_protocol_driver(protocol_name)
+        self._driver: StdioProtocolDriver = create_protocol_driver(self._protocol)
         self._session_manager: StdioSessionManager = StdioSessionManager(
             self._pool, self._driver
         )
@@ -125,7 +126,17 @@ class StdioResidentAdapter(BackendAdapter):
     def preflight_check(self) -> bool:
         """Сообщает фасаду, разрешён ли resident-путь флагом."""
 
-        return self._config.enabled
+        if not self._config.enabled:
+            return False
+        if self._protocol == "opencode-acp":
+            from adapters.stdio_drivers import is_opencode_resident_enabled
+
+            return is_opencode_resident_enabled()
+        if self._protocol == "msp-v1":
+            from adapters.stdio_drivers import is_resident_enabled
+
+            return is_resident_enabled()
+        return True
 
     def execute_chat(
         self,
@@ -240,7 +251,10 @@ class StdioResidentAdapter(BackendAdapter):
     @override
     def qualify(self) -> Qualification:
         enabled = self.preflight_check()
-        return Qualification(enabled, "" if enabled else "disabled")
+        if not enabled:
+            return Qualification(False, "disabled")
+        ok, reason = self._driver.verify_environment()
+        return Qualification(ok, reason)
 
     @override
     def is_healthy(self) -> bool:

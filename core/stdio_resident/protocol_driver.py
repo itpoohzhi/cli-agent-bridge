@@ -56,8 +56,42 @@ class StdioProtocolDriver(Protocol):
 
     def build_cancel_payload(self) -> bytes | None: ...
 
+    def compute_fingerprint(self) -> str:
+        """Return a unique driver config/version fingerprint for SlotAffinityKey."""
+        return ""
 
-class StreamJsonDriver:
+    def verify_environment(self) -> tuple[bool, str]:
+        """Run fail-closed integrity/drift check before Popen and in qualify()."""
+        return (True, "")
+
+    def build_env(
+        self, base_env: dict[str, str], turn_sandbox: str | None = None
+    ) -> dict[str, str]:
+        """Build process environment variables for a resident stdio slot."""
+        return dict(base_env)
+
+    def run_handshake(self, handle: Any, timeout_s: float = 10.0) -> bool:
+        """Run one-time cold-spawn protocol handshake."""
+        return True
+
+    def prepare_turn(
+        self, handle: Any, turn_context: Any, timeout_s: float = 5.0
+    ) -> bool:
+        """Run per-turn pre-flight setup before encode_turn."""
+        return True
+
+    def perform_turn_teardown(
+        self, handle: Any, turn_context: Any, timeout_s: float = 2.0
+    ) -> bool:
+        """Run a warm-process turn teardown barrier (e.g. session/leave)."""
+        return True
+
+    def build_sandbox_args(self) -> list[str]:
+        """Return CLI sandbox arguments required for the resident process."""
+        return []
+
+
+class StreamJsonDriver(StdioProtocolDriver):
     """Newline-delimited JSON driver for streaming turn events."""
 
     _capabilities: ClassVar[DriverCapabilities] = DriverCapabilities(

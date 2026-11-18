@@ -9,6 +9,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from core.http_post_context import PostHandler, PostHost, PostRequestContext
+from core.message_history_sanitizer import sanitize_request_payload
 from core.passthrough_autonomy import strip_passthrough_request
 
 
@@ -24,11 +25,11 @@ def clean_transport_request(
     самостоятельный вызов сохраняет прежнюю очистку env/autonomy.
     """
     raw, clean = (stripper or strip_passthrough_request)(raw, request)
-    if "transport_seed" not in clean:
-        return raw, clean
-    clean = dict(clean)
-    del clean["transport_seed"]
-    return json.dumps(clean, ensure_ascii=False).encode("utf-8"), clean
+    if "transport_seed" in clean:
+        clean = dict(clean)
+        del clean["transport_seed"]
+        raw = json.dumps(clean, ensure_ascii=False).encode("utf-8")
+    return sanitize_request_payload(raw, clean)
 
 
 def _allow_deferred_auth(context: PostRequestContext) -> bool:

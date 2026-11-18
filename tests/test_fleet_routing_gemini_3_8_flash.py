@@ -1,4 +1,4 @@
-"""L2: маршрутизация gemini-3.8-flash в droid, явный AGY-слот и согласованность с providers.d."""
+"""L2: маршрутизация gemini-3.8-flash в agy, явный AGY-слот и согласованность с providers.d."""
 
 from __future__ import annotations
 
@@ -21,16 +21,16 @@ def _model(model_id: str) -> dict:
     return next(m for m in _fleet()["models"] if m["id"] == model_id)
 
 
-def test_base_model_routes_to_droid_with_upstream() -> None:
+def test_base_model_routes_to_agy_with_upstream() -> None:
     model = _model("gemini-3.8-flash")
-    assert model["backend"] == "droid"
+    assert model["backend"] == "agy"
     assert resolve_target_model(model, "gemini-3.8-flash") == "gemini-3.8-flash"
 
 
 @pytest.mark.parametrize("effort", EFFORTS)
-def test_effort_aliases_route_to_droid(effort: str) -> None:
+def test_effort_aliases_route_to_agy(effort: str) -> None:
     alias = _fleet()["aliases"][f"gemini-3.8-flash-{effort}"]
-    assert alias == {"backend_id": "gemini-3.8-flash", "backend": "droid", "effort": effort}
+    assert alias == {"backend_id": "gemini-3.8-flash", "backend": "agy", "effort": effort}
 
 
 def test_explicit_agy_slot_is_kept_and_rewrites_to_upstream_model() -> None:
@@ -45,5 +45,5 @@ def test_explicit_agy_slot_is_kept_and_rewrites_to_upstream_model() -> None:
 
 def test_catalog_lock_primary_providers() -> None:
     lock = json.loads((ROOT / "catalog.lock.json").read_text(encoding="utf-8"))["models"]
-    assert lock["gemini-3.8-flash"]["provider"] == "droid"
+    assert lock["gemini-3.8-flash"]["provider"] == "agy"
     assert lock["gemini-3.8-flash-agy"]["provider"] == "agy"

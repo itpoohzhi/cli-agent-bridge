@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from typing import Any, ClassVar, cast, override
 
 from core.stdio_resident.protocol_driver import (
@@ -14,6 +14,18 @@ from core.stdio_resident.protocol_driver import (
     StdioProtocolDriver,
     StreamJsonDriver,
 )
+
+_EXTRA_DRIVERS: dict[str, Callable[..., StdioProtocolDriver]] = {}
+
+
+def register_protocol_driver(
+    protocol: str, factory: Callable[..., StdioProtocolDriver]
+) -> None:
+    """Register an external protocol driver factory by protocol name."""
+    key = protocol.strip()
+    if not key:
+        raise ValueError("protocol name must not be empty")
+    _EXTRA_DRIVERS[key] = factory
 
 
 def _mapping(value: object) -> dict[str, Any] | None:
@@ -217,8 +229,17 @@ class AcpDriver(StreamJsonDriver):
         return b'{"event": "cancel"}\n'
 
 
-def create_protocol_driver(protocol_name: str) -> StdioProtocolDriver:
+def create_protocol_driver(
+    protocol_name: str,
+    config: Mapping[str, Any] | None = None,
+    **kwargs: Any,
+) -> StdioProtocolDriver:
     """Create the driver registered for ``protocol_name``."""
+    if protocol_name in _EXTRA_DRIVERS:
+        factory = _EXTRA_DRIVERS[protocol_name]
+        if config is not None:
+            return factory(config=config, **kwargs)
+        return factory(**kwargs) if kwargs else factory()
 
     if protocol_name in {"claude-stream-json", "claude_stream_json"}:
         from core.stdio_resident.claude_driver import ClaudeStreamJsonDriver

@@ -233,32 +233,15 @@ _EXEC_SYNONYMS = frozenset({"execute", "run_command", "shell", "terminal"})
 
 
 def _canonical_tool_invocation(
-    name: str, arguments: dict[str, Any]
+    name: str,
+    arguments: dict[str, Any],
+    tool_schemas: dict[str, Any] | None = None,
 ) -> tuple[str, dict[str, Any]]:
-    """Приводит вызов инструмента к каноническому имени и схеме аргументов.
+    """Делегирует канонизацию вызова в ``core.tool_call_schema_policy``."""
+    from core.tool_call_schema_policy import canonicalize_tool_invocation
 
-    Единая точка нормализации для JSON (_parse_tool_call_block) и XML (_parse_execute_block, _drain_invoke).
-    1. Имена из _EXEC_SYNONYMS нормализуются к "bash".
-    2. Для инструмента "bash":
-       - если 'command' отсутствует, а присутствует 'cmd', 'CommandLine' или 'script', мапим в 'command'.
-       - служебные поля метаданных ('summary', 'toolSummary', 'description') удаляются из arguments,
-         чтобы не нарушать строгую JSON-схему инструмента bash.
-    """
-    clean_name = name.strip() if isinstance(name, str) else ""
-    args = dict(arguments) if isinstance(arguments, dict) else {}
-    if clean_name.casefold() in _EXEC_SYNONYMS:
-        clean_name = "bash"
-    if clean_name == "bash":
-        if "command" not in args:
-            for alt in ("cmd", "CommandLine", "script"):
-                if alt in args:
-                    args["command"] = args.pop(alt)
-                    break
-        for alt in ("cmd", "CommandLine", "script"):
-            args.pop(alt, None)
-        for meta in ("summary", "toolSummary", "description"):
-            args.pop(meta, None)
-    return clean_name, args
+    canon_name, canon_args = canonicalize_tool_invocation(name, arguments, tool_schemas)
+    return canon_name, dict(canon_args)
 
 
 def _recover_trailing_braces(text: str) -> dict | None:
@@ -306,7 +289,20 @@ def _loads_tolerant(text: str) -> Any:
         return recovered
 
 
-def _parse_tool_call_block(inner: str) -> dict | None:
+def _extract_tool_call_name(obj: dict[str, Any]) -> str | None:
+    if "name" in obj:
+        val = obj.get("name")
+        return val.strip() if isinstance(val, str) and val.strip() else None
+    for alt_key in ("tool", "action", "tool_name"):
+        val = obj.get(alt_key)
+        if isinstance(val, str) and val.strip():
+            return val.strip()
+    return None
+
+
+def _parse_tool_call_block(
+    inner: str, tool_schemas: dict[str, Any] | None = None
+) -> dict | None:
     """Содержимое блока -> {"name","arguments"}; None, если блок невалиден.
 
     Отсутствие ключа arguments — допустимый вызов с {}; присутствующее, но
@@ -323,24 +319,15 @@ def _parse_tool_call_block(inner: str) -> dict | None:
     if "name" not in obj and isinstance(obj.get("function"), dict):
         # OpenAI tool_calls: {"id", "type", "function": {"name", "arguments"}}
         obj = obj["function"]
-    if "name" not in obj:
-        for alt_key in ("tool", "action", "tool_name"):
-            val = obj.get(alt_key)
-            if isinstance(val, str) and val.strip():
-                obj["name"] = val
-                break
-    name = obj.get("name")
-    if not isinstance(name, str) or not name.strip():
+    name = _extract_tool_call_name(obj)
+    if name is None:
         return None
-    name = name.strip()
-    if "arguments" not in obj:
-        arguments: dict = {}
-    else:
-        normalized = _normalize_arguments(obj.get("arguments"))
-        if normalized is None:
-            return None
-        arguments = normalized
-    name, arguments = _canonical_tool_invocation(name, arguments)
+    arguments = (
+        {} if "arguments" not in obj else _normalize_arguments(obj.get("arguments"))
+    )
+    if arguments is None:
+        return None
+    name, arguments = _canonical_tool_invocation(name, arguments, tool_schemas)
     return {"name": name, "arguments": arguments}
 
 
@@ -398,14 +385,16 @@ def _split_tool_call_inner(inner: str) -> list[str]:
     return segments
 
 
-def _parse_tool_call_blocks(inner: str) -> list[dict] | None:
+def _parse_tool_call_blocks(
+    inner: str, tool_schemas: dict[str, Any] | None = None
+) -> list[dict] | None:
     """Содержимое блока -> список вызовов; None, если блок (или любой его член) невалиден.
 
     Обычный блок даёт один вызов. Если он не разбирается, но внутри есть
     несколько `<tool_call>` без промежуточных закрывающих тегов, блок делится на
     сегменты; пачка принимается только целиком (все сегменты валидны).
     """
-    single = _parse_tool_call_block(inner)
+    single = _parse_tool_call_block(inner, tool_schemas)
     if single is not None:
         return [single]
     if TOOL_CALL_OPEN not in inner:
@@ -415,7 +404,7 @@ def _parse_tool_call_blocks(inner: str) -> list[dict] | None:
         return None
     calls: list[dict] = []
     for segment in segments:
-        call = _parse_tool_call_block(segment)
+        call = _parse_tool_call_block(segment, tool_schemas)
         if call is None:
             return None
         calls.append(call)
@@ -1275,17 +1264,68 @@ class ToolCallParser:
 
     _JSON_MARKERS = re.compile(r'["\\<]')
 
-    def _feed_active(self, text: str) -> None:
-        """Каждый символ JSON просматривается один раз; тело собирается одним join."""
+    def _emit_parsed_calls(self, calls: list[dict[str, Any]]) -> None:
+        if self._allowed_tools is not None and self.strict_live:
+            for call in calls:
+                self._check_allowed(str(call.get("name") or ""))
+        self._remember(_OPAQUE_BLOCK)
+        for call in calls:
+            if not self._check_allowed(str(call.get("name") or "")):
+                continue
+            self.tool_calls_count += 1
+            self.trailing_chars_after_tool = 0
+            self._trailing_started = False
+            self._trailing_pending = 0
+            self._on_tool_call(call)
+
+    def _finish_active_block(
+        self, inner: str, open_tag: str, close_tag: str
+    ) -> None:
+        if not inner.strip():
+            return
+        calls = (
+            _parse_tool_call_blocks(inner, self._tool_schemas)
+            if self._parse_blocks is _parse_tool_call_blocks
+            else self._parse_blocks(inner)
+        )
+        if calls is not None:
+            self._emit_parsed_calls(calls)
+            return
+        if self.strict_live:
+            logger.warning("malformed tool_call block raw=%r", inner[:300])
+            raise LiveParserError("malformed tool_call block")
+        self._emit(open_tag + inner + close_tag)
+
+    def _prepare_active_text(self, text: str) -> tuple[int, str]:
+        if self._close_tail:
+            text, self._close_tail = self._close_tail + text, ""
+        if self._escaped and text:
+            self._escaped = False
+            return 1, text
+        return 0, text
+
+    def _handle_active_lt(self, text: str, index: int) -> bool:
         assert self._active is not None
         open_tag, close_tag = self._active
-        if self._close_tail:
-            text = self._close_tail + text
-            self._close_tail = ""
-        index = 0
-        if self._escaped and text:
-            index = 1
-            self._escaped = False
+        tail = text[index:]
+        if len(tail) < len(close_tag) and close_tag.startswith(tail):
+            self._parts.append(text[:index])
+            self._scan_pos += index
+            self._close_tail = tail
+            return True
+        if tail.startswith(close_tag):
+            self._parts.append(text[:index])
+            inner = "".join(self._parts)
+            self._parts.clear()
+            self._active = None
+            self._finish_active_block(inner, open_tag, close_tag)
+            self._buf = text[index + len(close_tag) :]
+            return True
+        return False
+
+    def _feed_active(self, text: str) -> None:
+        """Каждый символ JSON просматривается один раз; тело собирается одним join."""
+        index, text = self._prepare_active_text(text)
         while True:
             match = self._JSON_MARKERS.search(text, index)
             if match is None:
@@ -1296,50 +1336,16 @@ class ToolCallParser:
             char = text[index]
             if char == "\\" and self._in_string:
                 index += 2
-                if index > len(text):
-                    self._escaped = True
+                self._escaped = index > len(text)
             elif char == '"':
                 self._in_string = not self._in_string
                 index += 1
-            elif char == "<" and not self._in_string:
-                tail = text[index:]
-                if len(tail) < len(close_tag) and close_tag.startswith(tail):
-                    self._parts.append(text[:index])
-                    self._scan_pos += index
-                    self._close_tail = tail
-                    return
-                if tail.startswith(close_tag):
-                    self._parts.append(text[:index])
-                    inner = "".join(self._parts)
-                    self._parts.clear()
-                    self._active = None
-                    if not inner.strip():
-                        self._buf = text[index + len(close_tag) :]
-                        return
-                    calls = self._parse_blocks(inner)
-                    if calls is None:
-                        if self.strict_live:
-                            logger.warning(
-                                "malformed tool_call block raw=%r", inner[:300]
-                            )
-                            raise LiveParserError("malformed tool_call block")
-                        self._emit(open_tag + inner + close_tag)
-                    else:
-                        if self._allowed_tools is not None and self.strict_live:
-                            for call in calls:
-                                self._check_allowed(str(call.get("name") or ""))
-                        self._remember(_OPAQUE_BLOCK)
-                        for call in calls:
-                            if not self._check_allowed(str(call.get("name") or "")):
-                                continue
-                            self.tool_calls_count += 1
-                            self.trailing_chars_after_tool = 0
-                            self._trailing_started = False
-                            self._trailing_pending = 0
-                            self._on_tool_call(call)
-                    self._buf = text[index + len(close_tag) :]
-                    return
-                index += 1
+            elif (
+                char == "<"
+                and not self._in_string
+                and self._handle_active_lt(text, index)
+            ):
+                return
             else:
                 index += 1
 
@@ -1599,20 +1605,28 @@ class StreamNormalizer:
         strict_live: bool = True,
         reasoning_tags=REASONING_TAGS,
         max_reasoning_depth: int = DEFAULT_MAX_REASONING_DEPTH,
+        tool_schemas: dict[str, Any] | None = None,
     ):
-        self._initialize(NormalizerSinks(on_content, on_reasoning, on_tool_call), strict_live)
+        sinks = NormalizerSinks(on_content, on_reasoning, on_tool_call)
+        self._initialize(sinks, strict_live)
         self._tags = tuple(reasoning_tags)
         self._max_depth = max(int(max_reasoning_depth), 1)
+        self._tool_schemas = tool_schemas
         self._apply_mode_spec(DEFAULT_EMULATE_SPEC)
 
     @classmethod
     def for_mode(
-        cls, mode_spec: NormalizerModeSpec, sinks: NormalizerSinks | None = None,
-        *, strict_live: bool = True,
+        cls,
+        mode_spec: NormalizerModeSpec,
+        sinks: NormalizerSinks | None = None,
+        *,
+        strict_live: bool = True,
+        tool_schemas: dict[str, Any] | None = None,
     ) -> "StreamNormalizer":
         """Создаёт нормализатор без промежуточного парсера в режиме OFF."""
         instance = cls.__new__(cls)
         instance._initialize(sinks or NormalizerSinks(), strict_live)
+        instance._tool_schemas = tool_schemas
         instance._apply_mode_spec(mode_spec)
         return instance
 
@@ -1623,11 +1637,13 @@ class StreamNormalizer:
         self.strict_live = strict_live
         self._tags = REASONING_TAGS
         self._max_depth = DEFAULT_MAX_REASONING_DEPTH
+        self._tool_schemas: dict[str, Any] | None = None
         self._parser: ToolCallParser | None = None
         self._buf, self._tag, self._doc = "", "", ""
         self._state = "text"  # text | reasoning | tool
         self._reject_envelopes = False
         self._depth = 0
+        self._pending_content: list[str] = []
         self._content_pieces: list[str] = []
         self._reasoning_pieces: list[str] = []
         self._calls: list[dict] = []
@@ -1639,7 +1655,10 @@ class StreamNormalizer:
         self._reject_envelopes = self._reject_tools or (active and self.strict_live)
         if mode_spec.mode is ToolMode.EMULATE:
             self._parser = ToolCallParser(
-                self._emit_content, self._emit_call, strict_live=self.strict_live
+                self._emit_content,
+                self._emit_call,
+                strict_live=self.strict_live,
+                tool_schemas=self._tool_schemas,
             )
         candidates: list[tuple[str, str, str]] = []
         for tag in self._tags:
@@ -1698,12 +1717,25 @@ class StreamNormalizer:
         self._drain(final=True)
         if self._parser is not None:
             self._parser.finish()
+        if self._pending_content:
+            for piece in self._pending_content:
+                self._content_pieces.append(piece)
+                self._on_content(piece)
+            self._pending_content.clear()
 
     # -- sink-и нормализатора: аккумулятор сначала, уведомление следом ----------
     def _emit_content(self, text: str) -> None:
-        if text:
+        if not text:
+            return
+        if self._parser is None:
             self._content_pieces.append(text)
             self._on_content(text)
+            return
+        if self._calls:
+            if text.strip():
+                self._emit_reasoning(text)
+            return
+        self._pending_content.append(text)
 
     def _emit_reasoning(self, text: str) -> None:
         if text:
@@ -1714,6 +1746,11 @@ class StreamNormalizer:
         if not str(call.get("name") or "").strip():
             return  # вызов без имени не tool_call
         self._calls.append(call)
+        if self._pending_content:
+            preamble = "".join(self._pending_content)
+            self._pending_content.clear()
+            if preamble.strip():
+                self._emit_reasoning(preamble)
         self._on_tool_call(call)
 
     def _feed_parser(self, text: str) -> None:
@@ -1904,32 +1941,11 @@ def build_tool_schemas(tools: Any) -> dict[str, Any]:
 
 def _parameters_schema(
     tool_name: str, tool_schemas: dict[str, Any] | None
-) -> dict | None:
+) -> dict[str, Any] | None:
     """Объект `parameters` схемы инструмента; None — схемы для имени нет."""
-    schema = (tool_schemas or {}).get(tool_name)
-    if not isinstance(schema, dict):
-        return None
-    fn = schema.get("function") if isinstance(schema.get("function"), dict) else schema
-    params = fn.get("parameters")
-    return (
-        params
-        if isinstance(params, dict)
-        and not any(
-            key in params
-            for key in (
-                "$ref",
-                "anyOf",
-                "oneOf",
-                "allOf",
-                "if",
-                "then",
-                "else",
-                "dependentRequired",
-                "dependentSchemas",
-            )
-        )
-        else None
-    )
+    from core.tool_call_schema_policy import resolve_parameters_schema
+
+    return resolve_parameters_schema(tool_name, tool_schemas)
 
 
 def _is_blank(value: Any) -> bool:
