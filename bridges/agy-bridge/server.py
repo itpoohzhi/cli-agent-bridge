@@ -105,6 +105,7 @@ import time
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
+from functools import partial
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Callable, NamedTuple, cast, final
@@ -158,6 +159,8 @@ from core.agy_capacity_guard import (  # noqa: E402
 )
 from core.chat_key import SOURCES_SESSION_ID, resolve_chat_key  # noqa: E402
 from core.usage_wire import normalize_prompt_cache_details  # noqa: E402
+from core.session_continuity import ContinuityConfig, ContinuityIndex, session_key_for  # noqa: E402
+from core.prompt_truncation_notice import NoticePolicy, with_truncation_notice  # noqa: E402
 from core.cli_rejection import is_deterministic_cli_rejection  # noqa: E402
 from core.effortless_policy import effort_cli_args, resolve_request_effort  # noqa: E402
 from core.proc_groups import spawn_registered  # noqa: E402
@@ -1253,6 +1256,10 @@ def _log(msg: str) -> None:
         "[agy-bridge] %s %s\n" % (time.strftime("%H:%M:%S"), _mask_secrets(msg))
     )
     sys.stderr.flush()
+
+
+_CONTINUITY = ContinuityIndex(ContinuityConfig(
+    _env_int("AGY_BRIDGE_CONTINUITY_MAX_LINKS", 4096, 16, 1_000_000), SESSION_IDLE_TTL_S, _log))
 
 
 def _idle_timeout_from_env() -> float:
@@ -2520,7 +2527,11 @@ def _messages_to_prompt(
     limit = _prompt_budget(reserve_bytes)
     if not AGY_BRIDGE_ENABLE_HEAD_PRUNING or _ndjson_bytes(text) <= limit:
         return text
-    return _prune_prompt_blocks(blocks, tail_block, limit)
+    pruned = _prune_prompt_blocks(blocks, tail_block, limit)
+    if not _new_flag("truncation_notice_enabled"):
+        return pruned
+    rp = partial(_prune_prompt_blocks, blocks, tail_block)
+    return with_truncation_notice(pruned, blocks, rp, _NOTICE_POLICY, limit)
 
 
 def _join_prompt_parts(parts: list[str], tail_block: str = "") -> str:
@@ -3021,43 +3032,8 @@ def _session_key_for(
     """Ключ горячей сессии: токен чата, иначе cwd; без обоих ключ пуст.
 
     Сырой chat id в стор и на диск не попадает — только префикс его SHA-256.
-    Переданный, но невалидный cwd (не строка, относительный, длиннее
-    CWD_MAX_LEN, с NUL/контролами/суррогатами) — fail-closed: ключа нет.
-    Пустой cwd допустим только при штатном отсутствии cwd (None или "").
     """
-    chat = raw_chat_id.strip() if isinstance(raw_chat_id, str) else ""
-    # Суррогаты и контролы в chat id не должны доходить до encode("utf-8").
-    if any(
-        ord(c) < 32 or ord(c) == 127 or 0xD800 <= ord(c) <= 0xDFFF for c in chat
-    ):
-        return ()
-
-    cwd_norm = ""
-    if cwd is not None:
-        if isinstance(cwd, str):
-            val = cwd.strip()
-            if val:
-                if (
-                    len(val) > CWD_MAX_LEN
-                    or not os.path.isabs(val)
-                    or "\x00" in val
-                    or any(
-                        ord(c) < 32 or ord(c) == 127 or 0xD800 <= ord(c) <= 0xDFFF
-                        for c in val
-                    )
-                ):
-                    return ()
-                cwd_norm = os.path.normpath(val)
-        else:
-            return ()
-
-    if chat:
-        # Полный sha256: токен — идентичность сессии, усечённый дайджест допускал бы коллизии.
-        chat_token = hashlib.sha256(chat.encode("utf-8")).hexdigest()
-        return (chat_token, model, cwd_norm, effort)
-    if cwd_norm:
-        return (model, cwd_norm, effort)
-    return ()
+    return session_key_for(model, cwd, effort, raw_chat_id, CWD_MAX_LEN)
 
 
 def _request_chat_id(
@@ -3071,9 +3047,16 @@ def _request_chat_id(
     как идентичность сессии он склеил бы чужие диалоги. Предел длины — из
     BRIDGE_CHAT_KEY_MAX_LEN (по умолчанию 512).
     """
-    chat = resolve_chat_key(req, headers, extra, sources=SOURCES_SESSION_ID)
+    extra_map = extra if isinstance(extra, dict) else None
+    cwd = (extra_map or {}).get("cwd")
+    has_cwd = isinstance(cwd, str) and bool(cwd.strip())
+    chat = resolve_chat_key(req, headers, extra_map, sources=SOURCES_SESSION_ID)
     if chat.invalid:
         return "", True
+    if not chat.value and not has_cwd and isinstance(req, dict) and req.get("tools"):
+        if _new_flag("session_continuity_enabled"):
+            scope = f"{req.get('model') or ''}\x00"
+            return _CONTINUITY.resolve(req.get("messages"), scope), False
     return chat.value, False
 
 
@@ -3347,6 +3330,10 @@ def _ndjson_bytes(prompt: str) -> int:
     return len(_ndjson_user_line(prompt).encode("utf-8"))
 
 
+_NOTICE_TEMPLATE = os.environ.get("AGY_BRIDGE_TRUNCATION_NOTICE_TEMPLATE", "").strip()
+_NOTICE_POLICY = NoticePolicy(_ndjson_bytes, _NOTICE_TEMPLATE or None, _log)
+
+
 def _ndjson_user_line(prompt: str) -> str:
     """Строка NDJSON для stdin agy — единственный поддерживаемый вход промпта."""
     payload = {
@@ -3495,6 +3482,8 @@ class _RuntimeFlags(NamedTuple):
     self_heal_interrupted_turn: bool = False
     graceful_interruption_on_partial: bool = True
     graceful_timeout_finish_reason: str = "stop"
+    session_continuity_enabled: bool = False
+    truncation_notice_enabled: bool = False
 
 
 _NEW_FLAG_ENV = {
@@ -3508,6 +3497,8 @@ _NEW_FLAG_ENV = {
     "tool_emulation_enabled": "AGY_TOOL_EMULATION_ENABLED",
     "self_heal_interrupted_turn": "AGY_SELF_HEAL_INTERRUPTED_TURN",
     "graceful_interruption_on_partial": "AGY_GRACEFUL_INTERRUPTION_ON_PARTIAL",
+    "session_continuity_enabled": "AGY_SESSION_CONTINUITY_ENABLED",
+    "truncation_notice_enabled": "AGY_TRUNCATION_NOTICE_ENABLED",
 }
 _ENV_TRUE = frozenset({"1", "true", "yes", "on"})
 _ENV_FALSE = frozenset({"0", "false", "no", "off"})
