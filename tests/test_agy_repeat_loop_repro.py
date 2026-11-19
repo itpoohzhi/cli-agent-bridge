@@ -24,15 +24,17 @@ _TOOLS: list[dict[str, Any]] = [
 
 
 def _load_bridge() -> Any:
-    os.environ.setdefault("AGY_BRIDGE_KEY", "test-key-agy-repeat-loop")
-    os.environ.pop("AGY_BRIDGE_FLEET", None)
-    spec = importlib.util.spec_from_file_location(
-        "agy_bridge_server_repeat_loop_repro", _BRIDGE_PY
-    )
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
+    with pytest.MonkeyPatch.context() as mp:
+        if "AGY_BRIDGE_KEY" not in os.environ:
+            mp.setenv("AGY_BRIDGE_KEY", "test-key-agy-repeat-loop")
+        mp.delenv("AGY_BRIDGE_FLEET", raising=False)
+        spec = importlib.util.spec_from_file_location(
+            "agy_bridge_server_repeat_loop_repro", _BRIDGE_PY
+        )
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
     return module
 
 
@@ -147,3 +149,28 @@ def test_tool_turn_without_chat_id_commits_and_claims_session_store(
     assert not invalid_1 and not invalid_2
     assert sess_key_1 in srv._session_store
     assert claimed == "cid-turn-1"
+
+
+def test_cwd_without_chat_id_keeps_cwd_session_key_and_skips_continuity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _enable_flag(monkeypatch, "AGY_SESSION_CONTINUITY_ENABLED")
+    _, req2 = _turn_requests()
+    chat_id, invalid = srv._request_chat_id({}, {"cwd": "/abs/path"}, req2)
+    sess_key = srv._session_key_for(_MODEL, "/abs/path", "high", chat_id)
+
+    assert (chat_id, invalid) == ("", False)
+    assert len(sess_key) == 3
+    assert srv._CONTINUITY.link_count() == 0
+
+
+@pytest.mark.parametrize("extra", [None])
+def test_non_dict_extra_does_not_crash_and_keeps_continuity(
+    monkeypatch: pytest.MonkeyPatch, extra: Any
+) -> None:
+    _enable_flag(monkeypatch, "AGY_SESSION_CONTINUITY_ENABLED")
+    req1, _ = _turn_requests()
+    chat_id, invalid = srv._request_chat_id({}, extra, req1)
+
+    assert chat_id.startswith("cont-")
+    assert not invalid

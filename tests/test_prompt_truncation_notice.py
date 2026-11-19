@@ -1,5 +1,7 @@
 """Тесты чистого домена core.prompt_truncation_notice."""
 
+from __future__ import annotations
+
 import json
 import sys
 from pathlib import Path
@@ -150,7 +152,7 @@ def test_custom_template_is_used() -> None:
 
 def test_broken_template_falls_back_to_default() -> None:
     blocks = [(0, "tool", "T" * 100)]
-    for broken in ("{unknown}", "{", "{0}"):
+    for broken in ("{unknown}", "{", "{0}", "{count[0]}", "{count.x}"):
         reprune = _Reprune("", "T" * 100)
         policy = _policy(template=broken)
         result = with_truncation_notice("T", blocks, reprune, policy, 1000)

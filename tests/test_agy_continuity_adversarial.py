@@ -267,3 +267,16 @@ def test_chat_order_forward_and_reverse_has_no_leakage(reverse: bool) -> None:
         per_chat[name] = [idx.resolve(_hist(name, r)) for r in range(3)]
     assert all(len(set(chains)) == 1 for chains in per_chat.values())
     assert len({chains[0] for chains in per_chat.values()}) == len(names)
+
+
+def test_resolve_reads_clock_only_under_lock() -> None:
+    held: list[bool] = []
+
+    def clock() -> float:
+        held.append(idx._lock.locked())
+        return 0.0
+
+    idx = srv.ContinuityIndex(clock=clock)
+    chain = idx.resolve(_hist("u", 1), "s")
+    assert chain
+    assert held == [True]

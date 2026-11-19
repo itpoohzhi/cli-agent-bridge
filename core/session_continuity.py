@@ -104,9 +104,8 @@ def _canon_message(msg: object) -> dict[str, object]:
     return out
 
 
-def canonical_digest(messages: Sequence[object], scope: str = "") -> str:
-    """sha256 устойчивых полей сообщений; метаданные клиента игнорируются."""
-    payload = {"scope": scope, "messages": [_canon_message(m) for m in messages]}
+def _digest(canon: list[dict[str, object]], scope: str) -> str:
+    payload = {"scope": scope, "messages": canon}
     raw = json.dumps(
         payload,
         sort_keys=True,
@@ -117,21 +116,24 @@ def canonical_digest(messages: Sequence[object], scope: str = "") -> str:
     return hashlib.sha256(raw.encode("utf-8", "surrogatepass")).hexdigest()
 
 
+def canonical_digest(messages: Sequence[object], scope: str = "") -> str:
+    """sha256 устойчивых полей сообщений; метаданные клиента игнорируются."""
+    return _digest([_canon_message(m) for m in messages], scope)
+
+
 def _default_chain() -> str:
     return f"cont-{uuid.uuid4().hex}"
 
 
-def _prefix_digest(messages: list[object], scope: str) -> str | None:
+def _prefix_digest(canon: list[dict[str, object]], scope: str) -> str | None:
     """Дайджест истории до последнего assistant; None — нет префикса."""
     last = -1
-    for idx, msg in enumerate(messages):
-        if isinstance(msg, dict) and cast("dict[str, object]", msg).get("role") == (
-            "assistant"
-        ):
+    for idx, msg in enumerate(canon):
+        if msg.get("role") == "assistant":
             last = idx
     if last <= 0:
         return None
-    return canonical_digest(messages[:last], scope)
+    return _digest(canon[:last], scope)
 
 
 @final
@@ -188,11 +190,11 @@ class ContinuityIndex:
         """chain для истории; пустая строка — истории нет."""
         if not isinstance(messages, list) or not messages:
             return ""
-        msgs = cast("list[object]", messages)
-        prefix = _prefix_digest(msgs, scope)
-        full = canonical_digest(msgs, scope)
-        now = self._clock()
+        canon = [_canon_message(m) for m in cast("list[object]", messages)]
+        prefix = _prefix_digest(canon, scope)
+        full = _digest(canon, scope)
         with self._lock:
+            now = self._clock()
             self._expire(now)
             chain, status = self._take_chain(prefix)
             status = self._register(full, chain, now, status)

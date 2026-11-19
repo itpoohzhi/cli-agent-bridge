@@ -3049,9 +3049,10 @@ def _request_chat_id(
     chat = resolve_chat_key(req, headers, extra, sources=SOURCES_SESSION_ID)
     if chat.invalid:
         return "", True
-    if not chat.value and isinstance(req, dict) and req.get("tools"):
+    cwd = extra.get("cwd") if isinstance(extra, dict) else ""
+    if not chat.value and not cwd and isinstance(req, dict) and req.get("tools"):
         if _new_flag("session_continuity_enabled"):
-            scope = f"{req.get('model') or ''}\x00{extra.get('cwd') or ''}"
+            scope = f"{req.get('model') or ''}\x00"
             return _CONTINUITY.resolve(req.get("messages"), scope), False
     return chat.value, False
 

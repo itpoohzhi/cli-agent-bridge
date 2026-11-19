@@ -7,6 +7,8 @@ tool-результаты были усечены, к хвосту промпт�
 окружению; в шаблон подставляются только целые числа.
 """
 
+from __future__ import annotations
+
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
@@ -52,7 +54,7 @@ def _render_notice(template: str | None, count: int, limit: int) -> str:
         text = (template or DEFAULT_TRUNCATION_NOTICE_TEMPLATE).format(
             count=int(count), limit=int(limit)
         )
-    except (KeyError, ValueError, IndexError):
+    except (KeyError, ValueError, IndexError, TypeError, AttributeError):
         text = DEFAULT_TRUNCATION_NOTICE_TEMPLATE.format(
             count=int(count), limit=int(limit)
         )
