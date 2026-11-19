@@ -55,14 +55,18 @@ def _a(text: str) -> dict[str, object]:
     return {"role": "assistant", "content": text}
 
 
+def _asst_call(call_id: str, args: str) -> list[dict[str, object]]:
+    call = {"id": call_id, "function": {"name": "bash", "arguments": args}}
+    return [{"role": "assistant", "content": None, "tool_calls": [call]}]
+
+
 def _turns(n: int, tag: str = "") -> list[list[dict[str, object]]]:
-    """Истории ходов 1..n: u1; u1 a1 u2; u1 a1 u2 a2 u3; ..."""
-    out: list[list[dict[str, object]]] = []
-    msgs: list[dict[str, object]] = []
-    for i in range(1, n + 1):
-        if i > 1:
-            msgs.append(_a(f"{tag}a{i - 1}"))
-        msgs.append(_u(f"{tag}u{i}"))
+    """Истории ходов 1..n: u1; u1 a1(c1) t1; u1 a1 t1 a2(c2) t2; ..."""
+    msgs: list[dict[str, object]] = [_u(f"{tag}u1")]
+    out = [list(msgs)]
+    for i in range(1, n):
+        msgs += _asst_call(f"{tag}c{i}", "{}")
+        msgs.append({"role": "tool", "tool_call_id": f"{tag}c{i}", "content": "ok"})
         out.append(list(msgs))
     return out
 
@@ -104,11 +108,6 @@ def test_digest_is_sensitive_to_scope_and_content() -> None:
     assert canonical_digest([_u("x")]) != canonical_digest([_a("x")])
 
 
-def _asst_call(call_id: str, args: str) -> list[dict[str, object]]:
-    call = {"id": call_id, "function": {"name": "bash", "arguments": args}}
-    return [{"role": "assistant", "content": None, "tool_calls": [call]}]
-
-
 def test_digest_is_sensitive_to_tool_call_id_and_arguments() -> None:
     base = canonical_digest(_asst_call("t1", '{"c":"ls"}'))
     assert base == canonical_digest(_asst_call("t1", '{"c":"ls"}'))
@@ -125,12 +124,25 @@ def test_digest_covers_tool_result_fields() -> None:
 # --- ContinuityIndex: цепочка ------------------------------------------
 
 
-def test_chain_is_stable_across_three_turns() -> None:
+def test_chain_is_cold_for_turns_one_two_and_hot_from_turn_three() -> None:
     idx, _ = _index()
-    t1, t2, t3 = _turns(3)
+    t1, t2, t3, t4 = _turns(4)
     c1 = idx.resolve(t1, "s")
-    assert idx.resolve(t2, "s") == c1
-    assert idx.resolve(t3, "s") == c1
+    assert idx.link_count() == 0  # ход 1 без якоря не регистрируется
+    c2 = idx.resolve(t2, "s")
+    assert c2 != c1 and idx.link_count() == 1
+    assert idx.resolve(t3, "s") == c2
+    assert idx.resolve(t4, "s") == c2
+
+
+@pytest.mark.parametrize("call_id", [None, "", "  "])
+def test_history_without_tool_call_anchor_is_cold_and_not_registered(
+    call_id: str | None,
+) -> None:
+    idx, _ = _index()
+    msgs = [_u("u1"), *_asst_call(call_id or "", "{}"), _u("u2"), _a("a2"), _u("u3")]
+    chains = {idx.resolve(msgs[:n], "s") for n in (1, 3, 5)}
+    assert len(chains) == 3 and idx.link_count() == 0
 
 
 def test_invalid_messages_give_empty_chain() -> None:
@@ -143,45 +155,41 @@ def test_invalid_messages_give_empty_chain() -> None:
 
 def test_prefix_entry_is_single_use() -> None:
     idx, _ = _index()
-    t1, t2 = _turns(2)
-    c1 = idx.resolve(t1, "s")
-    assert idx.resolve(t2, "s") == c1
-    # Повтор того же хода 2: запись префикса уже изъята — холодный chain.
-    assert idx.resolve(t2, "s") != c1
+    t1, t2, t3 = _turns(3)
+    idx.resolve(t1, "s")
+    c2 = idx.resolve(t2, "s")
+    assert idx.resolve(t3, "s") == c2
+    # Повтор того же хода 3: запись префикса уже изъята — холодный chain.
+    assert idx.resolve(t3, "s") != c2
 
 
-def test_identical_first_requests_conflict_into_tombstone() -> None:
+def test_identical_anchored_histories_conflict_into_tombstone() -> None:
     idx, _ = _index()
-    (a1,) = _turns(1)
-    (b1,) = _turns(1)
-    ca1 = idx.resolve(a1, "s")
-    cb1 = idx.resolve(b1, "s")
-    assert ca1 != cb1
-    ca2 = idx.resolve(_turns(2)[1], "s")
-    cb2 = idx.resolve(_turns(2)[1], "s")
-    assert len({ca1, cb1, ca2, cb2}) == 4
+    _, t2, t3 = _turns(3)
+    ca2 = idx.resolve(t2, "s")
+    cb2 = idx.resolve(t2, "s")  # тот же дайджест, другой chain -> tombstone
+    ca3 = idx.resolve(t3, "s")
+    cb3 = idx.resolve(t3, "s")
+    assert len({ca2, cb2, ca3, cb3}) == 4
 
 
-def test_identical_first_requests_in_different_scopes_do_not_conflict() -> None:
+def test_identical_histories_in_different_scopes_do_not_conflict() -> None:
     idx, _ = _index()
-    t1, t2 = _turns(2)
-    c_m1 = idx.resolve(t1, "m1\x00/w")
-    c_m2 = idx.resolve(t1, "m2\x00/w")
-    c_w2 = idx.resolve(t1, "m1\x00/other")
-    assert idx.resolve(t2, "m1\x00/w") == c_m1
-    assert idx.resolve(t2, "m2\x00/w") == c_m2
-    assert idx.resolve(t2, "m1\x00/other") == c_w2
-    assert len({c_m1, c_m2, c_w2}) == 3
+    _, t2, t3 = _turns(3)
+    scopes = ("m1\x00/w", "m2\x00/w", "m1\x00/other")
+    cold = [idx.resolve(t2, sc) for sc in scopes]
+    assert [idx.resolve(t3, sc) for sc in scopes] == cold
+    assert len(set(cold)) == 3
 
 
 def test_sequential_identical_chats_do_not_merge() -> None:
     idx, _ = _index()
-    t1, t2 = _turns(2)
-    idx.resolve(t1, "s")
-    chain_a = idx.resolve(t2, "s")  # Ход 2 A: pop
-    idx.resolve(t1, "s")  # Ход 1 B: полный дайджест хода 1 свободен снова
-    chain_b = idx.resolve(t2, "s")
-    assert chain_a != chain_b
+    _, t2, t3 = _turns(3)
+    a2 = idx.resolve(t2, "s")
+    assert idx.resolve(t3, "s") == a2  # ход 3 A: pop
+    b2 = idx.resolve(t2, "s")  # ход 2 B: дайджест хода 2 свободен снова
+    assert b2 != a2
+    assert idx.resolve(t3, "s") == b2
 
 
 # --- вытеснение и TTL --------------------------------------------------
@@ -189,37 +197,30 @@ def test_sequential_identical_chats_do_not_merge() -> None:
 
 def test_max_links_evicts_oldest() -> None:
     idx, _ = _index(max_links=2)
-    chat_a, chat_b, chat_c = (_turns(2, tag=t) for t in "abc")
-    ca = idx.resolve(chat_a[0], "s")
-    idx.resolve(chat_b[0], "s")
-    idx.resolve(chat_c[0], "s")
+    chat_a, chat_b, chat_c = (_turns(3, tag=t) for t in "abc")
+    ca = idx.resolve(chat_a[1], "s")
+    idx.resolve(chat_b[1], "s")
+    cc = idx.resolve(chat_c[1], "s")
     assert idx.link_count() == 2
-    assert idx.resolve(chat_a[1], "s") != ca  # цепочка A вытеснена
-    assert idx.resolve(chat_c[1], "s") != ""
+    assert idx.resolve(chat_a[2], "s") != ca  # цепочка A вытеснена
+    assert idx.resolve(chat_c[2], "s") == cc
 
 
-def test_ttl_expires_links() -> None:
+@pytest.mark.parametrize(("dt", "hot"), [(10.5, False), (10.0, True)])
+def test_ttl_expiry_and_boundary(dt: float, hot: bool) -> None:
     idx, clock = _index(ttl_s=10.0)
-    t1, t2 = _turns(2)
-    c1 = idx.resolve(t1, "s")
-    clock.now += 10.5
-    assert idx.resolve(t2, "s") != c1
-
-
-def test_ttl_boundary_keeps_link() -> None:
-    idx, clock = _index(ttl_s=10.0)
-    t1, t2 = _turns(2)
-    c1 = idx.resolve(t1, "s")
-    clock.now += 10.0
-    assert idx.resolve(t2, "s") == c1
+    _, t2, t3 = _turns(3)
+    c2 = idx.resolve(t2, "s")
+    clock.now += dt
+    assert (idx.resolve(t3, "s") == c2) is hot
 
 
 def test_expired_entries_are_purged() -> None:
     idx, clock = _index(ttl_s=5.0)
-    idx.resolve(_turns(1, tag="a")[0], "s")
-    idx.resolve(_turns(1, tag="b")[0], "s")
+    idx.resolve(_turns(2, tag="a")[1], "s")
+    idx.resolve(_turns(2, tag="b")[1], "s")
     clock.now += 6.0
-    idx.resolve(_turns(1, tag="c")[0], "s")
+    idx.resolve(_turns(2, tag="c")[1], "s")
     assert idx.link_count() == 1
 
 
@@ -236,16 +237,15 @@ def test_log_contains_only_status_and_counter() -> None:
     lines: list[str] = []
     idx, _ = _index(log_fn=lines.append)
     secret = "TOPSECRET-token-123"
-    t1 = [_u(f"my password is {secret}")]
-    idx.resolve(t1, "model\x00/home/u")
-    idx.resolve([*t1, _a("reply " + secret), _u("more " + secret)], "model\x00/home/u")
+    for turn in _turns(3, tag=secret):
+        idx.resolve(turn, "model\x00/home/u")
     assert lines == [
+        "continuity status=init links=0",
         "continuity status=init links=1",
         "continuity status=hit links=1",
     ]
     joined = "\n".join(lines)
     assert secret not in joined
-    assert "password" not in joined
     assert "/home/u" not in joined
 
 

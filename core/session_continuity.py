@@ -1,12 +1,12 @@
 """Непрерывность чата без клиентского chat id: цепочка по дайджесту префикса.
 
 Чистый домен (только stdlib, без I/O и env). Клиент без chat id присылает на
-каждом ходе полную историю. Индекс запоминает дайджест каждой увиденной
-истории; ход N+1, чей префикс (всё до последнего assistant) совпал с
-дайджестом хода N, получает тот же `chain` (горячая сессия). Запись
-одноразовая (pop): повтор того же префикса — холодный старт. Два чата с
-идентичной историей в одном scope превращают дайджест в tombstone, и оба
-следующих хода стартуют холодно — склейка чужих диалогов исключена.
+каждом ходе полную историю. Индекс запоминает дайджест увиденной истории;
+ход N+1, чей префикс (всё до последнего assistant) совпал с ним, получает тот
+же `chain` (горячая сессия). Ссылка ищется и регистрируется только для среза
+с криптографическим якорем — assistant.tool_calls[].id (выдан мостом, угадать
+нельзя): ход 1 и 2 холодные, ход 3..N горячие. Запись одноразовая (pop),
+идентичные истории превращаются в tombstone — склейка чужих диалогов исключена.
 
 В лог уходят только статус и счётчик, без текста сообщений.
 """
@@ -26,21 +26,8 @@ from typing import cast, final
 
 _DEFAULT_TTL_S = 1800.0
 _PART_KEYS = (
-    "type",
-    "text",
-    "image_url",
-    "url",
-    "detail",
-    "source",
-    "media_type",
-    "data",
-    "input_audio",
-    "file",
-    "id",
-    "name",
-    "input",
-    "tool_use_id",
-    "content",
+    *"type text image_url url detail source media_type data".split(),
+    *"input_audio file id name input tool_use_id content".split(),
 )
 
 
@@ -125,13 +112,25 @@ def _default_chain() -> str:
     return f"cont-{uuid.uuid4().hex}"
 
 
+def _has_tool_call_anchor(canon_slice: Sequence[dict[str, object]]) -> bool:
+    """Есть assistant-сообщение с tool_calls, где хотя бы один id непуст."""
+    return any(
+        msg.get("role") == "assistant"
+        and any(
+            bool(str(c.get("id") or "").strip())
+            for c in _norm_tool_calls(msg.get("tool_calls"))
+        )
+        for msg in canon_slice
+    )
+
+
 def _prefix_digest(canon: list[dict[str, object]], scope: str) -> str | None:
-    """Дайджест истории до последнего assistant; None — нет префикса."""
+    """Дайджест истории до последнего assistant; None — нет якорного префикса."""
     last = -1
     for idx, msg in enumerate(canon):
         if msg.get("role") == "assistant":
             last = idx
-    if last <= 0:
+    if last <= 0 or not _has_tool_call_anchor(canon[:last]):
         return None
     return _digest(canon[:last], scope)
 
@@ -192,12 +191,13 @@ class ContinuityIndex:
             return ""
         canon = [_canon_message(m) for m in cast("list[object]", messages)]
         prefix = _prefix_digest(canon, scope)
-        full = _digest(canon, scope)
+        full = _digest(canon, scope) if _has_tool_call_anchor(canon) else None
         with self._lock:
             now = self._clock()
             self._expire(now)
             chain, status = self._take_chain(prefix)
-            status = self._register(full, chain, now, status)
+            if full is not None:
+                status = self._register(full, chain, now, status)
             count = len(self._links)
         log_fn = self._config.log_fn
         if log_fn is not None:

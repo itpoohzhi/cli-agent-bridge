@@ -41,29 +41,22 @@ def _load_bridge() -> Any:
 srv = _load_bridge()
 
 
-def _turn_requests() -> tuple[dict[str, Any], dict[str, Any]]:
-    """Два запроса DSH 0.2.2-rc.5: общий префикс, второй добавляет tool-цикл."""
-    system = {"role": "system", "content": "Ты помощник."}
-    user = {"role": "user", "content": "прочитай SKILL.md"}
-    assistant = {
-        "role": "assistant",
-        "content": "",
-        "tool_calls": [
-            {
-                "id": "call_1",
-                "type": "function",
-                "function": {"name": "read_file", "arguments": "{}"},
-            }
-        ],
-    }
-    tool = {"role": "tool", "tool_call_id": "call_1", "content": "содержимое файла"}
-    req1 = {"model": _MODEL, "messages": [system, user], "tools": _TOOLS}
-    req2 = {
-        "model": _MODEL,
-        "messages": [system, user, assistant, tool],
-        "tools": _TOOLS,
-    }
-    return req1, req2
+def _turn_requests() -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    """Три запроса DSH 0.2.2-rc.5: каждый следующий добавляет tool-цикл."""
+    msgs: list[dict[str, Any]] = [
+        {"role": "system", "content": "Ты помощник."},
+        {"role": "user", "content": "прочитай SKILL.md"},
+    ]
+    reqs = [{"model": _MODEL, "messages": list(msgs), "tools": _TOOLS}]
+    for n in (1, 2):
+        fn = {"name": "read_file", "arguments": "{}"}
+        call = {"id": f"call_{n}", "type": "function", "function": fn}
+        msgs.append({"role": "assistant", "content": "", "tool_calls": [call]})
+        msgs.append(
+            {"role": "tool", "tool_call_id": f"call_{n}", "content": f"файл {n}"}
+        )
+        reqs.append({"model": _MODEL, "messages": list(msgs), "tools": _TOOLS})
+    return reqs[0], reqs[1], reqs[2]
 
 
 @pytest.fixture(autouse=True)
@@ -87,20 +80,21 @@ def _isolate_session_store(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> N
     monkeypatch.setattr(srv, "_active_cid_owners", {})
 
 
-def test_dsh_second_tool_turn_without_chat_id_gets_continuity_session_key(
+def test_dsh_third_tool_turn_without_chat_id_resumes_continuity_session_key(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _enable_flag(monkeypatch, "AGY_SESSION_CONTINUITY_ENABLED")
-    req1, req2 = _turn_requests()
+    req1, req2, req3 = _turn_requests()
     chat_id_1, _ = srv._request_chat_id({}, {}, req1)
     chat_id_2, _ = srv._request_chat_id({}, {}, req2)
-    sess_key_1 = srv._session_key_for(_MODEL, "", "high", chat_id_1)
+    chat_id_3, _ = srv._request_chat_id({}, {}, req3)
     sess_key_2 = srv._session_key_for(_MODEL, "", "high", chat_id_2)
+    sess_key_3 = srv._session_key_for(_MODEL, "", "high", chat_id_3)
 
-    assert chat_id_1
-    assert chat_id_2 == chat_id_1
-    assert len(sess_key_1) == 4
-    assert sess_key_2 == sess_key_1
+    assert chat_id_1 and chat_id_2 and chat_id_1 != chat_id_2  # ходы 1-2 холодные
+    assert chat_id_3 == chat_id_2  # ход 3 горячий (resume)
+    assert len(sess_key_2) == 4
+    assert sess_key_3 == sess_key_2
 
 
 def test_active_tool_truncation_emits_single_notice_within_budget(
@@ -136,26 +130,26 @@ def test_tool_turn_without_chat_id_commits_and_claims_session_store(
 ) -> None:
     _isolate_session_store(monkeypatch, tmp_path)
     _enable_flag(monkeypatch, "AGY_SESSION_CONTINUITY_ENABLED")
-    req1, req2 = _turn_requests()
-
-    chat_id_1, invalid_1 = srv._request_chat_id({}, {}, req1)
-    sess_key_1 = srv._session_key_for(_MODEL, "", "high", chat_id_1)
-    srv._session_commit(sess_key_1, "cid-turn-1")
+    _, req2, req3 = _turn_requests()
 
     chat_id_2, invalid_2 = srv._request_chat_id({}, {}, req2)
     sess_key_2 = srv._session_key_for(_MODEL, "", "high", chat_id_2)
-    claimed = srv._session_claim(sess_key_2, turn_id="t2")
+    srv._session_commit(sess_key_2, "cid-turn-2")
 
-    assert not invalid_1 and not invalid_2
-    assert sess_key_1 in srv._session_store
-    assert claimed == "cid-turn-1"
+    chat_id_3, invalid_3 = srv._request_chat_id({}, {}, req3)
+    sess_key_3 = srv._session_key_for(_MODEL, "", "high", chat_id_3)
+    claimed = srv._session_claim(sess_key_3, turn_id="t3")
+
+    assert not invalid_2 and not invalid_3
+    assert sess_key_2 in srv._session_store
+    assert claimed == "cid-turn-2"
 
 
 def test_cwd_without_chat_id_keeps_cwd_session_key_and_skips_continuity(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _enable_flag(monkeypatch, "AGY_SESSION_CONTINUITY_ENABLED")
-    _, req2 = _turn_requests()
+    _, req2, _ = _turn_requests()
     chat_id, invalid = srv._request_chat_id({}, {"cwd": "/abs/path"}, req2)
     sess_key = srv._session_key_for(_MODEL, "/abs/path", "high", chat_id)
 
@@ -164,12 +158,12 @@ def test_cwd_without_chat_id_keeps_cwd_session_key_and_skips_continuity(
     assert srv._CONTINUITY.link_count() == 0
 
 
-@pytest.mark.parametrize("extra", [None])
+@pytest.mark.parametrize("extra", [None, [], "str", 0, {"cwd": "   "}])
 def test_non_dict_extra_does_not_crash_and_keeps_continuity(
     monkeypatch: pytest.MonkeyPatch, extra: Any
 ) -> None:
     _enable_flag(monkeypatch, "AGY_SESSION_CONTINUITY_ENABLED")
-    req1, _ = _turn_requests()
+    req1, _, _ = _turn_requests()
     chat_id, invalid = srv._request_chat_id({}, extra, req1)
 
     assert chat_id.startswith("cont-")

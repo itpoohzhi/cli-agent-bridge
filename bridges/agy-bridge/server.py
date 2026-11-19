@@ -105,6 +105,7 @@ import time
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
+from functools import partial
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Callable, NamedTuple, cast, final
@@ -2529,7 +2530,7 @@ def _messages_to_prompt(
     pruned = _prune_prompt_blocks(blocks, tail_block, limit)
     if not _new_flag("truncation_notice_enabled"):
         return pruned
-    rp = lambda lim: _prune_prompt_blocks(blocks, tail_block, lim)  # noqa: E731
+    rp = partial(_prune_prompt_blocks, blocks, tail_block)
     return with_truncation_notice(pruned, blocks, rp, _NOTICE_POLICY, limit)
 
 
@@ -3046,11 +3047,13 @@ def _request_chat_id(
     как идентичность сессии он склеил бы чужие диалоги. Предел длины — из
     BRIDGE_CHAT_KEY_MAX_LEN (по умолчанию 512).
     """
-    chat = resolve_chat_key(req, headers, extra, sources=SOURCES_SESSION_ID)
+    extra_map = extra if isinstance(extra, dict) else None
+    cwd = (extra_map or {}).get("cwd")
+    has_cwd = isinstance(cwd, str) and bool(cwd.strip())
+    chat = resolve_chat_key(req, headers, extra_map, sources=SOURCES_SESSION_ID)
     if chat.invalid:
         return "", True
-    cwd = extra.get("cwd") if isinstance(extra, dict) else ""
-    if not chat.value and not cwd and isinstance(req, dict) and req.get("tools"):
+    if not chat.value and not has_cwd and isinstance(req, dict) and req.get("tools"):
         if _new_flag("session_continuity_enabled"):
             scope = f"{req.get('model') or ''}\x00"
             return _CONTINUITY.resolve(req.get("messages"), scope), False

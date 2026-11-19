@@ -55,7 +55,7 @@ class _Spy:
         return "spy-chain"
 
 
-def _hist(user: str, rounds: int, tool: str = "ok") -> list[dict[str, Any]]:
+def _hist(user: str, rounds: int, tool: str = "ok", cid: str = "") -> list[dict[str, Any]]:
     """История: [system, user] + `rounds` пар assistant(tool_call)/tool."""
     msgs: list[dict[str, Any]] = [
         {"role": "system", "content": "Ты помощник."},
@@ -63,10 +63,14 @@ def _hist(user: str, rounds: int, tool: str = "ok") -> list[dict[str, Any]]:
     ]
     for n in range(rounds):
         fn = {"name": "read_file", "arguments": "{}"}
-        call = {"id": f"call_{n}", "type": "function", "function": fn}
+        call = {"id": f"call_{cid}{n}", "type": "function", "function": fn}
         msgs.append({"role": "assistant", "content": "", "tool_calls": [call]})
-        msgs.append({"role": "tool", "tool_call_id": f"call_{n}", "content": f"{tool}-{n}"})
+        msgs.append({"role": "tool", "tool_call_id": f"call_{cid}{n}", "content": f"{tool}-{n}"})
     return msgs
+
+
+def _chat(cid: str, rounds: int) -> list[dict[str, Any]]:
+    return _hist("same", rounds, cid, cid)
 
 
 def _req(messages: list[dict[str, Any]]) -> dict[str, Any]:
@@ -117,45 +121,58 @@ def test_1000_random_chat_pairs_never_cross_resume() -> None:
     owners: dict[str, str] = {}
     for i in range(1000):
         users = {c: f"{c}{i}-{rng.getrandbits(64):x}" for c in ("A", "B")}
-        done = {"A": 0, "B": 0}
-        chains: dict[str, set[str]] = {"A": set(), "B": set()}
+        chains: dict[str, list[str]] = {"A": [], "B": []}
         for name in _interleave(rng, {"A": 3, "B": 3}):
-            done[name] += 1
-            chain = idx.resolve(_hist(users[name], done[name] - 1))
-            chains[name].add(chain)
+            chain = idx.resolve(_hist(users[name], len(chains[name]), cid=users[name]))
+            chains[name].append(chain)
             assert owners.setdefault(chain, f"{name}{i}") == f"{name}{i}"
-        assert len(chains["A"]) == len(chains["B"]) == 1
-        assert chains["A"].isdisjoint(chains["B"])
-    assert len(owners) == 2000
+        for turns in chains.values():
+            assert turns[1] == turns[2] != turns[0]  # ходы 1-2 холодные, 3 горячий
+        assert {*chains["A"]}.isdisjoint(chains["B"])
+    assert len(owners) == 4000
 
 
-def test_identical_first_requests_conflict_then_independent_cold_chains() -> None:
+def test_identical_first_requests_start_cold_and_never_merge() -> None:
     idx = _new_index()
     a1 = idx.resolve(_hist("same", 0))
-    b1 = idx.resolve(_hist("same", 0))  # конфликт -> tombstone
-    a2 = idx.resolve(_hist("same", 1, "A"))
-    b2 = idx.resolve(_hist("same", 1, "B"))
+    b1 = idx.resolve(_hist("same", 0))  # без якоря: не регистрируется
+    assert idx.link_count() == 0
+    a2 = idx.resolve(_chat("A", 1))
+    b2 = idx.resolve(_chat("B", 1))
     assert len({a1, b1, a2, b2}) == 4
+    assert [idx.resolve(_chat(c, 2)) for c in "AB"] == [a2, b2]
 
 
-def test_identical_first_requests_sequential_pop_order_keeps_chats_apart() -> None:
+def test_poc_hijack_interleaving_c1_c2_a1_c2_retry_never_cross_resumes() -> None:
     idx = _new_index()
+    c1 = idx.resolve(_hist("same", 0))
+    c2 = idx.resolve(_chat("C", 1))
     a1 = idx.resolve(_hist("same", 0))
-    a2 = idx.resolve(_hist("same", 1, "A"))  # pop префикса
-    b1 = idx.resolve(_hist("same", 0))
-    b2 = idx.resolve(_hist("same", 1, "B"))
-    assert a2 == a1
-    assert b1 != a1
-    assert b2 == b1 != a2
+    c2_retry = idx.resolve(_chat("C", 1))
+    a2 = idx.resolve(_chat("A", 1))
+    c3 = idx.resolve(_chat("C", 2))
+    a3 = idx.resolve(_chat("A", 2))
+    assert not {c2_retry, c3} & {a1, a2, a3}  # ретрай C и C3 не задевают чат A
+    assert a3 == a2  # чат A не теряет свою цепочку
+    assert len({c1, c2, a1, c2_retry, a2, c3}) == 6
 
 
 def test_fork_retry_of_popped_prefix_starts_cold() -> None:
     idx = _new_index()
-    chain_a = idx.resolve(_hist("u", 0))
-    assert idx.resolve(_hist("u", 1, "A")) == chain_a
-    retry = idx.resolve(_hist("u", 1, "A"))  # тот же префикс после pop
+    chain_a = idx.resolve(_hist("u", 1))
+    assert idx.resolve(_hist("u", 2)) == chain_a
+    retry = idx.resolve(_hist("u", 2))  # тот же префикс после pop
     assert retry != chain_a
-    assert idx.resolve(_hist("u", 1, "A")) != retry  # и повторно — холодный
+    assert idx.resolve(_hist("u", 2)) != retry  # и повторно — холодный
+
+
+@pytest.mark.parametrize("extra", [None, [], "str", 0, {"cwd": "   "}])
+def test_odd_extra_keeps_continuity(monkeypatch: pytest.MonkeyPatch, extra: Any) -> None:
+    monkeypatch.setenv(_ENV_CONT, "1")
+    spy = _Spy()
+    monkeypatch.setattr(srv, "_CONTINUITY", spy)
+    assert srv._request_chat_id({}, extra, _req(_hist("u", 1))) == ("spy-chain", False)
+    assert spy.calls == 1
 
 
 @pytest.mark.parametrize(
@@ -265,8 +282,8 @@ def test_chat_order_forward_and_reverse_has_no_leakage(reverse: bool) -> None:
     per_chat: dict[str, list[str]] = {}
     for name in names:
         per_chat[name] = [idx.resolve(_hist(name, r)) for r in range(3)]
-    assert all(len(set(chains)) == 1 for chains in per_chat.values())
-    assert len({chains[0] for chains in per_chat.values()}) == len(names)
+    assert all(c[1] == c[2] != c[0] for c in per_chat.values())
+    assert len({chains[1] for chains in per_chat.values()}) == len(names)
 
 
 def test_resolve_reads_clock_only_under_lock() -> None:
