@@ -167,3 +167,14 @@ def flag_enabled(name: str) -> bool:
         if source is None:
             source = _SOURCES[name] = DynamicFlagSource(name)
     return source.enabled()
+
+
+FLAG_SYNTHESIZE_REQUIRED_BASH_DESC = "BRIDGE_SYNTHESIZE_REQUIRED_BASH_DESC_ENABLED"
+_SYNTHESIZE_BASH_DESC_SOURCE = DynamicFlagSource(
+    FLAG_SYNTHESIZE_REQUIRED_BASH_DESC, default=True
+)
+
+
+def synthesize_required_bash_desc_enabled() -> bool:
+    """Состояние флага ``BRIDGE_SYNTHESIZE_REQUIRED_BASH_DESC_ENABLED`` (по умолчанию True)."""
+    return _SYNTHESIZE_BASH_DESC_SOURCE.enabled(fallback=True)

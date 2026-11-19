@@ -22,6 +22,23 @@ aliases:
   gemini-4-hydrogen-medium: {backend_id: gemini-4-hydrogen, backend: agy, effort: medium}
   gemini-4-hydrogen-high: {backend_id: gemini-4-hydrogen, backend: agy, effort: high}
   gemini-4-hydrogen-xhigh: {backend_id: gemini-4-hydrogen, backend: agy, effort: xhigh}
+  gemini-4-neon-low: {backend_id: gemini-4-neon, backend: agy, effort: low}
+  gemini-4-neon-medium: {backend_id: gemini-4-neon, backend: agy, effort: medium}
+  gemini-4-neon-high: {backend_id: gemini-4-neon, backend: agy, effort: high}
+  gemini-4-neon-xhigh: {backend_id: gemini-4-neon, backend: agy, effort: xhigh}
+  gemini-4-carbon-low: {backend_id: gemini-4-carbon, backend: agy, effort: low}
+  gemini-4-carbon-medium: {backend_id: gemini-4-carbon, backend: agy, effort: medium}
+  gemini-4-carbon-high: {backend_id: gemini-4-carbon, backend: agy, effort: high}
+  gemini-pro-orchestrator-low: {backend_id: gemini-pro-orchestrator, backend: agy, effort: low}
+  gemini-pro-orchestrator-medium: {backend_id: gemini-pro-orchestrator, backend: agy, effort: medium}
+  gemini-pro-orchestrator-high: {backend_id: gemini-pro-orchestrator, backend: agy, effort: high}
+  gemini-pro-orchestrator-argon-low: {backend_id: gemini-pro-orchestrator-argon, backend: agy, effort: low}
+  gemini-pro-orchestrator-argon-medium: {backend_id: gemini-pro-orchestrator-argon, backend: agy, effort: medium}
+  gemini-pro-orchestrator-argon-high: {backend_id: gemini-pro-orchestrator-argon, backend: agy, effort: high}
+  gemini-pro-orchestrator-neon-low: {backend_id: gemini-pro-orchestrator-neon, backend: agy, effort: low}
+  gemini-pro-orchestrator-neon-medium: {backend_id: gemini-pro-orchestrator-neon, backend: agy, effort: medium}
+  gemini-pro-orchestrator-neon-high: {backend_id: gemini-pro-orchestrator-neon, backend: agy, effort: high}
+  gemini-pro-orchestrator-neon-xhigh: {backend_id: gemini-pro-orchestrator-neon, backend: agy, effort: xhigh}
   gemini-4-argon-low: {backend_id: gemini-4-argon, backend: agy, effort: low}
   gemini-4-argon-medium: {backend_id: gemini-4-argon, backend: agy, effort: medium}
   gemini-4-argon-high: {backend_id: gemini-4-argon, backend: agy, effort: high}

@@ -11,9 +11,19 @@ import logging
 import re
 import unicodedata
 import uuid
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from typing import Any, Callable
 from core.backend_adapter import ToolCall, ToolFunction, TurnEvent, TurnResult
+from core.invoke_xml_parser import (
+    INVOKE_CANDIDATE_RE as _INVOKE_CANDIDATE_RE,
+    drain_invoke as _drain_invoke_impl,
+    parse_execute_block as _parse_execute_block_impl,
+    parse_invoke_arguments as _parse_invoke_arguments_impl,
+)
+from core.tool_call_schema_policy import (
+    canonicalize_tool_invocation as _canonicalize_tool_invocation,
+    strip_undeclared_bash_metadata as _strip_undeclared_bash_metadata,
+)
 from core.tool_call_shape import (
     DEFAULT_MAX_PARALLEL_DEPTH as DEFAULT_MAX_PARALLEL_DEPTH,
     _PARALLEL_NAME,
@@ -236,11 +246,13 @@ def _canonical_tool_invocation(
     name: str,
     arguments: dict[str, Any],
     tool_schemas: dict[str, Any] | None = None,
+    *,
+    synthesize_required_description: bool = False,
 ) -> tuple[str, dict[str, Any]]:
     """Делегирует канонизацию вызова в ``core.tool_call_schema_policy``."""
-    from core.tool_call_schema_policy import canonicalize_tool_invocation
-
-    canon_name, canon_args = canonicalize_tool_invocation(name, arguments, tool_schemas)
+    canon_name, canon_args = _canonicalize_tool_invocation(
+        name, arguments, tool_schemas, synthesize_required_description=synthesize_required_description
+    )
     return canon_name, dict(canon_args)
 
 
@@ -735,156 +747,16 @@ class RepetitionGuard:
         return temp.feed(cleaned)[1]
 
 
-_INVOKE_CANDIDATE_RE = re.compile(
-    r"</invoke(?=[\s>:/])|</parameter(?=[\s>])"
-    r"|<invoke(?=[\s>:/])|<parameter(?=[\s>:/])"
-    r"|</execute(?=[\s>])|<execute(?=[\s>:/])"
-    r"|</command(?=[\s>])|<command(?=[\s>])"
-    r"|</summary(?=[\s>])|<summary(?=[\s>])",
-    re.IGNORECASE,
-)
-_INVOKE_CLOSE_RE = re.compile(r"</invoke(?::[A-Za-z0-9_.\-]+)?\s*>")
-_PARAMETER_CLOSE_RE = re.compile(r"</parameter\s*>")
-_PARAMETER_RE = re.compile(
-    r"<parameter\s+name\s*=\s*(?:\"([^\"]+)\"|'([^']+)')\s*>(.*?)</parameter\s*>",
-    re.DOTALL,
-)
-_PARAMETER_SELF_RE = re.compile(
-    r"<parameter\s+name\s*=\s*(?:\"([^\"]+)\"|'([^']+)')\s*/>"
-)
-_ATTR_NAME_RE = re.compile(r"\bname\s*=\s*(?:\"([^\"]+)\"|'([^']+)')")
-_INVOKE_PREFIX_RE = re.compile(r"^<invoke:([A-Za-z0-9_.\-]+)")
-_INVOKE_OPEN_INNER_RE = re.compile(r"<invoke(?::([A-Za-z0-9_.\-]+)|\s[^>]*)>")
-
-
-def _coerce_parameter_value(raw: str) -> Any:
-    """Значение `<parameter>`: строка; JSON — только если начинается с `{` или `[`."""
-    value = raw.strip()
-    if value[:1] in ("{", "["):
-        try:
-            return json.loads(value)
-        except ValueError:
-            return value
-    return value
-
-
-def _invoke_tag_name(tag: str) -> str:
-    """Имя инструмента из открывающего тега `<invoke name=...>` / `<invoke:NAME>`."""
-    prefix = _INVOKE_PREFIX_RE.match(tag)
-    if prefix:
-        return prefix.group(1).strip()
-    attr = _ATTR_NAME_RE.search(tag)
-    if attr:
-        return (attr.group(1) or attr.group(2) or "").strip()
-    return ""
-
-
-def _nested_invoke_name(inner: str) -> str:
-    """Имя из вложенного `<invoke ...>` (инцидент `<invoke:bash><invoke name=...>`)."""
-    match = _INVOKE_OPEN_INNER_RE.search(inner)
-    if not match:
-        return ""
-    if match.group(1):
-        return match.group(1).strip()
-    return _invoke_tag_name(match.group(0))
-
-
-_COMMAND_TAG_RE = re.compile(
-    r"<\s*command(?:\s+[^>]*)?\s*>(.*?)</\s*command\s*>", re.DOTALL | re.IGNORECASE
-)
-_COMMAND_OPEN_RE = re.compile(r"<\s*command(?=[\s>])", re.IGNORECASE)
-_COMMAND_CLOSE_RE = re.compile(r"</\s*command\s*>", re.IGNORECASE)
-_SUMMARY_TAG_RE = re.compile(
-    r"<\s*summary(?:\s+[^>]*)?\s*>(.*?)</\s*summary\s*>", re.DOTALL | re.IGNORECASE
-)
-_EXECUTE_OPEN_RE = re.compile(
-    r"<execute(?::([A-Za-z0-9_.\-]+)|(\s[^>]*))?>", re.IGNORECASE
-)
-_EXECUTE_CLOSE_RE = re.compile(r"</execute\s*>", re.IGNORECASE)
-
-
-_SUMMARY_TAG_BOUNDARY_RE = re.compile(
-    r"<\s*(/)?\s*summary(?:\s+[^>]*)?\s*>", re.IGNORECASE
-)
-
-
-def _strip_summary_blocks(text: str) -> str:
-    """Полностью удаляет все блоки <summary>...</summary>, включая вложенные и незакрытые."""
-    res = []
-    depth = 0
-    pos = 0
-    for m in _SUMMARY_TAG_BOUNDARY_RE.finditer(text):
-        if depth == 0:
-            res.append(text[pos : m.start()])
-        is_close = bool(m.group(1))
-        if is_close:
-            if depth > 0:
-                depth -= 1
-        else:
-            depth += 1
-        pos = m.end()
-    if depth == 0:
-        res.append(text[pos:])
-    return "".join(res)
-
-
 def _parse_invoke_arguments(inner: str) -> dict:
-    """Содержимое блока `<invoke>` -> словарь аргументов из тегов `<parameter>`."""
-    inner = _strip_summary_blocks(inner)
-    arguments: dict[str, Any] = {}
-    for match in _PARAMETER_RE.finditer(inner):
-        name = (match.group(1) or match.group(2) or "").strip()
-        if name:
-            arguments[name] = _coerce_parameter_value(match.group(3))
-    for match in _PARAMETER_SELF_RE.finditer(inner):
-        name = (match.group(1) or match.group(2) or "").strip()
-        if name and name not in arguments:
-            arguments[name] = ""
-    for key, tag_re in (("command", _COMMAND_TAG_RE), ("summary", _SUMMARY_TAG_RE)):
-        tag_match = tag_re.search(inner)
-        if tag_match is not None and key not in arguments:
-            arguments[key] = tag_match.group(1).strip()
-    if not arguments:
-        body = inner.strip()
-        if body[:1] == "{":
-            try:
-                parsed = json.loads(body)
-            except ValueError:
-                parsed = None
-            if isinstance(parsed, dict):
-                return parsed
-    return arguments
+    """Фасад к ``core.invoke_xml_parser.parse_invoke_arguments``."""
+    return _parse_invoke_arguments_impl(inner)
 
 
-def _parse_execute_block(buf: str, start: int = 0) -> tuple[dict | None, int] | None:
-    """Разбирает <execute ...>...</execute> с позиции start.
-
-    Возвращает ({"name", "arguments"}, индекс конца закрывающего тега)
-    или (None, индекс конца закрывающего тега) для пустых вызовов,
-    или None, если открывающий тег не распознан либо закрывающий ещё не пришёл.
-    Имя по умолчанию "bash"; атрибут name или суффикс <execute:name> его переопределяют.
-    Имя и аргументы приводятся к канонической форме (_canonical_tool_invocation).
-    """
-    open_match = _EXECUTE_OPEN_RE.match(buf, start)
-    if open_match is None:
-        return None
-    search_from = open_match.end()
-    close_match = _EXECUTE_CLOSE_RE.search(buf, search_from)
-    if close_match is None:
-        return None
-    name = open_match.group(1)
-    if not name and open_match.group(2):
-        attr = _ATTR_NAME_RE.search(open_match.group(2))
-        if attr is not None:
-            name = (attr.group(1) or attr.group(2) or "").strip()
-    raw_name = name or "bash"
-    inner = buf[open_match.end() : close_match.start()]
-    clean_inner = _strip_summary_blocks(inner)
-    raw_args = _parse_invoke_arguments(clean_inner)
-    canonical_name, canonical_args = _canonical_tool_invocation(raw_name, raw_args)
-    if canonical_name == "bash" and "command" not in canonical_args:
-        return None, close_match.end()
-    return {"name": canonical_name, "arguments": canonical_args}, close_match.end()
+def _parse_execute_block(
+    buf: str, start: int = 0, tool_schemas: dict[str, Any] | None = None
+) -> tuple[dict | None, int] | None:
+    """Фасад к ``core.invoke_xml_parser.parse_execute_block``."""
+    return _parse_execute_block_impl(buf, start, tool_schemas=tool_schemas)
 
 
 def _find_tool_close_outside_string(text: str, start: int) -> int:
@@ -1100,96 +972,12 @@ class ToolCallParser:
             return "wait"
         return "quoted"
 
+    def _parse_error(self, message: str) -> LiveParserError:
+        return LiveParserError(message)
+
     def _drain_invoke(self, final: bool, start: int) -> bool:
-        """Разобрать invoke-тег в начале буфера; True — продолжить `_drain`."""
-        if start > 0:
-            self._emit(self._buf[:start])
-            self._buf = self._buf[start:]
-        verdict = self._classify_open(0, final)
-        if verdict == "quoted":
-            self._emit(self._buf[:1])
-            self._buf = self._buf[1:]
-            return True
-        if verdict == "wait":
-            return False
-        gt = self._buf.find(">")
-        if gt == -1:
-            if not final:
-                return False
-            if self.strict_live:
-                raise LiveParserError("unclosed invoke tag")
-            self._buf = ""
-            return False
-        tag = self._buf[: gt + 1]
-        if tag.startswith("</"):
-            self._buf = self._buf[gt + 1 :]
-            self._remember(_OPAQUE_BLOCK)
-            return True
-        tag_lower = tag.lower()
-        if tag_lower.startswith("<execute"):
-            res = _parse_execute_block(self._buf, 0)
-            if res is None:
-                if not final:
-                    return False
-                if self.strict_live:
-                    raise LiveParserError("unclosed execute block")
-                self._buf = ""
-                return False
-            call, next_idx = res
-            self._buf = self._buf[next_idx:]
-            if call is not None:
-                self._emit_invoke_call(call["name"], call["arguments"])
-            return True
-        if tag_lower.startswith(("<parameter", "<command", "<summary")):
-            if self.strict_live:
-                raise LiveParserError("parameter outside invoke")
-            if tag[:-1].rstrip().endswith("/"):
-                self._buf = self._buf[gt + 1 :]
-                return True
-            if tag_lower.startswith("<command"):
-                close_re = re.compile(r"</command\s*>", re.IGNORECASE)
-            elif tag_lower.startswith("<summary"):
-                close_re = re.compile(r"</summary\s*>", re.IGNORECASE)
-            else:
-                close_re = _PARAMETER_CLOSE_RE
-            close = close_re.search(self._buf, gt + 1)
-            if close is None:
-                if not final:
-                    return False
-                self._buf = ""
-                return False
-            self._buf = self._buf[close.end() :]
-            return True
-        name = _invoke_tag_name(tag)
-        if tag[:-1].rstrip().endswith("/"):
-            self._buf = self._buf[gt + 1 :]
-            if not name:
-                if self.strict_live:
-                    raise LiveParserError("invoke without tool name")
-                return True
-            canon_name, canon_args = _canonical_tool_invocation(name, {})
-            self._emit_invoke_call(canon_name, canon_args)
-            return True
-        close = _INVOKE_CLOSE_RE.search(self._buf, gt + 1)
-        if close is None:
-            if not final:
-                return False
-            if self.strict_live:
-                raise LiveParserError("unclosed invoke block")
-            self._buf = ""
-            return False
-        inner = self._buf[gt + 1 : close.start()]
-        self._buf = self._buf[close.end() :]
-        if not name:
-            name = _nested_invoke_name(inner)
-        if not name:
-            if self.strict_live:
-                raise LiveParserError("invoke without tool name")
-            return True
-        raw_args = _parse_invoke_arguments(inner)
-        canon_name, canon_args = _canonical_tool_invocation(name, raw_args)
-        self._emit_invoke_call(canon_name, canon_args)
-        return True
+        """Фасад к ``core.invoke_xml_parser.drain_invoke``."""
+        return _drain_invoke_impl(self, final, start)
 
     def _drain(self, final: bool) -> None:
         while True:
@@ -2007,22 +1795,36 @@ def _sanitize_arguments_dict(args: dict, params: dict | None) -> dict:
     return cleaned
 
 
-def _sanitize_arguments(name: str, arguments: Any, tool_schemas: dict | None) -> Any:
-    """arguments (JSON-строка либо dict) -> то же представление без пустых опциональных строк.
+@dataclass(frozen=True, slots=True)
+class _SanitizeCfg:
+    schemas: dict[str, Any] | None
+    max_depth: int
+    synth: bool
 
-    Невалидные/не-объектные аргументы и аргументы без изменений возвращаются как есть.
-    """
+
+def _sanitize_arguments(
+    name: str,
+    arguments: Any,
+    tool_schemas: dict | None,
+    *,
+    synthesize_required_description: bool = False,
+) -> Any:
+    """arguments (JSON-строка либо dict) -> очищенное представление."""
     parsed = _normalize_arguments(arguments)
     if parsed is None:
         return arguments
     cleaned = _sanitize_arguments_dict(parsed, _parameters_schema(name, tool_schemas))
+    clean_name = name.strip()
+    if clean_name.casefold() in ("bash", "pwsh"):
+        _strip_undeclared_bash_metadata(
+            cleaned,
+            tool_schemas,
+            clean_name,
+            synthesize_required_description=synthesize_required_description,
+        )
     if cleaned == parsed:
         return arguments
-    return (
-        cleaned
-        if isinstance(arguments, dict)
-        else json.dumps(cleaned, ensure_ascii=False)
-    )
+    return cleaned if isinstance(arguments, dict) else json.dumps(cleaned, ensure_ascii=False)
 
 
 def _unpack_parallel(tool_call: Any, arguments: Any, limit: int) -> list[Any] | None:
@@ -2054,29 +1856,25 @@ def _unpack_parallel(tool_call: Any, arguments: Any, limit: int) -> list[Any] | 
 
 
 def _sanitize_call(
-    tool_call: Any,
-    tool_schemas: dict[str, Any] | None,
-    depth: int,
-    budget: list[int],
-    max_depth: int,
+    tool_call: Any, cfg: _SanitizeCfg, depth: int, budget: list[int]
 ) -> list[Any]:
     """`budget[0]` — сколько вызовов ещё можно опубликовать из текущего верхнего вызова."""
     name, arguments = _call_name_and_args(tool_call)
     if not name or not str(name).strip():
         return []
-    if name.rsplit(".", 1)[-1] == _PARALLEL_NAME and depth < max_depth:
+    if name.rsplit(".", 1)[-1] == _PARALLEL_NAME and depth < cfg.max_depth:
         unpacked = _unpack_parallel(tool_call, arguments, max(budget[0], 0))
         if unpacked is not None:
             results: list[Any] = []
             for sub in unpacked:
                 if budget[0] <= 0:
                     break
-                results.extend(
-                    _sanitize_call(sub, tool_schemas, depth + 1, budget, max_depth)
-                )
+                results.extend(_sanitize_call(sub, cfg, depth + 1, budget))
             return results
     budget[0] -= 1
-    cleaned = _sanitize_arguments(name, arguments, tool_schemas)
+    cleaned = _sanitize_arguments(
+        name, arguments, cfg.schemas, synthesize_required_description=cfg.synth
+    )
     return [tool_call if cleaned is arguments else _with_arguments(tool_call, cleaned)]
 
 
@@ -2086,26 +1884,11 @@ def sanitize_tool_call(
     *,
     max_parallel_calls: int = DEFAULT_MAX_PARALLEL_CALLS,
     max_parallel_depth: int = DEFAULT_MAX_PARALLEL_DEPTH,
+    synthesize_required_description: bool = False,
 ) -> list[Any]:
-    """Один вызов -> список вызовов того же типа (ToolCall либо dict) с чистыми аргументами.
-
-    Чистая функция: синтетический `parallel` разворачивается во вложенные вызовы с новыми
-    id (не более `max_parallel_calls` опубликованных вызовов и глубины `max_parallel_depth`;
-    сверх лимита распаковка прекращается, накопленное возвращается). Пустые строки
-    удаляются по схеме инструмента: поле объявлено в `properties` как строковое
-    (`type == "string"` или `"string"` в массиве `type`), не входит в `required`, его
-    `enum`/`const` не допускают пустую строку, это не payload-поле (`prompt`/`content`/
-    `command`). Без схемы или при неразрешимой схеме (`anyOf`/`oneOf`/`$ref`) поля не трогаются
-    (fail-conservative). Значения, в том числе justification, никогда не подставляются.
-    Невалидные аргументы остаются нетронутыми (fail-safe), повторный вызов идемпотентен.
-    """
-    return _sanitize_call(
-        tool_call,
-        tool_schemas,
-        0,
-        [max(int(max_parallel_calls), 1)],
-        max_parallel_depth,
-    )
+    """Один вызов -> список вызовов того же типа (ToolCall либо dict) с чистыми аргументами."""
+    cfg = _SanitizeCfg(tool_schemas, max_parallel_depth, synthesize_required_description)
+    return _sanitize_call(tool_call, cfg, 0, [max(int(max_parallel_calls), 1)])
 
 
 def sanitize_tool_calls_list(
@@ -2114,6 +1897,7 @@ def sanitize_tool_calls_list(
     *,
     max_parallel_calls: int = DEFAULT_MAX_PARALLEL_CALLS,
     max_parallel_depth: int = DEFAULT_MAX_PARALLEL_DEPTH,
+    synthesize_required_description: bool = False,
 ) -> list[Any]:
     """Санитизация списка вызовов в плоский список; `index` перенумеровывается подряд."""
     flat = [
@@ -2124,6 +1908,7 @@ def sanitize_tool_calls_list(
             tool_schemas,
             max_parallel_calls=max_parallel_calls,
             max_parallel_depth=max_parallel_depth,
+            synthesize_required_description=synthesize_required_description,
         )
     ]
     return [_with_index(call, index) for index, call in enumerate(flat)]

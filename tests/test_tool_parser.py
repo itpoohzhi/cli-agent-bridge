@@ -1684,7 +1684,7 @@ class TestToolCallParserTolerantRecovery(unittest.TestCase):
         assert parsed is not None
         call, end = parsed
         assert call["name"] == "bash"
-        assert call["arguments"] == {"command": "ls -la"}
+        assert call["arguments"] == {"command": "ls -la", "description": "list files"}
         assert text[end:] == "tail"
 
         named = _parse_execute_block('<execute name="shell"><command>pwd</command></execute>')
@@ -1739,7 +1739,7 @@ class TestToolCallParserTolerantRecovery(unittest.TestCase):
             '{"name": "bash", "arguments": {"command": "ls", "summary": "list", '
             '"toolSummary": "x", "description": "y"}}'
         )
-        self.assertEqual(parsed, {"name": "bash", "arguments": {"command": "ls"}})
+        self.assertEqual(parsed, {"name": "bash", "arguments": {"command": "ls", "description": "y"}})
 
 
 
@@ -1762,7 +1762,7 @@ class TestToolCallParserTolerantRecovery(unittest.TestCase):
                 self.assertEqual(joined, "Run:  done")
                 self.assertEqual(len(calls), 1)
                 self.assertEqual(calls[0]["name"], "bash")
-                self.assertEqual(calls[0]["arguments"], {"command": "printf 'safe'"})
+                self.assertEqual(calls[0]["arguments"], {"command": "printf 'safe'", "description": "s"})
 
 class TestExecuteBlockSafety(unittest.TestCase):
     def test_summary_isolation_does_not_execute_command_inside_summary(self) -> None:

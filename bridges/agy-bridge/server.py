@@ -180,9 +180,9 @@ from core.tool_emulation import (  # noqa: E402
     tools_protocol_section,
 )
 from core.tool_call_schema_policy import ToolCallLimitExceededError, build_tool_turn_error_body  # noqa: E402
-from core.message_history_sanitizer import sanitize_chat_messages  # noqa: E402
 from core.cli_turn_flags import format_print_timeout as _format_print_timeout, text_turn_cli_flags  # noqa: E402
 from core.env_hot_reload import file_signature as _file_signature  # noqa: E402
+from core.runtime_env import synthesize_required_bash_desc_enabled  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent
 HOME = Path.home()
@@ -5424,7 +5424,7 @@ class _ToolTurn:
         self._last_chunk_ts = time.monotonic()
         self._last_open_chunk_ts = 0.0
         self._normalizer = StreamNormalizer(
-            self._content, self._reasoning, self._call, strict_live=True
+            self._content, self._reasoning, self._call, strict_live=True, tool_schemas=self._schemas
         )
 
     @property
@@ -5466,23 +5466,14 @@ class _ToolTurn:
             "index": len(self.calls),
             "id": str(call.get("id") or "call_" + uuid.uuid4().hex[:24]),
             "type": "function",
-            "function": {
-                "name": str(call.get("name") or ""),
-                "arguments": json.dumps(
-                    call.get("arguments") or {}, ensure_ascii=False
-                ),
-            },
+            "function": {"name": str(call.get("name") or ""), "arguments": json.dumps(call.get("arguments") or {}, ensure_ascii=False)},
         }
         if has_unnamed_call(entry):
-            # Отброшенный безымянный вызов (в т.ч. внутри `parallel`) не даёт молчаливый `stop`:
-            # ход завершается tool_call_parse_error, неполный пакет не публикуется.
             self.error = self.error or "tool call without function name dropped"
             self.ok = False
             return
-        published = [
-            dict(cast("dict[str, object]", item), index=len(self.calls) + offset)
-            for offset, item in enumerate(sanitize_tool_call(entry, self._schemas))
-        ]
+        synth = synthesize_required_bash_desc_enabled()
+        published = [dict(cast("dict[str, object]", item), index=len(self.calls) + i) for i, item in enumerate(sanitize_tool_call(entry, self._schemas, synthesize_required_description=synth))]
         if len(self.calls) + len(published) > self._max_calls:
             return self._limit(len(self.calls) + len(published))
         if not published:

@@ -46,7 +46,7 @@ except ImportError:
     AdaptiveTimeoutController = None  # type: ignore[assignment,misc]
 
 try:
-    from core.runtime_env import resolve_toolless_tag_policy
+    from core.runtime_env import resolve_toolless_tag_policy, synthesize_required_bash_desc_enabled
     from core.stream_framing import format_stream_error_sse
     from core.tool_emulation import (  # noqa: E402
         DEFAULT_MAX_IMAGE_BYTES,
@@ -635,7 +635,7 @@ class _Execution:
         self.last_ka = self.last_check = time.monotonic()
         self.normalizer = StreamNormalizer.for_mode(
             mode_spec, NormalizerSinks(self.add_content, self.add_reasoning, self.add_call),
-            strict_live=True,
+            strict_live=True, tool_schemas=self.schemas,
         )
 
     def state(self, name: str, rc: int, err: str = "") -> dict:
@@ -657,15 +657,10 @@ class _Execution:
             raise LiveParserError("tool_call published without tool emulation")
         if self.gone:
             return
-        entry = {
-            "index": len(self.tool_calls), "id": "call_" + uuid.uuid4().hex[:24],
-            "type": "function", "function": {
-                "name": call["name"],
-                "arguments": json.dumps(call["arguments"], ensure_ascii=False),
-            },
-        }
-        # Схемная санитизация — один раз на владельце маршрута.
-        for item in sanitize_tool_call(entry, self.schemas):
+        entry = {"index": len(self.tool_calls), "id": "call_" + uuid.uuid4().hex[:24], "type": "function",
+                 "function": {"name": call["name"], "arguments": json.dumps(call["arguments"], ensure_ascii=False)}}
+        synth = synthesize_required_bash_desc_enabled()
+        for item in sanitize_tool_call(entry, self.schemas, synthesize_required_description=synth):
             item = dict(item, index=len(self.tool_calls))
             self.tool_calls.append(item)
             if not self.callbacks.on_tool_call(item):

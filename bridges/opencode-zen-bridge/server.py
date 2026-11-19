@@ -82,7 +82,9 @@ for _p in (str(_BRIDGE_DIR), str(_REPO_ROOT)):
 import zen_catalog as zc  # noqa: E402
 from core.chat_key import resolve_chat_key  # noqa: E402
 from core.proc_groups import live_proc_groups, spawn_registered  # noqa: E402
+from core.runtime_env import synthesize_required_bash_desc_enabled  # noqa: E402
 from core.subbridge_lifecycle import SubbridgeHooks, SubbridgeLifecycle  # noqa: E402
+from core.tool_call_schema_policy import canonicalize_tool_invocation  # noqa: E402
 from core.tool_emulation import (  # noqa: E402
     DEFAULT_MAX_PARALLEL_CALLS,
     DEFAULT_MAX_PARALLEL_DEPTH,
@@ -90,6 +92,7 @@ from core.tool_emulation import (  # noqa: E402
     build_tool_schemas,
     sanitize_tool_calls_list,
 )
+from core.turn_dispatch import ToolSchemaScope  # noqa: E402
 
 def _positive_int(raw: str | None, default: int) -> int:
     """Положительное целое из env-строки; нечисловое/неположительное значение -> default."""
@@ -113,13 +116,11 @@ _SANITIZE_LIMITS = {
 }
 
 
-def _normalize_tool_calls(
-    calls: list[dict[str, Any]], schemas: dict[str, Any]
-) -> list[dict[str, Any]]:
+def _normalize_tool_calls(calls: list[dict[str, Any]], schemas: dict[str, Any]) -> list[dict[str, Any]]:
     """Применить общий санитизатор на единой границе всех маршрутов ответа."""
     if not BRIDGE_SANITIZE_TOOL_CALLS:
         return calls
-    return sanitize_tool_calls_list(calls, schemas, **_SANITIZE_LIMITS)
+    return sanitize_tool_calls_list(calls, schemas, **_SANITIZE_LIMITS, synthesize_required_description=synthesize_required_bash_desc_enabled())
 
 
 HOST = os.environ.get("OPENCODE_ZEN_BRIDGE_HOST", "127.0.0.1").strip() or "127.0.0.1"
@@ -4221,9 +4222,8 @@ from zen_bridge.domain.tool_signals import _tools_section as _tools_section_impl
 
 
 def _tools_section(tools: list[Any], tool_choice: Any, model_id: str = "") -> str:
-    return _tools_section_impl(
-        tools, tool_choice, model_id, _tool_tags_for_model, _uses_alt_tool_tag, _tool_choice_name
-    )
+    ToolSchemaScope.update_if_bound(build_tool_schemas(tools))
+    return _tools_section_impl(tools, tool_choice, model_id, _tool_tags_for_model, _uses_alt_tool_tag, _tool_choice_name)
 
 
 def _render_turn(msg: dict[str, Any]) -> tuple[str, str]:
@@ -4282,15 +4282,10 @@ def _strip_code_fence(text: str) -> str:
     return body.strip()
 
 
-def _parse_tool_call_block(inner: str, *, quiet: bool = False) -> dict[str, Any] | None:
-    """Содержимое блока -> {"name","arguments"}; None, если блок невалиден.
-
-    Отсутствие ключа arguments — допустимый вызов с {}; присутствующее, но
-    не-объектное значение (строка-не-JSON, список, число, null) — вызов
-    отклоняем, чтобы не запускать инструмент с пустыми аргументами.
-    OpenAI-обёртка {"id","type","function":{"name","arguments"}} разворачивается,
-    только если name верхнего уровня отсутствует (он всегда побеждает).
-    """
+def _parse_tool_call_block(
+    inner: str, tool_schemas: dict[str, Any] | None = None, *, quiet: bool = False
+) -> dict[str, Any] | None:
+    """Содержимое блока -> {"name","arguments"}; None, если блок невалиден."""
     try:
         obj = _loads_lenient(_strip_code_fence(inner), quiet=quiet)
     except ValueError:
@@ -4308,7 +4303,11 @@ def _parse_tool_call_block(inner: str, *, quiet: bool = False) -> dict[str, Any]
         if normalized is None:
             return None
         arguments = normalized
-    return {"name": name.strip(), "arguments": arguments}
+    schemas = tool_schemas if tool_schemas is not None else ToolSchemaScope.get_current()
+    canon_name, canon_args = canonicalize_tool_invocation(
+        name.strip(), arguments, schemas, synthesize_required_description=synthesize_required_bash_desc_enabled()
+    )
+    return {"name": canon_name, "arguments": dict(canon_args)}
 
 
 def _is_quoted_open(text: str, start: int) -> bool:
@@ -4359,15 +4358,10 @@ def _split_tool_call_inner(inner: str) -> list[str]:
 
 
 def _parse_tool_call_blocks(
-    inner: str, *, quiet: bool = False
+    inner: str, tool_schemas: dict[str, Any] | None = None, *, quiet: bool = False
 ) -> list[dict[str, Any]] | None:
-    """Содержимое блока -> список вызовов; None, если блок (или любой его член) невалиден.
-
-    Обычный блок даёт один вызов. Если он не разбирается, но внутри есть
-    несколько открывающих тегов без промежуточных закрывающих, блок делится на
-    сегменты; пачка принимается только целиком (все сегменты валидны).
-    """
-    single = _parse_tool_call_block(inner, quiet=quiet)
+    """Содержимое блока -> список вызовов; None, если блок (или любой его член) невалиден."""
+    single = _parse_tool_call_block(inner, tool_schemas, quiet=quiet)
     if single is not None:
         return [single]
     if not any(open_tag in inner for open_tag, _ in TOOL_CALL_TAGS):
@@ -4377,7 +4371,7 @@ def _parse_tool_call_blocks(
         return None
     calls: list[dict[str, Any]] = []
     for segment in segments:
-        call = _parse_tool_call_block(segment, quiet=quiet)
+        call = _parse_tool_call_block(segment, tool_schemas, quiet=quiet)
         if call is None:
             return None
         calls.append(call)
@@ -4596,40 +4590,33 @@ def _strip_broken_tool_blocks(text: str, *, quiet: bool = False) -> tuple[str, i
 
 
 def _new_tool_call_parser(
-    on_content: Callable[[str], None], on_tool_call: Callable[[dict[str, Any]], None]
+    on_content: Callable[[str], None],
+    on_tool_call: Callable[[dict[str, Any]], None],
+    tool_schemas: dict[str, Any] | None = None,
 ) -> ToolCallParser:
     """Общий парсер с прежним протоколом и lenient-нормализацией этого адаптера."""
+    schemas = tool_schemas if tool_schemas is not None else ToolSchemaScope.get_current()
     return ToolCallParser(
-        on_content,
-        on_tool_call,
-        tag_pairs=TOOL_CALL_TAGS,
-        parse_blocks=_parse_tool_call_blocks,
-        suppress_after_tool=True,
+        on_content, on_tool_call, tag_pairs=TOOL_CALL_TAGS,
+        parse_blocks=lambda inner: _parse_tool_call_blocks(inner, schemas),
+        suppress_after_tool=True, tool_schemas=schemas,
     )
 
 
-def _split_tool_calls(chunks: list[str]) -> tuple[str, list[dict[str, Any]]]:
-    """Дельты текста ответа -> (content, tool_calls в формате OpenAI).
-
-    Тот же ToolCallParser, что у droid-bridge; id вызовов — call_<hex24>.
-    """
+def _split_tool_calls(
+    chunks: list[str], tool_schemas: dict[str, Any] | None = None
+) -> tuple[str, list[dict[str, Any]]]:
+    """Дельты текста ответа -> (content, tool_calls в формате OpenAI)."""
     pieces: list[str] = []
     calls: list[dict[str, Any]] = []
 
     def add_call(call: dict[str, Any]) -> None:
-        calls.append(
-            {
-                "index": len(calls),
-                "id": "call_" + uuid.uuid4().hex[:24],
-                "type": "function",
-                "function": {
-                    "name": call["name"],
-                    "arguments": json.dumps(call["arguments"], ensure_ascii=False),
-                },
-            }
-        )
+        calls.append({
+            "index": len(calls), "id": "call_" + uuid.uuid4().hex[:24], "type": "function",
+            "function": {"name": call["name"], "arguments": json.dumps(call["arguments"], ensure_ascii=False)},
+        })
 
-    parser = _new_tool_call_parser(pieces.append, add_call)
+    parser = _new_tool_call_parser(pieces.append, add_call, tool_schemas=tool_schemas)
     for chunk in chunks:
         parser.feed(chunk)
     parser.finish()
@@ -6398,16 +6385,10 @@ class Handler(BaseHTTPRequestHandler):
         filtered = _ZenSseFilter(raw, prompt, self._zen_short_bypass)
         self.wfile = cast(io.BufferedIOBase, cast(object, filtered))
         try:
-            self._stream_sse_body(
-                model,
-                prompt,
-                effort,
-                emulate_tools,
-                tools,
-                google_input,
-                reported_model,
-                tool_choice,
-            )
+            with ToolSchemaScope.bind(build_tool_schemas(tools)):
+                self._stream_sse_body(
+                    model, prompt, effort, emulate_tools, tools, google_input, reported_model, tool_choice
+                )
         finally:
             self.wfile = raw
             if filtered.terminated:
@@ -8266,7 +8247,8 @@ class Handler(BaseHTTPRequestHandler):
         self._zen_probe = False
         xs = self._xs = _new_exit_state()
         try:
-            self._handle_post(xs)
+            with ToolSchemaScope.bind(None):
+                self._handle_post(xs)
         finally:
             _log_exit(xs)
 

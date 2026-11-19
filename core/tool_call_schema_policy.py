@@ -14,21 +14,12 @@ LimitKind: TypeAlias = Literal["calls", "bytes"]
 EXEC_SYNONYMS: frozenset[str] = frozenset(
     {"execute", "run_command", "shell", "terminal"}
 )
+_SHELL_METADATA_TOOLS: frozenset[str] = frozenset({"bash", "pwsh"})
 _COMMAND_ALIASES: tuple[str, ...] = ("cmd", "CommandLine", "script")
 _LEGACY_META_KEYS: tuple[str, ...] = ("summary", "toolSummary", "description")
 _INTERNAL_SUMMARY_KEYS: tuple[str, ...] = ("summary", "toolSummary")
 _UNRESOLVABLE_SCHEMA_KEYS: frozenset[str] = frozenset(
-    {
-        "$ref",
-        "anyOf",
-        "oneOf",
-        "allOf",
-        "if",
-        "then",
-        "else",
-        "dependentRequired",
-        "dependentSchemas",
-    }
+    {"$ref", "anyOf", "oneOf", "allOf", "if", "then", "else", "dependentRequired", "dependentSchemas"}
 )
 
 
@@ -129,17 +120,34 @@ def _promote_summary_to_description(args: MutableJsonMap) -> None:
             return
 
 
+def _has_tool_schema(schemas: JsonMap, target: str) -> bool:
+    target_cf = target.casefold()
+    return target in schemas or any(isinstance(k, str) and k.casefold() == target_cf for k in schemas)
+
+
+def _is_required_parameter(params: JsonMap, name: str) -> bool:
+    req = params.get("required")
+    return isinstance(req, Sequence) and not isinstance(req, (str, bytes, bytearray)) and name in req
+
+
+def _synthesize_command_description(args: JsonMap) -> str:
+    command = _as_stripped_str(args.get("command"))
+    first_line = next((ln.strip() for ln in command.splitlines() if ln.strip()), "") if command else ""
+    normalized = " ".join(first_line.split())
+    if not normalized:
+        return "Execute shell command"
+    return f"Run: {normalized[:69].rstrip() + '...' if len(normalized) > 72 else normalized}"
+
+
 def strip_undeclared_bash_metadata(
     args: MutableJsonMap,
     tool_schemas: JsonMap | None,
     tool_name: str = "bash",
+    *,
+    synthesize_required_description: bool = False,
 ) -> None:
-    """Применяет контракт F5 к полям ``summary``/``toolSummary``/``description``."""
-    if tool_schemas is None:
-        for meta_key in ("summary", "toolSummary", "description"):
-            _ = args.pop(meta_key, None)
-        return
-    params = resolve_parameters_schema(tool_name, tool_schemas)
+    """Применяет контракт F5 к ``summary``/``toolSummary``/``description`` (fail-conservative)."""
+    params = None if tool_schemas is None else resolve_parameters_schema(tool_name, tool_schemas)
     if params is None or ("properties" not in params and "required" not in params):
         _promote_summary_to_description(args)
         for internal_key in _INTERNAL_SUMMARY_KEYS:
@@ -148,6 +156,8 @@ def strip_undeclared_bash_metadata(
     declared = _declared_parameter_names(params)
     if "description" in declared:
         _promote_summary_to_description(args)
+        if synthesize_required_description and _is_required_parameter(params, "description") and not _as_stripped_str(args.get("description")):
+            args["description"] = _synthesize_command_description(args)
     else:
         _ = args.pop("description", None)
     for internal_key in _INTERNAL_SUMMARY_KEYS:
@@ -159,23 +169,29 @@ def canonicalize_tool_invocation(
     name: str,
     arguments: JsonMap,
     tool_schemas: JsonMap | None = None,
+    *,
+    synthesize_required_description: bool = False,
 ) -> tuple[str, MutableJsonMap]:
     """Канонизирует имя и аргументы вызова инструмента без мутации входа."""
     clean_name = _as_stripped_str(name)
     arg_map = _as_map(arguments)
     args: MutableJsonMap = dict(arg_map) if arg_map is not None else {}
+    schemas = _as_map(tool_schemas)
     if clean_name.casefold() in EXEC_SYNONYMS:
-        clean_name = "bash"
-    if clean_name != "bash":
+        own_declared = schemas is not None and _has_tool_schema(schemas, clean_name) and not _has_tool_schema(schemas, "bash")
+        if not own_declared:
+            clean_name = "bash"
+    if clean_name.casefold() not in _SHELL_METADATA_TOOLS:
         return clean_name, args
-    if "command" not in args:
+    if clean_name in _SHELL_METADATA_TOOLS or schemas is not None:
+        if "command" not in args:
+            for alias in _COMMAND_ALIASES:
+                if alias in args:
+                    args["command"] = args.pop(alias)
+                    break
         for alias in _COMMAND_ALIASES:
-            if alias in args:
-                args["command"] = args.pop(alias)
-                break
-    for alias in _COMMAND_ALIASES:
-        _ = args.pop(alias, None)
-    strip_undeclared_bash_metadata(args, tool_schemas, clean_name)
+            _ = args.pop(alias, None)
+    strip_undeclared_bash_metadata(args, tool_schemas, clean_name, synthesize_required_description=synthesize_required_description)
     return clean_name, args
 
 

@@ -1,27 +1,28 @@
 {
-  "compiled_at": "2026-11-17T13:52:03+0300",
+  "compiled_at": "2026-11-19T14:46:14+0300",
   "compiler_version": 1,
-  "fleet_sha256": "2521c4b30adefff6c899967eb4a3d0bdf037ce41f4513622e057c016df248e11",
+  "fleet_sha256": "bca7ff409d50fa94c18db2a4ce34f59fa575033ad65d6d114846f145f190121d",
   "inputs": {
     "discovery_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
     "manifests": {
-      "_fleet.yaml": "20d9c9e68ea60f1de1b6d4c96c26a535897df11aca4922bd3b21b94891a590b2",
-      "agy-passthrough.yaml": "6186c9c4477ddcef24abd14daf6937c194729b9264ebba91f17faab6a2df2cd9",
-      "agy.yaml": "d7ca0b66b7ea9612ca770187c0358fcac734935015a2ab45dddd390ae8c58de9",
+      "_fleet.yaml": "8d88c0b137a9c2ac2f74ce7a10b6483f07a2e3ca8f7497ace740587833d7ff40",
+      "agy-passthrough.yaml": "7a05b980065274efc347c8c7b6bcce95c58a01954ac4b53083ab840d0118915f",
+      "agy.yaml": "f3fd34b0964e1942c2bc61cdbf536a27bc6d3c224b5cd426b8677fc1cec4eab6",
       "claude-p.yaml": "8ac948e1049b2ca703b010f4f54a5bec01d334caf75fd805f54fef47561246f7",
       "codex.yaml": "62caf30d9ce2f621f35d41e3ff3fb5d2066fe0e78190097cf27956b86babc7b1",
       "deepseek-direct.yaml": "3fcf9d693dde7a5891a62f5b819818fa8c1ec9a30cf89c587ef9f73db9913e20",
       "droid.yaml": "d2e2381093c695824123749e302d57028a113b7a522d7b29a8cdcc6b1c661e47",
-      "muse.yaml": "610c34e6a064333504b3b6ec7aeed78c597d69526b56d701f6fbd42727ec3b78",
-      "openai-key-2.yaml": "f3a13ea5b5b18353dda5e02e9678fd88aa2c21a18a53e44f4e8f0ce05f9f0fba",
+      "muse.yaml": "452e89f06332f7f0408c66c02ad658a6aee7432ed310504761ebcf470ccad52e",
+      "openai-key-2.yaml": "e9755fd06af82a3bb341122afd0d5c3e9b2504ef190ecb8fe751495d357e57a3",
       "openai-key-3.yaml": "eccc73e68769ab0d742b5ace825af8bbcb2d02f07068e272c608ddefd1b2177e",
       "opencode-go-claude.yaml": "7e63ccd97ae1f20179b4e03136c1b2fb50e9d0d40233df6c9465195a05779f4c",
       "opencode-go-sub1.yaml": "f7f4225e7a59357d9a26bb04fda0410d8a5f1cd5b085718db49dcef57a26320c",
       "opencode-go-sub2.yaml": "273d966b5d5ee55c8df36a82406f3b42b8c1ba1e3e9c4be171a670dbc73b3065",
       "opencode-go.yaml": "8d27372c95fcf802352d38e4e6f3a6c1919030ef6220d3c6c2c5808fe6077f68",
+      "opencode-resident.yaml": "26bb3cdf0249498e7974181d77265a4db3774dad9ff92dd9e00ca1eff7b08c22",
       "opencode-zen.yaml": "9239b0e1c543c23037f5407b6c64a0db04735d092ba7ccc53d197f83f91d1636"
     },
-    "manifests_sha256": "98a516655efb9ef34e2a1783998cf541cb8fd89e9e99a6629fea7b69fcb8512f"
+    "manifests_sha256": "9e2bb27df94798726d6ff1b4829fd077108693b474f4974bfa8705f0fab9b866"
   },
   "models": {
     "beam-free": {
@@ -153,17 +154,20 @@
     "gemini-3.8-flash": {
       "alternates": [
         {
+          "provider": "droid"
+        },
+        {
           "provider": "agy-passthrough"
         }
       ],
       "efforts_proven": [],
       "family": "Google",
-      "family_source": "exact_map",
+      "family_source": "prefix",
       "history": [],
       "in_fleet": true,
-      "provider": "droid",
+      "provider": "agy",
       "quorum_eligible": false,
-      "quota_group": "factory-droid",
+      "quota_group": "google-agy",
       "status": "quarantine"
     },
     "gemini-3.8-flash-agy": {
@@ -238,13 +242,77 @@
       "quota_group": "google-agy",
       "status": "quarantine"
     },
+    "gemini-4-neon": {
+      "alternates": [
+        {
+          "provider": "agy-passthrough"
+        }
+      ],
+      "efforts_proven": [],
+      "family": "Google",
+      "family_source": "prefix",
+      "history": [],
+      "in_fleet": true,
+      "provider": "agy",
+      "quorum_eligible": false,
+      "quota_group": "google-agy",
+      "status": "quarantine"
+    },
+    "gemini-pro-orchestrator": {
+      "alternates": [
+        {
+          "provider": "agy-passthrough"
+        }
+      ],
+      "efforts_proven": [],
+      "family": "Google",
+      "family_source": "prefix",
+      "history": [],
+      "in_fleet": true,
+      "provider": "agy",
+      "quorum_eligible": false,
+      "quota_group": "google-agy",
+      "status": "quarantine"
+    },
+    "gemini-pro-orchestrator-argon": {
+      "alternates": [
+        {
+          "provider": "agy-passthrough"
+        }
+      ],
+      "efforts_proven": [],
+      "family": "Google",
+      "family_source": "prefix",
+      "history": [],
+      "in_fleet": true,
+      "provider": "agy",
+      "quorum_eligible": false,
+      "quota_group": "google-agy",
+      "status": "quarantine"
+    },
+    "gemini-pro-orchestrator-neon": {
+      "alternates": [
+        {
+          "provider": "agy-passthrough"
+        }
+      ],
+      "efforts_proven": [],
+      "family": "Google",
+      "family_source": "prefix",
+      "history": [],
+      "in_fleet": true,
+      "provider": "agy",
+      "quorum_eligible": false,
+      "quota_group": "google-agy",
+      "status": "quarantine"
+    },
     "gpt-6.1-sol": {
       "alternates": [
         {
           "provider": "codex"
         },
         {
-          "provider": "openai-key-3"
+          "provider": "openai-key-2"
         },
         {
           "provider": "droid"
@@ -255,9 +323,9 @@
       "family_source": "exact_map",
       "history": [],
       "in_fleet": true,
-      "provider": "openai-key-2",
+      "provider": "openai-key-3",
       "quorum_eligible": false,
-      "quota_group": "openai-key-2",
+      "quota_group": "openai-key-3",
       "status": "quarantine"
     },
     "gpt-6.1-sol-droid": {
@@ -278,7 +346,7 @@
           "provider": "codex"
         },
         {
-          "provider": "openai-key-3"
+          "provider": "openai-key-2"
         }
       ],
       "efforts_proven": [],
@@ -286,9 +354,9 @@
       "family_source": "exact_map",
       "history": [],
       "in_fleet": true,
-      "provider": "openai-key-2",
+      "provider": "openai-key-3",
       "quorum_eligible": false,
-      "quota_group": "openai-key-2",
+      "quota_group": "openai-key-3",
       "status": "quarantine"
     },
     "iceman-free": {
@@ -576,7 +644,7 @@
       "allow_base_url": [],
       "bridge": true,
       "enabled": true,
-      "kind": "muse",
+      "kind": "stdio_resident",
       "max_concurrent": 64,
       "quota_group": "meta-muse",
       "timeout_s": 600.0
@@ -591,7 +659,7 @@
         }
       ],
       "bridge": true,
-      "enabled": true,
+      "enabled": false,
       "kind": "passthrough",
       "max_concurrent": 1,
       "quota_group": "openai-key-2",
@@ -817,6 +885,10 @@
     }
   },
   "rejected": {},
-  "rejected_providers": {},
+  "rejected_providers": {
+    "opencode-resident": [
+      "backend_options_invalid"
+    ]
+  },
   "schema": "catalog-lock/1"
 }
