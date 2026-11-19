@@ -381,7 +381,7 @@
     },
     "opencode-go": {
       "kind": "passthrough",
-      "enabled": true,
+      "enabled": false,
       "owned_by": "opencode-go",
       "max_concurrent": 64,
       "base_url": "http://127.0.0.1:10830/go/v1",
@@ -399,12 +399,7 @@
         ]
       },
       "per_request_headers": {
-        "x-opencode-session": "{uuid4}"
-      },
-      "default_body_extra": {
-        "thinking": {
-          "type": "disabled"
-        }
+        "x-opencode-session": "{session_affinity}"
       }
     },
     "opencode-go-sub1": {
@@ -445,12 +440,7 @@
         ]
       },
       "per_request_headers": {
-        "x-opencode-session": "{uuid4}"
-      },
-      "default_body_extra": {
-        "thinking": {
-          "type": "disabled"
-        }
+        "x-opencode-session": "{session_affinity}"
       }
     },
     "opencode-go-sub2": {
@@ -491,12 +481,7 @@
         ]
       },
       "per_request_headers": {
-        "x-opencode-session": "{uuid4}"
-      },
-      "default_body_extra": {
-        "thinking": {
-          "type": "disabled"
-        }
+        "x-opencode-session": "{session_affinity}"
       }
     },
     "opencode-go-claude": {
@@ -519,7 +504,7 @@
         ]
       },
       "per_request_headers": {
-        "x-opencode-session": "{uuid4}"
+        "x-opencode-session": "{session_affinity}"
       }
     },
     "deepseek-direct": {
@@ -898,7 +883,7 @@
         "high",
         "max"
       ],
-      "default_effort": "off",
+      "default_effort": "high",
       "context_window": 1000000,
       "max_tokens": 384000,
       "images": {
@@ -915,19 +900,13 @@
         "enabled": true,
         "catalog_hash": "5e85567a835e0f55cac11a1bf7b9f57eccdedb8c3f4e93c878452105f6f897a8",
         "legacy_backend": "opencode-go-sub1",
-        "disabled_backend": "opencode-go",
+        "disabled_backend": "opencode-go-sub1",
         "routes": [
           {
             "route_id": "deepseek-direct",
             "backend": "deepseek-direct",
             "weight": 0,
             "priority": 20
-          },
-          {
-            "route_id": "opencode-go",
-            "backend": "opencode-go",
-            "weight": 0,
-            "priority": 10
           },
           {
             "route_id": "opencode-go-sub1",

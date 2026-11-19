@@ -170,6 +170,8 @@ class _DomainHealth:
     opened_at: float | None = None
     probe_in_flight: bool = False
     hard_blocked: bool = False
+    cooldown_until: float | None = None
+    reason: str = ""
 
 _HealthKey = tuple[HealthDomain, str]
 
@@ -207,36 +209,72 @@ class RouteCircuitBreaker:
     def _entries(self, route: RouteCandidate) -> list[_DomainHealth]:
         return [entry for domain in HealthDomain if (entry := self._health.get(self._key(route, domain)))]
 
+    def _cooldown_deadline(self, entry: _DomainHealth) -> float:
+        if entry.cooldown_until is not None:
+            return entry.cooldown_until
+        return (entry.opened_at or 0.0) + self._policy.cooldown_s
+
     def state(self, route: RouteCandidate, domain: HealthDomain, now: float) -> CircuitState:
         entry = self._health.get(self._key(route, domain))
         if entry is None or (entry.opened_at is None and not entry.hard_blocked and not entry.probe_in_flight):
             return CircuitState.CLOSED
         if entry.hard_blocked or not _is_finite_number(now) or entry.opened_at is None:
             return CircuitState.HALF_OPEN if entry.probe_in_flight and not entry.hard_blocked else CircuitState.OPEN
-        if entry.probe_in_flight or now >= entry.opened_at + self._policy.cooldown_s:
+        if entry.probe_in_flight or now >= self._cooldown_deadline(entry):
             return CircuitState.HALF_OPEN
         return CircuitState.OPEN
 
-    def record_failure(self, route: RouteCandidate, domain: HealthDomain, now: float) -> None:
+    def record_failure(
+        self,
+        route: RouteCandidate,
+        domain: HealthDomain,
+        now: float,
+        *,
+        cooldown_s: float | None = None,
+        reason: str = "",
+    ) -> None:
         with self._lock:
             entry = self._health.setdefault(self._key(route, domain), _DomainHealth())
             entry.failures += 1
             entry.probe_in_flight = False
+            if cooldown_s is not None and _is_finite_number(cooldown_s) and cooldown_s > 0:
+                entry.opened_at = float(now)
+                entry.cooldown_until = float(now) + float(cooldown_s)
+                entry.reason = reason
+                return
             if domain is HealthDomain.CREDENTIAL_SCOPE:
                 entry.hard_blocked = True
                 entry.opened_at = float(now)
+                entry.reason = reason
             elif entry.failures >= self._policy.failure_threshold:
                 entry.opened_at = float(now)
+                entry.cooldown_until = None
+                entry.reason = reason
 
     def record_success(self, route: RouteCandidate, domain: HealthDomain) -> None:
         with self._lock:
             entry = self._health.get(self._key(route, domain))
             if entry is not None and not entry.hard_blocked and not entry.probe_in_flight:
-                entry.failures, entry.opened_at = 0, None
+                entry.failures, entry.opened_at, entry.cooldown_until, entry.reason = 0, None, None, ""
 
     def reset(self, route: RouteCandidate, domain: HealthDomain) -> None:
         with self._lock:
             _ = self._health.pop(self._key(route, domain), None)
+
+    def quota_block_info(self, route: RouteCandidate, now: float) -> tuple[bool, float, str]:
+        """Возвращает `(blocked, remaining_s, reason)` для домена `CREDENTIAL_SCOPE`."""
+        with self._lock:
+            entry = self._health.get(self._key(route, HealthDomain.CREDENTIAL_SCOPE))
+            if entry is None or (entry.opened_at is None and not entry.hard_blocked):
+                return False, 0.0, ""
+            if entry.hard_blocked:
+                return True, max(60.0, self._policy.cooldown_s), entry.reason
+            if not _is_finite_number(now) or entry.opened_at is None:
+                return True, max(60.0, self._policy.cooldown_s), entry.reason
+            remaining = self._cooldown_deadline(entry) - now
+            if remaining > 0:
+                return True, remaining, entry.reason
+            return False, 0.0, ""
 
     def try_acquire(self, route: RouteCandidate, now: float) -> CircuitProbe | None:
         with self._lock:
@@ -248,7 +286,7 @@ class RouteCircuitBreaker:
                 entry = self._health.get(key)
                 if entry is None or entry.opened_at is None and not entry.hard_blocked:
                     continue
-                if entry.hard_blocked or entry.probe_in_flight or entry.opened_at is None or now < entry.opened_at + self._policy.cooldown_s:
+                if entry.hard_blocked or entry.probe_in_flight or entry.opened_at is None or now < self._cooldown_deadline(entry):
                     return None
                 probed.append(key)
             for key in probed:
@@ -272,10 +310,13 @@ class RouteCircuitBreaker:
                 if success is not None:
                     entry.failures = 0 if success else self._policy.failure_threshold
                     entry.opened_at = None if success else float(now)
+                    if success:
+                        entry.cooldown_until = None
+                        entry.reason = ""
             return True
 
     def _is_available(self, route: RouteCandidate, now: float) -> bool:
-        return all(not e.hard_blocked and not e.probe_in_flight and (e.opened_at is None or now >= e.opened_at + self._policy.cooldown_s) for e in self._entries(route))
+        return all(not e.hard_blocked and not e.probe_in_flight and (e.opened_at is None or now >= self._cooldown_deadline(e)) for e in self._entries(route))
 
     def _is_panic_eligible(self, route: RouteCandidate, now: float) -> bool:
         return not self._is_available(route, now) and all(not e.hard_blocked and not e.probe_in_flight for e in self._entries(route))

@@ -23,8 +23,9 @@ transport:
         required: []
         pick: [User-Agent]
         forbid_ua_prefix: [python]
-      per_request_headers: {x-opencode-session: '{uuid4}'}
-      stream: false
+      per_request_headers: {x-opencode-session: '{session_affinity}'}
+      # Поле stream не компилируется в fleet.json; клиент управляет stream в теле запроса.
+      stream: true
       response: {field: 'choices[0].message.content'}
 allow_base_url:
 - {scheme: http, host: 127.0.0.1, port: 10830, path_prefix: /go/v1}
