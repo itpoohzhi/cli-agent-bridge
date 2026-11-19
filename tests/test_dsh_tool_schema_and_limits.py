@@ -138,7 +138,7 @@ def test_bash_strips_undeclared_description_when_strict_schema_omits_it() -> Non
 
 
 def test_bash_preserves_description_for_unresolvable_schema() -> None:
-    """REQ-001: при неразрешимой схеме ($ref) description сохраняется; None — legacy."""
+    """REQ-01: при неразрешимой схеме ($ref) и tool_schemas=None description сохраняется."""
     ref_schemas = build_tool_schemas(
         [{"type": "function", "function": {"name": "bash", "parameters": {"$ref": "#/$defs/Bash"}}}]
     )
@@ -154,18 +154,24 @@ def test_bash_preserves_description_for_unresolvable_schema() -> None:
     )
     assert name == "bash"
     assert args == {"command": "echo ok", "description": "Echo status"}
-    _, legacy_args = _canonicalize(
+    _, none_args = _canonicalize(
         "bash",
         {"command": "ls", "description": "y", "toolSummary": "x", "summary": "list"},
         None,
     )
-    assert legacy_args == {"command": "ls"}
+    assert none_args == {"command": "ls", "description": "y"}
+    _, promoted = _canonicalize(
+        "bash",
+        {"command": "ls", "toolSummary": "List dir", "summary": "ignored"},
+        None,
+    )
+    assert promoted == {"command": "ls", "description": "List dir"}
 
 
 def test_agy_tool_turn_accepts_34_parallel_calls_by_default(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """REQ-004: дефолт AGY_MAX_TOOL_CALLS=64 пропускает пачку из 34 вызовов."""
+    """REQ-004 + REQ-01: пачка из 34 вызовов сохраняет description в каждом вызове."""
     monkeypatch.delenv("AGY_MAX_TOOL_CALLS", raising=False)
     bridge = _load_bridge()
     emitted: list[dict[str, Any]] = []
@@ -181,6 +187,42 @@ def test_agy_tool_turn_accepts_34_parallel_calls_by_default(
     assert turn.error == ""
     assert len(turn.calls) == 34
     assert len(emitted) == 34
+    for i, call in enumerate(emitted):
+        assert json.loads(call["function"]["arguments"]) == {
+            "command": f"echo {i}",
+            "description": f"step {i}",
+        }
+
+
+def test_bash_synthesizes_required_description_and_protects_custom_synonym(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """REQ-01: fallback-синтез required description (default True) и защита EXEC_SYNONYMS."""
+    from core.tool_call_schema_policy import canonicalize_tool_invocation
+
+    schemas = build_tool_schemas(_DSH_BASH_TOOLS)
+    custom = build_tool_schemas(
+        [{"type": "function", "function": {"name": "execute", "parameters": {"type": "object"}}}]
+    )
+    cname, cargs = canonicalize_tool_invocation("execute", {"command": "id"}, custom)
+    assert (cname, cargs) == ("execute", {"command": "id"})
+
+    monkeypatch.delenv("BRIDGE_SYNTHESIZE_REQUIRED_BASH_DESC_ENABLED", raising=False)
+    bridge = _load_bridge()
+    emitted: list[dict[str, Any]] = []
+    turn = bridge._ToolTurn(_DSH_BASH_TOOLS, lambda _c: True, lambda _r: True, lambda b: emitted.extend(b) or True)
+    turn.feed('<tool_call>{"name": "bash", "arguments": {"command": "git status -s"}}</tool_call>')
+    turn.finish()
+    args_on = json.loads(emitted[0]["function"]["arguments"])
+    assert args_on["command"] == "git status -s" and args_on["description"].startswith("Run: git status -s")
+
+    monkeypatch.setenv("BRIDGE_SYNTHESIZE_REQUIRED_BASH_DESC_ENABLED", "0")
+    emitted_off: list[dict[str, Any]] = []
+    turn_off = bridge._ToolTurn(_DSH_BASH_TOOLS, lambda _c: True, lambda _r: True, lambda b: emitted_off.extend(b) or True)
+    turn_off.feed('<tool_call>{"name": "bash", "arguments": {"command": "git status -s"}}</tool_call>')
+    turn_off.finish()
+    assert json.loads(emitted_off[0]["function"]["arguments"]) == {"command": "git status -s"}
+    _ = schemas
 
 
 def test_agy_tool_turn_limit_exceeded_returns_distinct_error_type(

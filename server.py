@@ -63,7 +63,7 @@ import uuid
 from urllib.parse import parse_qs, urlparse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from dataclasses import asdict, dataclass, replace
+from dataclasses import dataclass
 from typing import Any, Callable, Mapping, cast
 
 ROOT = Path(__file__).resolve().parent
@@ -101,12 +101,8 @@ from core.backend_adapter import (  # noqa: E402
     EFFORT_LEVELS as EFFORT_LEVELS,
     AdapterRegistry,
     FleetViolation,
-    ImageAttachment,
     StreamSink,
-    Transcript,
-    TranscriptItem,
-    TurnContext,
-    ToolCall,
+    TurnContext as TurnContext,
     build_catalog,
     is_bridge_secret_name,
     strip_bridge_secrets,
@@ -179,7 +175,7 @@ from core.chat_key import (  # noqa: E402
     digest_of,
     resolve_chat_key as resolve_chat_key,
 )
-from core.usage_wire import build_wire_usage, extract_cache_read_tokens, normalize_prompt_cache_details, positive_wire_usage  # noqa: E402
+from core.usage_wire import build_wire_usage, extract_cache_read_tokens, positive_wire_usage  # noqa: E402
 from core.watchdog import (  # noqa: E402,F401
     DEFAULT_IDLE_TIMEOUT_S,
     DEFAULT_SAFETY_CAP_S,
@@ -202,6 +198,7 @@ from core.liveness_signals import (  # noqa: E402
     passthrough_window as passthrough_window,
 )
 from core.runtime_env import DynamicFlagSource, flag_enabled  # noqa: E402
+from core.turn_dispatch import ToolSchemaScope, dispatch_turn  # noqa: E402
 from core.request_telemetry import RequestTelemetryStore  # noqa: E402
 from core.telemetry_hooks import (  # noqa: E402
     TelemetryHooksMixin,
@@ -5819,7 +5816,7 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
             # Managed replay получает вызовы после единственной границы в _dispatch.
 
         parser = (
-            ToolCallParser(add_content, add_call, strict_live=sse_writer is not None)
+            ToolCallParser(add_content, add_call, strict_live=sse_writer is not None, tool_schemas=ToolSchemaScope.get_current())
             if emulate_tools
             else None
         )
@@ -7089,157 +7086,8 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
     def _dispatch(
         self, ctx: dict, keepalive, sse_writer: "StreamSink | None" = None
     ) -> dict:
-        """Ход через адаптер бэкенда модели; общий разбор `<tool_call>` и итог в формате фасада.
-
-        sse_writer не None только у настоящего живого SSE-хода (_serve_sse): адаптеры, умеющие
-        отдавать content/reasoning по мере готовности (сейчас — droid), сами вызывают его из
-        своего пути выполнения. Остальные (muse) его просто игнорируют — поведение не меняется.
-        """
-        managed_turn: ManagedTurn | None = ctx.get("managed_turn") or getattr(
-            self, "_active_managed_turn", None
-        )
-        if ctx.get("attached_existing") and managed_turn is not None:
-            eff_fn = getattr(self, "_effective_turn_timeout_s", None)
-            eff_to = eff_fn() if callable(eff_fn) else TIMEOUT_S
-            managed_turn.done_event.wait(timeout=eff_to)
-            if managed_turn.final_dict is not None:
-                return dict(managed_turn.final_dict)
-        adapter = BACKENDS.get(ctx["backend"])
-        if adapter is None:
-            return {
-                "state": "launcher_unavailable",
-                "rc": 1,
-                "text": "",
-                "usage": {},
-                "result": {},
-                "err": "",
-                "tool_calls": [],
-                "events": [],
-            }
-        transcript = ctx["rpc"]
-        turn = TurnContext(
-            **{
-                key: value
-                for key, value in ctx.items()
-                if key
-                not in (
-                    "rpc",
-                    "request_id",
-                    "subagent_id",
-                    "images",
-                    "attached_existing",
-                    "on_activity",
-                    "register_pgid",
-                    "cancel_event",
-                )
-            },
-            rpc=Transcript(
-                system=transcript["system"],
-                runnable=transcript["runnable"],
-                items=tuple(TranscriptItem(**item) for item in transcript["items"]),
-            ),
-            images=tuple(ImageAttachment(**image) for image in ctx["images"]),
-            handler=self,
-            keepalive=keepalive,
-            client_gone=lambda: _client_gone(self.connection),
-            on_activity=ctx.get("on_activity")
-            or (
-                getattr(managed_turn, "touch_activity", None)
-                if managed_turn is not None
-                else None
-            ),
-            register_pgid=ctx.get("register_pgid")
-            or (
-                (
-                    lambda pgid: TURN_MANAGER.register_child_pgid(
-                        pgid,
-                        backend=adapter.id,
-                        turn_id=getattr(managed_turn, "turn_id", ""),
-                    )
-                )
-                if managed_turn is not None
-                and getattr(managed_turn, "turn_id", None) is not None
-                else None
-            ),
-            cancel_event=ctx.get("cancel_event")
-            or (
-                getattr(managed_turn, "cancel_event", None)
-                if managed_turn is not None
-                else None
-            ),
-        )
-        t0 = time.monotonic()
-        raw_turn_result = adapter.execute_turn(turn, sse_writer)
-        limits = PassthroughLimits.from_env()
-        result = finalize_turn(
-            raw_turn_result,
-            turn.emulate_tools,
-            invoke_normalization_enabled=limits.invoke_normalization_enabled,
-            repetition_guard_enabled=limits.repetition_guard_enabled,
-        )
-        if BRIDGE_SANITIZE_TOOL_CALLS:
-            calls: list[ToolCall] = []
-            by_id: dict[str, list[ToolCall]] = {}
-            for call in result.tool_calls:
-                cleaned = [
-                    replace(item, index=len(calls) + index)
-                    for index, item in enumerate(
-                        sanitize_tool_call(call, turn.tool_schemas, **_SANITIZE_LIMITS)
-                    )
-                ]
-                by_id[call.id] = cleaned
-                calls.extend(cleaned)
-            result = replace(
-                result,
-                tool_calls=tuple(calls),
-                events=tuple(
-                    item
-                    for event in result.events or ()
-                    for item in (
-                        [replace(event, value=call) for call in by_id[event.value.id]]
-                        if event.kind == "tool_call"
-                        and isinstance(event.value, ToolCall)
-                        else [event]
-                    )
-                ),
-            )
-        if managed_turn is not None:
-            TURN_MANAGER.complete_turn_from_result(
-                managed_turn, result, backend_kind=adapter.kind
-            )
-        # Только локальный HTTP-буфер: межмодульный seam уже вернул DTO.
-        out = {
-            "state": result.state,
-            "rc": result.rc,
-            "text": result.text,
-            "reasoning": result.reasoning,
-            "err": result.err,
-            "usage": asdict(result.usage),
-            "result": {},
-            "tool_calls": [asdict(call) for call in result.tool_calls],
-            "events": [
-                (
-                    event.kind,
-                    asdict(event.value)
-                    if not isinstance(event.value, str)
-                    else event.value,
-                )
-                for event in result.events or ()
-            ],
-            "backend_kind": adapter.kind,
-        }
-        if (
-            adapter.kind != "droid"
-        ):  # droid-путь пишет свои done/usage строки в _run_once
-            # RW-007: сырой stderr/terminal reason бэкенда может содержать пользовательский
-            # текст; в постоянный журнал идут только коды и размеры (сырой err — в ответ клиенту).
-            _log(
-                f"done model={ctx['model']} backend={adapter.id} rc={out.get('rc')} "
-                f"state={out.get('state')} out_bytes={len(str(out.get('text') or '').encode())} "
-                f"wall_s={time.monotonic() - t0:.1f} "
-                f"err_bytes={len(str(out.get('err') or '').encode())} {ctx['tag']}"
-            )
-        return out
+        """Фасад к ``core.turn_dispatch.dispatch_turn``."""
+        return dispatch_turn(self, ctx, keepalive, sse_writer)
 
     @staticmethod
     def _record_turn_outcome(

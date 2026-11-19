@@ -2,14 +2,15 @@
 
 from __future__ import annotations
 
-import os
-from typing import Any, Mapping
+from typing import Any
 
 MULTIMODAL_MODELS: tuple[str, ...] = (
     "gpt-6.1-sol",
     "gemini-4-argon",
     "gemini-4-carbon",
     "gemini-4-hydrogen",
+    "gemini-4-neon",
+    "gemini-pro-orchestrator",
     "gemini-3.8-flash",
 )
 

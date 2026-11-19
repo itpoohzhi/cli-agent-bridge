@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+import inspect
 import json
 import uuid
-from typing import Callable
+from collections.abc import Mapping
+from typing import Any, Callable
 
+from core.runtime_env import synthesize_required_bash_desc_enabled
 from core.tool_emulation import (
+    DEFAULT_MAX_PARALLEL_CALLS,
+    DEFAULT_MAX_PARALLEL_DEPTH,
     TOOL_CALL_CLOSE,
     TOOL_CALL_OPEN,
     ToolCallParser,
@@ -32,16 +37,14 @@ __all__ = [
 ]
 
 _SANITIZE_LIMITS = {
-    "max_name_len": 64,
-    "max_args_len": 32768,
-    "max_calls": 32,
-    "max_depth": 16,
+    "max_parallel_calls": DEFAULT_MAX_PARALLEL_CALLS,
+    "max_parallel_depth": DEFAULT_MAX_PARALLEL_DEPTH,
 }
 
 
 def _split_tool_calls(
     chunks: list[str],
-    tool_schemas: list[dict] | None = None,
+    tool_schemas: Mapping[str, Any] | None = None,
     sanitize_func: Callable[..., list[dict]] | None = None,
 ) -> tuple[str, list[dict]]:
     """Собирает чанки, извлекает tool_calls и форматирует их в OpenAI-схему."""
@@ -61,10 +64,13 @@ def _split_tool_calls(
             }
         )
 
-    parser = ToolCallParser(pieces.append, add_call)
+    parser = ToolCallParser(pieces.append, add_call, tool_schemas=tool_schemas)
     for chunk in chunks:
         parser.feed(chunk)
     parser.finish()
     if sanitize_func is not None and tool_schemas is not None:
-        calls = sanitize_func(calls, tool_schemas, **_SANITIZE_LIMITS)
+        kwargs: dict[str, Any] = dict(_SANITIZE_LIMITS)
+        if "synthesize_required_description" in inspect.signature(sanitize_func).parameters:
+            kwargs["synthesize_required_description"] = synthesize_required_bash_desc_enabled()
+        calls = sanitize_func(calls, tool_schemas, **kwargs)
     return "".join(pieces), calls
