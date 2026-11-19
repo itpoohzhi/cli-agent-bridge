@@ -14,6 +14,7 @@ from core.http_post_dispatch import _cleanup_post, _passthrough, dispatch_route
 from core.http_post_ingress import begin_post, read_post_request
 from core.http_post_routing import prepare_post_body, resolve_post_route, selected_route_allowed
 from core.passthrough_exchange import _validate_endpoint, internal_trace_scope
+from core.quota_classifier import QuotaRules, classify_429
 from core.retry_control import MAX_RETRY_RATIO, MAX_TOTAL_ATTEMPTS_LIMIT, CircuitPolicy, HealthDomain, RetryReservation, RetrySizing, RetryTokenBucket, RouteCandidate, RouteCircuitBreaker, validate_retry_sizing
 from core.route_attempts import BRIDGE_OWNER, STATELESS_REPLAY_ENDPOINTS, AttemptPhase, AttemptState, RouteAttempt, RouteFailover, RouteRefusal, build_georouter_headers, build_pool_exhausted_error, evaluate_replay, failover_from_mapping, normalize_replay_endpoint
 from core.route_eligibility import EligibilityFacts, request_snapshot, route_eligible
@@ -207,7 +208,7 @@ def _replay_gate(
         not _effort(route)
         and declared is not None
         and declared.opt_in
-        and state.status_code in declared.statuses
+        and (state.status_code in declared.statuses or state.status_code in (401, 429, 503))
         and not state.committed
     ):
         # Маршрут явно объявил этот статус отказом слота: переход к следующему
@@ -228,6 +229,38 @@ def _route_failover(route: Any, backend: str) -> RouteFailover:
     return failover_from_mapping(
         getattr(adapter, "config", None) if adapter is not None else None
     )
+
+
+def _credential_scope(route: Any, spec: Any) -> str:
+    """Уникальный scope учётных данных слота (чтобы 429 одного слота не блокировал соседний)."""
+    ref = getattr(spec, "credential_ref", None)
+    if isinstance(ref, str) and ref:
+        return ref
+    registries = getattr(route.host, "BACKENDS", None)
+    adapter = registries.get(spec.backend) if isinstance(registries, Mapping) else None
+    cfg = getattr(adapter, "config", None) if adapter is not None else None
+    if isinstance(cfg, Mapping):
+        for key in ("api_key_ref", "quota_group", "api_key_env"):
+            val = cfg.get(key)
+            if isinstance(val, str) and val:
+                return val
+    return f"backend:{spec.backend}"
+
+
+def _with_retry_after(error: RouteRefusal, retry_after_s: int) -> RouteRefusal:
+    """Добавляет или повышает Retry-After для сводного ответа исчерпанного пула."""
+    headers = list(error.response_headers)
+    existing = 0
+    for k, v in headers:
+        if k.lower() == "retry-after":
+            try:
+                existing = max(existing, int(float(v)))
+            except ValueError:
+                pass
+    if retry_after_s > existing:
+        headers = [(k, v) for k, v in headers if k.lower() != "retry-after"]
+        headers.append(("Retry-After", str(retry_after_s)))
+    return RouteRefusal(error.status_code, tuple(headers), error.response_body)
 
 
 def _exhausted_pool(
@@ -255,7 +288,9 @@ def _run_routes(route: Any, routes: Any, seed: str, policy: Any) -> None:
     route = _pin_effort(route)
     body, count, breaker, reservation = prepare_post_body(route), 0, _breaker(), _begin_retry_request(config, len(order))
     refusals: list[tuple[str, RouteRefusal, RouteFailover]] = []
+    quota_skipped: list[tuple[str, RouteRefusal, RouteFailover]] = []
     declared: RouteFailover | None = None
+    quota_rules = QuotaRules.from_config()
     try:
         for backend in order:
             if route.host._client_gone(route.handler.connection):
@@ -266,49 +301,75 @@ def _run_routes(route: Any, routes: Any, seed: str, policy: Any) -> None:
                 break
             if not _eligible(route, spec, policy):
                 continue
-            candidate = RouteCandidate(route_id=spec.backend, origin=route.model_id, node=spec.backend, credential_scope=getattr(spec, "credential_ref", None) or "unscoped", identity=f"{route.model_id}:{_effort(route)}")
+            candidate = RouteCandidate(route_id=spec.backend, origin=route.model_id, node=spec.backend, credential_scope=_credential_scope(route, spec), identity=f"{route.model_id}:{_effort(route)}")
+            failover = _route_failover(route, backend)
             probe = breaker.try_acquire(candidate, now)
             if probe is None:
-                # Открытый circuit пропускает маршрут без списания попытки.
+                # Открытый circuit пропускает маршрут без списания попытки и без запроса в апстрим.
+                blocked, remaining_s, _reason = breaker.quota_block_info(candidate, now)
+                if blocked:
+                    retry_s = max(60, int(remaining_s))
+                    synth = RouteRefusal(429, (("Retry-After", str(retry_s)),), b'{"error":{"type":"rate_limit_error","message":"slot in quota cooldown"}}')
+                    quota_skipped.append((backend, synth, failover))
                 continue
             if count and not _retry_token(reservation):
                 _ = breaker.release_probe(probe)
                 break
             count += 1
-            failover = _route_failover(route, backend)
             attempt = RouteAttempt(decision.attempt_budget_s, now + decision.attempt_budget_s, time.monotonic)
             attempt.advance(AttemptPhase.CONNECTING)
             try:
                 _attempt(route, spec, body, attempt)
             except (RouteRefusal, PreSendTransientError, AdapterPreSendError) as error:
-                # Клиентский 4xx (кроме 403/429 — здоровье маршрута) не отравляет circuit.
-                if not (isinstance(error, RouteRefusal) and 400 <= error.status_code < 500 and error.status_code not in (403, 429)):
-                    breaker.record_failure(candidate, HealthDomain.ROUTE, time.monotonic())
+                now_err = time.monotonic()
+                recorded_refusal = error if isinstance(error, RouteRefusal) else None
+                if isinstance(error, RouteRefusal) and error.status_code == 429:
+                    qdec = classify_429(dict(error.response_headers), error.response_body, quota_rules)
+                    if qdec.is_quota:
+                        breaker.record_failure(candidate, HealthDomain.CREDENTIAL_SCOPE, now_err, cooldown_s=qdec.reset_s, reason=qdec.reason)
+                        cb_cache = getattr(route.host, "_QUOTA_CB_CACHE", None)
+                        if cb_cache is not None and hasattr(cb_cache, "record_429"):
+                            cb_cache.record_429(f"{route.model_id}@{spec.backend}", ttl_s=qdec.reset_s, reason=qdec.reason)
+                        recorded_refusal = _with_retry_after(error, max(60, int(qdec.reset_s)))
+                    else:
+                        breaker.record_failure(candidate, HealthDomain.ROUTE, now_err)
+                elif isinstance(error, RouteRefusal) and failover.opt_in and error.status_code in failover.statuses:
+                    breaker.record_failure(candidate, HealthDomain.CREDENTIAL_SCOPE, now_err, cooldown_s=quota_rules.cooldown_default_s, reason=f"http_{error.status_code}_slot_refusal")
+                elif not (isinstance(error, RouteRefusal) and 400 <= error.status_code < 500 and error.status_code not in (403, 429)):
+                    # Клиентский 4xx (кроме 403/429 — здоровье маршрута) не отравляет circuit.
+                    breaker.record_failure(candidate, HealthDomain.ROUTE, now_err)
                 _ = breaker.release_probe(probe)
-                if isinstance(error, RouteRefusal):
+                if isinstance(error, RouteRefusal) and recorded_refusal is not None:
                     attempt.advance_to(AttemptPhase.RESPONSE_HEADERS, error.status_code)
-                    if failover.opt_in:
-                        refusals.append((backend, error, failover))
-                        declared = failover
+                    if failover.opt_in or error.status_code == 429:
+                        refusals.append((backend, recorded_refusal, failover))
+                        if failover.opt_in:
+                            declared = failover
                 # timed_out — наблюдённый факт дедлайна попытки; commit/side-effects уже в state.
                 state = replace(attempt.state, timed_out=not isinstance(error, RouteRefusal) and attempt.remaining_s() <= 0)
-                last_error = error
+                last_error = recorded_refusal if recorded_refusal is not None else error
                 continue
             breaker.record_success(candidate, HealthDomain.ROUTE)
+            breaker.record_success(candidate, HealthDomain.CREDENTIAL_SCOPE)
             _ = probe.succeed(time.monotonic())
             attempt.advance_to(AttemptPhase.COMMITTED)
             return
-        if isinstance(last_error, RouteRefusal):
+        combined_refusals = refusals + quota_skipped
+        if isinstance(last_error, RouteRefusal) or quota_skipped:
             sink = route.host._HandlerSink(route.handler, extra_headers=route.host._trace_headers(route.handler._trace))
-            pool = _exhausted_pool(refusals)
-            if pool is None:
-                sink.start(last_error.status_code, list(last_error.response_headers))
-                sink.write(last_error.response_body)
-            else:
+            pool = _exhausted_pool(combined_refusals)
+            if pool is not None:
                 pool_label, pool_refusals = pool
                 status, headers, payload = build_pool_exhausted_error(pool_refusals, pool_label=pool_label)
                 sink.start(status, list(headers))
                 sink.write(payload)
+            elif isinstance(last_error, RouteRefusal):
+                sink.start(last_error.status_code, list(last_error.response_headers))
+                sink.write(last_error.response_body)
+            else:
+                first_err = quota_skipped[0][1]
+                sink.start(first_err.status_code, list(first_err.response_headers))
+                sink.write(first_err.response_body)
         else:
             route.reject(503, "route_unavailable", "no eligible transport is available")
     finally:

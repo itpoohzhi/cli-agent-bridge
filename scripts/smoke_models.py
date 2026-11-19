@@ -525,6 +525,17 @@ def smoke_test_model(
     request.add_header("Content-Type", "application/json")
     request.add_header("Authorization", f"Bearer {key}")
     request.add_header("X-Subagent-Id", subagent_id or f"smoke-{model_id}")
+    internal_key = os.environ.get("INTERNAL_SERVICE_KEY", "").strip()
+    if not internal_key:
+        env_p = Path.home() / ".dsh" / ".env"
+        if env_p.is_file():
+            for raw_line in env_p.read_text(encoding="utf-8", errors="ignore").splitlines():
+                stripped = raw_line.strip()
+                if stripped.startswith("INTERNAL_SERVICE_KEY="):
+                    internal_key = stripped.split("=", 1)[1].strip().strip("'\"")
+                    break
+    if internal_key:
+        request.add_header("X-Internal-Service-Key", internal_key)
 
     started = time.monotonic()
     ttft: float | None = None

@@ -414,3 +414,167 @@ def test_slot_manifest_loads_and_compiles(slot: str, key_name: str) -> None:
     assert entry["failover_message_markers"] == list(manifest.failover.message_markers)
     assert entry["failover_pool"] == "opencode-go"
     assert entry["failover_pool_label"] == "OpenCode Go"
+    assert entry["per_request_headers"] == {"x-opencode-session": "{session_affinity}"}
+
+
+def test_facade_quota_429_opens_long_credential_scope_cooldown_and_stops_storm(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from core import passthrough_facade as facade
+
+    monkeypatch.setattr(facade, "_RUNTIME", facade._RuntimeState())
+    facade._begin_retry_request(RetryBudgetConfig(), 2).release_unused()
+    bucket = facade._RUNTIME.bucket
+    assert bucket is not None
+    for _ in range(10):
+        bucket.admit_primary()
+
+    monthly_body = (
+        b'{"error":{"type":"GoUsageLimitError",'
+        b'"message":"OpenCode Go usage limit reached (monthly, resets in 18d 23h)"}}'
+    )
+    go_base = {
+        "failover_statuses": [402, 403],
+        "failover_error_types": list(GO_TYPES),
+        "failover_message_markers": list(GO_MARKERS),
+        "failover_pool": "opencode-go",
+        "failover_pool_label": "OpenCode Go",
+    }
+    backends = {
+        "opencode-go-sub1": SimpleNamespace(config={**go_base, "quota_group": "opencode-go-sub1"}),
+        "opencode-go-sub2": SimpleNamespace(config={**go_base, "quota_group": "opencode-go-sub2"}),
+    }
+    recorded_cache: list[tuple[str, float, str]] = []
+    cb_cache = SimpleNamespace(
+        record_429=lambda mid, ttl_s=1800.0, reason="429_quota": recorded_cache.append((mid, ttl_s, reason))
+    )
+
+    def make_sink() -> Any:
+        s = SimpleNamespace(status=None, headers=[], payload=b"")
+        s.start = lambda status, headers: (setattr(s, "status", status), setattr(s, "headers", headers))
+        s.write = lambda data: setattr(s, "payload", s.payload + data)
+        return s
+
+    sinks: list[Any] = []
+    seen: list[str] = []
+
+    def attempt_fn(route_: Any, spec: Any, body: Any, attempt: Any) -> None:
+        seen.append(spec.backend)
+        attempt.advance(AttemptPhase.SENDING)
+        attempt.advance(AttemptPhase.RESPONSE_HEADERS, 429)
+        raise RouteRefusal(429, (), monthly_body)
+
+    monkeypatch.setattr(facade, "prepare_post_body", lambda route_: object())
+    monkeypatch.setattr(facade, "route_order", lambda *args: ["opencode-go-sub1", "opencode-go-sub2"])
+    monkeypatch.setattr(facade, "_eligible", lambda *args: True)
+    monkeypatch.setattr(facade, "_attempt", attempt_fn)
+
+    def run_once() -> Any:
+        sink = make_sink()
+        sinks.append(sink)
+        host = SimpleNamespace(
+            BACKENDS=backends,
+            _QUOTA_CB_CACHE=cb_cache,
+            _client_gone=lambda conn: False,
+            _HandlerSink=lambda handler, extra_headers=None: sink,
+            _trace_headers=lambda trace: [],
+        )
+        handler = SimpleNamespace(connection=object(), _trace=SimpleNamespace(subagent_id=None))
+        route = SimpleNamespace(
+            host=host,
+            handler=handler,
+            model_id="deepseek-v4.1-flash",
+            model={"backend": "opencode-go-sub1", "routing": {}},
+            reject=lambda *args: setattr(sink, "status", args[0]),
+        )
+        specs = [SimpleNamespace(backend="opencode-go-sub1"), SimpleNamespace(backend="opencode-go-sub2")]
+        facade._run_routes(route, specs, "seed", None)
+        return sink
+
+    first = run_once()
+    assert seen == ["opencode-go-sub1", "opencode-go-sub2"]
+    assert first.status == 429
+    assert int(dict(first.headers)["Retry-After"]) >= 604800
+    assert len(recorded_cache) == 2
+
+    # Повторный запрос сразу после исчерпания пула: 0 обращений к апстриму, чистый 429 с Retry-After.
+    seen.clear()
+    second = run_once()
+    assert seen == []
+    assert second.status == 429
+    assert int(dict(second.headers)["Retry-After"]) >= 600000
+
+
+def test_facade_quota_429_isolates_credential_scope_between_slots(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from core import passthrough_facade as facade
+
+    monkeypatch.setattr(facade, "_RUNTIME", facade._RuntimeState())
+    facade._begin_retry_request(RetryBudgetConfig(), 2).release_unused()
+    bucket = facade._RUNTIME.bucket
+    assert bucket is not None
+    for _ in range(10):
+        bucket.admit_primary()
+
+    monthly_body = b'{"error":{"type":"GoUsageLimitError","message":"usage limit reached (monthly, resets in 5d)"}}'
+    go_base = {
+        "failover_statuses": [402, 403],
+        "failover_error_types": list(GO_TYPES),
+        "failover_message_markers": list(GO_MARKERS),
+        "failover_pool": "opencode-go",
+        "failover_pool_label": "OpenCode Go",
+    }
+    backends = {
+        "opencode-go-sub1": SimpleNamespace(config={**go_base, "quota_group": "opencode-go-sub1"}),
+        "opencode-go-sub2": SimpleNamespace(config={**go_base, "quota_group": "opencode-go-sub2"}),
+    }
+    seen: list[str] = []
+
+    def attempt_fn(route_: Any, spec: Any, body: Any, attempt: Any) -> None:
+        seen.append(spec.backend)
+        if spec.backend == "opencode-go-sub1":
+            attempt.advance(AttemptPhase.SENDING)
+            attempt.advance(AttemptPhase.RESPONSE_HEADERS, 429)
+            raise RouteRefusal(429, (), monthly_body)
+        # sub2 succeeds
+
+    monkeypatch.setattr(facade, "prepare_post_body", lambda route_: object())
+    monkeypatch.setattr(facade, "route_order", lambda *args: ["opencode-go-sub1", "opencode-go-sub2"])
+    monkeypatch.setattr(facade, "_eligible", lambda *args: True)
+    monkeypatch.setattr(facade, "_attempt", attempt_fn)
+
+    def run_once() -> None:
+        host = SimpleNamespace(
+            BACKENDS=backends,
+            _client_gone=lambda conn: False,
+            _HandlerSink=lambda handler, extra_headers=None: SimpleNamespace(),
+            _trace_headers=lambda trace: [],
+        )
+        handler = SimpleNamespace(connection=object(), _trace=SimpleNamespace(subagent_id=None))
+        route = SimpleNamespace(
+            host=host,
+            handler=handler,
+            model_id="deepseek-v4.1-flash",
+            model={"backend": "opencode-go-sub1", "routing": {}},
+            reject=lambda *args: pytest.fail(f"unexpected reject {args}"),
+        )
+        specs = [SimpleNamespace(backend="opencode-go-sub1"), SimpleNamespace(backend="opencode-go-sub2")]
+        facade._run_routes(route, specs, "seed", None)
+
+    run_once()
+    assert seen == ["opencode-go-sub1", "opencode-go-sub2"]
+    seen.clear()
+    run_once()
+    assert seen == ["opencode-go-sub2"]
+
+
+def test_fleet_uses_session_affinity_and_removes_disabled_opencode_go_fallback() -> None:
+    fleet = json.loads((ROOT / "fleet.json").read_text(encoding="utf-8"))
+    for name in ("opencode-go-sub1", "opencode-go-sub2", "opencode-go-claude"):
+        assert fleet["backends"][name]["per_request_headers"] == {"x-opencode-session": "{session_affinity}"}
+    ds = next(m for m in fleet["models"] if m["id"] == "deepseek-v4.1-flash")
+    assert ds["routing"]["disabled_backend"] != "opencode-go"
+    assert all(r["backend"] != "opencode-go" for r in ds["routing"]["routes"])
+    assert ds["default_effort"] == "high"
+
