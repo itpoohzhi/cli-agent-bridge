@@ -273,18 +273,19 @@ for _a in ("unregister", "set_blocked"): setattr(spawn_registered, _a, getattr(_
 
 def _prepare_claude_home(claude_home: Path | None = None, real_home: Path | None = None) -> Path:
     global _CLAUDE_HOME_INITIALIZED
+    use_cache = (claude_home, real_home) == (None, None)
     real_claude = (real_home or Path.home()) / ".claude"
     home = claude_home or WORKSPACE / "runtime" / "claude-home"
     claude_dir = home / ".claude"
     with _CLAUDE_HOME_LOCK:
-        if claude_home is None and real_home is None and _CLAUDE_HOME_INITIALIZED and claude_dir.is_dir():
+        if use_cache and _CLAUDE_HOME_INITIALIZED and claude_dir.is_dir():
             return home
         _sync_ca_files(real_claude, claude_dir)
         src = real_claude / "settings.json"
         raw = _read_json_dict(src) if src.is_file() else {}
         if raw is not None:
             _write_atomic(claude_dir / "settings.json", serialize_claude_json(filter_claude_settings(raw)).encode("utf-8"))
-            _CLAUDE_HOME_INITIALIZED = _CLAUDE_HOME_INITIALIZED or (claude_home is None and real_home is None)
+            if use_cache: _CLAUDE_HOME_INITIALIZED = True
         return home
 MAX_CONCURRENT = int(os.environ.get("CLAUDE_P_BRIDGE_MAX_CONCURRENT", "32"))
 QUEUE_TIMEOUT_S = int(os.environ.get("CLAUDE_P_BRIDGE_QUEUE_TIMEOUT", "900"))
