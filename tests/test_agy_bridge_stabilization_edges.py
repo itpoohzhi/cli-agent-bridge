@@ -148,3 +148,24 @@ def test_run_close_passes_send_sigint_and_acquire_respects_registry_cancel() -> 
         assert slots.waiters_count == 0
     finally:
         slots.release()
+
+
+def test_run_emulate_mode_preserves_disable_slash_commands() -> None:
+    agy = _load_agy()
+    captured: list[list[str]] = []
+
+    def _fake_spawn(cmd: list[str], **_kwargs: object) -> None:
+        captured.append(list(cmd))
+        raise RuntimeError("stop-after-cmd")
+
+    with mock.patch.object(agy, "spawn_registered", side_effect=_fake_spawn):
+        for mode in ("emulate", "ask", "agent"):
+            try:
+                agy.Run("p", "gemini-4-neon", "high", "/bin/echo", "", "t", mode=mode)
+            except RuntimeError:
+                pass
+    assert "--disable-slash-commands" in captured[0] and "--mode" in captured[0]
+    assert captured[0][captured[0].index("--mode") + 1] == "plan"
+    assert "--disable-slash-commands" in captured[1]
+    assert "--disable-slash-commands" not in captured[2]
+

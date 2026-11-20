@@ -5602,7 +5602,7 @@ class Run:
             model,
             *effort_cli_args(effort),
             "--print-timeout=" + _format_print_timeout(PRINT_TIMEOUT),
-            *text_turn_cli_flags(mode),
+            *text_turn_cli_flags(cli_mode),
         ]
         # Изображения хода: каталог файлов отдельным аргументом, cwd не подменяется.
         if add_dir is not None:
