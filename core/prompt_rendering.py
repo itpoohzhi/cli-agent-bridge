@@ -22,7 +22,6 @@ _TOOLS_PROTOCOL_LINES: tuple[str, ...] = (
     "You may output several such blocks in a row. Do not narrate around them.",
     "Tool results arrive later as lines like [tool result <id>] with the result text.",
     "If no tool is needed, reply normally in plain text.",
-    "Do not enter planning-only mode, do not create implementation_plan.md, and do not wait for plan approval; execute actions directly via <tool_call>.",
     "Never attempt to use built-in tools; the only tools available are the ones listed here.",
 )
 _ATTACHMENTS_FOOTER = (

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import math
 import os
 from collections.abc import Mapping
@@ -11,6 +12,11 @@ from core.chat_key import resolve_chat_key
 
 SRC_HEADER_SUBAGENT_ID = "x-subagent-id"
 _TRUTHY = frozenset({"1", "true", "yes", "on"})
+_MAX_COMBINED_KEY_LEN = 512
+_ANTI_PLAN_DIRECTIVE = (
+    "- Do NOT enter planning mode, do NOT ask for plan approval, and do NOT write "
+    "implementation_plan.md; execute requested actions directly via <tool_call>."
+)
 
 
 def _env_float(
@@ -76,12 +82,21 @@ def resolve_subagent_id(headers: Mapping[str, Any] | None) -> tuple[str, bool]:
 
 
 def combine_chat_and_subagent(chat_id: str, subagent_id: str) -> str:
-    """Пространство имён горячей сессии с изоляцией по `X-Subagent-Id`."""
+    """Пространство имён горячей сессии с изоляцией по `X-Subagent-Id` (без NUL и <= 512)."""
     if not subagent_id:
         return chat_id
-    if chat_id:
-        return f"{chat_id}\x00subagent:{subagent_id}"
-    return f"subagent:{subagent_id}"
+    combined = f"{chat_id}|sub:{subagent_id}" if chat_id else f"subagent:{subagent_id}"
+    return f"sub:{hashlib.sha256(combined.encode('utf-8')).hexdigest()[:48]}" if len(combined) > _MAX_COMBINED_KEY_LEN else combined
+
+
+def continuity_scope(model: object, subagent_id: str) -> str:
+    """Scope для `_CONTINUITY.resolve`: `subagent_id` изолирует, но не подменяет continuity."""
+    return f"{model or ''}\x00{subagent_id}\x00" if subagent_id else f"{model or ''}\x00"
+
+
+def append_anti_plan_directive(section: str) -> str:
+    """Добавить agy-специфичный запрет ухода в `/plan` только в секцию эмуляции agy-bridge."""
+    return f"{section}\n{_ANTI_PLAN_DIRECTIVE}" if section else section
 
 
 def health_queue_fields(slots: Any) -> dict[str, int]:

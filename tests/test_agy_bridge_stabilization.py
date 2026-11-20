@@ -33,14 +33,20 @@ def _load_agy() -> Any:
     global _AGY_MOD
     if _AGY_MOD is not None:
         return _AGY_MOD
-    os.environ.setdefault("AGY_BRIDGE_KEY", "test-key-agy-stabilization")
-    spec = importlib.util.spec_from_file_location("agy_bridge_stabilization_sut", _AGY_PY)
-    assert spec is not None and spec.loader is not None
-    mod = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = mod
-    spec.loader.exec_module(mod)
-    _AGY_MOD = mod
-    return mod
+    prev_key = os.environ.get("AGY_BRIDGE_KEY")
+    if prev_key is None:
+        os.environ["AGY_BRIDGE_KEY"] = "test-key-agy-stabilization"
+    try:
+        spec = importlib.util.spec_from_file_location("agy_bridge_stabilization_sut", _AGY_PY)
+        assert spec is not None and spec.loader is not None
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = mod
+        spec.loader.exec_module(mod)
+        _AGY_MOD = mod
+        return mod
+    finally:
+        if prev_key is None:
+            os.environ.pop("AGY_BRIDGE_KEY", None)
 
 
 def test_agy_concurrency_limits_aligned_to_four() -> None:
@@ -71,7 +77,7 @@ def test_acquire_slot_cancellable_ok_timeout_and_client_gone() -> None:
     assert queue_poll_s({"BRIDGE_PASSTHROUGH_QUEUE_POLL_S": "bad"}) == 0.1
 
 
-def test_agy_fair_queue_bounds_concurrency_to_four_and_cancels_gone_waiter() -> None:
+def test_agy_fair_queue_bounds_concurrency_to_four() -> None:
     agy = _load_agy()
     slots = agy._FairSlotSemaphore(4)
     in_flight, peak, lock = [0], [0], threading.Lock()
@@ -189,9 +195,9 @@ def test_effort_contract_carbon_neon_hydrogen_and_no_default_override() -> None:
 
 def test_subagent_id_isolates_sessions_and_fails_closed_on_invalid() -> None:
     agy = _load_agy()
-    chat_a, bad_a = agy._request_chat_id({"X-Subagent-Id": "coder-1"}, {"cwd": "/tmp"}, {"tools": [1]})
-    chat_b, bad_b = agy._request_chat_id({"X-Subagent-Id": "coder-2"}, {"cwd": "/tmp"}, {"tools": [1]})
-    assert not bad_a and not bad_b
+    chat_a, bad_a = agy._request_chat_id({"X-Subagent-Id": "coder-1", "X-Session-Id": "chat-1"}, {"cwd": "/tmp"}, {"tools": [1]})
+    chat_b, bad_b = agy._request_chat_id({"X-Subagent-Id": "coder-2", "X-Session-Id": "chat-1"}, {"cwd": "/tmp"}, {"tools": [1]})
+    assert not bad_a and not bad_b and "\x00" not in chat_a
     key_a = agy._session_key_for("gemini-4-neon", "/tmp", "high", chat_a)
     key_b = agy._session_key_for("gemini-4-neon", "/tmp", "high", chat_b)
     assert key_a != key_b and agy._session_key_valid(key_a)
@@ -200,9 +206,13 @@ def test_subagent_id_isolates_sessions_and_fails_closed_on_invalid() -> None:
 
 
 def test_tools_protocol_prevents_plan_mode_drift() -> None:
-    section = _render_tools_section([{"type": "function", "function": {"name": "read_file", "description": "read", "parameters": {}}}])
-    assert "implementation_plan.md" in section
-    assert "Never attempt to use built-in tools" in section
+    agy = _load_agy()
+    tools = [{"type": "function", "function": {"name": "read_file", "description": "read", "parameters": {}}}]
+    core_section = _render_tools_section(tools)
+    assert "implementation_plan.md" not in core_section
+    agy_prompt = agy._with_tools_protocol("do work", tools, None)
+    assert "implementation_plan.md" in agy_prompt
+    assert "Never attempt to use built-in tools" in agy_prompt
     assert agy_emulate_mode_check()
 
 
@@ -220,7 +230,7 @@ def agy_emulate_mode_check() -> bool:
     )
 
 
-def test_slot_helpers_bounds_combine_health_and_dynamic_config_log(tmp_path: Path) -> None:
+def test_slot_helpers_bounds_combine_health_and_dynamic_config_log() -> None:
     agy = _load_agy()
     ss = agy.slot_and_session
     assert queue_poll_s({}) == 0.1
@@ -234,8 +244,14 @@ def test_slot_helpers_bounds_combine_health_and_dynamic_config_log(tmp_path: Pat
     assert ss.kill_int_grace_s({}) == 0.25
     assert ss.kill_int_grace_s({"AGY_BRIDGE_KILL_INT_GRACE_S": "99"}) == 30.0
     assert ss.combine_chat_and_subagent("c1", "") == "c1"
-    assert ss.combine_chat_and_subagent("c1", "s1") == "c1\x00subagent:s1"
+    assert ss.combine_chat_and_subagent("c1", "s1") == "c1|sub:s1"
     assert ss.combine_chat_and_subagent("", "s1") == "subagent:s1"
+    long_key = ss.combine_chat_and_subagent("c" * 300, "s" * 300)
+    assert long_key.startswith("sub:") and len(long_key) <= 512 and "\x00" not in long_key
+    assert ss.continuity_scope("m1", "") == "m1\x00"
+    assert ss.continuity_scope("m1", "sub1") == "m1\x00sub1\x00"
+    assert ss.append_anti_plan_directive("") == ""
+    assert "implementation_plan.md" in ss.append_anti_plan_directive("sec")
     assert ss.health_queue_fields(SimpleNamespace(waiters_count=2, active_count=3)) == {
         "queued": 2,
         "slots_active": 3,
@@ -244,6 +260,10 @@ def test_slot_helpers_bounds_combine_health_and_dynamic_config_log(tmp_path: Pat
     assert acquire_slot_cancellable(sem, 1.0, lambda: True, poll_s=0.01) == "client_gone"
     assert acquire_slot_cancellable(sem, 0.0, lambda: False, poll_s=0.01) == "ok"
     sem.release()
+
+
+def test_dynamic_config_parse_error_logs(tmp_path: Path) -> None:
+    agy = _load_agy()
     bad_cfg = tmp_path / "dynamic_config.json"
     bad_cfg.write_text("{broken", encoding="utf-8")
     logs: list[str] = []

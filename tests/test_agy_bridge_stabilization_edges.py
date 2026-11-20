@@ -85,9 +85,9 @@ def test_agy_server_runtime_build_continuity_detach_and_registered_attempt() -> 
         mock.patch.object(agy, "_new_flag", return_value=True),
         mock.patch.object(agy._CONTINUITY, "resolve", return_value="cont-1") as res_mock,
     ):
-        cid, bad = agy._request_chat_id({}, {}, req)
+        cid, bad = agy._request_chat_id({"X-Subagent-Id": "coder-1"}, {}, req)
     assert cid == "cont-1" and bad is False
-    assert res_mock.call_args[0][1] == "gemini-4-neon\x00"
+    assert res_mock.call_args[0][1] == "gemini-4-neon\x00coder-1\x00"
     reg = agy.JobRegistry(orphan_max=2)
     job, _ = reg.attach("k-orp", "gemini-4-neon", "p")
     reg.detach(job, allow_orphan=True)
@@ -118,3 +118,33 @@ def test_sigint_early_return_skips_sigterm() -> None:
     assert proc.stdout is not None and proc.stdout.readline().strip() == b"R"
     sup.kill_group(proc, send_sigint=True)
     assert sigs == [signal.SIGINT]
+
+
+def test_run_close_passes_send_sigint_and_acquire_respects_registry_cancel() -> None:
+    agy = _load_agy()
+    run = agy.Run.__new__(agy.Run)
+    run._stop_watch = threading.Event()
+    run._proc_done = threading.Event()
+    run._tail = SimpleNamespace(
+        interrupt_active_query=lambda: None,
+        thread=SimpleNamespace(is_alive=lambda: False),
+    )
+    run.controller = SimpleNamespace(close=lambda: None)
+    run.proc = SimpleNamespace(pid=-999999, returncode=0, stdin=None, stdout=None, stderr=None)
+    with mock.patch.object(agy, "_kill_group") as kill_mock:
+        run.close()
+    assert kill_mock.call_args.kwargs.get("send_sigint") is True
+    slots = agy._FairSlotSemaphore(1)
+    assert slots.acquire(blocking=False)
+    handler = agy.Handler.__new__(agy.Handler)
+    cancelled = threading.Event()
+    cancelled.set()
+    handler._registry_job = SimpleNamespace(cancelled=cancelled)
+    handler._t_req_start = None
+    handler.connection = object()
+    try:
+        with mock.patch.object(agy, "_slots", slots):
+            assert handler._acquire_slot(keepalive=None) == "client_gone"
+        assert slots.waiters_count == 0
+    finally:
+        slots.release()

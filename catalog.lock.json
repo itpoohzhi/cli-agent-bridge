@@ -1,5 +1,5 @@
 {
-  "compiled_at": "2026-11-20T09:58:23+0300",
+  "compiled_at": "2026-11-19T14:46:14+0300",
   "compiler_version": 1,
   "fleet_sha256": "26d65b435eab4c14ff571f0dfe930ef2527f82a99bcaaf421002737fca6468b1",
   "inputs": {
@@ -15,14 +15,14 @@
       "muse.yaml": "452e89f06332f7f0408c66c02ad658a6aee7432ed310504761ebcf470ccad52e",
       "openai-key-2.yaml": "e9755fd06af82a3bb341122afd0d5c3e9b2504ef190ecb8fe751495d357e57a3",
       "openai-key-3.yaml": "eccc73e68769ab0d742b5ace825af8bbcb2d02f07068e272c608ddefd1b2177e",
-      "opencode-go-claude.yaml": "dc9ae65179f1fc5a8d0287956cb70ac1f905a47ec4fcebb831c9ce4cc7d6ad38",
-      "opencode-go-sub1.yaml": "9e7b79a82ef460f7da9c9dc6f84363692659f00fe7b5d0ded01a66aee29bb67a",
-      "opencode-go-sub2.yaml": "b0f73a97c1812776fb255b39d7503cfaf11856ad96b6453d89347cad755ee030",
-      "opencode-go.yaml": "ef23fcf4b92faafccc6cd2ef6a78e428aa94ff3046c4d211d7ee2b4257341697",
+      "opencode-go-claude.yaml": "7e63ccd97ae1f20179b4e03136c1b2fb50e9d0d40233df6c9465195a05779f4c",
+      "opencode-go-sub1.yaml": "f7f4225e7a59357d9a26bb04fda0410d8a5f1cd5b085718db49dcef57a26320c",
+      "opencode-go-sub2.yaml": "273d966b5d5ee55c8df36a82406f3b42b8c1ba1e3e9c4be171a670dbc73b3065",
+      "opencode-go.yaml": "8d27372c95fcf802352d38e4e6f3a6c1919030ef6220d3c6c2c5808fe6077f68",
       "opencode-resident.yaml": "26bb3cdf0249498e7974181d77265a4db3774dad9ff92dd9e00ca1eff7b08c22",
       "opencode-zen.yaml": "9239b0e1c543c23037f5407b6c64a0db04735d092ba7ccc53d197f83f91d1636"
     },
-    "manifests_sha256": "6770d29c0073b117cc1d4ada3630cac97bd56e6cdf45279b2f21e87fd888fc82"
+    "manifests_sha256": "9e2bb27df94798726d6ff1b4829fd077108693b474f4974bfa8705f0fab9b866"
   },
   "models": {
     "beam-free": {
@@ -715,16 +715,16 @@
           },
           "path": "/chat/completions",
           "per_request_headers": {
-            "x-opencode-session": "{session_affinity}"
+            "x-opencode-session": "{uuid4}"
           },
           "response": {
             "field": "choices[0].message.content"
           },
-          "stream": true
+          "stream": false
         },
         "type": "http"
       },
-      "enabled": false,
+      "enabled": true,
       "kind": "passthrough",
       "max_concurrent": 64,
       "quota_group": "opencode-go",
@@ -764,12 +764,12 @@
           },
           "path": "/chat/completions",
           "per_request_headers": {
-            "x-opencode-session": "{session_affinity}"
+            "x-opencode-session": "{uuid4}"
           },
           "response": {
             "field": "choices[0].message.content"
           },
-          "stream": true
+          "stream": false
         },
         "type": "http"
       },
@@ -808,7 +808,7 @@
           },
           "path": "/chat/completions",
           "per_request_headers": {
-            "x-opencode-session": "{session_affinity}"
+            "x-opencode-session": "{uuid4}"
           },
           "response": {
             "field": "choices[0].message.content"
@@ -852,7 +852,7 @@
           },
           "path": "/chat/completions",
           "per_request_headers": {
-            "x-opencode-session": "{session_affinity}"
+            "x-opencode-session": "{uuid4}"
           },
           "response": {
             "field": "choices[0].message.content"

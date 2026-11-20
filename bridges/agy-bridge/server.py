@@ -3038,7 +3038,12 @@ def _session_key_for(
 def _request_chat_id(
     headers: Any, extra: dict[str, object], req: dict[str, object] | None = None
 ) -> tuple[str, bool]:
-    """Первый переданный chat ID с изоляцией по `X-Subagent-Id` и fail-closed валидацией."""
+    """Первый переданный chat ID (+ X-Subagent-Id) и признак невалидного идентификатора.
+
+    Источники и валидация — единый `core.chat_key`, набор SOURCES_SESSION_ID.
+    `prompt_cache_key` намеренно НЕ источник: его шарят разные чаты, и как
+    идентичность сессии он склеил бы чужие диалоги. Предел длины — BRIDGE_CHAT_KEY_MAX_LEN.
+    """
     extra_map = extra if isinstance(extra, dict) else None
     cwd = (extra_map or {}).get("cwd")
     has_cwd = isinstance(cwd, str) and bool(cwd.strip())
@@ -3046,16 +3051,10 @@ def _request_chat_id(
     subagent_id, subagent_invalid = slot_and_session.resolve_subagent_id(headers)
     if chat.invalid or subagent_invalid:
         return "", True
-    if (
-        not chat.value
-        and not has_cwd
-        and not subagent_id
-        and isinstance(req, dict)
-        and req.get("tools")
-        and _new_flag("session_continuity_enabled")
-    ):
-        scope = f"{req.get('model') or ''}\x00"
-        return _CONTINUITY.resolve(req.get("messages"), scope), False
+    if not chat.value and not has_cwd and isinstance(req, dict) and req.get("tools"):
+        if _new_flag("session_continuity_enabled"):
+            scope = slot_and_session.continuity_scope(req.get("model"), subagent_id)
+            return _CONTINUITY.resolve(req.get("messages"), scope), False
     return slot_and_session.combine_chat_and_subagent(chat.value, subagent_id), False
 
 
@@ -5349,11 +5348,10 @@ def _with_tools_protocol(
     prompt: str, tools: list, tool_choice: object, has_attachments: bool = False
 ) -> str:
     """Промпт хода эмуляции: секция протокола `<tool_call>` ядра перед историей agy."""
-    section = tools_protocol_section(
-        tools,
-        tool_choice,
-        has_attachments=has_attachments,
-        attachment_tool=_attachment_tool(),
+    section = slot_and_session.append_anti_plan_directive(
+        tools_protocol_section(
+            tools, tool_choice, has_attachments=has_attachments, attachment_tool=_attachment_tool()
+        )
     )
     return f"{section}\n\n{prompt}" if prompt else section
 
