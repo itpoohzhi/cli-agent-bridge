@@ -146,6 +146,7 @@ from core.watchdog import (  # noqa: E402
     AdaptiveTimeoutController,
 )
 from core.runtime_build_info import UNKNOWN as BUILD_UNKNOWN, RuntimeBuildInfo  # noqa: E402
+from core import turn_resilience_facade as _TURN_RESILIENCE  # noqa: E402
 from core.log_redaction import (  # noqa: E402
     mask_credential_context,
     mask_long_tokens,
@@ -970,11 +971,14 @@ BUILD_INFO = RuntimeBuildInfo(_REPO_ROOT)
 
 def _runtime_build_fields() -> dict[str, object]:
     """Поля `/health`: git_head_sha, boot_ts, agy_binary_sha256, agy_home, очередь."""
-    base = BUILD_INFO.snapshot({
-        "agy_binary_sha256": _file_sha256(AGY_BIN) or BUILD_UNKNOWN,
-        "agy_home": str(CLEAN_HOME_DIR),
-    })
-    return {**base, **slot_and_session.health_queue_fields(_slots)}
+    return BUILD_INFO.snapshot(
+        {
+            "agy_binary_sha256": _file_sha256(AGY_BIN) or BUILD_UNKNOWN,
+            "agy_home": str(CLEAN_HOME_DIR),
+            **_TURN_RESILIENCE.health_fields(),
+            **slot_and_session.health_queue_fields(_slots),
+        }
+    )
 
 
 _active: dict = {}
@@ -3320,7 +3324,7 @@ def _is_transient_upstream_error(err: object) -> bool:
     if not err:
         return False
     text = err if isinstance(err, str) else str(err)
-    return any((_TRANSIENT_UPSTREAM_RE.search(text), is_transient_stream_interruption(text)))
+    return any((_TRANSIENT_UPSTREAM_RE.search(text), is_transient_stream_interruption(text), _TURN_RESILIENCE.go_transient(text)))
 
 
 def _ndjson_bytes(prompt: str) -> int:
@@ -3797,7 +3801,7 @@ def _retry_pause_s(attempt: int, rng: Callable[[], float] | None = None) -> floa
     """Full Jitter: U(0, min(2.0, 2.0 * 2^(attempt-1))) через инъецируемый RNG."""
     cap = min(RETRY_PAUSE_CAP_S, RETRY_PAUSE_CAP_S * float(1 << max(0, attempt - 1)))
     source = rng if rng is not None else _rng
-    return source() * cap
+    return _TURN_RESILIENCE.pause_s(attempt, source() * cap, cap)
 
 
 @final
@@ -4727,6 +4731,7 @@ class _TranscriptTail(InterruptionTailState):
         idx = _as_int(rec.get("step_index"))
         if idx is not None and idx < self.base_idx:
             return  # история прошлых ходов
+        _TURN_RESILIENCE.observe_record(self, rec, idx)
         if self._in_rewrite:
             self._note_activity()
         if rtype in ("END_TURN", "TURN_COMPLETE"):
@@ -7352,6 +7357,7 @@ class Handler(BaseHTTPRequestHandler):
                         ),
                     )
                     self._attach_resolved_usage(run, out, model)
+                    _TURN_RESILIENCE.recover(ctx, run, out, _log)
                     finalize = ctx.get("finalize_timeout")
                     if finalize is not None and out.get("state") in (
                         "timeout",
@@ -7386,13 +7392,7 @@ class Handler(BaseHTTPRequestHandler):
                     or delivered_reasoning
                 )
                 if ctx["stream_resilience_enabled"]:
-                    # Commit запрещает невидимый повтор даже при пустом out;
-                    # нативные инструменты могли изменить данные без tool_calls.
-                    delivered = delivered or bool(
-                        ctx.get("stream_committed")
-                        or ctx.get("tool_activity")
-                        or typed_out.get("tool_events")
-                    )
+                    delivered = _TURN_RESILIENCE.delivered_after_commit(ctx, typed_out, delivered)
                 if (
                     attempt == 1
                     and universal
@@ -7428,11 +7428,11 @@ class Handler(BaseHTTPRequestHandler):
                     # Сбой upstream (502/503/сеть), а не разговора: сессия не
                     # инвалидируется, lease cid остаётся в _in_flight_cids до finally
                     # HTTP-хендлера, повтор идёт в тот же conversation_id.
-                    if attempt == 2 or not _retry_take():
+                    if attempt == 2 or not _TURN_RESILIENCE.take(ctx, out, _retry_take, _log):
                         if attempt != 2:
                             _log(f"retry-budget-exhausted state={out['state']} {tag}")
                         # Повторы исчерпаны: сломанная сессия не достаётся следующим ходам.
-                        _session_invalidate(ctx["sess_key"], ctx["conversation_id"])
+                        _TURN_RESILIENCE.invalidate(ctx, out, _session_invalidate, _log)
                         break
                     _log(
                         f"transient upstream err={_err_summary(out.get('err'), 120)!r}, "
@@ -7443,7 +7443,7 @@ class Handler(BaseHTTPRequestHandler):
                 if ctx.get("hot_resumed") and out["state"] != "client_gone":
                     # Горячая сессия сломалась: больше её не используем, а повтор
                     # идёт холодным вызовом с полной историей.
-                    _session_invalidate(ctx["sess_key"], ctx["conversation_id"])
+                    _TURN_RESILIENCE.invalidate(ctx, out, _session_invalidate, _log)
                     _cid_release(
                         str(ctx["conversation_id"]), str(ctx.get("turn_id") or "")
                     )
@@ -7471,7 +7471,7 @@ class Handler(BaseHTTPRequestHandler):
                 )
                 if not transient or attempt == 2:
                     break
-                if not _retry_take():
+                if not _TURN_RESILIENCE.take(ctx, out, _retry_take, _log):
                     _log(f"retry-budget-exhausted state={out['state']} {tag}")
                     break
                 _log(
@@ -8332,6 +8332,8 @@ class Handler(BaseHTTPRequestHandler):
         def keepalive() -> bool:
             return sse_stream_helpers.keepalive(ctx)
         return sse_body_runner.serve_sse_body(self, ctx, (_new_flag, _log, _graceful_finish_reason, _ToolTurn))
+
+Handler._error_body = staticmethod(_TURN_RESILIENCE.masked_error_body(Handler._error_body))
 
 
 class Server(ThreadingHTTPServer):

@@ -357,8 +357,8 @@ class RuntimeBuildInfoTests(unittest.TestCase):
     def test_git_sha_of_repo_and_unknown_outside(self) -> None:
         info = RuntimeBuildInfo(_REPO)
         self.assertRegex(str(info.git_head_sha), r"^[0-9a-f]{40,64}$")
-        with tempfile.TemporaryDirectory() as tmp:
-            self.assertEqual(RuntimeBuildInfo(tmp).git_head_sha, UNKNOWN)
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ), mock.patch("core.runtime_build_info._core_package_dir", return_value=Path(tmp)):
+            os.environ.pop("BRIDGE_GIT_HEAD_SHA", None); self.assertEqual(RuntimeBuildInfo(tmp).git_head_sha, UNKNOWN)
         snap = RuntimeBuildInfo(_REPO, git_head_sha="abc").snapshot({"x": 1})
         self.assertEqual((snap["git_head_sha"], snap["x"]), ("abc", 1))
         self.assertIsInstance(snap["boot_ts"], float)
