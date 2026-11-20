@@ -19,16 +19,10 @@ from core import passthrough_precommit
 from core.backend_adapter import PreSendTransientError
 from core.liveness_signals import LivenessWindow, passthrough_window
 from core.nonstream_aggregator import internal_stream_body, request_deadlines
-from core.passthrough_sliding_window import (
-    FLAG_PASSTHROUGH_SLIDING_WINDOW,
-    open_sliding_deadline,
-)
-from core.route_attempts import (
-    RouteRefusal,
-    evaluate_presend_candidate,
-    failover_from_mapping,
-)
+from core.passthrough_sliding_window import FLAG_PASSTHROUGH_SLIDING_WINDOW, open_sliding_deadline
+from core.route_attempts import RouteRefusal, evaluate_presend_candidate, failover_from_mapping
 from core.runtime_env import flag_enabled
+from core.slot_acquire import acquire_slot_cancellable
 from core.transport_credentials import credential_ready
 
 
@@ -344,10 +338,12 @@ def handle_request(
     settings = options or RuntimeOptions()
     runtime = _RequestRuntime(adapter, exchange, settings)
     queue_default = float(getattr(adapter.host, "QUEUE_TIMEOUT_S", settings.queue_timeout_s))
-    remaining = runtime.open_deadline - time.monotonic()
-    if not adapter._slots.acquire(timeout=max(0.0, min(queue_default, remaining))):
-        model, request_id = fail_context(exchange.request, exchange.headers, adapter.host)
-        adapter._fail(exchange.sink, 503, "overloaded", "passthrough backend is saturated", model=model, request_id=request_id)
+    timeout_s = max(0.0, min(queue_default, runtime.open_deadline - time.monotonic()))
+    status = acquire_slot_cancellable(adapter._slots, timeout_s, exchange.sink.client_gone)
+    if status != "ok":
+        if status == "timeout":
+            model, req_id = fail_context(exchange.request, exchange.headers, adapter.host)
+            adapter._fail(exchange.sink, 503, "overloaded", "passthrough backend is saturated", model=model, request_id=req_id)
         return
     with adapter._lock:
         adapter._active += 1

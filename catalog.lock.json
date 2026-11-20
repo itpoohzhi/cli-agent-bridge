@@ -1,13 +1,13 @@
 {
   "compiled_at": "2026-11-19T14:46:14+0300",
   "compiler_version": 1,
-  "fleet_sha256": "bca7ff409d50fa94c18db2a4ce34f59fa575033ad65d6d114846f145f190121d",
+  "fleet_sha256": "26d65b435eab4c14ff571f0dfe930ef2527f82a99bcaaf421002737fca6468b1",
   "inputs": {
     "discovery_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
     "manifests": {
       "_fleet.yaml": "8d88c0b137a9c2ac2f74ce7a10b6483f07a2e3ca8f7497ace740587833d7ff40",
       "agy-passthrough.yaml": "7a05b980065274efc347c8c7b6bcce95c58a01954ac4b53083ab840d0118915f",
-      "agy.yaml": "f3fd34b0964e1942c2bc61cdbf536a27bc6d3c224b5cd426b8677fc1cec4eab6",
+      "agy.yaml": "d8a2a5711fd0fc40f8bf51b9896280aa7976b98f2c9f0b2e90689afaeedf90b7",
       "claude-p.yaml": "8ac948e1049b2ca703b010f4f54a5bec01d334caf75fd805f54fef47561246f7",
       "codex.yaml": "62caf30d9ce2f621f35d41e3ff3fb5d2066fe0e78190097cf27956b86babc7b1",
       "deepseek-direct.yaml": "3fcf9d693dde7a5891a62f5b819818fa8c1ec9a30cf89c587ef9f73db9913e20",
@@ -547,7 +547,7 @@
       },
       "enabled": true,
       "kind": "passthrough",
-      "max_concurrent": 128,
+      "max_concurrent": 4,
       "quota_group": "google-agy",
       "timeout_s": 600.0
     },
