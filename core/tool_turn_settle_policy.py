@@ -57,7 +57,6 @@ _WAIT_GRACE = SettleDecision("wait_eof_grace", False, False, False)
 _WAIT_DONE = SettleDecision("wait_done", False, False, False)
 _CLEAN_COMPLETE = SettleDecision("clean_complete", True, False, True)
 _FORCED_STOP = SettleDecision("forced_stop", True, True, False)
-_STALL_MSG = "Incomplete <tool_call> tag: stream stalled before closing tag"
 
 
 def suppress_post_call_content(*, has_calls: bool, has_open_tool_call: bool) -> bool:
@@ -71,10 +70,11 @@ def _evaluate_open_call(
     stalled = (state.now - state.last_open_chunk_ts) >= config.stall_timeout_s
     decision = _CONTINUE
     if stalled:
+        msg = f"tool call block stalled without progress for {config.stall_timeout_s:g}s"
         decision = (
             _FORCED_STOP
             if state.has_calls
-            else SettleDecision("stall_error", True, True, False, _STALL_MSG)
+            else SettleDecision("stall_error", True, True, False, msg)
         )
     return decision
 

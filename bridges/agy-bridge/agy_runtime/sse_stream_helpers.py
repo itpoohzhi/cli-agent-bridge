@@ -67,9 +67,8 @@ class SseStreamSession:
             self.tool_turn = hooks[3](
                 next(filter(None, (ctx.get("tools"),)), list[dict[str, Any]]()),
                 self.on_text, self.on_reasoning, self.on_calls, )
-            ctx["tool_stop"] = self.tool_turn.turn_complete
-            ctx["tool_calls_emitted"] = lambda: bool(self.tool_turn.calls)
-            ctx["emitted_call_ids"] = lambda: [str(c.get("id") or "") for c in self.tool_turn.calls]
+            ctx.update(tool_stop=self.tool_turn.turn_complete, tool_calls_emitted=lambda: bool(self.tool_turn.calls),
+                emitted_call_ids=lambda: [str(c.get("id", "")) for c in self.tool_turn.calls])
         self.stream_text = self.tool_turn.feed if self.tool_turn else self.on_text
         self.stream_reasoning = (
             self.tool_turn.feed_reasoning if self.tool_turn else self.on_reasoning )
@@ -82,7 +81,8 @@ class SseStreamSession:
         cid_pat = self.ctx.get("cid_re")
         pat = cid_pat if isinstance(cid_pat, re.Pattern) else re.compile(r"^[0-9a-f-]{8,64}$")
         conv_hdrs = build_conv_headers(
-            self.ctx.get("conversation_id"), pat,
+            next(filter(None, (self.ctx.get("conversation_id"), getattr(h, "_observed_cid", ""))), ""),
+            pat,
             peer_is_loopback=is_loopback_peer(h), config_path=self.ctx.get("dynamic_config_path"),
         )
         seen = {k.lower() for k, _ in headers}

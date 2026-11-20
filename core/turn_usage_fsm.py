@@ -138,6 +138,25 @@ def _cum_log(
     )
 
 
+def _resolve_result_prompt(
+    use_cum: bool,
+    raw_in: int | None,
+    cache_sum: int,
+    window: int | None,
+    divisor: int,
+) -> tuple[str, int]:
+    win_val = window if isinstance(window, int) else 0
+    in_val = raw_in if isinstance(raw_in, int) else 0
+    source = "cumulative_estimate" if use_cum else "result"
+    prompt = min(in_val // divisor, win_val - 1) if use_cum else (in_val + cache_sum)
+    return source, prompt
+
+
+def _int_or_zero(value: object) -> int:
+    val = _count_or_none(value)
+    return val if isinstance(val, int) else 0
+
+
 def _resolve_from_result(
     out: Mapping[str, object],
     snap: StepUsageSnapshot | None,
@@ -150,18 +169,16 @@ def _resolve_from_result(
     success = _is_clean_result(out)
     cache_sum = raw_cache if isinstance(raw_cache, int) else 0
     use_cum = all((success, _over_window(raw_in, cache_sum, window)))
-    turns = _count_or_none(out.get("num_turns")) or 0
-    tools = _count_or_none(out.get("tool_events")) or 0
+    turns = _int_or_zero(out.get("num_turns"))
+    tools = _int_or_zero(out.get("tool_events"))
     divisor = max(2, turns + tools, obs_steps)
     missing = all((not isinstance(raw_in, int), not isinstance(raw_cache, int), not conflict))
-    win_val = window if isinstance(window, int) else 0
-    in_val = raw_in if isinstance(raw_in, int) else 0
-    source = "cumulative_estimate" if use_cum else "result"
-    prompt = min(in_val // divisor, win_val - 1) if use_cum else (in_val + cache_sum)
+    source, prompt = _resolve_result_prompt(use_cum, raw_in, cache_sum, window, divisor)
     reason = "over_window" if use_cum else _result_reason(conflict, missing, success, isinstance(window, int))
     details, inconsistent = normalize_prompt_cache_details(prompt, raw_cache)
     fresh_comp = (raw_out if isinstance(raw_out, int) else 0) + (raw_th if isinstance(raw_th, int) else 0)
     completion = fresh_comp if all((not resume, not obs_steps)) else 0
+    win_val = window if isinstance(window, int) else 0
     logs = (_cum_log(raw_meta, (win_val, divisor, prompt, turns, tools, obs_steps), inconsistent),) if use_cum else ()
     data: dict[str, object] = {
         "source": source, "reason": reason, "step_idx": None, "prompt": prompt,
@@ -184,14 +201,10 @@ def resolve_turn_usage(
     raw_out = _count_or_none(raw.get("output_tokens"))
     raw_th = _count_or_none(raw.get("thinking_tokens"))
     raw_cache, conflict = _raw_cache_tokens(raw)
-    last = snap.last_step_usage if snap else None
-    if last:
-        if snap:
-            calc, logs = _resolve_from_last_step(last, snap, raw_out, raw_th)
-        else:
-            calc, logs = _resolve_from_result(out, snap, window, resume, (raw_in, raw_out, raw_th, raw_cache, conflict))
-    else:
-        calc, logs = _resolve_from_result(out, snap, window, resume, (raw_in, raw_out, raw_th, raw_cache, conflict))
+    calc, logs = _resolve_from_result(out, snap, window, resume, (raw_in, raw_out, raw_th, raw_cache, conflict))
+    if snap:
+        if snap.last_step_usage:
+            calc, logs = _resolve_from_last_step(snap.last_step_usage, snap, raw_out, raw_th)
     prompt = cast("int", calc["prompt"])
     completion = cast("int", calc["completion"])
     details = cast("dict[str, int] | None", calc["details"])

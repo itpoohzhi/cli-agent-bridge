@@ -84,7 +84,7 @@ class _SseBodyRunner:
             s.stream_reasoning = s.tool_turn.feed_reasoning
             s.ctx["tool_stop"] = s.tool_turn.turn_complete
             s.ctx["tool_calls_emitted"] = lambda: bool(s.tool_turn.calls)
-            s.ctx["emitted_call_ids"] = lambda: [str(c.get("id") or "") for c in s.tool_turn.calls]
+            s.ctx["emitted_call_ids"] = lambda: [str(c.get("id", "")) for c in s.tool_turn.calls]
     def tool_stop(self) -> bool:
         return self.expired() or bool(self.stop and self.stop())
     def settle_decision(self, *, proc_exited: bool = False, result_received: bool = False) -> SettleDecision:

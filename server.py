@@ -197,7 +197,7 @@ from core.liveness_signals import (  # noqa: E402
     FLAG_TELEMETRY,
     passthrough_window as passthrough_window,
 )
-from core.runtime_env import DynamicFlagSource, flag_enabled  # noqa: E402
+from core.runtime_env import DynamicFlagSource, allow_hub_client_response_header, flag_enabled  # noqa: E402
 from core.turn_dispatch import ToolSchemaScope, dispatch_turn  # noqa: E402
 from core.request_telemetry import RequestTelemetryStore  # noqa: E402
 from core.telemetry_hooks import (  # noqa: E402
@@ -1926,7 +1926,7 @@ class _HandlerSink(ResponseSink):
         try:
             self._handler.send_response(int(status))
             for key, value in headers:
-                if key.lower() not in self._DROP | self._extra_names:
+                if allow_hub_client_response_header(key, self._DROP | self._extra_names, self._handler, _LOOPBACK_PEERS):
                     self._handler.send_header(key, value)
             for key, value in self._extra_headers:
                 self._handler.send_header(key, value)

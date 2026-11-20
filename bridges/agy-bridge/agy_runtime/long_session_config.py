@@ -8,12 +8,13 @@ import os
 import re
 import threading
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Final, cast
 
 from core.correlation_contract import DEFAULT_CORR_MAX_LEN, build_validated_header
-from core.tool_turn_settle_policy import ToolTurnSettleConfig
+from core.prompt_budget_policy import LazyPromptMaterializer
+from core.tool_turn_settle_policy import ToolTurnSettleConfig, decide_session_commit
 
 AGY_CONV_HEADER_NAME: Final[str] = "X-Agy-Conversation-Id"
 DEFAULT_PROMPT_BYTES_CAP: Final[int] = 98304
@@ -143,7 +144,7 @@ def tool_settle_config(*, config_path: Path | None = None) -> ToolTurnSettleConf
             "tool_settle_timeout_s", "AGY_TOOL_SETTLE_TIMEOUT_S", 5.0, (0.05, 60.0), config_path=config_path
         ),
         stall_timeout_s=read_float_setting(
-            "tool_call_stall_timeout_s", "AGY_TOOL_CALL_STALL_TIMEOUT_S", 30.0, (1.0, 300.0), config_path=config_path
+            "tool_call_stall_timeout_s", "AGY_TOOL_CALL_STALL_TIMEOUT_S", 30.0, (0.05, 300.0), config_path=config_path
         ),
         eof_grace_s=read_float_setting(
             "tool_settle_eof_grace_s", "AGY_TOOL_SETTLE_EOF_GRACE_S", 1.5, (0.0, 15.0), config_path=config_path
@@ -225,7 +226,7 @@ def apply_direct_mode_policy(
     raw = _raw_setting("direct_mode", "AGY_BRIDGE_DIRECT_MODE", config_path)
     mode = str(raw if _present(raw) else "inherit").strip().lower()
     target = _DIRECT_OVERRIDES.get(mode)
-    if _present(target) and isinstance(target, str):
+    if isinstance(target, str):
         env["AGY_DIRECT"] = target
     return env
 
@@ -233,3 +234,58 @@ def apply_direct_mode_policy(
 def classify_cloud_mode(env: Mapping[str, str]) -> str:
     """Классифицирует сетевой режим запуска agy.real (direct vs georouter) за O(1)."""
     return {"1": "direct"}.get(str(env.get("AGY_DIRECT", "")).strip(), "georouter")
+
+
+def build_lazy_prompt_pair(
+    stripped_base: LazyPromptMaterializer | None,
+    render_full: Callable[[], str],
+    wrap_proto: Callable[[str, bool], str],
+    flags: tuple[bool, bool],
+) -> tuple[LazyPromptMaterializer, LazyPromptMaterializer]:
+    """Создаёт ленивые материализаторы (full_mat, stripped_mat) без eager-обрезки."""
+    use_stripped_for_full, full_attached = flags
+
+    def _build_stripped() -> str:
+        base = stripped_base.get() if isinstance(stripped_base, LazyPromptMaterializer) else ""
+        wrapped = wrap_proto(base, False) if base else ""
+        return wrapped
+
+    def _build_full() -> str:
+        raw_p = ""
+        if isinstance(stripped_base, LazyPromptMaterializer):
+            if use_stripped_for_full:
+                raw_p = stripped_base.get()
+        if not raw_p:
+            raw_p = render_full()
+        return wrap_proto(raw_p, full_attached)
+
+    return LazyPromptMaterializer(_build_full), LazyPromptMaterializer(_build_stripped)
+
+
+def register_post_turn_if_committed(
+    out_map: Mapping[str, object],
+    ctx: Mapping[str, object],
+    continuity: object,
+    anchor_meta: tuple[object, str, str, re.Pattern[str]],
+    *,
+    config_path: Path | None = None,
+) -> bool:
+    """Регистрирует криптоякорь строго после commit-исхода хода (D2)."""
+    messages, scope, chat_id, cid_re = anchor_meta
+    cid = str(next(filter(None, (out_map.get("conversation_id"),)), ""))
+    raw_rc = out_map.get("rc")
+    act = decide_session_commit(
+        state=str(out_map.get("state", "")),
+        rc=raw_rc if isinstance(raw_rc, int) else None,
+        tool_turn_stop=bool(out_map.get("tool_turn_stop")),
+        conversation_id=cid,
+        cid_valid=bool(cid_re.fullmatch(cid)),
+    )
+    emitted_fn = ctx.get("emitted_call_ids")
+    cids = emitted_fn() if callable(emitted_fn) else ()
+    reg_fn = getattr(continuity, "register_post_turn", None)
+    done = False
+    if all((dict(commit=True).get(act, False), bool(cids), bool(scope), bool(chat_id), callable(reg_fn))):
+        if callable(reg_fn):
+            done = bool(reg_fn(messages, scope, chat_id, cids, enabled=post_turn_anchor_enabled(config_path=config_path)))
+    return done

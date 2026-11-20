@@ -30,11 +30,12 @@ def ensure_drained_before_usage(
         if callable(drain_fn):
             rem = _remaining(deadline, clock)
             drained = drain_fn(rem)
-            if isinstance(drained, (list, tuple)) and drained:
-                existing = out.get("retained_events")
-                buf = list(cast("list[object]", existing)) if isinstance(existing, list) else []
-                buf.extend(cast("list[object] | tuple[object, ...]", drained))
-                out["retained_events"] = buf
+            if isinstance(drained, (list, tuple)):
+                if drained:
+                    existing = out.get("retained_events")
+                    buf = list(cast("list[object]", existing)) if isinstance(existing, list) else []
+                    buf.extend(cast("list[object] | tuple[object, ...]", drained))
+                    out["retained_events"] = buf
         tail = getattr(run, "_tail", None)
         if isinstance(tail, type(None)):
             tail = getattr(run, "tail", None)
@@ -60,3 +61,42 @@ def resolve_and_log_step_usage(
     for msg in res.log_messages:
         log_fn(msg)
     return res.resolved
+
+
+def format_usage_log_fields(
+    resolved: object,
+    safe_val: Callable[[str], str],
+    num_text: Callable[[object], str],
+) -> str:
+    """Форматирует числовую диагностику usage для строки done."""
+    out = ""
+    if isinstance(resolved, dict):
+        info = cast("dict[str, object]", resolved)
+        raw_wire = info.get("wire")
+        wire = cast("dict[str, object]", raw_wire) if isinstance(raw_wire, dict) else {}
+        raw_src = info.get("source")
+        src = safe_val(raw_src) if isinstance(raw_src, str) else ""
+        raw_reason = info.get("reason")
+        reason = safe_val(raw_reason) if isinstance(raw_reason, str) else ""
+        out = (
+            " usage_source=%s reason=%s step_idx=%s prompt=%s cached=%s completion=%s "
+            "total=%s completeness=%d inconsistent=%d raw_in=%s raw_out=%s "
+            "raw_thinking=%s raw_total=%s raw_cache=%s"
+            % (
+                src,
+                reason if reason else "-",
+                num_text(info.get("step_idx")),
+                num_text(wire.get("prompt_tokens")),
+                num_text(info.get("cached")),
+                num_text(wire.get("completion_tokens")),
+                num_text(wire.get("total_tokens")),
+                int(bool(info.get("completeness"))),
+                int(bool(info.get("inconsistent"))),
+                num_text(info.get("raw_in")),
+                num_text(info.get("raw_out")),
+                num_text(info.get("raw_thinking")),
+                num_text(info.get("raw_total")),
+                num_text(info.get("raw_cache")),
+            )
+        )
+    return out
