@@ -68,6 +68,14 @@ def test_recover_valid_retry_delivers_structured_calls_once(monkeypatch: pytest.
     again = _out()
     _ = _recover(tail, ctx, again)  # INV-S6: once-per-turn
     assert again["state"] == "agy_error" and len(fed) == 1
+    # INV-S6 после неудачной первой попытки (emitted остался False): повтор на том же ctx/tail запрещён
+    fed2: list[str] = []
+    ctx2 = {**malformed_ctx(fed2), "tools": []}
+    _ = _recover(tail_with_steps(), ctx2, _out())
+    ctx2["tools"] = [{"type": "function", "function": {"name": "read"}}]
+    out2 = _out()
+    _ = _recover(tail_with_steps(), ctx2, out2)
+    assert out2["state"] == "agy_error" and fed2 == []
 
 
 def test_recover_nine_of_ten_rejected_fail_closed(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -141,3 +149,51 @@ def test_error_body_masks_pump_error_detail_and_none_passthrough(monkeypatch: py
     assert "Retries remaining" not in pump["detail"]
     ok = server.Handler._error_body({"state": "done", "rc": 0, "text": "ok"}, True)  # pyright: ignore[reportPrivateUsage]
     assert ok is None
+
+
+def test_observe_rejects_non_done_planner_step_inv_s2(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """INV-S2: незавершённый PLANNER_RESPONSE (status != DONE/COMPLETED) отвергается fail-closed."""
+    enable(monkeypatch, tmp_path, "recovery")
+    fac, tail = facade(), SimpleNamespace()
+    fac.observe_record(tail, {"type": "ERROR_MESSAGE", "content": stub.MALFORMED_TEXT}, 5)
+    fac.observe_record(tail, {"type": "PLANNER_RESPONSE", "status": "RUNNING", "content": '<tool_call>{"name":"read","arguments":{"path":"a.py"}}</tool_call>'}, 6)
+    fed: list[str] = []
+    out = _out()
+    lines = _recover(tail, malformed_ctx(fed), out)
+    assert fed == [] and out["state"] == "agy_error"
+    assert any("candidate.incomplete" in line for line in lines)
+
+
+def test_recover_rejects_already_emitted_tool_calls_and_dirty_events(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """F-002/F-003: ранее выданные tool_calls или нечисловой tool_events блокируют recovery."""
+    from core.content_delivery_tracker import ContentDeliveryTracker
+
+    enable(monkeypatch, tmp_path, "recovery")
+    tracker = ContentDeliveryTracker()
+    tracker.mark_tool_calls(1)
+    fed: list[str] = []
+    out = _out()
+    _ = _recover(tail_with_steps(), {**malformed_ctx(fed), "delivery_tracker": tracker}, out)
+    assert fed == [] and out["state"] == "agy_error"
+
+    ctx_emitted = {**malformed_ctx(fed), "tool_calls_emitted": lambda: True}
+    _ = _recover(tail_with_steps(), ctx_emitted, _out())
+    assert fed == []
+
+    out_dirty = _out(tool_events="bad_count")
+    _ = _recover(tail_with_steps(), malformed_ctx(fed), out_dirty)
+    assert fed == [] and out_dirty["state"] == "agy_error"
+
+
+def test_retain_rejects_non_int_turns_and_nested_error_mask(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """F-003/F-007: не-int num_turns инвалидирует сессию fail-closed; вложенный error маскируется."""
+    enable(monkeypatch, tmp_path, "retain", "mask")
+    fac = facade()
+    invalidated: list[tuple[Any, Any]] = []
+    for bad_turns in ("2", True, 1.5, {}):
+        ctx = {"sess_key": "s", "conversation_id": "c1"}
+        out = {"err": 'Get "https://www.googleapis.com/oauth2/v2/userinfo": EOF', "num_turns": bad_turns, "conversation_id": "c1"}
+        fac.invalidate(ctx, out, lambda k, c: invalidated.append((k, c)), lambda _m: None)
+    assert len(invalidated) == 4
+    wrapped = fac.masked_error_body(lambda *_a, **_kw: {"error": {"message": "fail Retries remaining: 3"}})
+    assert "Retries remaining" not in wrapped(1, extra=True)["error"]["message"]

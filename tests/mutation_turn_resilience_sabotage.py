@@ -48,13 +48,15 @@ MUTATIONS: tuple[Mutation, ...] = (
     _m("non-network-relax", FACADE, "    return kind is FailureKind.NETWORK_TRANSIENT or (isinstance(text, str) and is_transient_stream_interruption(text))\n", "    return True\n", WIRING[1]),
     _m("kill-switch-bypassed", FACADE, "    if not _flags().transport_failure_classifier:\n        return False\n", "", WIRING[0]),
     _m("mask-always-on", FACADE, "        if not isinstance(body, dict) or not _flags().vendor_retry_phrase_mask:\n            return body\n", "        if not isinstance(body, dict):\n            return body\n", WIRING[2], "test_turn_resilience_adversarial.py"),
-    _m("once-per-turn-off", FACADE, "    if tracker is None or ctx.get(_RECOVERY_KEY):\n        return\n", "    if tracker is None:\n        return\n", WIRING[2]),
+    _m("once-per-turn-off", FACADE, "    if tracker is None or ctx.get(_RECOVERY_KEY) or not tracker.try_begin_recovery():\n        return\n", "    if tracker is None:\n        return\n", WIRING[2]),
+    _m("inv-s2-complete-ignored", FACADE, '        complete = str(rec.get("status") or "").upper() in _COMPLETE_STATUSES\n', "        complete = True\n", WIRING[2]),
     _m("failclosed-9of10-weakened", POLICY, "    if odd or keys[:half] != keys[half:] or len(set(keys[:half])) != half:\n", "    if len(set(keys[:half])) != half:\n", "test_tool_call_recovery_policy.py", WIRING[2]),
-    _m("inv-s1-delivery-off", POLICY, '    if facts is not None and (facts.tool_events > 0 or facts.content_bytes > 0):\n        return "client_output_already_delivered"\n', "", "test_tool_call_recovery_policy.py", WIRING[2]),
+    _m("inv-s1-delivery-off", POLICY, '    if facts is not None and (facts.tool_events > 0 or facts.content_bytes > 0 or facts.tool_calls > 0):\n        return "client_output_already_delivered"\n', "", "test_tool_call_recovery_policy.py", WIRING[2]),
+    _m("inv-s1-toolcalls-ignored", POLICY, "    if facts is not None and (facts.tool_events > 0 or facts.content_bytes > 0 or facts.tool_calls > 0):\n", "    if facts is not None and (facts.tool_events > 0 or facts.content_bytes > 0):\n", WIRING[2]),
     _m("pause-limit-broken", RETRY, "    return min(pause_max, pause_max * _unit(state.jitter_unit) + correlated)\n", "    return pause_max * _unit(state.jitter_unit) + correlated\n", "test_invisible_retry_policy.py", WIRING[0]),
     _m("budget-gate-off", RETRY, '    if remaining <= 0.0 or elapsed + pause + last > total:\n        return _deny("budget_exhausted")\n', '    if False:\n        return _deny("budget_exhausted")\n', "test_invisible_retry_policy.py", WIRING[1]),
     _m("retain-guard-off", "core/hot_session_retention_policy.py", '    if type(facts.turns) is not int or facts.turns != 0:\n        return HotSessionDecision(False, "session_mutated_turns")\n', "", "test_hot_session_retention_policy.py", WIRING[1]),
-    _m("window-ttl-broken", "core/failure_window.py", "        horizon = now - self._window_s\n", "        horizon = now - self._window_s * 1e9\n", "test_failure_window.py", "test_turn_resilience_adversarial.py"),
+    _m("window-ttl-broken", "core/failure_window.py", "        horizon = now - span\n", "        horizon = now - span * 1e9\n", "test_failure_window.py", "test_turn_resilience_adversarial.py"),
     _m("flag-veto-broken", "core/recovery_flags.py", "    return bool(votes) and all(votes)\n", "    return bool(votes) and any(votes)\n", "test_recovery_flags.py", "test_turn_resilience_adversarial.py"),
 )
 

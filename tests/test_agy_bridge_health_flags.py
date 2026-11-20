@@ -33,7 +33,7 @@ def test_snapshot_follows_flags_without_restart(monkeypatch: pytest.MonkeyPatch,
 def test_health_last_turn_resolved_line_lists_enabled_flags(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     enable(monkeypatch, tmp_path, "pause")
     line = str(facade().health_fields()["last_turn_resolved"])
-    assert line.startswith("turn-resolved reason=health") and "flags_on=retry_window_pause" in line
+    assert line.startswith("turn-resolved reason=idle") and "flags_on=retry_window_pause" in line
 
 
 def test_turn_resolved_logged_only_when_a_flag_is_on(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

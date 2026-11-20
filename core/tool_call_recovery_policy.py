@@ -86,7 +86,7 @@ def _candidate(steps: tuple[StepRecord, ...]) -> StepRecord | str:
 
 
 def _delivery_denial(facts: DeliveryFacts | None) -> str:
-    if facts is not None and (facts.tool_events > 0 or facts.content_bytes > 0):
+    if facts is not None and (facts.tool_events > 0 or facts.content_bytes > 0 or facts.tool_calls > 0):
         return "client_output_already_delivered"
     return ""
 

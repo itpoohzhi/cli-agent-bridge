@@ -26,29 +26,30 @@ class FailureWindow:
         self._lock = threading.Lock()
         self._events: deque[float] = deque(maxlen=int(maxlen))
 
-    def _evict(self, now: float) -> None:
+    def _evict(self, now: float, window_s: float | None = None) -> None:
         """Убрать события старше окна (вызывать под замком)."""
-        horizon = now - self._window_s
+        span = float(window_s) if window_s is not None and window_s > 0 else self._window_s
+        horizon = now - span
         while self._events and self._events[0] <= horizon:
             _ = self._events.popleft()
 
-    def record(self, now: float) -> int:
+    def record(self, now: float, window_s: float | None = None) -> int:
         """Зафиксировать сбой в момент `now`; вернуть число событий в окне."""
         with self._lock:
-            self._evict(now)
+            self._evict(now, window_s)
             self._events.append(now)
             return len(self._events)
 
-    def recent_count(self, now: float) -> int:
+    def recent_count(self, now: float, window_s: float | None = None) -> int:
         """Число сбоев в окне `(now - window_s, now]` после эвикции."""
         with self._lock:
-            self._evict(now)
+            self._evict(now, window_s)
             return len(self._events)
 
-    def snapshot(self, now: float) -> tuple[float, ...]:
+    def snapshot(self, now: float, window_s: float | None = None) -> tuple[float, ...]:
         """Неизменяемая копия меток времени в окне."""
         with self._lock:
-            self._evict(now)
+            self._evict(now, window_s)
             return tuple(self._events)
 
     def clear(self) -> None:

@@ -1,13 +1,7 @@
-"""Тонкий фасад устойчивости хода (AD-001..AD-009): связка монолита моста с чистыми политиками.
-
-В `bridges/agy-bridge/server.py` остаются лишь делегирующие вызовы; вся оркестрация здесь.
-Каждая точка читает kill-switch флаги заново (`read_recovery_flags`), а при выключенном флаге
-возвращает ровно базовое значение (побайтная эквивалентность). Агент-агностично: решения
-опираются на факты хода (доставка клиенту, класс сбоя, шаги), не на имя CLI.
-"""
-
+"""Тонкий фасад устойчивости хода (AD-001..AD-009): связка монолита моста с чистыми политиками."""
 from __future__ import annotations
 
+import threading
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import replace
@@ -25,25 +19,24 @@ from core.tool_call_completion_tracker import ToolCallCompletionTracker
 from core.tool_call_recovery_policy import evaluate_recovery
 from core.transport_failure_classifier import classify_transport_failure
 from core.transport_failure_contracts import DeliveryFacts, FailureKind, HotSessionFacts, RecoveryFlagSnapshot, RetryAttemptState
-from core.turn_resolution_report import (
-    build_turn_resolution_report,
-    flags_snapshot_dict,
-    format_turn_resolved,
-    health_fields as _report_health_fields,
-)
+from core.turn_resolution_report import build_turn_resolution_report, flags_snapshot_dict, format_turn_resolved, health_fields as _report_health_fields
 from core.vendor_phrase_sanitizer import mask_vendor_phrases
 
 TRACKER_ATTR = "_resilience_step_tracker"
-_ATTEMPT_KEY = "_resilience_attempts"
-_RECOVERY_KEY = "_resilience_recovery_done"
-_CLOCK_KEY = "resilience_clock"
+_ATTEMPT_KEY, _RECOVERY_KEY, _CLOCK_KEY = "_resilience_attempts", "_resilience_recovery_done", "resilience_clock"
+_COMPLETE_STATUSES = frozenset(("DONE", "COMPLETED"))
 _WINDOW = FailureWindow()
+_LAST_LOCK = threading.Lock()
+_LAST_REPORT: Any = None
 Log = Callable[[str], object]
 
 
 def reset_failure_window() -> None:
-    """Сбросить окно недавних сбоев процесса (тесты, рестарт политики)."""
+    """Сбросить окно недавних сбоев и последний отчёт (тесты, рестарт политики)."""
+    global _LAST_REPORT
     _WINDOW.clear()
+    with _LAST_LOCK:
+        _LAST_REPORT = None
 
 
 def _flags() -> RecoveryFlagSnapshot:
@@ -56,19 +49,20 @@ def _now(ctx: Mapping[str, object]) -> float:
 
 
 def _say(log: Log, reason: str, attempts: int = 0, kind: FailureKind = FailureKind.UNCLASSIFIED) -> None:
-    """Одна строка `turn-resolved` в лог (только если включён хотя бы один флаг)."""
+    global _LAST_REPORT
     flags = _flags()
     if any(vars(flags).values()):
-        spoken = reason.replace("_", ".")  # токены <24 символов: LONG_TOKEN_RE логов их не маскирует
-        log(format_turn_resolved(build_turn_resolution_report(spoken, flags, attempts, kind)))
+        report = build_turn_resolution_report(reason.replace("_", "."), flags, attempts, kind)
+        with _LAST_LOCK:
+            _LAST_REPORT = report
+        log(format_turn_resolved(report))
 
 
 def go_transient(text: object) -> bool:
     """AD-001: Go-форма сетевого сбоя (`: EOF`, TLS timeout…) транзиентна; FATAL — вето."""
     if not _flags().transport_failure_classifier:
         return False
-    verdict = classify_transport_failure(text, read_transport_failure_config())
-    return verdict.kind is FailureKind.NETWORK_TRANSIENT
+    return classify_transport_failure(text, read_transport_failure_config()).kind is FailureKind.NETWORK_TRANSIENT
 
 
 def _facts(ctx: Mapping[str, object]) -> DeliveryFacts:
@@ -77,18 +71,13 @@ def _facts(ctx: Mapping[str, object]) -> DeliveryFacts:
 
 
 def _network_transient(out: Mapping[str, object]) -> bool:
-    """Сбой транспорта (а не модели/разметки): Go-формы классификатора либо общее ядро replay."""
     text = out.get("err")
     kind = classify_transport_failure(text, read_transport_failure_config()).kind
     return kind is FailureKind.NETWORK_TRANSIENT or (isinstance(text, str) and is_transient_stream_interruption(text))
 
 
 def delivered_after_commit(ctx: Mapping[str, object], out: Mapping[str, object], delivered: bool) -> bool:
-    """AD-002: при сетевом сбое keepalive/role-дельта — не доставка. Иначе — прежний commit.
-
-    Флаг выкл., сбой не сетевой (напр. ошибка functionCall) или recovery уже отвергнут → база:
-    `stream_committed` запрещает невидимый повтор (INV-S7, поведение при REJECT равно базе).
-    """
+    """AD-002: при сетевом сбое keepalive/role-дельта — не доставка. Иначе — прежний commit."""
     activity = bool(ctx.get("tool_activity") or out.get("tool_events"))
     tracker = ctx.get("delivery_tracker")
     relaxed = _flags().keepalive_only_preretry and isinstance(tracker, ContentDeliveryTracker)
@@ -108,14 +97,16 @@ def _last_attempt_s(out: Mapping[str, object]) -> float:
 
 
 def take(ctx: dict[str, Any], out: Mapping[str, object], take_fn: Callable[[], bool], log: Log) -> bool:
-    """AD-003: гейт повтора по бюджету и окну сбоев; флаг выкл. → прежний `take_fn()`."""
+    """AD-003: гейт повтора по бюджету (верхний jitter=1.0) и окну сбоев; OFF → `take_fn()`."""
     if not _flags().retry_window_pause:
         return take_fn()
-    now = _now(ctx)
+    now, budget = _now(ctx), read_retry_budget_config()
     attempt = int(ctx.get(_ATTEMPT_KEY, 0)) + 1
     ctx[_ATTEMPT_KEY] = attempt
-    state = RetryAttemptState(attempt, _elapsed_s(ctx, now), _last_attempt_s(out), _WINDOW.record(now))
-    decision = may_retry_invisibly(_facts(ctx), read_retry_budget_config(), state)
+    failures = _WINDOW.record(now, budget.window_s)
+    state = RetryAttemptState(attempt, _elapsed_s(ctx, now), _last_attempt_s(out), failures, 1.0)
+    decision = may_retry_invisibly(_facts(ctx), budget, state)
+    ctx["_resilience_retry_timeout_s"] = decision.retry_timeout_s
     _say(log, f"retry_gate:{decision.reason}", attempt)
     return decision.allowed and take_fn()
 
@@ -124,17 +115,18 @@ def pause_s(attempt: int, base: float, cap: float) -> float:
     """AD-003: пауза = full jitter + добавка коррелированного окна; флаг выкл. → `base`."""
     if not _flags().retry_window_pause:
         return base
+    budget = read_retry_budget_config()
     jitter = base / cap if cap > 0 else 1.0
-    state = RetryAttemptState(attempt, 0.0, 0.0, _WINDOW.recent_count(time.monotonic()), jitter)
-    return compute_pause_s(read_retry_budget_config(), state)
+    state = RetryAttemptState(attempt, 0.0, 0.0, _WINDOW.recent_count(time.monotonic(), budget.window_s), jitter)
+    return compute_pause_s(budget, state)
 
 
 def _retain(out: Mapping[str, object]) -> bool:
     kind = classify_transport_failure(out.get("err"), read_transport_failure_config()).kind
     turns = out.get("num_turns")
+    parsed_turns: Any = 0 if turns is None else turns
     conversation = str(out.get("conversation_id") or NO_CONVERSATION)
-    facts = HotSessionFacts(kind, turns if type(turns) is int else 0, conversation)
-    return should_retain_hot_session(facts).retain
+    return should_retain_hot_session(HotSessionFacts(kind, parsed_turns, conversation)).retain
 
 
 def invalidate(ctx: Mapping[str, Any], out: Mapping[str, object], invalidate_fn: Callable[[Any, Any], object], log: Log) -> None:
@@ -145,20 +137,20 @@ def invalidate(ctx: Mapping[str, Any], out: Mapping[str, object], invalidate_fn:
     invalidate_fn(ctx["sess_key"], ctx["conversation_id"])
 
 
+def _mask_dict(body: dict[str, Any]) -> dict[str, Any]:
+    out = {k: mask_vendor_phrases(v) if k in ("message", "detail") and isinstance(v, str) else v for k, v in body.items()}
+    if isinstance(out.get("error"), dict):
+        out["error"] = _mask_dict(out["error"])
+    return out
+
+
 def masked_error_body(inner: Callable[..., Any]) -> Callable[..., Any]:
-    """AD-006: user-visible `message`/`detail` тела ошибки без `Retries remaining: N`.
-
-    Оборачивает сборщик тела ошибки моста: вход парсера/классификатора не затрагивается, а при
-    выключенном флаге возвращается исходный объект (побайтная эквивалентность базе).
-    """
-
-    def build(out: Any, resilience: Any = None) -> Any:
-        body = inner(out, resilience)
+    """AD-006: user-visible `message`/`detail` (вкл. вложенный `error`) без `Retries remaining: N`."""
+    def build(*args: Any, **kwargs: Any) -> Any:
+        body = inner(*args, **kwargs)
         if not isinstance(body, dict) or not _flags().vendor_retry_phrase_mask:
             return body
-        masked = ("message", "detail")
-        return {k: mask_vendor_phrases(v) if k in masked and isinstance(v, str) else v for k, v in body.items()}
-
+        return _mask_dict(body)
     return build
 
 
@@ -171,12 +163,13 @@ def _tracker_of(tail: object) -> ToolCallCompletionTracker:
 
 
 def observe_record(tail: object, rec: Mapping[str, object], idx: int | None) -> None:
-    """AD-005: запомнить шаги транскрипта (ошибка/planner) для recovery; флаг выкл. → no-op."""
+    """AD-005 / INV-S2: запомнить шаги транскрипта с флагом `complete`; флаг выкл. → no-op."""
     kind = str(rec.get("type") or "")
     if idx is None or kind not in ("PLANNER_RESPONSE", "ERROR_MESSAGE") or not _flags().toolcall_error_recovery:
         return
     if kind == "PLANNER_RESPONSE":
-        _tracker_of(tail).note_planner(idx, str(rec.get("content") or ""))
+        complete = str(rec.get("status") or "").upper() in _COMPLETE_STATUSES
+        _tracker_of(tail).note_planner(idx, str(rec.get("content") or ""), complete=complete)
         return
     text = next(filter(None, (rec.get(key) for key in ("content", "message", "error"))), "")
     _tracker_of(tail).note_error(idx, str(text))
@@ -193,19 +186,25 @@ def _known_names(ctx: Mapping[str, Any]) -> frozenset[str]:
 
 
 def _deliver(ctx: Mapping[str, Any], calls: tuple[Any, ...]) -> bool:
-    """Подать проверенные вызовы в структурный эмулятор; True iff он их опубликовал."""
     feed, emitted = ctx.get("recovery_feed"), ctx.get("tool_calls_emitted")
-    if not callable(feed) or not callable(emitted) or not {c.name for c in calls} <= _known_names(ctx):
+    if not callable(feed) or not callable(emitted) or emitted() or not {c.name for c in calls} <= _known_names(ctx):
         return False
-    return bool(feed(calls_to_markup(calls)) is not False and emitted())
+    before = _facts(ctx).tool_calls
+    if feed(calls_to_markup(calls)) is False or not emitted():
+        return False
+    return _facts(ctx).tool_calls > before if isinstance(ctx.get("delivery_tracker"), ContentDeliveryTracker) else True
+
+
+def _safe_tool_events(raw: object) -> int:
+    if raw is None:
+        return 0
+    return raw if type(raw) is int and raw >= 0 else 1
 
 
 def _turn_facts(ctx: Mapping[str, Any], out: Mapping[str, object]) -> DeliveryFacts:
-    """Факты клиента плюс то, что видно только в `out` (JSON-режим: текст, tool_events)."""
     facts = _facts(ctx)
     text_bytes = len(str(out.get("text") or "").encode("utf-8"))
-    events = int(out.get("tool_events") or 0)
-    return replace(facts, content_bytes=facts.content_bytes + text_bytes, tool_events=facts.tool_events + events)
+    return replace(facts, content_bytes=facts.content_bytes + text_bytes, tool_events=facts.tool_events + _safe_tool_events(out.get("tool_events")))
 
 
 def _recoverable(ctx: Mapping[str, Any], run: object, out: Mapping[str, object]) -> ToolCallCompletionTracker | None:
@@ -218,10 +217,10 @@ def _recoverable(ctx: Mapping[str, Any], run: object, out: Mapping[str, object])
 def recover(ctx: dict[str, Any], run: object, out: dict[str, Any], log: Log) -> None:
     """AD-005: «ошибка functionCall → валидный tool_call» → структурные tool_calls (INV-S1..S8)."""
     tracker = _recoverable(ctx, run, out) if _flags().toolcall_error_recovery else None
-    if tracker is None or ctx.get(_RECOVERY_KEY):
+    if tracker is None or ctx.get(_RECOVERY_KEY) or not tracker.try_begin_recovery():
         return
     ctx[_RECOVERY_KEY] = True
-    decision = evaluate_recovery(tracker.snapshot(), StrictToolCallParser(), _turn_facts(ctx, out))
+    decision = evaluate_recovery(replace(tracker.snapshot(), recovery_attempted=False), StrictToolCallParser(), _turn_facts(ctx, out))
     if decision.recovered and _deliver(ctx, decision.calls):
         out.update(state="done", rc=0, err="", tool_turn_stop=True)
         _say(log, "toolcall_recovered", 1)
@@ -230,7 +229,8 @@ def recover(ctx: dict[str, Any], run: object, out: dict[str, Any], log: Log) -> 
 
 
 def health_fields() -> dict[str, object]:
-    """Аддитивные поля `/health`: `flags_snapshot` и `resilience_flags` по именам env."""
+    """Аддитивные поля `/health`: `flags_snapshot` и последний отчёт решения хода."""
     flags = _flags()
-    fields = _report_health_fields(build_turn_resolution_report("health", flags))
-    return {**fields, "flags_snapshot": flags_snapshot_dict(flags)}
+    with _LAST_LOCK:
+        report = _LAST_REPORT or build_turn_resolution_report("idle", flags)
+    return {**_report_health_fields(report), "flags_snapshot": flags_snapshot_dict(flags)}
