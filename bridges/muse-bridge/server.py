@@ -67,6 +67,7 @@ from muse_runtime.process_supervisor import (  # noqa: E402 # pyright: ignore[re
 )
 from muse_runtime.account_pool import AccountPool, AccountPoolConfig  # noqa: E402 # pyright: ignore[reportImplicitRelativeImport]
 from muse_runtime.stream_relay import StreamRelay  # noqa: E402 # pyright: ignore[reportImplicitRelativeImport]
+from muse_runtime.zero_canon_runtime import prepare_muse_launch, zero_canon_scope  # noqa: E402 # pyright: ignore[reportImplicitRelativeImport]
 __all__ = [
     "ProcessSupervisor",
     "ProcessSupervisorConfig",
@@ -902,14 +903,6 @@ class Run:
             }
 
         self.workdir.mkdir(parents=True, exist_ok=True)
-        env = dict(os.environ)
-        env.setdefault(
-            "PATH",
-            "/Users/aazhiry1/.local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin",
-        )
-        env.pop(
-            "META_API_KEY", None
-        )  # обёртка тоже вычищает; двойная страховка (flat-подписка, не PAYG)
 
         fd, prompt_path = tempfile.mkstemp(
             prefix="muse-prompt-", suffix=".txt", dir=str(self.workdir)
@@ -946,6 +939,7 @@ class Run:
             "--prompt-file",
             prompt_path,
         ]
+        cmd, env, self.workdir = prepare_muse_launch(cmd, None, self.workdir)
         _log(
             f"exec model={self.model_id} effort={self.effort} prompt_chars={len(self.prompt)} ws={self.workdir}"
         )
@@ -1338,12 +1332,6 @@ class ServeRun:
         if not os.access(MUSE_WRAPPER, os.X_OK):
             raise ServeUnavailable(f"muse wrapper not executable: {MUSE_WRAPPER}")
         self.workdir.mkdir(parents=True, exist_ok=True)
-        env = dict(os.environ)
-        env.setdefault(
-            "PATH",
-            "/Users/aazhiry1/.local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin",
-        )
-        env.pop("META_API_KEY", None)
         cmd = [
             MUSE_WRAPPER,
             "serve",
@@ -1355,6 +1343,7 @@ class ServeRun:
             "--trust-workspace",
             *_cli_permission_flags(),
         ]
+        cmd, env, self.workdir = prepare_muse_launch(cmd, None, self.workdir)
         try:
             self.proc = subprocess.Popen(
                 cmd,
@@ -2828,7 +2817,8 @@ class Handler(BaseHTTPRequestHandler):
             self._send(404, {"error": {"message": f"not found: {path}"}})
             return
         try:
-            self._serve_json(req)
+            with zero_canon_scope(self.headers, workspace=WORKSPACE):
+                self._serve_json(req)
         finally:
             # Любой выход (в т.ч. обрыв в очереди за слотом): поток keepalive не переживает запрос.
             self._sse_stop_keepalive()

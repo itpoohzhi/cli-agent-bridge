@@ -20,8 +20,10 @@ from typing import IO, Any, cast
 
 from core.stdio_resident.config import StdioPoolConfig
 from core.stdio_resident.process_pool import ResidentProcessPool, SlotLeaseTimeoutError
+from core.stdio_resident.process_io import TIMEOUT
 from core.stdio_resident.protocol_driver import DecodedChunk, StdioProtocolDriver
 from core.stdio_resident.types import ExecutionFingerprint, SlotAffinityKey
+from core.stdio_resident.zero_canon_router import ZeroCanonIsolation, zero_canon_isolation
 
 __all__ = ["SessionTurnMode", "SessionTurnResult", "SlotLeaseTimeoutError", "StdioSessionManager"]
 
@@ -72,9 +74,7 @@ class StdioSessionManager:
         cancel_event: threading.Event | None = None,
     ) -> SessionTurnResult:
         """Execute and materialize one turn, including process metadata."""
-        stream = self._execute_turn(
-            affinity_key, prompt, argv_builder, cwd, env, turn_context, cancel_event
-        )
+        stream = self._execute_turn(affinity_key, prompt, argv_builder, cwd, env, turn_context, cancel_event)
         while True:
             try:
                 _ = next(stream)
@@ -93,9 +93,7 @@ class StdioSessionManager:
         is_ephemeral: bool = False,
     ) -> Iterator[DecodedChunk]:
         """Yield decoded chunks until the protocol reports turn completion."""
-        return self._execute_turn(
-            affinity_key, prompt, argv_builder, cwd, env, turn_context, cancel_event, is_ephemeral=is_ephemeral
-        )
+        return self._execute_turn(affinity_key, prompt, argv_builder, cwd, env, turn_context, cancel_event, is_ephemeral=is_ephemeral)
 
     def _execute_turn(
         self,
@@ -109,7 +107,8 @@ class StdioSessionManager:
         is_ephemeral: bool = False,
     ) -> Generator[DecodedChunk, None, SessionTurnResult]:
         session_key = self._session_key(affinity_key)
-        with self._get_session_lock(session_key):
+        with self._get_session_lock(session_key), zero_canon_isolation(self._driver, affinity_key.review_profile) as iso:
+            is_ephemeral = is_ephemeral or iso.active  # Zero-Canon не смешивается с пулом
             cfg = self._config or getattr(self._pool, "_config", None) or StdioPoolConfig()
             turn_idle_s = float(getattr(cfg, "turn_idle_timeout_s", 180.0))
             turn_total_s = float(getattr(cfg, "turn_total_timeout_s", 600.0))
@@ -122,14 +121,14 @@ class StdioSessionManager:
                     raise RuntimeError(reason or "driver environment verification failed")
             sandbox_args_fn = getattr(self._driver, "build_sandbox_args", None)
             sandbox_args = list(sandbox_args_fn()) if callable(sandbox_args_fn) else []
-            base_argv = list(argv_builder())
+            base_argv = iso.argv(list(argv_builder()), affinity_key.model, affinity_key.effort)
             argv = base_argv + [f for f in sandbox_args if f not in base_argv]
             fp_fn = getattr(self._driver, "compute_fingerprint", None)
             fingerprint = self._build_fingerprint(argv, cwd, env, str(fp_fn()) if callable(fp_fn) else "")
             self._invalidate_changed_slot(session_key, fingerprint)
             turn_sandbox = tempfile.mkdtemp(prefix="turn-")
             os.chmod(turn_sandbox, 0o700)
-            spawn_env = self._resolve_spawn_env(env)
+            spawn_env = self._resolve_spawn_env(env, iso)
             turn_context_for_turn: dict[str, Any] = {**(turn_context or {}), "turn_sandbox": turn_sandbox}
             try:
                 slot = self._pool.acquire(affinity_key, lambda: list(argv), cwd, spawn_env, is_ephemeral=is_ephemeral)
@@ -171,14 +170,16 @@ class StdioSessionManager:
                     if remaining_total_s <= 0.0:
                         raise RuntimeError("turn total timeout exceeded")
                     timeout = min(turn_idle_s, remaining_total_s)
-                    tagged_line = slot.handle.read_line(timeout_s=timeout)
+                    read_outcome = getattr(slot.handle, "read_line_outcome", None)
+                    kind, tagged_line = read_outcome(timeout_s=timeout) if callable(read_outcome) else ("", slot.handle.read_line(timeout_s=timeout))
+                    if kind == TIMEOUT:
+                        raise TimeoutError(f"resident process idle {timeout:g}s without output")
                     if tagged_line is None:
                         raise RuntimeError("resident process ended before the terminal marker")
                     raw_line = tagged_line.line
                     decoded = self._driver.decode_line(raw_line)
                     if decoded is not None:
-                        chunk_error = getattr(decoded, "error", None)
-                        if chunk_error is not None:
+                        if (chunk_error := getattr(decoded, "error", None)) is not None:
                             self._pool.release(slot.slot_id, cancel=True, lease_id=lease_id)
                             released = True
                             self._forget_slot(session_key, slot.slot_id)
@@ -213,8 +214,10 @@ class StdioSessionManager:
                             lock_file.close()
             return SessionTurnResult(mode=mode, chunks=chunks, pid=slot.handle.pid, generation=turn_generation, is_tool_stop=is_tool_stop)
 
-    def _resolve_spawn_env(self, env: Mapping[str, str] | None, _turn_sandbox: str | None = None) -> Mapping[str, str] | None:
+    def _resolve_spawn_env(self, env: Mapping[str, str] | None, iso: ZeroCanonIsolation | None = None) -> Mapping[str, str] | None:
         base_env = dict(os.environ if env is None else env)
+        if iso is not None and (isolated := iso.env(base_env)) is not None:
+            return isolated
         build_env_fn = getattr(self._driver, "build_env", None)
         if not callable(build_env_fn):
             return env
@@ -273,7 +276,7 @@ class StdioSessionManager:
 
     @staticmethod
     def _session_key(affinity_key: SlotAffinityKey) -> str:
-        return "\0".join((affinity_key.owner_hash, affinity_key.chat_key))
+        return "\0".join((affinity_key.owner_hash, affinity_key.chat_key, affinity_key.review_profile))
 
     @staticmethod
     def _build_fingerprint(argv: list[str], cwd: str, env: Mapping[str, str] | None, driver_fp: str = "") -> ExecutionFingerprint:

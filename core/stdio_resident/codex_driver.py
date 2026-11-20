@@ -5,7 +5,10 @@
 from __future__ import annotations
 
 import json
+import os
+import tomllib
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any, ClassVar, cast, override
 
 from core.stdio_resident.protocol_driver import (
@@ -13,6 +16,7 @@ from core.stdio_resident.protocol_driver import (
     DriverCapabilities,
     StreamJsonDriver,
 )
+from core.subbridge_zero_canon import dump_toml, filter_codex_config
 
 
 class CodexAppServerDriver(StreamJsonDriver):
@@ -146,6 +150,40 @@ class CodexAppServerDriver(StreamJsonDriver):
     @override
     def build_cancel_payload(self) -> bytes | None:
         return b'{"jsonrpc": "2.0", "method": "turn/cancel", "params": {}}\n'
+
+    def build_zero_canon_env(self, base_env: Mapping[str, str], root: str) -> dict[str, str]:
+        """Изолированные HOME/CODEX_HOME: config.toml без mcp_servers/hooks, без AGENTS.md."""
+        home = base_env.get("HOME", "")
+        config = base_env.get("CODEX_HOME") or (f"{home}/.codex" if home else "")
+        src = Path(config) if config else None
+        dst = Path(root) / ".codex"
+        dst.mkdir(parents=True, exist_ok=True)
+        os.chmod(dst, 0o700)
+        raw: dict[str, Any] = {}
+        if src is not None and (src / "config.toml").is_file():
+            try:
+                raw = tomllib.loads((src / "config.toml").read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                raw = {}
+        (dst / "config.toml").write_text(dump_toml(filter_codex_config(raw)), encoding="utf-8")
+        if src is not None and (src / "auth.json").is_file():
+            target = dst / "auth.json"
+            target.write_bytes((src / "auth.json").read_bytes())
+            os.chmod(target, 0o600)
+        return {**base_env, "HOME": root, "CODEX_HOME": str(dst)}
+
+    def build_zero_canon_argv(self, argv: list[str], model: str = "", effort: str = "") -> list[str]:
+        """`codex app-server` с явными `-c` оверрайдами модели/effort и без AGENTS.md."""
+        result = [*argv] if "app-server" in argv else [*argv, "app-server"]
+        overrides = {"project_doc_max_bytes": "0"}
+        if model and model != "default":
+            overrides["model"] = json.dumps(model)
+        if effort and effort != "default":
+            overrides["model_reasoning_effort"] = json.dumps(effort)
+        for key, value in overrides.items():
+            if not any(item.startswith(f"{key}=") for item in result):
+                result.extend(("-c", f"{key}={value}"))
+        return result
 
     def handshake_payload(self) -> bytes:
         """Build the Codex app-server initialization request."""

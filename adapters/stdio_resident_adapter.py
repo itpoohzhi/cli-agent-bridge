@@ -10,17 +10,8 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from typing import Any, cast, override
 
 from core.backend_adapter import (
-    ADAPTER_API as BACKEND_ADAPTER_API,
-    SESSIONS_RESIDENT,
-    STREAMING_NATIVE,
-    BackendAdapter,
-    BackendModel,
-    Capabilities,
-    KindConstraints,
-    Qualification,
-    StreamSink,
-    TurnContext,
-    TurnResult,
+    ADAPTER_API as BACKEND_ADAPTER_API, SESSIONS_RESIDENT, STREAMING_NATIVE, BackendAdapter,
+    BackendModel, Capabilities, KindConstraints, Qualification, StreamSink, TurnContext, TurnResult,
 )
 from core.stdio_resident.config import StdioPoolConfig
 from core.stdio_resident.process_pool import ResidentProcessPool
@@ -29,6 +20,7 @@ from core.stdio_resident.rpc_drivers import create_protocol_driver
 from core.stdio_resident.session_manager import StdioSessionManager
 from core.stdio_resident.turn_stream import TurnStreamAssembler
 from core.stdio_resident.types import SlotAffinityKey
+from core.subbridge_zero_canon import normalize_review_profile, review_profile_from_headers
 
 ADAPTER_API = BACKEND_ADAPTER_API
 KIND = "stdio_resident"
@@ -155,6 +147,7 @@ class StdioResidentAdapter(BackendAdapter):
             model=self._string_value(data, "model", "default"),
             effort=self._string_value(data, "effort", "medium"),
             cwd_norm=normalized_cwd,
+            review_profile=normalize_review_profile(self._string_value(data, "review_profile", "")),
         )
         env = self._string_mapping(data.get("env"))
         turn_context = self._mapping_or_none(data.get("turn_context"))
@@ -279,6 +272,7 @@ class StdioResidentAdapter(BackendAdapter):
             "cwd": ctx.cwd or os.getcwd(),
             "prompt": ctx.prompt,
             "env": ctx.fwd_env,
+            "review_profile": review_profile_from_headers(getattr(getattr(ctx, "handler", None), "headers", None)),
         }
         for chunk in self.execute_chat(request):
             choices = cast(list[dict[str, Any]], chunk["choices"])

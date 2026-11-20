@@ -17,7 +17,7 @@ _HOP_HEADERS = frozenset(
 _PRIVATE_HEADERS = frozenset(
     "authorization x-api-key cookie cookie2 host content-length accept-encoding "
     "x-transport-seed x-exclude-transports x-subagent-id x-internal-service-key "
-    "x-bypass-model-filter x-turn-owner-token".split()
+    "x-bypass-model-filter x-turn-owner-token x-review-profile".split()
 )
 
 

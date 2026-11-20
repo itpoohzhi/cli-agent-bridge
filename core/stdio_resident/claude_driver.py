@@ -5,9 +5,19 @@
 from __future__ import annotations
 
 import json
+import os
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any, ClassVar, cast, override
 
+from core.claude_zero_canon import (
+    CLAUDE_PRESERVED_CA_FILES,
+    build_claude_zero_canon_env,
+    build_claude_zero_canon_flags,
+    filter_claude_settings,
+    filter_claude_state,
+    serialize_claude_json,
+)
 from core.stdio_resident.protocol_driver import (
     DecodedChunk,
     DriverCapabilities,
@@ -23,6 +33,7 @@ class ClaudeStreamJsonDriver(StreamJsonDriver):
         supports_soft_cancel=True,
         supports_multi_turn=True,
     )
+    FAST_FAIL_STATUSES: ClassVar[frozenset[int]] = frozenset({429})
 
     @override
     def build_argv(self, base_argv: list[str], options: Mapping[str, Any]) -> list[str]:
@@ -86,14 +97,71 @@ class ClaudeStreamJsonDriver(StreamJsonDriver):
 
         tool_calls = self._extract_claude_tool_calls(payload, event)
         tool_stop = bool(tool_calls) or self._has_tool_stop(payload, event)
+        error = self._fast_error(payload, text, is_error)
         return DecodedChunk(
             text=text,
             reasoning=reasoning,
             tool_calls=tool_calls,
             is_terminal=is_terminal,
             is_tool_stop=tool_stop,
-            raw=payload if is_error else {},
+            raw=payload if is_error or error else {},
+            error=error,
         )
+
+    @classmethod
+    def _fast_error(cls, payload: Mapping[str, Any], text: str, is_error: bool) -> str | None:
+        """Fail-fast: итоговая ошибка или api_retry с 429, без ожидания idle-таймаута."""
+        status = payload.get("api_error_status", payload.get("error_status"))
+        retry = payload.get("type") == "system" and payload.get("subtype") == "api_retry"
+        if retry and status not in cls.FAST_FAIL_STATUSES:
+            return None
+        if not (is_error or retry):
+            return None
+        detail = text or cls._string(payload.get("error")) or "claude error"
+        return f"claude_error status={status}: {detail}" if status else f"claude_error: {detail}"
+
+    def build_zero_canon_env(self, base_env: Mapping[str, str], root: str) -> dict[str, str]:
+        """Изолированные HOME/CLAUDE_CONFIG_DIR с отфильтрованными settings.json/.claude.json."""
+        home = base_env.get("HOME", "")
+        config = base_env.get("CLAUDE_CONFIG_DIR") or (f"{home}/.claude" if home else "")
+        src = Path(config) if config else None
+        dst = Path(root) / ".claude"
+        dst.mkdir(parents=True, exist_ok=True)
+        os.chmod(dst, 0o700)
+        if src is not None:
+            states = (src / ".claude.json", src.parent / ".claude.json")
+            for name, keep, paths in (
+                ("settings.json", filter_claude_settings, (src / "settings.json",)),
+                (".claude.json", filter_claude_state, states),
+            ):
+                raw = next((r for r in map(self._read_json, paths) if r is not None), None)
+                if raw is not None:
+                    (dst / name).write_text(serialize_claude_json(keep(raw)), encoding="utf-8")
+            for name in CLAUDE_PRESERVED_CA_FILES:
+                if (src / name).is_file():
+                    (dst / name).write_bytes((src / name).read_bytes())
+        return build_claude_zero_canon_env(base_env, root, profile="strict", config_dir=str(dst))
+
+    def build_zero_canon_argv(self, argv: list[str], model: str = "", effort: str = "") -> list[str]:
+        """Добавляет изолирующие флаги Zero-Canon, `--model` и `--effort` (без дублей)."""
+        flags, extra, index = build_claude_zero_canon_flags(), [], 0
+        while index < len(flags):
+            width = 2 if index + 1 < len(flags) and not flags[index + 1].startswith("--") else 1
+            if not self._has_flag(argv, flags[index]):
+                extra.extend(flags[index:index + width])
+            index += width
+        for flag, value in (("--model", model), ("--effort", effort)):
+            if value and value != "default" and not self._has_flag(argv, flag):
+                extra.extend((flag, value))
+        return [*argv, *extra]
+
+    @staticmethod
+    def _read_json(path: Path) -> dict[str, Any] | None:
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        return cast(dict[str, Any], raw) if isinstance(raw, dict) else None
 
     @override
     def is_terminal(self, raw_line: str, decoded: DecodedChunk | None) -> bool:

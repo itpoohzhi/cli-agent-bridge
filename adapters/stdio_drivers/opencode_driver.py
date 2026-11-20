@@ -12,17 +12,17 @@ import threading
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, ClassVar, cast, override
 
-from core.stdio_resident.protocol_driver import (
-    DecodedChunk,
-    DriverCapabilities,
-)
+from core.stdio_resident.protocol_driver import DecodedChunk, DriverCapabilities
 from core.stdio_resident.rpc_drivers import AcpDriver
+from core.subbridge_zero_canon import filter_opencode_config
 
 _OPENCODE_ENV_ALLOWLIST: tuple[str, ...] = (
     "PATH", "HOME", "LANG", "LC_ALL", "TMPDIR", "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY",
-    "XDG_DATA_HOME", "XDG_CONFIG_HOME", "OPENCODE_CONFIG", "OPENCODE_CONFIG_CONTENT", "DEEPSEEK_API_KEY", "OPENCODE_API_KEY",
+    "XDG_DATA_HOME", "XDG_CONFIG_HOME", "OPENCODE_CONFIG", "OPENCODE_CONFIG_CONTENT",
+    "DEEPSEEK_API_KEY", "OPENCODE_API_KEY",
 )
 
 
@@ -34,15 +34,19 @@ class OpenCodeDecodedChunk(DecodedChunk):
     reply_bytes: bytes | None = None
 
 
-def _merge_config_content(existing_raw: str) -> str:
-    config_obj: dict[str, Any] = {}
+def _parse_config_content(existing_raw: str) -> dict[str, Any]:
     if existing_raw:
         try:
             parsed = json.loads(existing_raw)
             if isinstance(parsed, dict):
-                config_obj = parsed
+                return parsed
         except (json.JSONDecodeError, TypeError):
-            config_obj = {}
+            pass
+    return {}
+
+
+def _merge_config_content(existing_raw: str) -> str:
+    config_obj = _parse_config_content(existing_raw)
     config_obj.setdefault("permission", {"*": "allow"})
     return json.dumps(config_obj, ensure_ascii=False)
 
@@ -57,8 +61,7 @@ class OpenCodeAcpDriver(AcpDriver):
     def __init__(self, config: Mapping[str, Any] | None = None) -> None:
         super().__init__()
         self._config = dict(config or {})
-        self._id_counter = 0
-        self._id_lock = threading.Lock()
+        self._id_counter, self._id_lock = 0, threading.Lock()
         self._active_session_id: str | None = None
         self._active_prompt_id: int | None = None
         self._last_error: dict[str, Any] | None = None
@@ -84,29 +87,48 @@ class OpenCodeAcpDriver(AcpDriver):
         return argv
 
     @override
-    def build_env(
-        self, base_env: Mapping[str, str] | None, turn_sandbox: str | None = None
-    ) -> dict[str, str]:
+    def build_env(self, base_env: Mapping[str, str] | None, turn_sandbox: str | None = None) -> dict[str, str]:
         source = os.environ if base_env is None else base_env
         env: dict[str, str] = {k: source[k] for k in _OPENCODE_ENV_ALLOWLIST if k in source}
         env["OPENCODE_DB"] = ":memory:"
         if turn_sandbox:
             env["TMPDIR"] = turn_sandbox
-        raw_config = source.get("OPENCODE_CONFIG_CONTENT", "")
-        env["OPENCODE_CONFIG_CONTENT"] = _merge_config_content(raw_config)
+        env["OPENCODE_CONFIG_CONTENT"] = _merge_config_content(source.get("OPENCODE_CONFIG_CONTENT", ""))
         return env
+
+    def build_zero_canon_env(self, base_env: Mapping[str, str], root: str) -> dict[str, str]:
+        """Isolated HOME/XDG_CONFIG_HOME, empty cwd, and forced `permission={'*': 'ask'}`."""
+        env, zc_root = self.build_env(base_env, turn_sandbox=root), Path(root)
+        zc_cfg, zc_oc_cfg = zc_root / ".config", zc_root / ".config" / "opencode"
+        zc_data, zc_data_oc, zc_cwd = zc_root / ".local" / "share", zc_root / ".local" / "share" / "opencode", zc_root / "cwd"
+        for directory in (zc_root, zc_cfg, zc_oc_cfg, zc_root / ".local", zc_data, zc_data_oc, zc_cwd):
+            directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+            os.chmod(directory, 0o700)
+        src_data = Path(base_env.get("XDG_DATA_HOME") or f"{base_env.get('HOME', '')}/.local/share")
+        auth_src = src_data / "opencode" / "auth.json"
+        if auth_src.is_file() and not auth_src.is_symlink():
+            auth_dst = zc_data_oc / "auth.json"
+            auth_dst.write_bytes(auth_src.read_bytes())
+            os.chmod(auth_dst, 0o600)
+        raw_cfg = _parse_config_content(base_env.get("OPENCODE_CONFIG_CONTENT", ""))
+        env.update({
+            "HOME": str(zc_root), "XDG_CONFIG_HOME": str(zc_cfg), "XDG_DATA_HOME": str(zc_data),
+            "OPENCODE_CONFIG_CONTENT": json.dumps(filter_opencode_config(raw_cfg), ensure_ascii=False),
+            "BRIDGE_ZERO_CANON": "1",
+        })
+        env.pop("OPENCODE_CONFIG", None)
+        return env
+
+    def build_zero_canon_argv(self, argv: list[str], model: str = "", effort: str = "") -> list[str]:
+        """Ensure `opencode acp` argv under Zero-Canon."""
+        _ = (model, effort)
+        return self.build_argv(argv, {})
 
     def handshake_payload(self) -> tuple[int, bytes]:
         req_id = self._allocate_id()
         payload = {
-            "jsonrpc": "2.0",
-            "id": req_id,
-            "method": "initialize",
-            "params": {
-                "protocolVersion": 1,
-                "clientInfo": {"name": "cli-agent-bridge", "version": "1.0"},
-                "clientCapabilities": {},
-            },
+            "jsonrpc": "2.0", "id": req_id, "method": "initialize",
+            "params": {"protocolVersion": 1, "clientInfo": {"name": "cli-agent-bridge", "version": "1.0"}, "clientCapabilities": {}},
         }
         return req_id, (json.dumps(payload, ensure_ascii=False) + "\n").encode()
 
@@ -133,9 +155,7 @@ class OpenCodeAcpDriver(AcpDriver):
         except Exception:
             return False
 
-    def build_session_new_payload(
-        self, cwd: str, model: str, effort: str | None = None
-    ) -> tuple[int, bytes]:
+    def build_session_new_payload(self, cwd: str, model: str, effort: str | None = None) -> tuple[int, bytes]:
         req_id = self._allocate_id()
         params: dict[str, Any] = {"cwd": cwd, "model": model, "mcpServers": []}
         if effort:
@@ -155,9 +175,7 @@ class OpenCodeAcpDriver(AcpDriver):
             return True
         return False
 
-    def prepare_turn(
-        self, handle: Any, turn_context: Any, timeout_s: float = 10.0
-    ) -> bool:
+    def prepare_turn(self, handle: Any, turn_context: Any, timeout_s: float = 10.0) -> bool:
         """Ensure an active ACP session exists before the prompt turn."""
         if self._active_session_id is not None:
             return True
@@ -166,35 +184,19 @@ class OpenCodeAcpDriver(AcpDriver):
         req_id, data = self.build_session_new_payload(cwd, model, ctx.get("effort"))
         try:
             handle.write(data)
-            resp = self._wait_response(handle, req_id, timeout_s)
-            return self._handle_session_response(resp)
+            return self._handle_session_response(self._wait_response(handle, req_id, timeout_s))
         except Exception:
             return False
 
     @override
-    def encode_turn(
-        self,
-        prompt: str,
-        turn_context: Mapping[str, Any] | None = None,
-    ) -> bytes:
+    def encode_turn(self, prompt: str, turn_context: Mapping[str, Any] | None = None) -> bytes:
         context = dict(turn_context or {})
-        session_id = (
-            context.get("sessionId")
-            or context.get("session_id")
-            or self._active_session_id
-            or "default"
-        )
+        session_id = context.get("sessionId") or context.get("session_id") or self._active_session_id or "default"
         req_id = self._allocate_id()
         self._active_prompt_id = req_id
-
         payload = {
-            "jsonrpc": "2.0",
-            "id": req_id,
-            "method": "session/prompt",
-            "params": {
-                "sessionId": session_id,
-                "prompt": [{"type": "text", "text": prompt}],
-            },
+            "jsonrpc": "2.0", "id": req_id, "method": "session/prompt",
+            "params": {"sessionId": session_id, "prompt": [{"type": "text", "text": prompt}]},
         }
         return (json.dumps(payload, ensure_ascii=False) + "\n").encode()
 
@@ -203,18 +205,13 @@ class OpenCodeAcpDriver(AcpDriver):
         kind = update.get("sessionUpdate") or update.get("type")
         if kind in ("content_part_delta", "delta"):
             delta = self._mapping(update.get("delta")) or update
-            text = self._extract_string(delta, ("text", "content"))
-            reasoning = self._extract_string(delta, ("reasoning", "thought"))
-            return text, reasoning, [], False
+            return self._extract_string(delta, ("text", "content")), self._extract_string(delta, ("reasoning", "thought")), [], False
         if kind in ("agent_message_chunk", "message_chunk", "agent_message"):
-            text = self._extract_string(update, ("content", "text", "delta"))
-            return text, "", [], False
+            return self._extract_string(update, ("content", "text", "delta")), "", [], False
         if kind in ("agent_thought_chunk", "thought_chunk", "agent_thought"):
-            thought = self._extract_string(update, ("content", "thought", "reasoning", "delta"))
-            return "", thought, [], False
+            return "", self._extract_string(update, ("content", "thought", "reasoning", "delta")), [], False
         if kind == "tool_call":
-            call = self._mapping(update.get("toolCall")) or update
-            return "", "", [call], True
+            return "", "", [self._mapping(update.get("toolCall")) or update], True
         return "", "", [], False
 
     @override
@@ -222,35 +219,21 @@ class OpenCodeAcpDriver(AcpDriver):
         payload = self._parse_object(raw_line)
         if payload is None or payload.get("jsonrpc") != "2.0":
             return None
-
         if "error" in payload:
             err_dict = self._mapping(payload["error"])
-            err_msg = str(err_dict.get("message") if err_dict else payload["error"])
-            return OpenCodeDecodedChunk(error=err_msg, is_terminal=True, raw=payload)
-
+            return OpenCodeDecodedChunk(error=str(err_dict.get("message") if err_dict else payload["error"]), is_terminal=True, raw=payload)
         res = payload.get("result")
         if isinstance(res, dict) and "sessionId" in res:
             self._active_session_id = str(res["sessionId"])
-
         method = payload.get("method")
         if method == "session/request_permission":
-            req_id = payload.get("id")
-            reply = json.dumps({"jsonrpc": "2.0", "id": req_id, "result": {"decision": "allow"}}) + "\n"
+            reply = json.dumps({"jsonrpc": "2.0", "id": payload.get("id"), "result": {"decision": "allow"}}) + "\n"
             return OpenCodeDecodedChunk(reply_bytes=reply.encode("utf-8"), raw=payload)
-
         params = self._mapping(payload.get("params")) or {}
-        text, reasoning, tool_calls, is_tool_stop = ("", "", [], False)
-        if method == "session/update":
-            text, reasoning, tool_calls, is_tool_stop = self._parse_update(params)
-
-        is_terminal = self._check_terminal(payload)
+        text, reasoning, tool_calls, is_tool_stop = self._parse_update(params) if method == "session/update" else ("", "", [], False)
         return OpenCodeDecodedChunk(
-            text=text,
-            reasoning=reasoning,
-            tool_calls=tool_calls,
-            is_terminal=is_terminal,
-            is_tool_stop=is_tool_stop,
-            raw=payload,
+            text=text, reasoning=reasoning, tool_calls=tool_calls,
+            is_terminal=self._check_terminal(payload), is_tool_stop=is_tool_stop, raw=payload,
         )
 
     def _check_terminal(self, payload: Mapping[str, Any]) -> bool:
@@ -264,9 +247,7 @@ class OpenCodeAcpDriver(AcpDriver):
         if decoded is not None and decoded.is_terminal:
             return True
         payload = self._parse_object(raw_line)
-        if not payload or payload.get("jsonrpc") != "2.0":
-            return False
-        return self._check_terminal(payload)
+        return bool(payload and payload.get("jsonrpc") == "2.0" and self._check_terminal(payload))
 
     @override
     def is_tool_stop(self, raw_line: str, decoded: DecodedChunk | None) -> bool:
@@ -275,25 +256,19 @@ class OpenCodeAcpDriver(AcpDriver):
         payload = self._parse_object(raw_line)
         if not payload or payload.get("jsonrpc") != "2.0":
             return False
-        params = self._mapping(payload.get("params")) or {}
-        update = self._mapping(params.get("update")) or {}
+        update = self._mapping((self._mapping(payload.get("params")) or {}).get("update")) or {}
         return update.get("sessionUpdate") == "tool_call"
 
     @override
     def build_cancel_payload(self) -> bytes | None:
-        payload = {
-            "jsonrpc": "2.0",
-            "method": "session/cancel",
-            "params": {"sessionId": self._active_session_id or "default"},
-        }
+        payload = {"jsonrpc": "2.0", "method": "session/cancel", "params": {"sessionId": self._active_session_id or "default"}}
         return (json.dumps(payload, ensure_ascii=False) + "\n").encode()
 
     def set_session_id(self, session_id: str) -> None:
         self._active_session_id = session_id
 
     def compute_fingerprint(self) -> str:
-        data = f"opencode-acp:{self._config.get('binary', 'opencode')}"
-        return hashlib.sha256(data.encode()).hexdigest()
+        return hashlib.sha256(f"opencode-acp:{self._config.get('binary', 'opencode')}".encode()).hexdigest()
 
     @staticmethod
     def _mapping(value: object) -> dict[str, Any] | None:

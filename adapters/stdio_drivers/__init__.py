@@ -16,6 +16,7 @@ from adapters.stdio_drivers.muse_driver import MuseMspDriver
 from adapters.stdio_drivers.opencode_driver import OpenCodeAcpDriver
 from core.stdio_resident.rpc_drivers import register_protocol_driver
 from core.stdio_resident.types import SlotAffinityKey
+from core.subbridge_zero_canon import normalize_review_profile
 
 register_protocol_driver("opencode-acp", OpenCodeAcpDriver)
 
@@ -35,6 +36,8 @@ _SESSION_ID_KEYS: tuple[str, ...] = ("chat_key", "session_id", "conversation_id"
 _SESSION_ID_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,128}\Z")
 _ENV_MUSE_RESIDENT_ENABLED = "BRIDGE_MUSE_RESIDENT_ENABLED"
 _ENV_OPENCODE_RESIDENT_ENABLED = "BRIDGE_OPENCODE_RESIDENT_ENABLED"
+_CLAUDE_IDS = frozenset({"claude", "claude-p", "claude_p"})
+_CODEX_IDS = frozenset({"codex", "codex-cli", "codex-app-server"})
 _TRUE_VALUES = frozenset({"1", "true", "yes", "on", "enabled"})
 _FALSE_VALUES = frozenset({"0", "false", "no", "off", "disabled"})
 
@@ -125,11 +128,20 @@ def infer_protocol(
         return "msp-v1"
     if actual_id in ("opencode", "opencode-resident"):
         return "opencode-acp"
+    if actual_id.lower() in _CLAUDE_IDS:
+        return "claude-stream-json"
+    if actual_id.lower() in _CODEX_IDS:
+        return "codex-app-server"
     wrapper_path = _extract_wrapper_path(actual_config)
-    if wrapper_path and os.path.basename(wrapper_path.replace("\\", "/")) == "muse-cli.sh":
+    name = os.path.basename(wrapper_path.replace("\\", "/")).lower() if wrapper_path else ""
+    if name == "muse-cli.sh":
         return "msp-v1"
-    if wrapper_path and "opencode" in os.path.basename(wrapper_path.replace("\\", "/")):
+    if "opencode" in name:
         return "opencode-acp"
+    if name.split(".")[0] in _CLAUDE_IDS or name.startswith("claude-p-"):
+        return "claude-stream-json"
+    if name.split(".")[0] in _CODEX_IDS:
+        return "codex-app-server"
     return "stream-json"
 
 
@@ -155,6 +167,7 @@ def build_affinity_key(
     cwd_norm: str,
     is_ephemeral: bool = False,
     driver_fingerprint: str = "",
+    review_profile: str = "standard",
 ) -> SlotAffinityKey:
     """Construct ``SlotAffinityKey`` with optional wave fields supported by types."""
     kwargs: dict[str, Any] = {
@@ -169,6 +182,8 @@ def build_affinity_key(
         fields = {f.name for f in dataclasses.fields(SlotAffinityKey)}
         if "is_ephemeral" in fields:
             kwargs["is_ephemeral"] = is_ephemeral
+        if "review_profile" in fields:
+            kwargs["review_profile"] = normalize_review_profile(review_profile)
         if "driver_fingerprint" in fields:
             kwargs["driver_fingerprint"] = driver_fingerprint
         elif "fingerprint" in fields:

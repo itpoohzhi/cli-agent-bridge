@@ -11,6 +11,7 @@ from urllib.parse import urlparse
 from core.http_post_context import PostHandler, PostHost, PostRequestContext
 from core.message_history_sanitizer import sanitize_request_payload
 from core.passthrough_autonomy import strip_passthrough_request
+from core.passthrough_exchange import internal_trace_scope
 
 
 def clean_transport_request(
@@ -185,9 +186,17 @@ def _serve_fallback_alias(context: PostRequestContext) -> bool:
             headers=dict(handler.headers.items()), sink=sink,
         )
 
-    return fallback_http_hook.dispatch(
-        handler, context.request, context.host, upstream, context.provider_id,
-    )
+    scoped = [
+        *context.host._trace_headers(handler._trace),
+        *(
+            (name, value) for name, value in handler.headers.items()
+            if name.lower() == "x-review-profile"
+        ),
+    ]
+    with internal_trace_scope(scoped):
+        return fallback_http_hook.dispatch(
+            handler, context.request, context.host, upstream, context.provider_id,
+        )
 
 
 def _resolve_chat_path(context: PostRequestContext) -> bool:
