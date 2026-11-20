@@ -139,7 +139,19 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from agy_runtime import midstream_resilience, slot_and_session, sse_body_runner, sse_stream_helpers  # noqa: E402
+from agy_runtime import (  # noqa: E402
+    long_session_config as _lsc, midstream_resilience, slot_and_session,
+    sse_body_runner, sse_stream_helpers, turn_usage_finalize as _u_fin,
+)
+from core.continuity_anchor_policy import mint_bridge_call_id  # noqa: E402
+from core.correlation_contract import extract_correlation, format_log_corr_suffix  # noqa: E402
+from core.prompt_budget_policy import LazyPromptMaterializer, compute_prompt_budget, resolve_ctx_prompt  # noqa: E402
+from core.slot_acquire import SlotWaitOptions, acquire_slot_timed  # noqa: E402
+from core.tool_turn_settle_policy import (  # noqa: E402
+    SettleDecision, ToolTurnSettleState, decide_session_commit,
+    evaluate_tool_turn_settle, resolve_tool_turn_stop, suppress_post_call_content,
+)
+from core.turn_usage_fsm import should_emit_wire_usage  # noqa: E402
 from core.watchdog import (  # noqa: E402
     IDLE_TIMEOUT_S as _CORE_IDLE_TIMEOUT_S,
     WATCHDOG_INTERVAL_S as _CORE_WATCHDOG_INTERVAL_S,
@@ -159,7 +171,6 @@ from core.agy_capacity_guard import (  # noqa: E402
     summarize_capacity_text,
 )
 from core.chat_key import SOURCES_SESSION_ID, resolve_chat_key  # noqa: E402
-from core.usage_wire import normalize_prompt_cache_details  # noqa: E402
 from core.session_continuity import ContinuityConfig, ContinuityIndex, session_key_for  # noqa: E402
 from core.prompt_truncation_notice import NoticePolicy, with_truncation_notice  # noqa: E402
 from core.cli_rejection import is_deterministic_cli_rejection  # noqa: E402
@@ -1262,7 +1273,11 @@ def _log(msg: str) -> None:
 
 
 _CONTINUITY = ContinuityIndex(ContinuityConfig(
-    _env_int("AGY_BRIDGE_CONTINUITY_MAX_LINKS", 4096, 16, 1_000_000), SESSION_IDLE_TTL_S, _log))
+    _env_int("AGY_BRIDGE_CONTINUITY_MAX_LINKS", 4096, 16, 1_000_000),
+    SESSION_IDLE_TTL_S,
+    _log,
+    post_turn_anchor_enabled=lambda: _lsc.post_turn_anchor_enabled(config_path=DYNAMIC_CONFIG_PATH),
+))
 
 
 def _idle_timeout_from_env() -> float:
@@ -1811,7 +1826,7 @@ def _launch_env() -> dict:
     env.setdefault(ALLOWED_MODELS_ENV, _allowed_models_file())
     env["BRIDGE_ZERO_CANON"] = "1"
     env["BROWSER"] = "/usr/bin/false"
-    return env
+    return _lsc.apply_direct_mode_policy(env, config_path=DYNAMIC_CONFIG_PATH)
 
 
 class LauncherUnavailable(Exception):
@@ -2402,10 +2417,10 @@ def _downgrade_to_text_in_run_once(
         if ctx.get("hot_resumed"):
             with _session_store_lock:
                 _in_flight_cids.discard(old_cid)
-    stripped = ctx.get("stripped_full_prompt")
-    if not isinstance(stripped, str) or not stripped:
+    stripped = resolve_ctx_prompt(ctx, "stripped_full_prompt")
+    if not stripped:
         stripped = _text_only_prompt_fallback(
-            str(ctx.get("full_prompt") or ctx.get("prompt") or "")
+            next(filter(None, (resolve_ctx_prompt(ctx, "full_prompt"), str(ctx.get("prompt", "")))), "")
         )
     ctx["hot_resumed"] = False
     ctx["conversation_id"] = ""
@@ -2479,13 +2494,14 @@ def _render_message(
 
 def _prompt_budget(reserve_bytes: int = 0) -> int:
     """Бюджет истории: потолок минус резерв обёртки, не ниже `AGY_BRIDGE_PRUNE_MIN_BUDGET_BYTES` (4096)."""
-    floor = min(
-        _env_int(
-            "AGY_BRIDGE_PRUNE_MIN_BUDGET_BYTES", 4096, 512, PROMPT_MAX_NDJSON_BYTES_HIGH
-        ),
-        PROMPT_MAX_NDJSON_BYTES,
+    cap = _lsc.prompt_bytes_cap(config_path=DYNAMIC_CONFIG_PATH)
+    floor = _env_int("AGY_BRIDGE_PRUNE_MIN_BUDGET_BYTES", 4096, 512, cap)
+    return compute_prompt_budget(
+        max_cap_bytes=cap,
+        env_cap_bytes=_lsc.max_prompt_bytes(config_path=DYNAMIC_CONFIG_PATH),
+        floor_bytes=floor,
+        reserve_bytes=reserve_bytes,
     )
-    return max(PROMPT_MAX_NDJSON_BYTES - max(int(reserve_bytes), 0), floor)
 
 
 def _protocol_reserve_bytes(
@@ -3039,27 +3055,33 @@ def _session_key_for(
     return session_key_for(model, cwd, effort, raw_chat_id, CWD_MAX_LEN)
 
 
+def _resolve_chat_context(
+    headers: Any, extra: dict[str, object], req: dict[str, object] | None = None
+) -> tuple[str, bool, str]:
+    """Возвращает (chat_id, invalid, continuity_scope); scope непуст только при _CONTINUITY.resolve."""
+    extra_map = extra if isinstance(extra, dict) else {}
+    cwd = extra_map.get("cwd")
+    has_cwd = all((isinstance(cwd, str), bool(str(cwd).strip()) if isinstance(cwd, str) else False))
+    chat = resolve_chat_key(req, headers, extra_map, sources=SOURCES_SESSION_ID)
+    subagent_id, subagent_invalid = slot_and_session.resolve_subagent_id(headers)
+    result: tuple[str, bool, str] = ("", True, "")
+    if not any((chat.invalid, subagent_invalid)):
+        use_cont = all((not chat.value, not has_cwd, isinstance(req, dict), bool(req.get("tools")) if isinstance(req, dict) else False, _new_flag("session_continuity_enabled")))
+        if use_cont:
+            if isinstance(req, dict):
+                scope = slot_and_session.continuity_scope(req.get("model"), subagent_id)
+                result = (_CONTINUITY.resolve(req.get("messages"), scope), False, scope)
+        else:
+            result = (slot_and_session.combine_chat_and_subagent(chat.value, subagent_id), False, "")
+    return result
+
+
 def _request_chat_id(
     headers: Any, extra: dict[str, object], req: dict[str, object] | None = None
 ) -> tuple[str, bool]:
-    """Первый переданный chat ID (+ X-Subagent-Id) и признак невалидного идентификатора.
-
-    Источники и валидация — единый `core.chat_key`, набор SOURCES_SESSION_ID.
-    `prompt_cache_key` намеренно НЕ источник: его шарят разные чаты, и как
-    идентичность сессии он склеил бы чужие диалоги. Предел длины — BRIDGE_CHAT_KEY_MAX_LEN.
-    """
-    extra_map = extra if isinstance(extra, dict) else None
-    cwd = (extra_map or {}).get("cwd")
-    has_cwd = isinstance(cwd, str) and bool(cwd.strip())
-    chat = resolve_chat_key(req, headers, extra_map, sources=SOURCES_SESSION_ID)
-    subagent_id, subagent_invalid = slot_and_session.resolve_subagent_id(headers)
-    if chat.invalid or subagent_invalid:
-        return "", True
-    if not chat.value and not has_cwd and isinstance(req, dict) and req.get("tools"):
-        if _new_flag("session_continuity_enabled"):
-            scope = slot_and_session.continuity_scope(req.get("model"), subagent_id)
-            return _CONTINUITY.resolve(req.get("messages"), scope), False
-    return slot_and_session.combine_chat_and_subagent(chat.value, subagent_id), False
+    """Совместимая 2-кортежная обёртка над _resolve_chat_context."""
+    chat_id, invalid, _scope = _resolve_chat_context(headers, extra, req)
+    return chat_id, invalid
 
 
 def _session_key_valid(sess_key: tuple[str, ...]) -> bool:
@@ -5127,7 +5149,8 @@ class _TranscriptTail(InterruptionTailState):
             _count_drain_deadline()
         ms = int((time.monotonic() - started) * 1000)
         _log(
-            f"drain cid={self._cid8()} ms={ms} emitted={self.emitted - emitted_before} outcome={self.drain_outcome} pending_steps={pending} exit={exit_kind}"
+            f"drain cid={self._cid8()} ms={ms} emitted={self.emitted - emitted_before} "
+            f"outcome={self.drain_outcome} pending_steps={pending} exit={exit_kind} {getattr(self.run_ref, 'tag', '')}"
         )
 
 
@@ -5411,11 +5434,13 @@ class _ToolTurn:
         self._max_calls = _safe_int_env("AGY_MAX_TOOL_CALLS", 64)
         self._limit_error: ToolCallLimitExceededError | None = None
         self._max_bytes = _safe_int_env("AGY_MAX_TOOL_BYTES", 10 * 1024 * 1024)
-        self._settle_timeout_s = _safe_float_env("AGY_TOOL_SETTLE_TIMEOUT_S", 5.0)
-        self._stall_timeout_s = _safe_float_env("AGY_TOOL_CALL_STALL_TIMEOUT_S", 30.0)
+        self._settle_cfg = _lsc.tool_settle_config(config_path=DYNAMIC_CONFIG_PATH)
+        self._settle_timeout_s = self._settle_cfg.settle_timeout_s
+        self._stall_timeout_s = self._settle_cfg.stall_timeout_s
         self._total_bytes = 0
         self._last_chunk_ts = time.monotonic()
         self._last_open_chunk_ts = 0.0
+        self._calls_closed_ts = 0.0
         self._normalizer = StreamNormalizer(
             self._content, self._reasoning, self._call, strict_live=True, tool_schemas=self._schemas
         )
@@ -5442,8 +5467,9 @@ class _ToolTurn:
         return self.ok
 
     def _content(self, text: str) -> None:
-        if self.ok and not self._on_content(text):
-            self.ok = False
+        if not suppress_post_call_content(has_calls=bool(self.calls), has_open_tool_call=self._normalizer.has_open_tool_call()):
+            if all((self.ok, not self._on_content(text))):
+                self.ok = False
 
     def _reasoning(self, text: str) -> None:
         if self.ok and not self._on_reasoning(text):
@@ -5457,7 +5483,7 @@ class _ToolTurn:
             return self._limit(len(self.calls) + 1)
         entry: dict[str, object] = {
             "index": len(self.calls),
-            "id": str(call.get("id") or "call_" + uuid.uuid4().hex[:24]),
+            "id": mint_bridge_call_id(),
             "type": "function",
             "function": {"name": str(call.get("name") or ""), "arguments": json.dumps(call.get("arguments") or {}, ensure_ascii=False)},
         }
@@ -5490,7 +5516,8 @@ class _ToolTurn:
             self.error = f"tool call buffer exceeded max bytes ({self._max_bytes})"
             return self.ok
         self._total_bytes += chunk_bytes
-        self.notify_activity()
+        if not suppress_post_call_content(has_calls=bool(self.calls), has_open_tool_call=self._normalizer.has_open_tool_call()):
+            self.notify_activity()
         if self._normalizer.has_open_tool_call():
             self._last_open_chunk_ts = self._last_chunk_ts
         try:
@@ -5500,11 +5527,13 @@ class _ToolTurn:
             self.error = str(exc) or type(exc).__name__
         except LiveParserError as exc:
             self.error = str(exc) or type(exc).__name__
-        # Проверяем состояние ПОСЛЕ feed_text
         if self._normalizer.has_open_tool_call():
             self._last_open_chunk_ts = self._last_chunk_ts
+            self._calls_closed_ts = 0.0
         else:
             self._last_open_chunk_ts = 0.0
+            if self.calls and not self._calls_closed_ts:
+                self._calls_closed_ts = time.monotonic()
         return self.ok
 
     def finish(self) -> None:
@@ -5527,25 +5556,25 @@ class _ToolTurn:
         except Exception:
             return "unknown"
 
+    def settle_decision(
+        self, *, proc_exited: bool = False, result_received: bool = False
+    ) -> SettleDecision:
+        """Вычисляет решение завершения tool-turn через чистую политику."""
+        st = ToolTurnSettleState(
+            now=time.monotonic(), has_error=bool(self.error),
+            has_open_tool_call=self._normalizer.has_open_tool_call(),
+            has_calls=bool(self.calls), last_open_chunk_ts=self._last_open_chunk_ts,
+            last_chunk_ts=self._last_chunk_ts, calls_closed_ts=self._calls_closed_ts,
+            proc_exited=proc_exited, result_received=result_received,
+        )
+        dec = evaluate_tool_turn_settle(st, self._settle_cfg)
+        if dec.error_message:
+            self.error = dec.error_message
+        return dec
+
     def turn_complete(self) -> bool:
-        """Завершить ход при ошибке или после тишины вне блока вызова."""
-        if self.error:
-            return True
-        now = time.monotonic()
-        if self._normalizer.has_open_tool_call():
-            if (
-                self._last_open_chunk_ts > 0.0
-                and now - self._last_open_chunk_ts >= self._stall_timeout_s
-            ):
-                self.error = (
-                    "tool call block stalled without progress for "
-                    f"{self._stall_timeout_s:g}s"
-                )
-                return True
-            return False
-        if self.calls:
-            return now - self._last_chunk_ts >= self._settle_timeout_s
-        return False
+        """Совместимая 0-аргументная обёртка над settle_decision()."""
+        return self.settle_decision().should_stop
 
     def error_body(self) -> dict[str, Any]:
         return build_tool_turn_error_body(
@@ -5585,6 +5614,7 @@ class Run:
         work_dir = cwd if (cwd and os.path.isdir(cwd)) else str(WORKSPACE)
         self.work_dir = work_dir
         self.mode = mode
+        self.tag = tag
         if AGY_BRIDGE_ENABLE_HEAD_PRUNING:
             prompt = _ensure_prompt_fits_ndjson(prompt)
         self.stdin_line = _ndjson_user_line(prompt)
@@ -6312,15 +6342,6 @@ def _model_context_window(model_id: object) -> int | None:
     return None
 
 
-def _raw_cache_tokens(raw: dict) -> tuple[int | None, bool]:
-    """(cache_read, конфликт алиасов) из сырого usage: snake-ключ, иначе camel-ключ."""
-    snake = raw.get("cache_read_tokens")
-    camel = raw.get("cacheReadTokens")
-    if snake is not None and camel is not None and snake != camel:
-        return None, True  # алиасы расходятся: cache неизвестен, удобное не выбирается
-    return _count_or_none(snake if snake is not None else camel), False
-
-
 def _num_text(value: object) -> str:
     """Число для лога; всё остальное — `missing` (исходная строка не печатается)."""
     count = _count_or_none(value)
@@ -6330,153 +6351,13 @@ def _num_text(value: object) -> str:
 def _resolve_step_usage(
     out: dict, snap: _UsageSnapshot, window: int | None, resume: bool
 ) -> dict[str, object]:
-    """Один неизменяемый wire-`usage` попытки; сырой `out["usage"]` не мутируется.
-
-    Порядок: валидный последний шаг транскрипта (измеренное окно, без clamp) ->
-    ограниченная оценка для успешного хода с накопительным raw выше окна ->
-    result-only (input + cache, без clamp).
-    """
-    raw_obj = out.get("usage")
-    raw = cast("dict[str, object]", raw_obj) if isinstance(raw_obj, dict) else {}
-    raw_in = _count_or_none(raw.get("input_tokens"))
-    raw_out = _count_or_none(raw.get("output_tokens"))
-    raw_th = _count_or_none(raw.get("thinking_tokens"))
-    raw_cache, conflict = _raw_cache_tokens(raw)
-    details: dict[str, int] | None
-    inconsistent = False
-    reason = ""
-    step_idx: int | None = None
-    last = snap.last_step_usage
-    if last is not None:
-        source = "last_step"
-        step_idx, last_in, last_cache, _last_out = last
-        prompt = last_in + (last_cache if last_cache is not None else 0)
-        details, inconsistent = normalize_prompt_cache_details(prompt, last_cache)
-        if snap.completeness:
-            completion = snap.turn_output_tokens_sum
-        else:
-            completion = 0
-            reason = "ledger_incomplete"
-            _log(
-                "usage-step-ledger-incomplete observed_steps=%d saturated=%d "
-                "invalid_records=%d raw_output=%s raw_thinking=%s"
-                % (
-                    snap.observed_planner_steps,
-                    int(snap.observed_planner_steps_saturated),
-                    snap.invalid_records_count,
-                    _num_text(raw_out),
-                    _num_text(raw_th),
-                )
-            )
-    else:
-        result_obj = out.get("result")
-        result = cast("dict[str, object]", result_obj) if isinstance(result_obj, dict) else {}
-        success = (
-            out.get("rc") == 0
-            and out.get("state") == "done"
-            and str(result.get("status") or "").upper() != "ERROR"
-            and not result.get("error")
-        )
-        cache_sum = raw_cache if raw_cache is not None else 0
-        over_window = (
-            window is not None
-            and raw_in is not None
-            and (raw_in >= window or raw_in + cache_sum > window)
-        )
-        if success and window is not None and raw_in is not None and over_window:
-            source = "cumulative_estimate"
-            turns = _count_or_none(out.get("num_turns")) or 0
-            tools = _count_or_none(out.get("tool_events")) or 0
-            divisor = max(2, turns + tools, snap.observed_planner_steps)
-            prompt = min(raw_in // divisor, window - 1)
-            reason = "over_window"
-        else:
-            source = "result"
-            prompt = (raw_in or 0) + cache_sum
-            reason = (
-                "alias_conflict"
-                if conflict
-                else "not_success"
-                if not success
-                else "no_window"
-                if window is None
-                else "within_window"
-            )
-        details, inconsistent = normalize_prompt_cache_details(prompt, raw_cache)
-        # Без ledger область raw output известна только у свежего разговора.
-        if not resume and snap.observed_planner_steps == 0:
-            completion = (raw_out or 0) + (raw_th or 0)
-        else:
-            completion = 0
-        if source == "cumulative_estimate":
-            _log(
-                "usage-cumulative-fallback raw_in=%s raw_cache=%s window=%d n=%d "
-                "prompt=%d turns=%d tools=%d observed_steps=%d inconsistent=%d "
-                "raw_output=%s raw_thinking=%s"
-                % (
-                    _num_text(raw_in),
-                    _num_text(raw_cache),
-                    cast(int, window),
-                    divisor,
-                    prompt,
-                    turns,
-                    tools,
-                    snap.observed_planner_steps,
-                    int(inconsistent),
-                    _num_text(raw_out),
-                    _num_text(raw_th),
-                )
-            )
-    wire: dict[str, object] = {
-        "prompt_tokens": prompt,
-        "completion_tokens": completion,
-        "total_tokens": prompt + completion,
-    }
-    if details is not None:
-        wire["prompt_tokens_details"] = details
-    return {
-        "wire": wire,
-        "source": source,
-        "reason": reason,
-        "step_idx": step_idx,
-        "completeness": snap.completeness,
-        "inconsistent": inconsistent,
-        "cached": details["cached_tokens"] if details is not None else None,
-        "raw_in": raw_in,
-        "raw_out": raw_out,
-        "raw_thinking": raw_th,
-        "raw_total": _count_or_none(raw.get("total_tokens")),
-        "raw_cache": raw_cache,
-    }
+    """Делегирует нормализацию step-scoped usage в agy_runtime.turn_usage_finalize."""
+    return _u_fin.resolve_and_log_step_usage(out, snap, window, resume, _log)
 
 
 def _usage_log_fields(resolved: object) -> str:
-    """Числовая диагностика usage для строки done; пусто, если usage не нормализовался."""
-    if not isinstance(resolved, dict):
-        return ""
-    info = cast("dict[str, object]", resolved)
-    wire = cast("dict[str, object]", info.get("wire") or {})
-    return (
-        " usage_source=%s reason=%s step_idx=%s prompt=%s cached=%s completion=%s "
-        "total=%s completeness=%d inconsistent=%d raw_in=%s raw_out=%s "
-        "raw_thinking=%s raw_total=%s raw_cache=%s"
-        % (
-            _safe_log_value(str(info.get("source") or "")),
-            _safe_log_value(str(info.get("reason") or "")) or "-",
-            _num_text(info.get("step_idx")),
-            _num_text(wire.get("prompt_tokens")),
-            _num_text(info.get("cached")),
-            _num_text(wire.get("completion_tokens")),
-            _num_text(wire.get("total_tokens")),
-            int(bool(info.get("completeness"))),
-            int(bool(info.get("inconsistent"))),
-            _num_text(info.get("raw_in")),
-            _num_text(info.get("raw_out")),
-            _num_text(info.get("raw_thinking")),
-            _num_text(info.get("raw_total")),
-            _num_text(info.get("raw_cache")),
-        )
-    )
+    """Делегирует форматирование диагностики usage в agy_runtime.turn_usage_finalize."""
+    return _u_fin.format_usage_log_fields(resolved, _safe_log_value, _num_text)
 
 
 def _image_fallback_view() -> tuple[dict[str, object], dict[str, bool]]:
@@ -6554,19 +6435,24 @@ class Handler(BaseHTTPRequestHandler):
     def _send(
         self, code: int, payload: dict, extra_headers: dict[str, str] | None = None
     ) -> None:
-        if self._registry_job is not None:
-            return
-        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        pending = getattr(self, "_pending_response_headers", None)
+        merged = dict(pending) if isinstance(pending, dict) else {}
+        if extra_headers:
+            merged.update(extra_headers)
         try:
-            self.send_response(code)
-            self.send_header("Content-Type", "application/json; charset=utf-8")
-            self.send_header("Content-Length", str(len(body)))
-            for header, value in (extra_headers or {}).items():
-                self.send_header(header, value)
-            self.end_headers()
-            self.wfile.write(body)
+            if isinstance(self._registry_job, type(None)):
+                body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+                self.send_response(code)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                for header, value in merged.items():
+                    self.send_header(header, value)
+                self.end_headers()
+                self.wfile.write(body)
         except (BrokenPipeError, ConnectionResetError, OSError):
             pass
+        finally:
+            self._pending_response_headers = None
 
     # Дедлайн единого окна финальной записи (AD-004); None — обычный режим исполнения.
     _flush_deadline: float | None = None
@@ -6646,37 +6532,26 @@ class Handler(BaseHTTPRequestHandler):
         self._send(code, {"error": {"message": message, "type": reason, "code": code}})
 
     def _acquire_slot(self, keepalive) -> str:
-        """Wait fairly using the semaphore interface and a separate queue deadline."""
-        slots, acquired = _slots, False
-        poll_s = slot_and_session.queue_poll_interval_s()
-
-        def admitted() -> str:
+        """Захватить слот через core.slot_acquire.acquire_slot_timed с замером queue_wait_ms."""
+        slots = _slots
+        deadline = time.monotonic() + QUEUE_TIMEOUT_S
+        t_req_start = self._t_req_start
+        if all((isinstance(t_req_start, (int, float)), _new_flag("extended_timeout_enabled"))):
+            deadline = min(deadline, float(cast(float, t_req_start)) + T_REQ_BUDGET_S - T_RESERVE_S)
+        opts = SlotWaitOptions(
+            poll_s=slot_and_session.queue_poll_interval_s(),
+            keepalive=keepalive,
+            keepalive_interval_s=_lsc.queue_keepalive_interval_s(config_path=DYNAMIC_CONFIG_PATH),
+        )
+        outcome, wait_ms = acquire_slot_timed(
+            slots, max(0.0, deadline - time.monotonic()), self._job_client_gone, opts
+        )
+        self._last_queue_wait_ms = wait_ms
+        if dict(ok=True).get(outcome, False):
             _maybe_checkpoint_sqlite_wal()
             return ""
-
-        try:
-            if self._job_client_gone():
-                return "client_gone"
-            acquired = slots.acquire(blocking=False)
-            if acquired:
-                return admitted()
-            deadline = time.monotonic() + QUEUE_TIMEOUT_S
-            t_req_start = self._t_req_start
-            if t_req_start is not None and _new_flag("extended_timeout_enabled"):
-                deadline = min(deadline, t_req_start + T_REQ_BUDGET_S - T_RESERVE_S)
-            while time.monotonic() < deadline:
-                if self._job_client_gone():
-                    return "client_gone"
-                wait_s = min(poll_s, max(0.0, deadline - time.monotonic()))
-                acquired = slots.acquire(timeout=wait_s)
-                if acquired:
-                    return admitted()
-                if keepalive is not None and not keepalive():
-                    return "client_gone"
-            return "queue_timeout"
-        finally:
-            if not acquired:
-                getattr(slots, "cancel_wait", lambda: None)()
+        getattr(slots, "cancel_wait", lambda: None)()
+        return {"client_gone": "client_gone"}.get(outcome, "queue_timeout")
 
     def _execute(
         self,
@@ -6808,10 +6683,15 @@ class Handler(BaseHTTPRequestHandler):
             return out
 
         while True:
-            if turn_complete is not None and run.q.empty() and turn_complete():
-                stopped = state("done", 0)
-                stopped["tool_turn_stop"] = True
-                return stopped
+            if all((not isinstance(turn_complete, type(None)), run.q.empty())):
+                dec = resolve_tool_turn_stop(
+                    turn_complete,
+                    proc_exited=not isinstance(run.proc.poll(), type(None)),
+                    result_received=all((bool(result_ev), not result_error, not dict(ERROR=True).get(str(result_ev.get("status", "")).upper(), False))),
+                )
+                if isinstance(dec, SettleDecision):
+                    if dec.should_stop:
+                        return dict(state("done", 0), tool_turn_stop=dec.tool_turn_stop, tool_turn_clean_eof=dec.tool_turn_clean_eof)
             now = time.monotonic()
             ext = policy is not None and _new_flag("extended_timeout_enabled")
             if ext:
@@ -6909,10 +6789,11 @@ class Handler(BaseHTTPRequestHandler):
                         )
             if kind == "init":
                 conversation_id = str(payload.get("conversation_id") or "")
+                self._observed_cid = conversation_id
                 _log(
                     f"init conversation={conversation_id[:8] or '-'} "
                     f"tools={payload.get('tools')} "
-                    f"permission_mode={payload.get('permission_mode')}"
+                    f"permission_mode={payload.get('permission_mode')} {run.tag}"
                 )
             elif kind == "reasoning":
                 add_reasoning(str(payload))
@@ -7043,7 +6924,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._run_once_impl(ctx, *callbacks)
         try:
             job, owner = _JOB_REGISTRY.attach(
-                key, str(ctx["model"]), str(ctx["full_prompt"])
+                key, str(ctx["model"]), resolve_ctx_prompt(ctx, "full_prompt")
             )
         except JobConflict:
             return {"state": "job_conflict", "text": "", "rc": 1}
@@ -7286,7 +7167,9 @@ class Handler(BaseHTTPRequestHandler):
                     f"exec model={model} effort={effort} effort_source={ctx['effort_source']} "
                     f"prompt_bytes={len(ctx['prompt'].encode())} "
                     f"tools={ctx['tools_count']} resume={1 if ctx.get('conversation_id') else 0} "
-                    f"sess={'agentic' if ctx.get('sess_key') else 'plain'} {tag}"
+                    f"sess={'agentic' if ctx.get('sess_key') else 'plain'} "
+                    f"queue_wait_ms={getattr(self, '_last_queue_wait_ms', 0)} "
+                    f"cloud_mode={_lsc.classify_cloud_mode(os.environ)} {tag}"
                 )
                 try:
                     run = Run(
@@ -7356,6 +7239,8 @@ class Handler(BaseHTTPRequestHandler):
                             else {}
                         ),
                     )
+                    d_en, d_max = _lsc.usage_drain_settings(config_path=DYNAMIC_CONFIG_PATH)
+                    _u_fin.ensure_drained_before_usage(run, out, drain_max_s=d_max, enabled=d_en)
                     self._attach_resolved_usage(run, out, model)
                     _TURN_RESILIENCE.recover(ctx, run, out, _log)
                     finalize = ctx.get("finalize_timeout")
@@ -7449,7 +7334,7 @@ class Handler(BaseHTTPRequestHandler):
                     )
                     ctx["hot_resumed"] = False
                     ctx["conversation_id"] = ""
-                    ctx["prompt"] = ctx["full_prompt"]
+                    ctx["prompt"] = resolve_ctx_prompt(ctx, "full_prompt")
                     if (
                         out["state"] == "agy_error"
                         and not delivered
@@ -7479,17 +7364,16 @@ class Handler(BaseHTTPRequestHandler):
                     f"err={_err_summary(out.get('err'), 120)!r}, retry {attempt} {tag}"
                 )
                 time.sleep(_retry_pause_s(attempt))
-            if out.get("tool_turn_stop"):
-                # Ход прерван после <tool_call>: разговор agy не завершён штатно и
-                # горячей сессией не служит (следующий ход — холодный, с историей).
-                if ctx.get("hot_resumed"):
-                    _session_invalidate(ctx["sess_key"], str(ctx["conversation_id"]))
-            elif (
-                out.get("state") == "done"
-                and out.get("conversation_id")
-                and ctx.get("sess_key")
-            ):
-                _session_commit(ctx["sess_key"], str(out["conversation_id"]))
+            out_cid = str(next(filter(None, (out.get("conversation_id"),)), ""))
+            commit_act = decide_session_commit(
+                state=str(out.get("state", "")), rc=out.get("rc") if isinstance(out.get("rc"), int) else None,
+                tool_turn_stop=bool(out.get("tool_turn_stop")), conversation_id=out_cid,
+                cid_valid=bool(_CID_RE.fullmatch(out_cid)),
+            )
+            if all((dict(commit=True).get(commit_act, False), bool(ctx.get("sess_key")))):
+                _session_commit(ctx["sess_key"], out_cid)
+            elif all((dict(invalidate=True).get(commit_act, False), bool(ctx.get("hot_resumed")), bool(ctx.get("sess_key")))):
+                _session_invalidate(ctx["sess_key"], str(ctx["conversation_id"]))
             if out.get("state") != "client_gone":
                 _last_ok[0] = (
                     time.monotonic()
@@ -7522,6 +7406,8 @@ class Handler(BaseHTTPRequestHandler):
         `resolved` — итог `_resolve_step_usage` (флаг включён): одна и та же форма
         для JSON и SSE; без него — прежнее отображение сырого usage.
         """
+        if not should_emit_wire_usage(resolved):
+            return {}
         if isinstance(resolved, dict):
             wire = cast("dict[str, object]", resolved).get("wire")
             if isinstance(wire, dict):
@@ -7716,6 +7602,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         t_req_start = time.monotonic()  # старт бюджета запроса: до admission
+        self._pending_response_headers = None
+        self._last_queue_wait_ms = 0
+        self._observed_cid = ""
         if not _auth_ok(self):
             # Непрочитанное тело иначе будет разобрано как следующий запрос keep-alive.
             self.close_connection = True
@@ -7858,16 +7747,16 @@ class Handler(BaseHTTPRequestHandler):
             universal = _is_image_fallback_enabled()
             images: list[dict[str, object]] = []
             render_messages: list[object] = messages
-            stripped_full_prompt = ""
+            stripped_base: LazyPromptMaterializer | None = None
             force_cold = False
             if universal:
                 # Рендер без raw dict-content и неперечисленных ключей — всегда,
                 # в т. ч. когда media нет: его читают и cold, и hot-resume путь.
                 render_messages = _universal_render_messages(messages)
                 image_parts, other_media = _media_part_counts(messages)
-                # Всегда нормализуем историю: любой cold/downgrade-путь берёт
-                # промпт только отсюда, а не из legacy `_flatten_content`.
-                stripped_full_prompt = _messages_to_stripped_prompt(messages, reserve)
+                stripped_base = LazyPromptMaterializer(
+                    lambda: _messages_to_stripped_prompt(messages, reserve)
+                )
                 if image_parts or other_media:
                     if not _is_image_input_enabled():
                         _log_image_fallback(
@@ -7933,31 +7822,20 @@ class Handler(BaseHTTPRequestHandler):
                     model_len,
                 )
                 return
-            if force_cold or (universal and not images):
-                full_prompt = stripped_full_prompt
-            else:
-                full_prompt = _messages_to_prompt(
-                    render_messages, images, reserve_bytes=reserve
+            def _wrap_proto(text: str, attached: bool) -> str:
+                wrapped = (
+                    _with_tools_protocol(text, tools, tool_choice, has_attachments=attached)
+                    if emulate_tools
+                    else _with_pure_text_protocol(text, has_attachments=attached)
                 )
-                if universal:
-                    stripped_full_prompt = stripped_full_prompt or full_prompt
-            full_attached = bool(images) and not force_cold
-            if emulate_tools:
-                full_prompt = _with_tools_protocol(
-                    full_prompt, tools, tool_choice, has_attachments=full_attached
-                )
-                if stripped_full_prompt:
-                    stripped_full_prompt = _with_tools_protocol(
-                        stripped_full_prompt, tools, tool_choice, has_attachments=False
-                    )
-            else:
-                full_prompt = _with_pure_text_protocol(
-                    full_prompt, has_attachments=full_attached
-                )
-                if stripped_full_prompt:
-                    stripped_full_prompt = _with_pure_text_protocol(
-                        stripped_full_prompt, has_attachments=False
-                    )
+                return wrapped
+
+            full_mat, stripped_mat = _lsc.build_lazy_prompt_pair(
+                stripped_base,
+                lambda: _messages_to_prompt(render_messages, images, reserve_bytes=reserve),
+                _wrap_proto,
+                (any((force_cold, not images)), all((bool(images), not force_cold))),
+            )
             extra = (
                 req.get("extra_body") if isinstance(req.get("extra_body"), dict) else {}
             )
@@ -7997,7 +7875,7 @@ class Handler(BaseHTTPRequestHandler):
             # Горячие сессии — только агентным запросам с инструментами. Фоновые и
             # plain-запросы (в т. ч. генерация заголовка DSH, tools=0) стор не читают
             # и не пишут: ни claim, ни commit, ни invalidate.
-            chat_id, chat_id_invalid = _request_chat_id(
+            chat_id, chat_id_invalid, continuity_scope = _resolve_chat_context(
                 self.headers, cast(dict, extra), req if isinstance(req, dict) else None
             )
             sess_key: tuple[str, ...] | None = (
@@ -8057,7 +7935,7 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 conversation_id = ""
             is_resumed = False
-            prompt = full_prompt
+            prompt = ""
             if force_cold:
                 # Media убраны из истории, либо malformed/unowned CID:
                 # ход идёт холодным text-only с полной историей.
@@ -8077,14 +7955,16 @@ class Handler(BaseHTTPRequestHandler):
                     prompt, resumed_attached = _resumed_turn_prompt(
                         render_messages, images, reserve
                     )
-                    if emulate_tools:
-                        prompt = _with_tools_protocol(
-                            prompt, tools, tool_choice, has_attachments=resumed_attached
-                        )
-                    else:
-                        prompt = _with_pure_text_protocol(
-                            prompt, has_attachments=resumed_attached
-                        )
+                    prompt = _wrap_proto(prompt, resumed_attached)
+            lazy_on = _lsc.lazy_prompt_enabled(config_path=DYNAMIC_CONFIG_PATH)
+            if not is_resumed:
+                prompt = full_mat.get()
+            full_prompt_val: object = full_mat if all((is_resumed, lazy_on)) else full_mat.get()
+            stripped_val: object = stripped_mat if all((is_resumed, lazy_on)) else stripped_mat.get()
+            req_id, sub_id = extract_correlation(
+                self.headers, max_len=_lsc.corr_max_len(config_path=DYNAMIC_CONFIG_PATH)
+            )
+            _anchor_meta = (messages, continuity_scope, chat_id, _CID_RE)
             ctx = {
                 "registry_use_cid": use_cid,
                 "registry_owned_cid": owned_cid,
@@ -8101,7 +7981,7 @@ class Handler(BaseHTTPRequestHandler):
                 "turn_id": turn_id,
                 "sess_key": sess_key,
                 "hot_resumed": is_resumed,
-                "full_prompt": full_prompt,
+                "full_prompt": full_prompt_val,
                 "model": model_id,
                 "model_len": model_len,
                 "effort": effort,
@@ -8110,15 +7990,21 @@ class Handler(BaseHTTPRequestHandler):
                 "cwd": cwd,
                 "tools_count": tools_count,
                 "conversation_id": conversation_id,
+                "cid_re": _CID_RE,
+                "dynamic_config_path": DYNAMIC_CONFIG_PATH,
+                "register_post_turn": lambda om: _lsc.register_post_turn_if_committed(
+                    om, ctx, _CONTINUITY, _anchor_meta, config_path=DYNAMIC_CONFIG_PATH
+                ),
                 "tag": (
                     f"client={self._client_tag()} "
                     f"ua={(self.headers.get('User-Agent') or '-')[:60]}"
+                    f"{format_log_corr_suffix(req_id, sub_id)}"
                 ),
                 "stream": bool(req.get("stream")),
                 "images": images,
                 "img_dir": img_dir,
                 "universal_fallback": universal,
-                "stripped_full_prompt": stripped_full_prompt,
+                "stripped_full_prompt": stripped_val,
             }
             if ctx["stream"]:
                 self._serve_sse(ctx)
@@ -8204,6 +8090,7 @@ class Handler(BaseHTTPRequestHandler):
         if tool_turn is not None:
             ctx["tool_stop"] = tool_turn.turn_complete
             ctx["tool_calls_emitted"] = lambda: bool(tool_turn.calls)
+            ctx["emitted_call_ids"] = lambda: [str(c.get("id", "")) for c in tool_turn.calls]
 
         def build_payload(
             out: dict,
@@ -8220,16 +8107,18 @@ class Handler(BaseHTTPRequestHandler):
                 # OpenAI-совместимое поле мышления: Harness читает его из сообщения
                 # ассистента так же, как из дельты потока.
                 message["reasoning_content"] = reasoning
+            u_pay = self._usage_payload(
+                next(filter(None, (out.get("usage"),)), {}), out.get("usage_resolved")
+            )
             payload = {
                 "id": f"chatcmpl-agy-{uuid.uuid4().hex[:12]}",
                 "object": "chat.completion",
                 "created": int(time.time()),
                 "model": ctx["model"],
                 "choices": [{"index": 0, "message": message, "finish_reason": finish_reason}],
-                "usage": self._usage_payload(
-                    out.get("usage") or {}, out.get("usage_resolved")
-                ),
             }
+            if u_pay:
+                payload["usage"] = u_pay
             if out.get("conversation_id"):
                 payload["conversation_id"] = out["conversation_id"]
             return payload
@@ -8305,6 +8194,14 @@ class Handler(BaseHTTPRequestHandler):
         if err is not None:
             self._send(err["code"], {"error": err})
             return
+        reg = ctx.get("register_post_turn")
+        if callable(reg):
+            reg(out)
+        if all((not out.get("tool_turn_stop"), dict(done=True).get(str(out.get("state", "")), False))):
+            self._pending_response_headers = _lsc.build_conv_headers(
+                out.get("conversation_id"), _CID_RE,
+                peer_is_loopback=_lsc.is_loopback_peer(self), config_path=DYNAMIC_CONFIG_PATH,
+            )
         if tool_turn is None:
             self._send(
                 200, build_payload(out, str(out.get("text") or ""), reasoning, "stop")

@@ -1,14 +1,7 @@
 """Непрерывность чата без клиентского chat id: цепочка по дайджесту префикса.
 
-Чистый домен (только stdlib, без I/O и env). Клиент без chat id присылает на
-каждом ходе полную историю. Индекс запоминает дайджест увиденной истории;
-ход N+1, чей префикс (всё до последнего assistant) совпал с ним, получает тот
-же `chain` (горячая сессия). Ссылка ищется и регистрируется только для среза
-с криптографическим якорем — assistant.tool_calls[].id (выдан мостом, угадать
-нельзя): ход 1 и 2 холодные, ход 3..N горячие. Запись одноразовая (pop),
-идентичные истории превращаются в tombstone — склейка чужих диалогов исключена.
-
-В лог уходят только статус и счётчик, без текста сообщений.
+Чистый домен (stdlib, без I/O и env): дайджест префикса и пост-ходовой
+криптоякорь assistant.tool_calls[].id (одноразовый pop + tombstone).
 """
 
 from __future__ import annotations
@@ -24,6 +17,12 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import cast, final
 
+from core.continuity_anchor_policy import (
+    PostTurnAnchorIndex,
+    build_post_turn_anchor_key,
+    extract_valid_bridge_call_ids,
+)
+
 _DEFAULT_TTL_S = 1800.0
 _PART_KEYS = (
     *"type text image_url url detail source media_type data".split(),
@@ -38,6 +37,7 @@ class ContinuityConfig:
     max_links: int = 4096
     ttl_s: float = _DEFAULT_TTL_S
     log_fn: Callable[[str], None] | None = None
+    post_turn_anchor_enabled: bool | Callable[[], bool] = True
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "max_links", max(1, int(self.max_links)))
@@ -124,15 +124,27 @@ def _has_tool_call_anchor(canon_slice: Sequence[dict[str, object]]) -> bool:
     )
 
 
+def _last_assistant_index(canon: list[dict[str, object]]) -> int:
+    hits = [i for i, m in enumerate(canon) if dict(assistant=True).get(str(m.get("role")), False)]
+    return hits[-1] if hits else -1
+
+
 def _prefix_digest(canon: list[dict[str, object]], scope: str) -> str | None:
     """Дайджест истории до последнего assistant; None — нет якорного префикса."""
-    last = -1
-    for idx, msg in enumerate(canon):
-        if msg.get("role") == "assistant":
-            last = idx
-    if last <= 0 or not _has_tool_call_anchor(canon[:last]):
-        return None
-    return _digest(canon[:last], scope)
+    last = _last_assistant_index(canon)
+    ok = all((last > 0, _has_tool_call_anchor(canon[: max(0, last)])))
+    result = _digest(canon[:last], scope) if ok else None
+    return result
+
+
+def _post_anchor_key(canon: list[dict[str, object]], scope: str) -> str | None:
+    """Ключ пост-ходового якоря по (scope, digest(canon[:last]), bridge call_ids в canon[last])."""
+    last = _last_assistant_index(canon)
+    result: str | None = None
+    if last > 0:
+        call_ids = extract_valid_bridge_call_ids(canon[last].get("tool_calls"))
+        result = build_post_turn_anchor_key(scope, _digest(canon[:last], scope), call_ids)
+    return result
 
 
 @final
@@ -150,6 +162,11 @@ class ContinuityIndex:
         self._new_chain = new_chain or _default_chain
         self._lock = threading.Lock()
         self._links: OrderedDict[str, tuple[str | None, float]] = OrderedDict()
+        self._post_anchors = PostTurnAnchorIndex(self._config.max_links, self._config.ttl_s)
+
+    def _post_enabled(self) -> bool:
+        flag = self._config.post_turn_anchor_enabled
+        return bool(flag()) if callable(flag) else bool(flag)
 
     def link_count(self) -> int:
         with self._lock:
@@ -162,16 +179,23 @@ class ContinuityIndex:
             if now - ts <= ttl:
                 break
             _ = self._links.popitem(last=False)
+        self._post_anchors.expire(now)
 
-    def _take_chain(self, prefix: str | None) -> tuple[str, str]:
-        if prefix is None:
-            return self._new_chain(), "init"
-        entry = self._links.pop(prefix, None)
-        if entry is None:
-            return self._new_chain(), "miss"
-        if entry[0] is None:
-            return self._new_chain(), "tombstone"
-        return entry[0], "hit"
+    def _take_chain(
+        self, prefix: str | None, post_key: str | None = None, now: float = 0.0
+    ) -> tuple[str, str]:
+        entry = self._links.pop(prefix, None) if isinstance(prefix, str) else None
+        result: tuple[str, str] | None = None
+        if isinstance(entry, tuple):
+            result = (entry[0], "hit") if isinstance(entry[0], str) else (self._new_chain(), "tombstone")
+        elif all((isinstance(post_key, str), self._post_enabled())):
+            chain, pstatus = self._post_anchors.claim(str(post_key), now)
+            if isinstance(chain, str):
+                result = (chain, "post_hit")
+            elif dict(tombstone=True).get(pstatus, False):
+                result = (self._new_chain(), "tombstone")
+        fallback = (self._new_chain(), "miss" if isinstance(prefix, str) else "init")
+        return result if isinstance(result, tuple) else fallback
 
     def _register(self, full: str, chain: str, now: float, status: str) -> str:
         existing = self._links.get(full)
@@ -185,17 +209,38 @@ class ContinuityIndex:
             _ = self._links.popitem(last=False)
         return status
 
+    def register_post_turn(
+        self,
+        messages: object,
+        scope: str,
+        chain: str,
+        emitted_call_ids: Sequence[str],
+        *,
+        enabled: bool = True,
+    ) -> bool:
+        """Регистрирует пост-ходовой криптоякорь (вызывать строго после tool_turn.finish())."""
+        ok = False
+        if all((enabled, self._post_enabled(), isinstance(messages, list), bool(messages), bool(chain))):
+            canon = [_canon_message(m) for m in cast("list[object]", messages)]
+            key = build_post_turn_anchor_key(scope, _digest(canon, scope), emitted_call_ids)
+            if isinstance(key, str):
+                with self._lock:
+                    _ = self._post_anchors.register(key, chain, self._clock())
+                ok = True
+        return ok
+
     def resolve(self, messages: object, scope: str = "") -> str:
         """chain для истории; пустая строка — истории нет."""
         if not isinstance(messages, list) or not messages:
             return ""
         canon = [_canon_message(m) for m in cast("list[object]", messages)]
         prefix = _prefix_digest(canon, scope)
+        post_key = _post_anchor_key(canon, scope)
         full = _digest(canon, scope) if _has_tool_call_anchor(canon) else None
         with self._lock:
             now = self._clock()
             self._expire(now)
-            chain, status = self._take_chain(prefix)
+            chain, status = self._take_chain(prefix, post_key, now)
             if full is not None:
                 status = self._register(full, chain, now, status)
             count = len(self._links)
