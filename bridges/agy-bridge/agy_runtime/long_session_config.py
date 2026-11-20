@@ -35,26 +35,33 @@ def _present(val: object) -> bool:
     return not isinstance(val, type(None))
 
 
+def _read_json_file(path: Path, hit: tuple[float, tuple[object, ...], dict[str, object]] | None) -> tuple[tuple[object, ...], dict[str, object]]:
+    sig: tuple[object, ...] = ()
+    result: dict[str, object] = {}
+    try:
+        st = os.stat(path)
+        sig = (st.st_mtime_ns, st.st_size, st.st_ino)
+        same = bool(hit) and not set(sig).symmetric_difference(hit[1]) if hit else False
+        if same and hit:
+            result = hit[2]
+        else:
+            parsed = cast("object", json.loads(path.read_text(encoding="utf-8")))
+            result = cast("dict[str, object]", parsed) if isinstance(parsed, dict) else {}
+    except (OSError, ValueError):
+        result = {}
+    return sig, result
+
+
 def _load_dynamic_config(config_path: Path | None = None) -> dict[str, object]:
     path = config_path if _present(config_path) else _DEFAULT_CONFIG_PATH
     key = str(path)
     now = time.monotonic()
     with _CACHE_LOCK:
         hit = _CACHE.get(key)
-    fresh = bool(hit) and (now - hit[0]) < _CACHE_TTL_S if hit else False
+    fresh = (now - hit[0]) < _CACHE_TTL_S if hit else False
     result: dict[str, object] = hit[2] if all((bool(hit), fresh)) and hit else {}
     if not fresh:
-        sig: tuple[object, ...] = ()
-        try:
-            st = os.stat(path)
-            sig = (st.st_mtime_ns, st.st_size, st.st_ino)
-            if hit and not set(sig).symmetric_difference(hit[1]) and len(sig) == len(hit[1]):
-                result = hit[2]
-            else:
-                parsed = cast("object", json.loads(path.read_text(encoding="utf-8")))
-                result = cast("dict[str, object]", parsed) if isinstance(parsed, dict) else {}
-        except (OSError, ValueError):
-            result = {}
+        sig, result = _read_json_file(path, hit)
         with _CACHE_LOCK:
             _CACHE[key] = (now, sig, result)
     return result

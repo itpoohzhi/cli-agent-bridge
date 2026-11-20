@@ -11,9 +11,11 @@ from types import SimpleNamespace
 import pytest
 
 _ROOT = Path(__file__).resolve().parents[1]
-for _p in (str(_ROOT), str(_ROOT / "bridges/agy-bridge")):
-    if _p not in sys.path:
-        sys.path.insert(0, _p)
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
+_AGY_DIR = str(_ROOT / "bridges/agy-bridge")
+if _AGY_DIR not in sys.path:
+    sys.path.append(_AGY_DIR)
 
 from agy_runtime import long_session_config as lsc  # noqa: E402
 from core.correlation_contract import (  # noqa: E402

@@ -10,8 +10,9 @@ import threading
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
+from core.passthrough_headers import allow_client_response_header
 from core.tool_mode import ToollessTagPolicy
 
 _Env = Mapping[str, str]
@@ -178,3 +179,20 @@ _SYNTHESIZE_BASH_DESC_SOURCE = DynamicFlagSource(
 def synthesize_required_bash_desc_enabled() -> bool:
     """Состояние флага ``BRIDGE_SYNTHESIZE_REQUIRED_BASH_DESC_ENABLED`` (по умолчанию True)."""
     return _SYNTHESIZE_BASH_DESC_SOURCE.enabled(fallback=True)
+
+
+def allow_hub_client_response_header(
+    name: str,
+    blocked: frozenset[str],
+    handler: object,
+    loopback_peers: tuple[str, ...],
+) -> bool:
+    """Fail-closed egress-фильтр хаба: проверяет loopback client_address и BRIDGE_EXPOSE_INTERNAL_HEADERS."""
+    addr: object = getattr(handler, "client_address", None)
+    seq = cast("tuple[object, ...] | list[object]", addr) if isinstance(addr, (tuple, list)) else ()
+    host: object = seq[0] if seq else ""
+    is_loopback = all((isinstance(host, str), frozenset(loopback_peers).__contains__(str(host))))
+    expose = env_bool(os.environ, ("BRIDGE_EXPOSE_INTERNAL_HEADERS",), True)
+    return allow_client_response_header(
+        name, blocked, peer_is_loopback=is_loopback, expose_internal=expose
+    )

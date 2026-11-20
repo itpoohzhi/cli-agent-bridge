@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Set as AbstractSet
 from string import ascii_letters, digits
+from typing import Final
+
+SAFE_PUBLIC_X_HEADERS: Final[frozenset[str]] = frozenset(("x-request-id",))
+SAFE_PUBLIC_X_PREFIXES: Final[tuple[str, ...]] = ("x-ratelimit-",)
 
 _TOKEN_CHARS = frozenset(ascii_letters + digits + "!#$%&'*+-.^_`|~")
 _HOP_HEADERS = frozenset(
@@ -86,3 +90,21 @@ def outbound_headers(
             raise ValueError("outbound_credential_invalid")
         forwarded["Authorization"] = "Bearer " + credential
     return forwarded
+
+
+def allow_client_response_header(
+    name: str,
+    blocked: AbstractSet[str],
+    *,
+    peer_is_loopback: bool,
+    expose_internal: bool = True,
+) -> bool:
+    """Fail-closed allow-list для x-* на non-loopback: наружу идут только x-request-id и x-ratelimit-*."""
+    low = name.lower()
+    is_blocked = blocked.__contains__(low)
+    is_public_x = any((SAFE_PUBLIC_X_HEADERS.__contains__(low), low.startswith(SAFE_PUBLIC_X_PREFIXES)))
+    is_internal_x = all((low.startswith("x-"), not is_public_x))
+    allowed = False
+    if not is_blocked:
+        allowed = all((peer_is_loopback, expose_internal)) if is_internal_x else True
+    return allowed
