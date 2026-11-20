@@ -35,9 +35,10 @@ class TurnUsageResolution:
 
 
 def _count_or_none(value: object) -> int | None:
+    is_int = all((isinstance(value, int), not isinstance(value, bool)))
     result: int | None = None
-    if isinstance(value, int) and not isinstance(value, bool):
-        result = value if value >= 0 else None
+    if is_int and isinstance(value, int):
+        result = value if max(0, value) - value == 0 else None
     return result
 
 
@@ -51,7 +52,7 @@ def _raw_cache_tokens(raw: Mapping[str, object]) -> tuple[int | None, bool]:
     snake = raw.get("cache_read_tokens")
     camel = raw.get("cacheReadTokens")
     both = all((not isinstance(snake, type(None)), not isinstance(camel, type(None))))
-    conflict = both and snake != camel
+    conflict = all((both, snake != camel))
     picked = snake if not isinstance(snake, type(None)) else camel
     result = (None, True) if conflict else (_count_or_none(picked), False)
     return result
@@ -86,11 +87,8 @@ def _resolve_from_last_step(
         logs = (
             fmt
             % (
-                snap.observed_planner_steps,
-                int(snap.observed_planner_steps_saturated),
-                snap.invalid_records_count,
-                _num_text(raw_out),
-                _num_text(raw_th),
+                snap.observed_planner_steps, int(snap.observed_planner_steps_saturated),
+                snap.invalid_records_count, _num_text(raw_out), _num_text(raw_th),
             ),
         )
     data: dict[str, object] = {
@@ -103,8 +101,9 @@ def _resolve_from_last_step(
 
 def _over_window(raw_in: int | None, cache_sum: int, window: int | None) -> bool:
     result = False
-    if isinstance(window, int) and isinstance(raw_in, int):
-        result = any((raw_in >= window, (raw_in + cache_sum) > window))
+    if isinstance(window, int):
+        if isinstance(raw_in, int):
+            result = any((raw_in >= window, (raw_in + cache_sum) > window))
     return result
 
 
@@ -119,6 +118,24 @@ def _result_reason(conflict: bool, missing: bool, success: bool, has_window: boo
     elif not has_window:
         reason = "no_window"
     return reason
+
+
+def _cum_log(
+    raw_meta: tuple[int | None, int | None, int | None, int | None, bool],
+    stats: tuple[int, int, int, int, int, int],
+    inconsistent: bool,
+) -> str:
+    raw_in, raw_out, raw_th, raw_cache, _ = raw_meta
+    window, divisor, prompt, turns, tools, obs_steps = stats
+    fmt = (
+        "usage-cumulative-fallback raw_in=%s raw_cache=%s window=%d n=%d "
+        + "prompt=%d turns=%d tools=%d observed_steps=%d inconsistent=%d "
+        + "raw_output=%s raw_thinking=%s"
+    )
+    return fmt % (
+        _num_text(raw_in), _num_text(raw_cache), window, divisor, prompt,
+        turns, tools, obs_steps, int(inconsistent), _num_text(raw_out), _num_text(raw_th),
+    )
 
 
 def _resolve_from_result(
@@ -137,29 +154,15 @@ def _resolve_from_result(
     tools = _count_or_none(out.get("tool_events")) or 0
     divisor = max(2, turns + tools, obs_steps)
     missing = all((not isinstance(raw_in, int), not isinstance(raw_cache, int), not conflict))
-    if use_cum and isinstance(raw_in, int) and isinstance(window, int):
-        source, prompt, reason = "cumulative_estimate", min(raw_in // divisor, window - 1), "over_window"
-    else:
-        source = "result"
-        prompt = (raw_in if isinstance(raw_in, int) else 0) + cache_sum
-        reason = _result_reason(conflict, missing, success, isinstance(window, int))
+    win_val = window if isinstance(window, int) else 0
+    in_val = raw_in if isinstance(raw_in, int) else 0
+    source = "cumulative_estimate" if use_cum else "result"
+    prompt = min(in_val // divisor, win_val - 1) if use_cum else (in_val + cache_sum)
+    reason = "over_window" if use_cum else _result_reason(conflict, missing, success, isinstance(window, int))
     details, inconsistent = normalize_prompt_cache_details(prompt, raw_cache)
     fresh_comp = (raw_out if isinstance(raw_out, int) else 0) + (raw_th if isinstance(raw_th, int) else 0)
     completion = fresh_comp if all((not resume, not obs_steps)) else 0
-    logs: tuple[str, ...] = ()
-    if use_cum and isinstance(window, int):
-        fmt = (
-            "usage-cumulative-fallback raw_in=%s raw_cache=%s window=%d n=%d "
-            + "prompt=%d turns=%d tools=%d observed_steps=%d inconsistent=%d "
-            + "raw_output=%s raw_thinking=%s"
-        )
-        logs = (
-            fmt
-            % (
-                _num_text(raw_in), _num_text(raw_cache), window, divisor, prompt,
-                turns, tools, obs_steps, int(inconsistent), _num_text(raw_out), _num_text(raw_th),
-            ),
-        )
+    logs = (_cum_log(raw_meta, (win_val, divisor, prompt, turns, tools, obs_steps), inconsistent),) if use_cum else ()
     data: dict[str, object] = {
         "source": source, "reason": reason, "step_idx": None, "prompt": prompt,
         "completion": completion, "details": details, "inconsistent": inconsistent,
@@ -182,8 +185,11 @@ def resolve_turn_usage(
     raw_th = _count_or_none(raw.get("thinking_tokens"))
     raw_cache, conflict = _raw_cache_tokens(raw)
     last = snap.last_step_usage if snap else None
-    if last and snap:
-        calc, logs = _resolve_from_last_step(last, snap, raw_out, raw_th)
+    if last:
+        if snap:
+            calc, logs = _resolve_from_last_step(last, snap, raw_out, raw_th)
+        else:
+            calc, logs = _resolve_from_result(out, snap, window, resume, (raw_in, raw_out, raw_th, raw_cache, conflict))
     else:
         calc, logs = _resolve_from_result(out, snap, window, resume, (raw_in, raw_out, raw_th, raw_cache, conflict))
     prompt = cast("int", calc["prompt"])
@@ -197,18 +203,12 @@ def resolve_turn_usage(
     if isinstance(details, dict):
         wire["prompt_tokens_details"] = details
     resolved: dict[str, object] = {
-        "wire": wire,
-        "source": calc["source"],
-        "reason": calc["reason"],
-        "step_idx": calc["step_idx"],
-        "completeness": snap.completeness if snap else False,
+        "wire": wire, "source": calc["source"], "reason": calc["reason"],
+        "step_idx": calc["step_idx"], "completeness": snap.completeness if snap else False,
         "inconsistent": calc["inconsistent"],
         "cached": details["cached_tokens"] if isinstance(details, dict) else None,
-        "raw_in": raw_in,
-        "raw_out": raw_out,
-        "raw_thinking": raw_th,
-        "raw_total": _count_or_none(raw.get("total_tokens")),
-        "raw_cache": raw_cache,
+        "raw_in": raw_in, "raw_out": raw_out, "raw_thinking": raw_th,
+        "raw_total": _count_or_none(raw.get("total_tokens")), "raw_cache": raw_cache,
         "emit_wire_usage": calc["emit_wire_usage"],
     }
     return TurnUsageResolution(resolved=resolved, log_messages=logs)

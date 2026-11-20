@@ -35,7 +35,9 @@ def ensure_drained_before_usage(
                 buf = list(cast("list[object]", existing)) if isinstance(existing, list) else []
                 buf.extend(cast("list[object] | tuple[object, ...]", drained))
                 out["retained_events"] = buf
-        tail = getattr(run, "tail", None)
+        tail = getattr(run, "_tail", None)
+        if isinstance(tail, type(None)):
+            tail = getattr(run, "tail", None)
         thread = getattr(tail, "thread", None)
         join_fn = getattr(thread, "join", None)
         rem_join = _remaining(deadline, clock)

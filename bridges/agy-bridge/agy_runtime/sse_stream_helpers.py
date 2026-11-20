@@ -6,10 +6,12 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import uuid
 from typing import Any, cast, final
 
 from agy_runtime.content_arbiter import _ContentArbiter
+from agy_runtime.long_session_config import build_conv_headers, is_loopback_peer
 from agy_runtime.midstream_resilience import _owner_time
 from agy_runtime.stream_relay import StreamRelay
 from agy_runtime.tool_progress import _ToolProgress
@@ -67,6 +69,7 @@ class SseStreamSession:
                 self.on_text, self.on_reasoning, self.on_calls, )
             ctx["tool_stop"] = self.tool_turn.turn_complete
             ctx["tool_calls_emitted"] = lambda: bool(self.tool_turn.calls)
+            ctx["emitted_call_ids"] = lambda: [str(c.get("id") or "") for c in self.tool_turn.calls]
         self.stream_text = self.tool_turn.feed if self.tool_turn else self.on_text
         self.stream_reasoning = (
             self.tool_turn.feed_reasoning if self.tool_turn else self.on_reasoning )
@@ -76,9 +79,17 @@ class SseStreamSession:
         return self.disconnected
     def start(self, status: int, headers: list[tuple[str, str]]) -> None:
         h = self.handler
+        cid_pat = self.ctx.get("cid_re")
+        pat = cid_pat if isinstance(cid_pat, re.Pattern) else re.compile(r"^[0-9a-f-]{8,64}$")
+        conv_hdrs = build_conv_headers(
+            self.ctx.get("conversation_id"), pat,
+            peer_is_loopback=is_loopback_peer(h), config_path=self.ctx.get("dynamic_config_path"),
+        )
+        seen = {k.lower() for k, _ in headers}
+        extra = [(k, v) for k, v in conv_hdrs.items() if not seen.__contains__(k.lower())]
         try:
             h.send_response(status)
-            for key, value in ( *headers, ("Cache-Control", "no-cache"),
+            for key, value in ( *headers, *extra, ("Cache-Control", "no-cache"),
                 ("X-Accel-Buffering", "no"), ):
                 h.send_header(key, value)
             h.end_headers()
