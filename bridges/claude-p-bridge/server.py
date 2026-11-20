@@ -18,6 +18,7 @@ import signal
 import socket
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import uuid
@@ -32,7 +33,11 @@ for _p in (_REPO_ROOT, Path(__file__).resolve().parents[1]):
         sys.path.insert(0, str(_p))
 
 from core.chat_key import resolve_chat_key  # noqa: E402
-from core.proc_groups import live_proc_groups, spawn_registered  # noqa: E402
+from core.claude_zero_canon import (  # noqa: E402
+    CLAUDE_PRESERVED_CA_FILES, build_claude_zero_canon_env, build_claude_zero_canon_flags,
+    filter_claude_settings, filter_claude_state, serialize_claude_json,
+)
+from core.proc_groups import live_proc_groups, spawn_registered as _spawn_registered  # noqa: E402
 from core.subbridge_lifecycle import SubbridgeHooks, SubbridgeLifecycle  # noqa: E402
 from core.usage_wire import (  # noqa: E402
     CACHE_READ_KEYS,
@@ -223,61 +228,64 @@ WORKSPACE = ROOT / "workspace"
 
 _CLAUDE_HOME_LOCK = threading.Lock()
 _CLAUDE_HOME_INITIALIZED = False
+_CLAUDE_CA_FILES = tuple(sorted(CLAUDE_PRESERVED_CA_FILES))
 
+def _write_atomic(dest: Path, body: bytes) -> None:
+    if not dest.is_symlink() and dest.is_file() and (dest.stat().st_mode & 0o777) == 0o600 and dest.read_bytes() == body:
+        return
+    fd, tmp = tempfile.mkstemp(dir=str(dest.parent), prefix=".tmp_")
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(body)
+        os.replace(tmp, dest)
+    finally:
+        Path(tmp).unlink(missing_ok=True)
 
-def _prepare_claude_home() -> Path:
-    """Подготовить изолированный фиктивный HOME для claude -p (P0/P2 Zero-Canon).
+def _read_json_dict(path: Path) -> dict | None:
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        return raw if isinstance(raw, dict) else None
+    except (OSError, ValueError):
+        return None
 
-    В ~/.claude/ переносятся только файлы авторизации, настроек и сертификатов,
-    без глобальных инструкций (agents-global.md, CLAUDE.md) и пользовательских расширений.
-    Защита от race condition (F-001): потокобезопасная однократная инициализация под lock,
-    атомарная запись через временный файл (os.replace) и строгие права 0700/0600.
-    """
-    global _CLAUDE_HOME_INITIALIZED
-    real_claude = Path.home() / ".claude"
-    home = WORKSPACE / "runtime" / "claude-home"
-    claude_dir = home / ".claude"
-
-    if _CLAUDE_HOME_INITIALIZED and claude_dir.is_dir():
-        return home
-
-    with _CLAUDE_HOME_LOCK:
-        if _CLAUDE_HOME_INITIALIZED and claude_dir.is_dir():
-            return home
-
-        home.mkdir(parents=True, exist_ok=True)
-        claude_dir.mkdir(parents=True, exist_ok=True)
+def _sync_ca_files(real_claude: Path, claude_dir: Path) -> None:
+    claude_dir.mkdir(parents=True, exist_ok=True)
+    try: os.chmod(claude_dir, 0o700)
+    except OSError: pass
+    for name in _CLAUDE_CA_FILES:
         try:
-            os.chmod(claude_dir, 0o700)
-        except OSError:
-            pass
+            src = real_claude / name
+            if src.is_file(): _write_atomic(claude_dir / name, src.read_bytes())
+        except OSError: pass
+    for src in (real_claude / ".claude.json", real_claude.parent / ".claude.json"):
+        if src.is_file():
+            st = _read_json_dict(src)
+            if st is not None: _write_atomic(claude_dir / ".claude.json", serialize_claude_json(filter_claude_state(st)).encode("utf-8"))
+            break
 
-        allowed_files = (
-            "settings.json",
-            "aeza-8788-ca.pem",
-            "bundle-with-aeza.pem",
-            "policy-limits.json",
-            "policy-limits.json.signature.json",
-            "policy-limits.json.stamp.json",
-        )
+def spawn_registered(cmd: list, **kwargs: Any) -> subprocess.Popen:
+    raw = kwargs.get("env")
+    env, iso = (os.environ if raw is None else raw), str(WORKSPACE / "runtime" / "claude-home")
+    h = env.get("HOME", "") if raw is not None else ""
+    kwargs["env"] = build_claude_zero_canon_env(env, h if h and Path(h).resolve() != Path.home().resolve() else iso)
+    return _spawn_registered(cmd, **kwargs)
+for _a in ("unregister", "set_blocked"): setattr(spawn_registered, _a, getattr(_spawn_registered, _a))
 
-        for name in allowed_files:
-            source = real_claude / name
-            if source.is_file():
-                dest = claude_dir / name
-                tmp_dest = claude_dir / f".tmp_{name}_{uuid.uuid4().hex[:8]}"
-                try:
-                    shutil.copy2(source, tmp_dest)
-                    os.chmod(tmp_dest, 0o600)
-                    os.replace(tmp_dest, dest)
-                except OSError:
-                    if tmp_dest.exists():
-                        try:
-                            tmp_dest.unlink()
-                        except OSError:
-                            pass
-
-        _CLAUDE_HOME_INITIALIZED = True
+def _prepare_claude_home(claude_home: Path | None = None, real_home: Path | None = None) -> Path:
+    global _CLAUDE_HOME_INITIALIZED
+    use_cache = (claude_home, real_home) == (None, None)
+    real_claude = (real_home or Path.home()) / ".claude"
+    home = claude_home or WORKSPACE / "runtime" / "claude-home"
+    claude_dir = home / ".claude"
+    with _CLAUDE_HOME_LOCK:
+        if use_cache and _CLAUDE_HOME_INITIALIZED and claude_dir.is_dir():
+            return home
+        _sync_ca_files(real_claude, claude_dir)
+        src = real_claude / "settings.json"
+        raw = _read_json_dict(src) if src.is_file() else {}
+        if raw is not None:
+            _write_atomic(claude_dir / "settings.json", serialize_claude_json(filter_claude_settings(raw)).encode("utf-8"))
+            if use_cache: _CLAUDE_HOME_INITIALIZED = True
         return home
 MAX_CONCURRENT = int(os.environ.get("CLAUDE_P_BRIDGE_MAX_CONCURRENT", "32"))
 QUEUE_TIMEOUT_S = int(os.environ.get("CLAUDE_P_BRIDGE_QUEUE_TIMEOUT", "900"))
@@ -385,25 +393,14 @@ def _cleanup_img_dir(img_dir: Path | None) -> None:
 
 
 def _build_claude_cmd(model: str, effort: str, img_dir: Path | None = None) -> list:
-    """argv `claude -p`; с картинками — только встроенный Read по `--add-dir` (AD-003)."""
-    cmd = [
-        CLAUDE_BIN, "-p",
-        "--model", model,
-        "--effort", effort,
-        "--output-format", "stream-json",
-        "--verbose",
-        "--include-partial-messages",
-        "--strict-mcp-config",
-        "--mcp-config", str(MCP_CONFIG),
-    ]
-    if img_dir is not None:
-        cmd += ["--permission-mode", "dontAsk",
-                "--tools", "Read", "--allowedTools", f"Read({img_dir}/**)",
-                "--add-dir", str(img_dir)]
-    else:
-        # Встроенные инструменты отключены: действия идут только через DSH.
-        cmd += ["--permission-mode", "bypassPermissions", "--tools", ""]
-    return cmd
+    """argv `claude -p`; Zero-Canon флаги из core, с картинками — Read по `--add-dir` (AD-003)."""
+    cmd = [CLAUDE_BIN, "-p", "--model", model, "--effort", effort,
+           "--output-format", "stream-json", "--verbose", "--include-partial-messages",
+           "--mcp-config", str(MCP_CONFIG), *build_claude_zero_canon_flags(img_dir is not None)]
+    if img_dir is None:  # встроенные инструменты отключены: действия только через DSH
+        return cmd + ["--permission-mode", "bypassPermissions"]
+    return cmd + ["--permission-mode", "dontAsk", "--allowedTools", f"Read({img_dir}/**)",
+                  "--add-dir", str(img_dir)]
 
 
 def _effort(value: Any, model: str = MODEL_ID) -> str:

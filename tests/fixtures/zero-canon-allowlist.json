@@ -1,0 +1,175 @@
+{
+  "schema_version": "1.0",
+  "env_policy_version": "pol-env/3",
+  "review_profile_header": "X-Review-Profile",
+  "review_profile_value": "Zero-Canon",
+  "claude": {
+    "provenance": [
+      "seat_zero_canon.py",
+      "seat_zero_profile.py"
+    ],
+    "settings_allowlist": [
+      "env",
+      "apiKeyHelper",
+      "forceLoginMethod",
+      "forceLoginOrgUUID"
+    ],
+    "state_allowlist": [
+      "oauthAccount",
+      "userID",
+      "hasCompletedOnboarding",
+      "lastOnboardingVersion",
+      "customApiKeyResponses"
+    ],
+    "env_overlay": {
+      "CLAUDE_CONFIG_DIR": "/.claude"
+    }
+  },
+  "codex": {
+    "provenance": [
+      "seat_zero_canon.py",
+      "seat_zero_profile.py"
+    ],
+    "config_allowlist": [
+      "chatgpt_base_url",
+      "cli_auth_credentials_store",
+      "forced_chatgpt_workspace_id",
+      "forced_login_method",
+      "model_provider",
+      "model_providers",
+      "preferred_auth_method"
+    ],
+    "auth_files": [
+      ".codex/auth.json"
+    ],
+    "env_overlay": {
+      "CODEX_HOME": "/.codex"
+    }
+  },
+  "agy": {
+    "provenance": [
+      "seat_zero_canon.py",
+      "seat_zero_profile.py"
+    ],
+    "auth_files": [
+      ".gemini/oauth_creds.json",
+      ".gemini/google_accounts.json",
+      ".gemini/settings.json",
+      ".gemini/antigravity-cli/auth.json",
+      ".gemini/antigravity-cli/state.json"
+    ],
+    "symlink_dirs": [
+      ".gemini/antigravity-cli/bin",
+      ".gemini/antigravity-cli/builtin",
+      ".config/agy-launch",
+      ".local/bin",
+      ".config/antigravity-account-switch",
+      ".config/ai-route-switch"
+    ],
+    "forced_env": {
+      "BROWSER": "/usr/bin/false"
+    },
+    "stripped_env": [
+      "GH_TOKEN",
+      "GITHUB_TOKEN",
+      "GH_ENTERPRISE_TOKEN"
+    ],
+    "settings_allowlist": [
+      "selectedAuthType",
+      "theme",
+      "security",
+      "auth"
+    ],
+    "settings_override": {
+      "hooks": {},
+      "mcpServers": {}
+    }
+  },
+  "forbidden_flags": {
+    "provenance": [
+      "DEC-002",
+      "DEC-004"
+    ],
+    "claude": [
+      "--tools",
+      "--allowedTools",
+      "--disallowedTools",
+      "--setting-sources",
+      "--mcp-config",
+      "--strict-mcp-config",
+      "--dangerously-skip-permissions",
+      "--allow-dangerously-skip-permissions",
+      "--bare",
+      "--settings",
+      "--plugin-dir",
+      "--add-dir",
+      "-r",
+      "--resume",
+      "-c",
+      "--continue"
+    ],
+    "codex": [
+      "-s",
+      "--sandbox",
+      "-c",
+      "--config",
+      "-a",
+      "--ask-for-approval",
+      "-p",
+      "--profile",
+      "--add-dir",
+      "--dangerously-bypass-approvals-and-sandbox",
+      "--full-auto",
+      "--ephemeral"
+    ],
+    "agy": [
+      "--mode",
+      "--mcp-config",
+      "--yolo",
+      "-y",
+      "--approval-mode",
+      "--extensions",
+      "--include-directories"
+    ]
+  },
+  "argv_grammar": {
+    "provenance": [
+      "DEC-002",
+      "DEC-004"
+    ],
+    "unknown_rc": 64,
+    "unsupported_rc": 78,
+    "by_name": {
+      "claude": "claude",
+      "codex": "codex",
+      "agy": "agy",
+      "agy-cli.sh": "agy",
+      "agy.real": "agy",
+      "muse": "muse",
+      "muse-cli.sh": "muse",
+      "droid": "droid"
+    },
+    "unsupported_transports": [
+      "muse",
+      "droid"
+    ],
+    "insert": {
+      "claude": {
+        "default_index": 1,
+        "after_first_arg_in": [
+          "-p",
+          "--print"
+        ],
+        "after_first_arg_index": 2
+      },
+      "codex": {
+        "after_first_token": "exec",
+        "stop_token": "--",
+        "missing_rc": 64
+      },
+      "agy": {
+        "default_index": 1
+      }
+    }
+  }
+}
