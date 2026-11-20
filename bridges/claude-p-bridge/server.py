@@ -228,14 +228,10 @@ WORKSPACE = ROOT / "workspace"
 
 _CLAUDE_HOME_LOCK = threading.Lock()
 _CLAUDE_HOME_INITIALIZED = False
-
-
 _CLAUDE_CA_FILES = (*sorted(CLAUDE_PRESERVED_CA_FILES), "policy-limits.json.stamp.json")
 
-
 def _write_atomic(dest: Path, body: bytes) -> None:
-    """Атомарная запись 0600 (mkstemp в каталоге dest + os.replace); то же содержимое — no-op."""
-    if dest.is_file() and dest.read_bytes() == body:
+    if not dest.is_symlink() and dest.is_file() and (dest.stat().st_mode & 0o777) == 0o600 and dest.read_bytes() == body:
         return
     fd, tmp = tempfile.mkstemp(dir=str(dest.parent), prefix=".tmp_")
     try:
@@ -245,7 +241,6 @@ def _write_atomic(dest: Path, body: bytes) -> None:
     finally:
         Path(tmp).unlink(missing_ok=True)
 
-
 def _read_json_dict(path: Path) -> dict:
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
@@ -253,22 +248,23 @@ def _read_json_dict(path: Path) -> dict:
         return {}
     return raw if isinstance(raw, dict) else {}
 
-
 def _sync_ca_files(real_claude: Path, claude_dir: Path) -> None:
-    """Создать claude_dir (0700) и перенести CA/policy-файлы атомарно (0600)."""
     claude_dir.mkdir(parents=True, exist_ok=True)
     try:
         os.chmod(claude_dir, 0o700)
     except OSError:
         pass
     for name in _CLAUDE_CA_FILES:
-        if (real_claude / name).is_file():
-            _write_atomic(claude_dir / name, (real_claude / name).read_bytes())
-
+        try:
+            src = real_claude / name
+            if src.is_file():
+                _write_atomic(claude_dir / name, src.read_bytes())
+        except OSError:
+            pass
 
 def spawn_registered(cmd: list, **kwargs: Any) -> subprocess.Popen:
-    env = kwargs["env"]
-    kwargs["env"] = build_claude_zero_canon_env(env, env["HOME"])
+    env = kwargs.get("env") or os.environ
+    kwargs["env"] = build_claude_zero_canon_env(env, env.get("HOME", str(WORKSPACE / "runtime" / "claude-home")))
     return _spawn_registered(cmd, **kwargs)
 for _a in ("unregister", "set_blocked"):
     setattr(spawn_registered, _a, getattr(_spawn_registered, _a))
