@@ -78,16 +78,17 @@ def test_status_and_mutations_roundtrip(monkeypatch: pytest.MonkeyPatch, tmp_pat
 
     code, st0 = _run_cli(capsys, ["--fleet", str(fleet), "status", "--json"])
     assert (code, st0["corrupt"], st0["overrides_count"]) == (0, False, 0)
-    assert (st0["weights_enabled"], st0["compiled_fleet_enabled"]) == (True, False)
+    assert (st0["weights_enabled"], st0["compiled_fleet_enabled"], st0["transport_routing_enabled"]) == (True, False, True)
     assert "gpt-6.1-sol" in st0["categories"]["multi_active"]
 
     code, sm = _run_cli(capsys, ["--fleet", str(fleet), "--updated-by", "swiftbar", "set-model", "gpt-6.1-sol", "codex=70", "openai-key-3=30", "--json"])
-    assert (code, sm["weights"]) == (0, {"codex": 70, "openai-key-3": 30})
+    assert (code, sm["weights"], sm["all_zero_reserve"]) == (0, {"codex": 70, "openai-key-3": 30}, False)
     assert _run_cli(capsys, ["--fleet", str(fleet), "status", "--json"])[1]["updated_by"] == "swiftbar"
 
     code, sp = _run_cli(capsys, ["--fleet", str(fleet), "set-provider", "codex", "15", "--json"])
-    assert code == 0
+    assert code == 0 and sp["all_zero_reserve"] is False
     assert set(sp["affected_models"]) == {"gpt-6.1-sol", "gpt-6.1-terra"}
+    assert sp["routed_models"] == ["gpt-6.1-sol"] and sp["single_transport_models"] == ["gpt-6.1-terra"]
 
     code, st1 = _run_cli(capsys, ["--fleet", str(fleet), "status", "--json"])
     assert (code, st1["overrides_count"], st1["updated_by"]) == (0, 3, "cli")
@@ -230,3 +231,27 @@ def test_rebuild_shadowed_active_turns_and_restart(monkeypatch: pytest.MonkeyPat
     code, ok_rs = _run_cli(capsys, ["--fleet", str(fleet), "rebuild", "--apply", "--json"])
     assert (code, ok_rs["restarted"]) == (0, True)
     assert any(c[:3] == ["launchctl", "kickstart", "-k"] for c in calls)
+
+
+def test_transport_routing_disabled_and_all_zero_reserve_visibility(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """F-017/F-010/F-004: transport_routing_enabled=false в status/doctor и all_zero_reserve в set-model/set-provider."""
+    fleet, _, _, _ = _env_paths(monkeypatch, tmp_path)
+    _mock_urlopen(monkeypatch, active=0, ok=True)
+    monkeypatch.setenv("BRIDGE_COMPILE_PYTHON", sys.executable)
+    monkeypatch.setattr(rw.subprocess, "run", lambda *_a, **_kw: subprocess.CompletedProcess(["py"], 0, "", ""))
+    monkeypatch.setenv("BRIDGE_TRANSPORT_ROUTING_ENABLED", "false")
+
+    code_st, st = _run_cli(capsys, ["--fleet", str(fleet), "status", "--json"])
+    code_doc, doc = _run_cli(capsys, ["--fleet", str(fleet), "doctor", "--json"])
+    assert code_st == 0 and st["transport_routing_enabled"] is False
+    assert code_doc == 0 and doc["transport_routing_enabled"] is False
+
+    code_sm, sm = _run_cli(capsys, ["--fleet", str(fleet), "set-model", "gpt-6.1-sol", "codex=0", "openai-key-3=0", "--json"])
+    assert code_sm == 0 and sm["all_zero_reserve"] is True
+    assert _run_cli(capsys, ["--fleet", str(fleet), "status", "--json"])[1]["models"]["gpt-6.1-sol"]["all_zero_reserve"] is True
+
+    code_sp, sp = _run_cli(capsys, ["--fleet", str(fleet), "set-provider", "codex", "0", "--json"])
+    assert code_sp == 0 and sp["all_zero_reserve"] is True
+    assert sp["routed_models"] == ["gpt-6.1-sol"] and sp["single_transport_models"] == ["gpt-6.1-terra"]

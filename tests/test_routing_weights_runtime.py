@@ -249,3 +249,32 @@ def test_effective_model_routing_applies_and_falls_back(monkeypatch: pytest.Monk
 
     _ = weights.write_text("{corrupt", encoding="utf-8")
     assert rwr.effective_model_routing("gpt-6.1-sol", model) == model["routing"]
+    # enabled: False маршрут игнорируется при выборе legacy_backend, если есть включённые.
+    _write_v1(weights, models={"gpt-6.1-sol": {"codex": 99, "openai-key-3": 1}})
+    disabled_model = _sample_model()
+    disabled_model["routing"]["routes"][0]["enabled"] = False
+    rwr._DEFAULT_CACHE.invalidate()
+    eff_dis = rwr.effective_model_routing("gpt-6.1-sol", disabled_model)
+    assert eff_dis is not None and eff_dis["legacy_backend"] == "openai-key-3"
+
+
+@pytest.mark.parametrize("env_key", ["BRIDGE_ROUTING_WEIGHTS_TTL_S", "BRIDGE_ROUTING_WEIGHTS_MAX_BYTES", "BRIDGE_ROUTING_WEIGHTS_LOG_INTERVAL_S"])
+def test_bad_numeric_config_fail_closed_in_hot_path(
+    env_key: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """F-015: битые числовые параметры не бросают ConfigError/ValueError, а откатываются к base."""
+    weights = _isolated_env(monkeypatch, tmp_path)
+    _ = weights.write_text("{corrupt", encoding="utf-8") if env_key == "BRIDGE_ROUTING_WEIGHTS_LOG_INTERVAL_S" else _write_v1(weights, models={"gpt-6.1-sol": {"codex": 95, "openai-key-3": 5}})
+    monkeypatch.setenv("BRIDGE_ROUTING_WEIGHTS_TTL_S", "0.0")
+    monkeypatch.setenv(env_key, "not-a-number")
+    model = _sample_model()
+
+    assert rwr.effective_model_routing("gpt-6.1-sol", model) == model["routing"]
+    assert "fail-closed" in capsys.readouterr().err
+    assert rwr.effective_model_routing("gpt-6.1-sol", model) == model["routing"]
+    assert capsys.readouterr().err == ""
+
+    monkeypatch.delenv(env_key, raising=False)
+    Path(os.environ["BRIDGE_DYNAMIC_CONFIG_PATH"]).write_text(json.dumps({env_key: "not-a-number"}), encoding="utf-8")
+    rwr._DEFAULT_CACHE.invalidate()
+    assert rwr.effective_model_routing("gpt-6.1-sol", model) == model["routing"]

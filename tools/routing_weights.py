@@ -13,17 +13,14 @@ if str(ROOT) not in sys.path:
 
 from core.routing_weights_domain import WeightsOverrideDoc, build_catalog_routing_view  # noqa: E402
 from core.routing_weights_runtime import RoutingWeightsStore, WeightsCorruptError, WeightsLockTimeoutError, default_weights_path  # noqa: E402
-from core.runtime_env import NumSpec, parse_number  # noqa: E402
+from core.runtime_env import DynamicFlagSource, NumSpec, parse_number  # noqa: E402
 
 _EXIT_OK, _EXIT_ERR, _EXIT_CORRUPT, _EXIT_BUSY, _MAX_WEIGHT = 0, 1, 2, 3, 10_000
 _WEIGHT_RE, _TRUE_VALUES = re.compile(r"^\d+$"), frozenset({"1", "true", "yes", "on"})
 _DEFAULT_STATE_DIR, _DEFAULT_HEALTH_URL, _DEFAULT_SERVICE = "~/work/cli-agent-bridge/state", "http://127.0.0.1:9882/health", "com.user.dsh-hub"
-_HEALTH_TIMEOUT = NumSpec(("BRIDGE_HEALTH_TIMEOUT_S",), 1.5, 0.2, 15.0)
-_COMPILE_TIMEOUT = NumSpec(("BRIDGE_COMPILE_TIMEOUT_S",), 60.0, 5.0, 600.0)
-_LOCK_WAIT = NumSpec(("BRIDGE_LIFECYCLE_LOCK_WAIT_S",), 30.0, 0.1, 120.0)
-_LOCK_POLL = NumSpec(("BRIDGE_LIFECYCLE_LOCK_POLL_S",), 0.05, 0.005, 1.0)
-_Context = NamedTuple("_Context", [("fleet_path", Path), ("lock_path", Path | None), ("weights_path", Path), ("compiled_enabled", bool), ("weights_enabled", bool), ("updated_by", str)])
-
+_HEALTH_TIMEOUT, _COMPILE_TIMEOUT = NumSpec(("BRIDGE_HEALTH_TIMEOUT_S",), 1.5, 0.2, 15.0), NumSpec(("BRIDGE_COMPILE_TIMEOUT_S",), 60.0, 5.0, 600.0)
+_LOCK_WAIT, _LOCK_POLL = NumSpec(("BRIDGE_LIFECYCLE_LOCK_WAIT_S",), 30.0, 0.1, 120.0), NumSpec(("BRIDGE_LIFECYCLE_LOCK_POLL_S",), 0.05, 0.005, 1.0)
+_Context = NamedTuple("_Context", [("fleet_path", Path), ("lock_path", Path | None), ("weights_path", Path), ("compiled_enabled", bool), ("weights_enabled", bool), ("transport_routing_enabled", bool), ("updated_by", str)])
 class _CliError(Exception):
     """Управляемая ошибка CLI с точным кодом возврата."""
     def __init__(self, code: int, message: str) -> None:
@@ -44,6 +41,12 @@ def _dynamic_flag(name: str, default: bool, fallback: bool) -> bool:
         return fallback
     raw = data.get(name, os.environ.get(name, default)) if isinstance(data, dict) else None
     return fallback if raw is None else (raw if isinstance(raw, bool) else str(raw).strip().lower() in _TRUE_VALUES)
+def _transport_routing_enabled() -> bool:
+    """Читает мастер-флаг BRIDGE_TRANSPORT_ROUTING_ENABLED (fail-closed -> False)."""
+    try:
+        return DynamicFlagSource("BRIDGE_TRANSPORT_ROUTING_ENABLED", default=True).enabled(fallback=False)
+    except Exception:
+        return False
 def _build_context(args: argparse.Namespace) -> _Context:
     """Разрешает активный fleet.json, catalog.lock.json, routing_weights.json и флаги."""
     compiled_en = _dynamic_flag("BRIDGE_COMPILED_FLEET_ENABLED", False, False)
@@ -53,8 +56,7 @@ def _build_context(args: argparse.Namespace) -> _Context:
     lock = Path(os.path.expanduser(args.lock)) if args.lock else (fleet.parent / "catalog.lock.json")
     if args.lock and not lock.is_file():
         raise _CliError(_EXIT_ERR, f"lock_not_found: {lock}")
-    return _Context(fleet, lock if lock.is_file() else None, Path(os.path.expanduser(args.weights)) if args.weights else default_weights_path(), compiled_en, weights_en, args.updated_by)
-
+    return _Context(fleet, lock if lock.is_file() else None, Path(os.path.expanduser(args.weights)) if args.weights else default_weights_path(), compiled_en, weights_en, _transport_routing_enabled(), args.updated_by)
 def _load_view(ctx: _Context, doc: WeightsOverrideDoc | None) -> dict[str, Any]:
     """Строит матрицу маршрутизации активного каталога."""
     def _rd(path: Path, kind: str) -> dict[str, Any]:
@@ -86,7 +88,6 @@ def _mutate_doc(ctx: _Context, updater: Callable[[dict[str, Any]], None]) -> Wei
         raise _CliError(_EXIT_BUSY, str(exc)) from None
     except ValueError as exc:
         raise _CliError(_EXIT_ERR, str(exc)) from None
-
 def _cmd_status(ctx: _Context) -> tuple[int, dict[str, Any]]:
     """Возвращает матрицу маршрутизации, флаги и статус целостности весов."""
     doc, corrupt, error = None, False, None
@@ -95,7 +96,7 @@ def _cmd_status(ctx: _Context) -> tuple[int, dict[str, Any]]:
     except WeightsCorruptError as exc:
         corrupt, error = True, str(exc)
     view = _load_view(ctx, doc)
-    return _EXIT_OK, {**view, "ok": not corrupt, "weights_enabled": ctx.weights_enabled, "compiled_fleet_enabled": ctx.compiled_enabled, "active_fleet_path": str(ctx.fleet_path), "weights_path": str(ctx.weights_path), "overrides_count": view["override_count"], "corrupt": corrupt, "error": error, "updated_at": doc.updated_at if doc else None, "updated_by": doc.updated_by if doc else None}
+    return _EXIT_OK, {**view, "ok": not corrupt, "weights_enabled": ctx.weights_enabled, "compiled_fleet_enabled": ctx.compiled_enabled, "transport_routing_enabled": ctx.transport_routing_enabled, "active_fleet_path": str(ctx.fleet_path), "weights_path": str(ctx.weights_path), "overrides_count": view["override_count"], "corrupt": corrupt, "error": error, "updated_at": doc.updated_at if doc else None, "updated_by": doc.updated_by if doc else None}
 def _cmd_set_model(ctx: _Context, args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
     """Обновляет per-model веса маршрутов с валидацией по активному fleet.json."""
     updates: dict[str, int] = {}
@@ -109,14 +110,18 @@ def _cmd_set_model(ctx: _Context, args: argparse.Namespace) -> tuple[int, dict[s
     if unknown := sorted(set(updates) - {r["backend"] for r in model["routes"]}):
         raise _CliError(_EXIT_ERR, f"unknown_backends_for_model: {','.join(unknown)}")
     next_doc = _mutate_doc(ctx, lambda p: p["models"].__setitem__(args.model_id, {**p["models"].get(args.model_id, {}), **updates}))
-    return _EXIT_OK, {"ok": True, "model_id": args.model_id, "weights": dict(next_doc.models[args.model_id])}
+    all_zero = bool(_load_view(ctx, next_doc)["models"][args.model_id]["all_zero_reserve"])
+    return _EXIT_OK, {"ok": True, "model_id": args.model_id, "weights": dict(next_doc.models[args.model_id]), "all_zero_reserve": all_zero}
 def _cmd_set_provider(ctx: _Context, args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
     """Задаёт provider-override и возвращает список всех затронутых моделей."""
     weight = _parse_weight(args.weight)
     if (provider := _load_view(ctx, None)["providers"].get(args.provider_id)) is None:
         raise _CliError(_EXIT_ERR, f"unknown_provider: {args.provider_id}")
-    _mutate_doc(ctx, lambda p: p["providers"].__setitem__(args.provider_id, weight))
-    return _EXIT_OK, {"ok": True, "provider_id": args.provider_id, "weight": weight, "affected_models": list(provider["models"])}
+    next_doc = _mutate_doc(ctx, lambda p: p["providers"].__setitem__(args.provider_id, weight))
+    after_view = _load_view(ctx, next_doc)
+    affected = list(provider["models"])
+    all_zero = any(after_view["models"][m]["all_zero_reserve"] for m in affected)
+    return _EXIT_OK, {"ok": True, "provider_id": args.provider_id, "weight": weight, "affected_models": affected, "routed_models": list(provider["routed_models"]), "single_transport_models": list(provider["single_transport_models"]), "all_zero_reserve": all_zero}
 def _cmd_reset(ctx: _Context, args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
     """Снимает overrides модели, провайдера или всего документа."""
     removed = [0]
@@ -184,7 +189,7 @@ def _cmd_doctor(ctx: _Context) -> tuple[int, dict[str, Any]]:
     stale_m, stale_b, fleet_err = _find_stale(ctx, doc)
     compile_py, health = _find_compile_python(), _probe_health()
     ok = all((not info["is_symlink"], info["mode_ok"], info["valid_json"], not stale_m, not stale_b, fleet_err is None, compile_py is not None, health["reachable"]))
-    return _EXIT_OK, {"ok": ok, "weights_path": str(ctx.weights_path), "active_fleet_path": str(ctx.fleet_path), "weights_enabled": ctx.weights_enabled, "compiled_fleet_enabled": ctx.compiled_enabled, **info, "stale_models": stale_m, "stale_backends": stale_b, "fleet_error": fleet_err, "compile_python": compile_py, "health": health}
+    return _EXIT_OK, {"ok": ok, "weights_path": str(ctx.weights_path), "active_fleet_path": str(ctx.fleet_path), "weights_enabled": ctx.weights_enabled, "compiled_fleet_enabled": ctx.compiled_enabled, "transport_routing_enabled": ctx.transport_routing_enabled, **info, "stale_models": stale_m, "stale_backends": stale_b, "fleet_error": fleet_err, "compile_python": compile_py, "health": health}
 @contextlib.contextmanager
 def _lifecycle_lock(state_dir: Path) -> Iterator[None]:
     """Берёт эксклюзивный flock на <state>/.lifecycle.lock."""
@@ -244,7 +249,6 @@ def _cmd_rebuild(ctx: _Context, args: argparse.Namespace) -> tuple[int, dict[str
     if args.apply:
         return _apply_rebuild(ctx, args, py, state)
     return _EXIT_OK, {"ok": True, "applied": False, "python": py, "warnings": _run_compile(py, state, False, False)}
-
 def _build_parser() -> _ArgParser:
     """Создаёт CLI-парсер с глобальными флагами и подкомандами."""
     shared, parser = _ArgParser(add_help=False, argument_default=argparse.SUPPRESS), _ArgParser(description="Оперативные веса маршрутизации")

@@ -123,7 +123,9 @@ def apply_weight_overrides(model_id: str, routing: Mapping[str, object], doc: We
     result["routes"] = new_routes
     result["catalog_hash"] = routes_catalog_hash(new_routes)
     if new_routes:
-        owner = min(new_routes, key=lambda r: (-int(r["weight"]), int(r["priority"]), str(r["backend"])))
+        enabled_routes = [route for route in new_routes if route.get("enabled") is not False]
+        candidates = enabled_routes or new_routes
+        owner = min(candidates, key=lambda r: (-int(r["weight"]), int(r["priority"]), str(r["backend"])))
         result["legacy_backend"] = owner["backend"]
     return result
 
@@ -196,10 +198,12 @@ def _build_model_entry(
     evaluated, disabled = _evaluate_routes(model_id, _extract_model_routes(model, backends), backends, doc)
     disabled.extend(_lock_alternates(lock_data, model_id, {item["backend"] for item in evaluated}))
     active_count = sum(1 for item in evaluated if item["enabled"])
+    total_weight = sum(i["weight"] for i in evaluated if i["enabled"])
     return model_id, {
         "id": model_id, "backend": model.get("backend"),
         "category": _classify_model(active_count, len(disabled)), "routes": evaluated,
-        "disabled_candidates": disabled, "total_weight": sum(i["weight"] for i in evaluated if i["enabled"]),
+        "disabled_candidates": disabled, "total_weight": total_weight,
+        "all_zero_reserve": bool(evaluated) and total_weight == 0,
     }
 
 
@@ -210,10 +214,16 @@ def _collect_providers(
     for model_id, entry in models_view.items():
         for route in entry["routes"]:
             provider_models.setdefault(route["backend"], []).append(model_id)
-    return {
-        p: {"enabled": _is_backend_enabled(backends, p), "models": list(dict.fromkeys(ms)), "override_weight": doc.providers.get(p) if doc else None}
-        for p, ms in sorted(provider_models.items())
-    }
+    out: dict[str, dict[str, Any]] = {}
+    for p, ms in sorted(provider_models.items()):
+        uniq = list(dict.fromkeys(ms))
+        out[p] = {
+            "enabled": _is_backend_enabled(backends, p), "models": uniq,
+            "routed_models": [m for m in uniq if len(models_view[m]["routes"]) >= 2],
+            "single_transport_models": [m for m in uniq if len(models_view[m]["routes"]) == 1],
+            "override_weight": doc.providers.get(p) if doc else None,
+        }
+    return out
 
 
 def build_catalog_routing_view(
