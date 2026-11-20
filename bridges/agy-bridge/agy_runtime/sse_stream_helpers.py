@@ -13,6 +13,7 @@ from agy_runtime.content_arbiter import _ContentArbiter
 from agy_runtime.midstream_resilience import _owner_time
 from agy_runtime.stream_relay import StreamRelay
 from agy_runtime.tool_progress import _ToolProgress
+from core.content_delivery_tracker import ContentDeliveryTracker
 from core.route_health_policy import redact_diagnostic_text
 from core.stream_interruption_recovery import evaluate_graceful_interruption
 from core.stream_resilience_policy import (
@@ -39,6 +40,8 @@ class SseStreamSession:
         self.resilience = hooks[0]("AGY_BRIDGE_STREAM_RESILIENCE_ENABLED", True)
         ctx.update(stream_resilience_enabled=self.resilience, stream_committed=False,
             keepalive_cb=self.keepalive)
+        self.delivery = ctx["delivery_tracker"] = ContentDeliveryTracker()
+        ctx["recovery_feed"] = lambda text: self.stream_text(text)
         self.completion_id = f"chatcmpl-agy-{uuid.uuid4().hex[:12]}"
         self.created, self.disconnected = int(_owner_time(handler).time()), False
         self.relay = StreamRelay(getattr(handler, "wfile", None))
@@ -82,6 +85,7 @@ class SseStreamSession:
             self.ctx["stream_committed"] = h.close_connection = True
             if not h._emit(self.chunk({"role": "assistant", "content": ""})):
                 raise_error(BrokenPipeError())
+            self.delivery.mark_keepalive()
         except OSError as exc:
             self.disconnected = True
             raise BrokenPipeError from exc
@@ -111,10 +115,17 @@ class SseStreamSession:
         ok = not self.disconnected
         if not all((self.resilience, not value)):
             ok = self.emit(self.chunk({channel: value}))
+            if ok:
+                self._track(value, channel)
             useful = bool(value.strip()) if isinstance(value, str) else True
             if all((ok, useful)):
                 self._count_delta(value, channel)
         return ok
+    def _track(self, value: Any, channel: str) -> None:
+        if channel == "tool_calls":
+            self.delivery.mark_tool_calls(len(value))
+        else:
+            dict(content=self.delivery.mark_content).get(channel, self.delivery.mark_reasoning)(value)
     def _count_delta(self, value: Any, channel: str) -> None:
         if dict(content=True).get(channel, False):
             self.emitted_content += len(value.strip())
@@ -130,6 +141,7 @@ class SseStreamSession:
     def on_tool_trace(self, event: dict[str, Any]) -> bool:
         if self.tool_turn:
             self.tool_turn.notify_activity()
+        self.delivery.mark_tool_event()
         if self.resilience:
             self.ctx["tool_activity"] = True
         ok = True
@@ -153,6 +165,8 @@ class SseStreamSession:
         ok = not self.disconnected
         if any((self.ctx["stream_committed"], self.ctx.get("step_job_id"))):
             ok = self.coordinator.write_keepalive()
+            if ok:
+                self.delivery.mark_keepalive()
         if self.resilience:
             self.disconnected |= not ok
         return ok

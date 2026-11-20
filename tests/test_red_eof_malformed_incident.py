@@ -105,15 +105,44 @@ def test_stub_malformed_streams_have_incident_shape() -> None:
 # ---------------------------------------------------------------- SCN-01 / SCN-02: EOF
 
 
-def test_scn01_base_classifier_treats_go_eof_as_transient() -> None:
-    """Базовое ядро обязано считать Go `userinfo: EOF` транзиентным (RC-1)."""
-    assert is_transient_stream_interruption(stub.USERINFO_EOF) is True
-
-
-def test_scn01_base_retry_eligibility_allows_pre_content_retry() -> None:
-    """Для EOF до доставки контента повтор разрешён."""
+def test_scn01_base_replay_classifier_is_not_widened_ad001() -> None:
+    """AD-001: общее ядро replay НЕ расширяется Go-формами; классификация живёт в новом модуле."""
+    assert is_transient_stream_interruption(stub.USERINFO_EOF) is False
     decision = evaluate_stream_retry_eligibility(error_text=stub.USERINFO_EOF, delivered=False)
-    assert decision.can_retry is True
+    assert decision.can_retry is False
+
+
+def test_scn01_facade_marks_go_eof_transient_only_when_flag_on(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Фасад: Go `userinfo: EOF` транзиентен при флаге; FM-09 (401) фатален; флаг выкл. → False."""
+    facade = _new("core.turn_resilience_facade")
+    cfg = tmp_path / "dynamic_config.json"
+    cfg.write_text("{}", encoding="utf-8")
+    monkeypatch.setenv("BRIDGE_DYNAMIC_CONFIG_PATH", str(cfg))
+    assert facade.go_transient(stub.USERINFO_EOF) is False
+    monkeypatch.setenv("BRIDGE_TRANSPORT_FAILURE_CLASSIFIER_ENABLED", "true")
+    assert facade.go_transient(stub.USERINFO_EOF) is True
+    assert facade.go_transient("HTTP 401 Unauthorized: EOF") is False
+
+
+def test_scn01_facade_retry_gate_allows_pre_content_retry(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Гейт повтора за флагом: до доставки контента повтор разрешён, после — запрещён."""
+    facade = _new("core.turn_resilience_facade")
+    tracker = _new("core.content_delivery_tracker").ContentDeliveryTracker()
+    cfg = tmp_path / "dynamic_config.json"
+    cfg.write_text("{}", encoding="utf-8")
+    monkeypatch.setenv("BRIDGE_DYNAMIC_CONFIG_PATH", str(cfg))
+    monkeypatch.setenv("BRIDGE_RETRY_WINDOW_PAUSE_ENABLED", "true")
+    facade.reset_failure_window()
+    ctx: dict[str, Any] = {"delivery_tracker": tracker, "t_req_start": 0.0, "resilience_clock": lambda: 23.0}
+    tracker.mark_keepalive()
+    assert facade.take(ctx, {"duration_s": 23.0}, lambda: True, lambda _line: None) is True
+    tracker.mark_content("текст")
+    ctx2 = dict(ctx)
+    assert facade.take(ctx2, {"duration_s": 23.0}, lambda: True, lambda _line: None) is False
 
 
 def test_scn01_new_classifier_marks_go_forms_transient_and_keeps_fatal() -> None:

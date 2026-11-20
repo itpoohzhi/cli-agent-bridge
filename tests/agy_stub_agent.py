@@ -5,6 +5,9 @@
   eof_then_ok        спавн 0: stall + eligibility EOF, rc=1; спавн >=1: успешный ответ.
   malformed_valid    служебная ошибка functionCall, затем валидные `<tool_call>`, result=ERROR.
   malformed_nine_ten тот же поток, но один из десяти `<tool_call>` — битый JSON (9/10).
+  eof_always         каждый спавн: stall + EOF, rc=1 (оба повтора падают).
+Живой режим (env `AGY_STUB_SCENARIO`): протокол реального `agy` (init/step_update/result в
+stdout, `PLANNER_RESPONSE`/`ERROR_MESSAGE` в transcript_full.jsonl) — для Live-Isolated E2E.
 Номер спавна хранится счётчиком в `--state-dir`. Без сети, секретов и реальных путей.
 Чистая функция `build_run` пригодна для импорта без запуска процесса.
 """
@@ -13,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
 from collections.abc import Sequence
@@ -28,7 +32,8 @@ MALFORMED_TEXT = (
     "no input to parse. Please retry with a properly formatted function call "
     "Retries remaining: 3"
 )
-SCENARIOS = ("eof_then_ok", "malformed_valid", "malformed_nine_ten")
+SCENARIOS = ("eof_then_ok", "malformed_valid", "malformed_nine_ten", "eof_always")
+LIVE_CID = "c83f5757-1e5d-4a58-9d57-5d1a2c0de001"
 _PLANNER_CALLS = 5
 
 
@@ -68,6 +73,8 @@ def _ok_events() -> tuple[dict[str, object], ...]:
 
 def build_run(scenario: str, spawn_index: int) -> StubRun:
     """Вернуть детерминированный результат спавна `spawn_index` для сценария."""
+    if scenario == "eof_always":
+        return StubRun((), f"Print mode: eligibility check failed: {USERINFO_EOF}", 1)
     if scenario == "eof_then_ok":
         if spawn_index == 0:
             return StubRun((), f"Print mode: eligibility check failed: {USERINFO_EOF}", 1)
@@ -88,7 +95,52 @@ def next_spawn_index(state_dir: Path, scenario: str) -> int:
     return index
 
 
+def _emit(obj: dict[str, object]) -> None:
+    sys.stdout.write(json.dumps(obj, ensure_ascii=False) + "\n")
+    sys.stdout.flush()
+
+
+def _transcript_records(scenario: str) -> list[dict[str, object]]:
+    """Записи транскрипта `PLANNER_RESPONSE`/`ERROR_MESSAGE` из синтетических событий сценария."""
+    records: list[dict[str, object]] = []
+    for ev in build_run(scenario, 0).events:
+        if ev["event"] == "planner":
+            records.append({"type": "PLANNER_RESPONSE", "step_index": ev["step_idx"], "status": ev["status"],
+                            "content": ev["content"], "tool_calls": [{"name": "read"}]})
+        elif ev["event"] == "error_message":
+            records.append({"type": "ERROR_MESSAGE", "step_index": ev["step_idx"], "content": ev["error"]})
+    return records
+
+
+def run_live(scenario: str, state_dir: Path, stall_s: float, settle_s: float) -> int:
+    """Спавн в формате реального agy: stdin дочитан, события в stdout, транскрипт в HOME."""
+    _ = sys.stdin.read()
+    run = build_run(scenario, next_spawn_index(state_dir, scenario))
+    if run.stderr:
+        time.sleep(stall_s)
+        sys.stderr.write(run.stderr + "\n")
+        return run.rc
+    if scenario.startswith("malformed"):
+        logs = Path(os.environ["HOME"]) / ".gemini/antigravity-cli/brain" / LIVE_CID / ".system_generated/logs"
+        logs.mkdir(parents=True, exist_ok=True)
+        lines = (json.dumps(rec, ensure_ascii=False) for rec in _transcript_records(scenario))
+        (logs / "transcript_full.jsonl").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    _emit({"event": "init", "conversation_id": LIVE_CID, "init": {"tools": [], "permission_mode": "auto"}})
+    if scenario.startswith("malformed"):
+        time.sleep(settle_s)
+        result = {"status": "ERROR", "error": MALFORMED_TEXT, "conversation_id": LIVE_CID, "num_turns": 2}
+    else:
+        _emit({"event": "step_update", "step_update": {"step_type": "agent_response", "step_index": 2, "text_delta": "Готово"}})
+        result = {"status": "SUCCESS", "response": "Готово", "conversation_id": LIVE_CID, "num_turns": 1}
+    _emit({"event": "result", "result": result})
+    return run.rc
+
+
 def main(argv: Sequence[str] | None = None) -> int:
+    live = os.environ.get("AGY_STUB_SCENARIO")
+    if live:
+        return run_live(live, Path(os.environ["AGY_STUB_STATE_DIR"]), float(os.environ.get("AGY_STUB_STALL_S", "0.6")),
+                        float(os.environ.get("AGY_STUB_SETTLE_S", "0.6")))
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--scenario", choices=SCENARIOS, required=True)
     parser.add_argument("--state-dir", type=Path, required=True)
