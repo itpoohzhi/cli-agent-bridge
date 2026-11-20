@@ -20,6 +20,7 @@ from core.route_attempts import BRIDGE_OWNER, STATELESS_REPLAY_ENDPOINTS, Attemp
 from core.route_eligibility import EligibilityFacts, request_snapshot, route_eligible
 from core.route_health_policy import RetryBudgetConfig, compute_attempt_decision
 from core.routing_contract import ROUTING_ALGORITHM, PreSendTransientError, parse_routes
+from core.routing_weights_runtime import base_model_routing as _model_routing, effective_model_routing
 from core.runtime_env import NumSpec, parse_number
 from core.transport_credentials import credential_ready
 from core.transport_routing import route_order
@@ -384,16 +385,8 @@ def _request_policy(route: Any) -> Any:
     header_policy = request_snapshot({"model": route.model_id, "headers": dict(route.handler.headers.items()), "trace_subagent_id": trace_role if isinstance(trace_role, str) else None})
     return replace(policy, role_ids=policy.role_ids + header_policy.role_ids, excluded=policy.excluded | header_policy.excluded)
 
-def _model_routing(model: dict[str, Any]) -> dict[str, Any]:
-    routing, backend = model.get("routing"), model.get("backend")
-    if isinstance(routing, dict) and (routing.get("legacy_backend") in (None, backend) or backend == routing.get("disabled_backend")):
-        return routing
-    if not backend:
-        return {}
-    return {"catalog_hash": "singleton:" + backend, "routes": [dict(route_id=backend, backend=backend, weight=100, priority=0, params=model.get("params", {}))]}
-
 def _dispatch(route: Any) -> None:
-    routing = _model_routing(route.model)
+    routing = effective_model_routing(route.model_id, route.model)
     if not (route.host.flag_enabled(ROUTING_FLAG) and routing and routing.get("enabled", True)):
         route.model["backend"] = routing.get("disabled_backend") or route.model.get("backend")
         dispatch_route(route)
