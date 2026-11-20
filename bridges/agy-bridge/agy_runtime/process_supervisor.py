@@ -19,6 +19,7 @@ class ProcessSupervisorConfig:
     kill_wait_s: float = 1.0
     stream_read_timeout_s: float = 30.0
     poll_interval_s: float = 0.01
+    kill_int_grace_s: float = 0.0
 
     def __post_init__(self) -> None:
         """Проверяет конечность и допустимость интервалов."""
@@ -36,15 +37,13 @@ class ProcessSupervisor:
         self.config: ProcessSupervisorConfig = config or ProcessSupervisorConfig()
 
     def group_alive(self, pgid: int) -> bool:
-        """Проверяет существование группы, учитывая ограничения доступа."""
+        """Проверяет существование группы; на macOS зомби-лидер даёт `EPERM` (= мертва)."""
         if pgid <= 0:
             return False
         try:
             os.killpg(pgid, 0)
-        except ProcessLookupError:
+        except (ProcessLookupError, PermissionError):
             return False
-        except PermissionError:
-            return True
         return True
 
     @staticmethod
@@ -57,22 +56,34 @@ class ProcessSupervisor:
         except (ProcessLookupError, PermissionError, OSError):
             pass
 
+    def _wait_group_exit(self, proc: subprocess.Popen[Any], grace_s: float) -> bool:
+        """Ждёт выхода группы в пределах `grace_s`; возвращает True, если группа жива."""
+        deadline = time.monotonic() + grace_s
+        while self.group_alive(proc.pid):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return True
+            time.sleep(min(self.config.poll_interval_s, remaining))
+        return False
+
     def kill_group(
-        self, proc: subprocess.Popen[Any], grace_s: float | None = None
+        self,
+        proc: subprocess.Popen[Any],
+        grace_s: float | None = None,
+        *,
+        send_sigint: bool = False,
     ) -> None:
-        """Завершает группу через TERM/KILL и обязательно забирает лидера."""
+        """Завершает группу (INT при `send_sigint` -> TERM -> KILL) и забирает лидера."""
         grace = self.config.kill_term_grace_s if grace_s is None else grace_s
         try:
             if not math.isfinite(grace) or grace < 0:
                 raise ValueError("Период мягкого завершения должен быть конечным")
+            if send_sigint and self.config.kill_int_grace_s > 0 and self.group_alive(proc.pid):
+                self._signal_group(proc.pid, signal.SIGINT)
+                if not self._wait_group_exit(proc, self.config.kill_int_grace_s):
+                    return
             self._signal_group(proc.pid, signal.SIGTERM)
-            deadline = time.monotonic() + grace
-            while self.group_alive(proc.pid):
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    break
-                time.sleep(min(self.config.poll_interval_s, remaining))
-            if self.group_alive(proc.pid):
+            if self._wait_group_exit(proc, grace):
                 self._signal_group(proc.pid, signal.SIGKILL)
         finally:
             try:

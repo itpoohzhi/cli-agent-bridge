@@ -11,6 +11,8 @@ from core.route_health_policy import redact_diagnostic_text
 from core.agy_capacity_guard import CAPACITY_REASON
 from core.usage_wire import positive_wire_usage
 from core.tool_channel_fsm import normalize_staged_fragments
+from core.tool_turn_settle_policy import SettleDecision, resolve_tool_turn_stop
+from core.turn_usage_fsm import should_emit_wire_usage
 from core.stream_resilience_policy import can_safely_replay_turn, is_present, is_uncommitted_step
 from core.stream_resilience_runtime import MidstreamReplayOrchestrator
 _attempt_scope = threading.local()
@@ -82,8 +84,15 @@ class _SseBodyRunner:
             s.stream_reasoning = s.tool_turn.feed_reasoning
             s.ctx["tool_stop"] = s.tool_turn.turn_complete
             s.ctx["tool_calls_emitted"] = lambda: bool(s.tool_turn.calls)
+            s.ctx["emitted_call_ids"] = lambda: [str(c.get("id", "")) for c in s.tool_turn.calls]
     def tool_stop(self) -> bool:
         return self.expired() or bool(self.stop and self.stop())
+    def settle_decision(self, *, proc_exited: bool = False, result_received: bool = False) -> SettleDecision:
+        res = SettleDecision("forced_stop", True, True, False)
+        if not self.expired():
+            got = resolve_tool_turn_stop(self.stop, proc_exited=proc_exited, result_received=result_received)
+            res = got if isinstance(got, SettleDecision) else SettleDecision("continue", False, False, False)
+        return res
     def recovery_snapshot(self) -> str:
         owner = getattr(self.stop, "__self__", None)
         snapshot = getattr(owner, "recovery_snapshot", None)
@@ -213,6 +222,10 @@ class _SseBodyRunner:
                 err = s.tool_turn.error_body()
             elif s.tool_turn.calls:
                 reason = "tool_calls"
+        reg = s.ctx.get("register_post_turn")
+        if all((not is_present(err), proceed)):
+            if callable(reg):
+                reg(out)
         if proceed:
             self._finish_response(out, err, reason)
     def _finish_response(self, out: dict[str, Any], err: Any, reason: str) -> None:
@@ -242,7 +255,7 @@ class _SseBodyRunner:
         if any((ok, not s.resilience)):
             ok = True
             usage = s.handler._usage_payload(next(filter(None, (out.get("usage"),)), dict[str, Any]()), out.get("usage_resolved"))
-            if any((usage.get("prompt_tokens"), usage.get("completion_tokens"))):
+            if all((should_emit_wire_usage(out.get("usage_resolved")), any((usage.get("prompt_tokens"), usage.get("completion_tokens"))))):
                 ok = s.emit(s.chunk({}, reason, usage=usage, conversation_id=cid))
         return ok
 def serve_sse_body(handler: Any, ctx: dict[str, Any], hooks: tuple[Any, Any, Any, Any]) -> None:

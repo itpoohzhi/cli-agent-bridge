@@ -348,7 +348,7 @@
       "kind": "passthrough",
       "enabled": true,
       "owned_by": "agy-bridge",
-      "max_concurrent": 128,
+      "max_concurrent": 4,
       "base_url": "http://127.0.0.1:9887/v1",
       "api_key_env": "AGY_BRIDGE_KEY"
     },
