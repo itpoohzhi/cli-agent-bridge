@@ -142,3 +142,21 @@ def test_config_defaults_corrupt_json_and_loopback(
     assert lsc.build_conv_headers("abcdef12", _CID_RE, peer_is_loopback=False, config_path=bad) == {}
     monkeypatch.setenv("AGY_BRIDGE_EXPOSE_CONV_HEADER", "0")
     assert lsc.build_conv_headers("abcdef12", _CID_RE, peer_is_loopback=True, config_path=bad) == {}
+
+
+def test_dynamic_config_cache_ttl_and_stat_refresh(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cfg = tmp_path / "dyn.json"
+    cfg.write_text('{"max_prompt_bytes_cap": 65536}', encoding="utf-8")
+    monkeypatch.delenv("AGY_BRIDGE_MAX_PROMPT_BYTES_CAP", raising=False)
+    now = [100.0]
+    monkeypatch.setattr(lsc.time, "monotonic", lambda: now[0])
+    assert lsc.prompt_bytes_cap(config_path=cfg) == 65536
+    # Внутри TTL (< 0.5s) даже при перезаписи отдаётся кэш
+    cfg.write_text('{"max_prompt_bytes_cap": 81920}', encoding="utf-8")
+    now[0] = 100.1
+    assert lsc.prompt_bytes_cap(config_path=cfg) == 65536
+    # После истечения TTL и смены файла перечитывается новое значение
+    now[0] = 101.0
+    assert lsc.prompt_bytes_cap(config_path=cfg) == 81920

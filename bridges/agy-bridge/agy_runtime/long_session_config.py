@@ -42,10 +42,11 @@ def _read_json_file(path: Path, hit: tuple[float, tuple[object, ...], dict[str, 
     try:
         st = os.stat(path)
         sig = (st.st_mtime_ns, st.st_size, st.st_ino)
-        same = bool(hit) and not set(sig).symmetric_difference(hit[1]) if hit else False
-        if same and hit:
-            result = hit[2]
-        else:
+        same = not set(sig).symmetric_difference(hit[1]) if isinstance(hit, tuple) else False
+        if isinstance(hit, tuple):
+            if same:
+                result = hit[2]
+        if not same:
             parsed = cast("object", json.loads(path.read_text(encoding="utf-8")))
             result = cast("dict[str, object]", parsed) if isinstance(parsed, dict) else {}
     except (OSError, ValueError):
@@ -59,8 +60,8 @@ def _load_dynamic_config(config_path: Path | None = None) -> dict[str, object]:
     now = time.monotonic()
     with _CACHE_LOCK:
         hit = _CACHE.get(key)
-    fresh = (now - hit[0]) < _CACHE_TTL_S if hit else False
-    result: dict[str, object] = hit[2] if all((bool(hit), fresh)) and hit else {}
+    fresh = (now - hit[0]) < _CACHE_TTL_S if isinstance(hit, tuple) else False
+    result: dict[str, object] = hit[2] if isinstance(hit, tuple) else {}
     if not fresh:
         sig, result = _read_json_file(path, hit)
         with _CACHE_LOCK:

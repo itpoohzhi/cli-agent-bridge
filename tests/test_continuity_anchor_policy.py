@@ -91,7 +91,19 @@ def test_continuity_index_t1_to_t2_hot_chain() -> None:
     ]
     assert idx.resolve(t2_msgs, "gemini-4-neon-high") == chain_t1
     assert any("status=post_hit" in line for line in logs)
+    # T2 -> T3 проверка _prefix_digest (hit по полному префиксу истории с tool_calls)
+    id2 = mint_bridge_call_id()
+    t3_msgs = [
+        *t2_msgs,
+        {"role": "assistant", "content": None, "tool_calls": [{"id": id2, "type": "function", "function": {"name": "r", "arguments": "{}"}}]},
+        {"role": "tool", "tool_call_id": id2, "content": "CHUNK_2"},
+    ]
+    assert idx.resolve(t3_msgs, "gemini-4-neon-high") == chain_t1
+    # Повторный T2 не повторяет одноразовый post_hit
     assert idx.resolve(t2_msgs, "gemini-4-neon-high") != chain_t1
+    # assistant на индексе 0 не даёт ни prefix_digest, ни post_anchor
+    only_asst = [{"role": "assistant", "content": None, "tool_calls": [{"id": emitted_id, "type": "function", "function": {"name": "r", "arguments": "{}"}}]}]
+    assert idx.resolve(only_asst, "gemini-4-neon-high") != chain_t1
 
 
 def test_continuity_index_post_turn_kill_switch() -> None:

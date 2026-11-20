@@ -5467,10 +5467,9 @@ class _ToolTurn:
         return self.ok
 
     def _content(self, text: str) -> None:
-        if suppress_post_call_content(has_calls=bool(self.calls), has_open_tool_call=self._normalizer.has_open_tool_call()):
-            return
-        if self.ok and not self._on_content(text):
-            self.ok = False
+        if not suppress_post_call_content(has_calls=bool(self.calls), has_open_tool_call=self._normalizer.has_open_tool_call()):
+            if all((self.ok, not self._on_content(text))):
+                self.ok = False
 
     def _reasoning(self, text: str) -> None:
         if self.ok and not self._on_reasoning(text):

@@ -51,13 +51,41 @@ def test_tool_turn_mints_bridge_id_and_suppresses_post_call_plan_leak(
     assert BRIDGE_CALL_ID_RE.fullmatch(cid)
     assert emitted_calls[0][0]["id"] == cid
     ts_before = tt._last_chunk_ts
-    # Пост-вызовный plan_leak подавляется и НЕ сбрасывает _last_chunk_ts!
+    closed_before = tt._calls_closed_ts
+    assert closed_before > 0.0
+    # Пост-вызовный plan_leak подавляется и НЕ сбрасывает _last_chunk_ts и _calls_closed_ts!
     tt.feed("Now I will enter planning mode and edit implementation_plan.md")
     assert emitted_text == []
     assert tt._last_chunk_ts == ts_before
+    assert tt._calls_closed_ts == closed_before
     # Идемпотентность id после finish()
     tt.finish()
     assert tt.calls[0]["id"] == cid
+
+
+def test_execute_returns_clean_eof_flags_via_resolve_tool_turn_stop() -> None:
+    import queue
+    from core.tool_turn_settle_policy import SettleDecision
+
+    srv = _load_agy_server()
+    h = srv.Handler.__new__(srv.Handler)
+    h._job_client_gone = lambda: False
+
+    class _FakeTT:
+        def settle_decision(self, *, proc_exited: bool = False, result_received: bool = False) -> SettleDecision:
+            return SettleDecision("clean_complete", True, False, True)
+
+        def turn_complete(self) -> bool:
+            return True
+
+    fake_run = SimpleNamespace(
+        q=queue.Queue(), started=0.0, got_event=True, tag="req_id=r1",
+        proc=SimpleNamespace(poll=lambda: None, pid=1),
+        controller=SimpleNamespace(check=lambda _pid: (False, "", {}), on_activity=lambda _k: None),
+        policy=None,
+    )
+    out = h._execute(fake_run, lambda _t: True, lambda _ev: True, lambda _r: True, None, turn_complete=_FakeTT().turn_complete)
+    assert out["state"] == "done" and out["tool_turn_stop"] is False and out["tool_turn_clean_eof"] is True
 
 
 def test_resolve_chat_context_and_t1_to_t2_continuity_roundtrip(

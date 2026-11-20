@@ -83,6 +83,16 @@ def test_resolve_turn_usage_missing_cumulative_and_alias_conflict() -> None:
     assert should_emit_wire_usage({}) is True
 
 
+def test_usage_fsm_rejects_bool_and_error_status() -> None:
+    r_bool = resolve_turn_usage({"rc": 0, "state": "done", "usage": {"input_tokens": True}}, None, 200000, False)
+    assert r_bool.resolved["reason"] == "missing_usage" and r_bool.resolved["emit_wire_usage"] is False
+    r_err = resolve_turn_usage(
+        {"rc": 0, "state": "done", "result": {"status": "ERROR"}, "usage": {"input_tokens": 500000}},
+        None, 200000, False,
+    )
+    assert r_err.resolved["reason"] == "not_success" and r_err.resolved["source"] == "result"
+
+
 def test_ensure_drained_before_usage_short_circuit_and_retained_events() -> None:
     calls: list[str] = []
 
