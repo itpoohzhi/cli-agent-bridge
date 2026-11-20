@@ -139,7 +139,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from agy_runtime import midstream_resilience, sse_body_runner, sse_stream_helpers  # noqa: E402
+from agy_runtime import midstream_resilience, slot_and_session, sse_body_runner, sse_stream_helpers  # noqa: E402
 from core.watchdog import (  # noqa: E402
     IDLE_TIMEOUT_S as _CORE_IDLE_TIMEOUT_S,
     WATCHDOG_INTERVAL_S as _CORE_WATCHDOG_INTERVAL_S,
@@ -969,13 +969,12 @@ BUILD_INFO = RuntimeBuildInfo(_REPO_ROOT)
 
 
 def _runtime_build_fields() -> dict[str, object]:
-    """Поля `/health`: git_head_sha, boot_ts, agy_binary_sha256, agy_home."""
-    return BUILD_INFO.snapshot(
-        {
-            "agy_binary_sha256": _file_sha256(AGY_BIN) or BUILD_UNKNOWN,
-            "agy_home": str(CLEAN_HOME_DIR),
-        }
-    )
+    """Поля `/health`: git_head_sha, boot_ts, agy_binary_sha256, agy_home, очередь."""
+    base = BUILD_INFO.snapshot({
+        "agy_binary_sha256": _file_sha256(AGY_BIN) or BUILD_UNKNOWN,
+        "agy_home": str(CLEAN_HOME_DIR),
+    })
+    return {**base, **slot_and_session.health_queue_fields(_slots)}
 
 
 _active: dict = {}
@@ -3039,25 +3038,25 @@ def _session_key_for(
 def _request_chat_id(
     headers: Any, extra: dict[str, object], req: dict[str, object] | None = None
 ) -> tuple[str, bool]:
-    """Первый переданный chat ID и признак невалидного идентификатора.
-
-    Источники и валидация — единый `core.chat_key`, набор SOURCES_SESSION_ID
-    (только явные chat-id). `prompt_cache_key` намеренно НЕ источник: по
-    OpenAI-семантике это аффинность кэша префикса, его шарят разные чаты, и
-    как идентичность сессии он склеил бы чужие диалоги. Предел длины — из
-    BRIDGE_CHAT_KEY_MAX_LEN (по умолчанию 512).
-    """
+    """Первый переданный chat ID с изоляцией по `X-Subagent-Id` и fail-closed валидацией."""
     extra_map = extra if isinstance(extra, dict) else None
     cwd = (extra_map or {}).get("cwd")
     has_cwd = isinstance(cwd, str) and bool(cwd.strip())
     chat = resolve_chat_key(req, headers, extra_map, sources=SOURCES_SESSION_ID)
-    if chat.invalid:
+    subagent_id, subagent_invalid = slot_and_session.resolve_subagent_id(headers)
+    if chat.invalid or subagent_invalid:
         return "", True
-    if not chat.value and not has_cwd and isinstance(req, dict) and req.get("tools"):
-        if _new_flag("session_continuity_enabled"):
-            scope = f"{req.get('model') or ''}\x00"
-            return _CONTINUITY.resolve(req.get("messages"), scope), False
-    return chat.value, False
+    if (
+        not chat.value
+        and not has_cwd
+        and not subagent_id
+        and isinstance(req, dict)
+        and req.get("tools")
+        and _new_flag("session_continuity_enabled")
+    ):
+        scope = f"{req.get('model') or ''}\x00"
+        return _CONTINUITY.resolve(req.get("messages"), scope), False
+    return slot_and_session.combine_chat_and_subagent(chat.value, subagent_id), False
 
 
 def _session_key_valid(sess_key: tuple[str, ...]) -> bool:
@@ -3351,6 +3350,7 @@ _supervisor = ProcessSupervisor(
     ProcessSupervisorConfig(
         kill_term_grace_s=KILL_TERM_GRACE_S,
         kill_wait_s=KILL_WAIT_S,
+        kill_int_grace_s=slot_and_session.kill_int_grace_s(),
     )
 )
 _group_alive = _supervisor.group_alive
@@ -3579,10 +3579,9 @@ def _runtime_snapshot() -> _RuntimeFlags:
                 )
             except OSError:
                 pass  # повторим на следующем TTL
-            except ValueError:
-                key = (
-                    new_key  # битый файл: lastgood, без повторного разбора того же stat
-                )
+            except ValueError as exc:
+                _log(f"dynamic_config parse error: {exc}")
+                key = new_key
             else:
                 snapshot, key = parsed, new_key
     with _cfg_lock:
@@ -5299,13 +5298,13 @@ class JobRegistry:
                 self.condition.wait(timeout=timeout)
             return job.events[offset:], job.result
 
-    def detach(self, job: _Job) -> None:
+    def detach(self, job: _Job, *, allow_orphan: bool = True) -> None:
         cancel = None
         with self.condition:
             job.readers = max(0, job.readers - 1)
             if job.readers or job.result is not None or job.orphan:
                 return
-            if self.orphans < self.orphan_max:
+            if allow_orphan and self.orphans < self.orphan_max:
                 job.orphan = True
                 self.orphans += 1
             else:
@@ -5586,13 +5585,7 @@ class Run:
         if AGY_BRIDGE_ENABLE_HEAD_PRUNING:
             prompt = _ensure_prompt_fits_ndjson(prompt)
         self.stdin_line = _ndjson_user_line(prompt)
-        cli_mode = (
-            os.environ.get("AGY_BRIDGE_ASK_CLI_MODE", "plan")
-            if mode in ("ask", "plan")
-            else os.environ.get("AGY_BRIDGE_AGENT_CLI_MODE", "auto")
-            if mode in ("agent", "auto")
-            else mode
-        )
+        cli_mode = slot_and_session.resolve_cli_mode(mode)
         cmd = [
             launcher,
             "--input-format",
@@ -6248,7 +6241,7 @@ class Run:
         self._tail.interrupt_active_query()
         self.controller.close()
         # Группа зачищается всегда: лидер мог выйти, оставив потомков (фоновые задачи agy).
-        _kill_group(self.proc)
+        _kill_group(self.proc, send_sigint=True)
         with _active_lock:
             _active.pop(self.proc.pid, None)
         spawn_registered.unregister(self.proc)
@@ -6651,15 +6644,15 @@ class Handler(BaseHTTPRequestHandler):
 
     def _acquire_slot(self, keepalive) -> str:
         """Wait fairly using the semaphore interface and a separate queue deadline."""
-        slots = _slots
-        acquired = False
+        slots, acquired = _slots, False
+        poll_s = slot_and_session.queue_poll_interval_s()
 
         def admitted() -> str:
             _maybe_checkpoint_sqlite_wal()
             return ""
 
         try:
-            if self._registry_job is not None and self._registry_job.cancelled.is_set():
+            if self._job_client_gone():
                 return "client_gone"
             acquired = slots.acquire(blocking=False)
             if acquired:
@@ -6669,12 +6662,9 @@ class Handler(BaseHTTPRequestHandler):
             if t_req_start is not None and _new_flag("extended_timeout_enabled"):
                 deadline = min(deadline, t_req_start + T_REQ_BUDGET_S - T_RESERVE_S)
             while time.monotonic() < deadline:
-                if (
-                    self._registry_job is not None
-                    and self._registry_job.cancelled.is_set()
-                ):
+                if self._job_client_gone():
                     return "client_gone"
-                wait_s = min(1.0, max(0.0, deadline - time.monotonic()))
+                wait_s = min(poll_s, max(0.0, deadline - time.monotonic()))
                 acquired = slots.acquire(timeout=wait_s)
                 if acquired:
                     return admitted()
@@ -7056,7 +7046,8 @@ class Handler(BaseHTTPRequestHandler):
             return {"state": "job_conflict", "text": "", "rc": 1}
         if owner:
             self._start_job_producer(ctx, job)
-        return self._read_job_events(job, callbacks)
+        allow_orphan = slot_and_session.allow_job_orphan(int(ctx.get("tools_count") or 0))
+        return self._read_job_events(job, callbacks, allow_orphan=allow_orphan)
 
     def _start_job_producer(self, ctx: dict, job: _Job) -> None:
         """Зафиксировать контекст попытки до отделения producer от подписчика."""
@@ -7098,11 +7089,12 @@ class Handler(BaseHTTPRequestHandler):
             ctx["job_owns_cid"] = False
             registry.finish(job, {"state": "pump_error", "text": "", "rc": 1})
 
-    def _read_job_events(self, job: _Job, callbacks: tuple) -> dict:
+    def _read_job_events(
+        self, job: _Job, callbacks: tuple, *, allow_orphan: bool = True
+    ) -> dict:
         """Доставить события подписчику, сохраняя heartbeat и гарантированный detach."""
         on_text, on_tool_trace, on_reasoning, keepalive = callbacks
-        registry = _JOB_REGISTRY
-        offset = 0
+        registry, offset = _JOB_REGISTRY, 0
         heartbeat = _env_float(
             "BRIDGE_SSE_HEARTBEAT_INTERVAL_S", 12.0, 0.001, float("inf")
         )
@@ -7131,7 +7123,7 @@ class Handler(BaseHTTPRequestHandler):
                         return {"state": "client_gone", "text": "", "rc": 1}
                     last_delivery = time.monotonic()
         finally:
-            registry.detach(job)
+            registry.detach(job, allow_orphan=allow_orphan)
 
     def _run_once_impl(
         self, ctx: dict, on_text, on_tool_trace, on_reasoning, keepalive
@@ -8105,7 +8097,7 @@ class Handler(BaseHTTPRequestHandler):
                     or ""
                 ),
                 # Эмуляция: модель зовёт инструменты клиента, нативные agy выключены.
-                "agy_mode": "ask" if emulate_tools else resolve_agy_mode(req),
+                "agy_mode": "emulate" if emulate_tools else resolve_agy_mode(req),
                 "emulate_tools": emulate_tools,
                 "tools": tools,
                 "turn_id": turn_id,
