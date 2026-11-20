@@ -74,6 +74,12 @@
       "GITHUB_TOKEN",
       "GH_ENTERPRISE_TOKEN"
     ],
+    "settings_allowlist": [
+      "selectedAuthType",
+      "theme",
+      "security",
+      "auth"
+    ],
     "settings_override": {
       "hooks": {},
       "mcpServers": {}
@@ -92,21 +98,38 @@
       "--mcp-config",
       "--strict-mcp-config",
       "--dangerously-skip-permissions",
+      "--allow-dangerously-skip-permissions",
       "--bare",
-      "--settings"
+      "--settings",
+      "--plugin-dir",
+      "--add-dir",
+      "-r",
+      "--resume",
+      "-c",
+      "--continue"
     ],
     "codex": [
       "-s",
       "--sandbox",
       "-c",
       "--config",
+      "-a",
+      "--ask-for-approval",
+      "-p",
+      "--profile",
+      "--add-dir",
       "--dangerously-bypass-approvals-and-sandbox",
       "--full-auto",
       "--ephemeral"
     ],
     "agy": [
       "--mode",
-      "--mcp-config"
+      "--mcp-config",
+      "--yolo",
+      "-y",
+      "--approval-mode",
+      "--extensions",
+      "--include-directories"
     ]
   },
   "argv_grammar": {

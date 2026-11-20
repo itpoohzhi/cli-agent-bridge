@@ -39,8 +39,15 @@ CLAUDE_FORBIDDEN_FLAGS = frozenset((
     "--mcp-config",
     "--strict-mcp-config",
     "--dangerously-skip-permissions",
+    "--allow-dangerously-skip-permissions",
     "--bare",
     "--settings",
+    "--plugin-dir",
+    "--add-dir",
+    "-r",
+    "--resume",
+    "-c",
+    "--continue",
 ))
 
 CLAUDE_BASE_FLAGS = (
@@ -54,6 +61,7 @@ CLAUDE_PRESERVED_CA_FILES = frozenset((
     "bundle-with-aeza.pem",
     "policy-limits.json",
     "policy-limits.json.signature.json",
+    "policy-limits.json.stamp.json",
 ))
 
 
@@ -122,10 +130,13 @@ def _filter_allowlist(raw: Mapping[str, Any], allowlist: frozenset[str]) -> dict
 
 
 def _normalize_dir(path: str, label: str) -> str:
-    """Validate and strip trailing slashes from a directory path string."""
+    """Validate absolute non-root directory path and strip trailing slashes."""
     if not isinstance(path, str) or not path.strip():
         raise ValueError(f"{label} must be a non-empty path string")
-    return path.rstrip("/") or "/"
+    cleaned = path.strip().rstrip("/")
+    if not cleaned.startswith("/") or not cleaned[1:]:
+        raise ValueError(f"{label} must be an absolute non-root path: {path!r}")
+    return cleaned
 
 
 def get_claude_profile(profile: str) -> ClaudeProfileSpec:
