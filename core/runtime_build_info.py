@@ -1,6 +1,7 @@
 """Провенанс процесса: git-ревизия кода в памяти и момент старта (фиксируются при старте).
 
-Недоступное значение — `unknown`. Env: `BRIDGE_BUILD_INFO_GIT_TIMEOUT_S` (дефолт 2.0).
+`git_head_sha`: git(repo_root) → git(realpath пакета core) → env `BRIDGE_GIT_HEAD_SHA` → `unknown`.
+Env: `BRIDGE_BUILD_INFO_GIT_TIMEOUT_S` (дефолт 2.0). Хардкода ревизий нет.
 """
 
 from __future__ import annotations
@@ -14,7 +15,9 @@ from typing import Final
 
 UNKNOWN: Final[str] = "unknown"
 GIT_TIMEOUT_ENV: Final[str] = "BRIDGE_BUILD_INFO_GIT_TIMEOUT_S"
+GIT_SHA_ENV: Final[str] = "BRIDGE_GIT_HEAD_SHA"
 DEFAULT_GIT_TIMEOUT_S: Final[float] = 2.0
+_HEX: Final[frozenset[str]] = frozenset("0123456789abcdef")
 
 
 def _env_float(name: str, default: float) -> float:
@@ -25,8 +28,17 @@ def _env_float(name: str, default: float) -> float:
     return value if 0 < value < float("inf") else default
 
 
-def resolve_git_head_sha(repo_root: Path | str) -> str:
-    """`git rev-parse HEAD` каталога `repo_root`; любой сбой — `unknown`."""
+def _valid_sha(sha: str) -> bool:
+    return len(sha) in (40, 64) and set(sha) <= _HEX
+
+
+def _core_package_dir() -> Path:
+    """Реальный каталог пакета `core` (разрешает симлинки установки)."""
+    return Path(__file__).resolve().parent
+
+
+def _git_head(repo_root: Path | str) -> str:
+    """`git rev-parse HEAD` каталога; любой сбой — `unknown`."""
     try:
         done = subprocess.run(
             ["git", "-C", str(repo_root), "rev-parse", "HEAD"],
@@ -35,9 +47,19 @@ def resolve_git_head_sha(repo_root: Path | str) -> str:
         )  # fmt: skip
     except (OSError, subprocess.SubprocessError):
         return UNKNOWN
-    sha = done.stdout.strip()
-    ok = done.returncode == 0 and len(sha) in (40, 64) and set(sha) <= set("0123456789abcdef")
-    return sha if ok else UNKNOWN
+    sha = done.stdout.strip().lower()
+    return sha if done.returncode == 0 and _valid_sha(sha) else UNKNOWN
+
+
+def resolve_git_head_sha(repo_root: Path | str, env: Mapping[str, str] | None = None) -> str:
+    """Цепочка: git(repo_root) → git(realpath core) → env `BRIDGE_GIT_HEAD_SHA` → `unknown`."""
+    for root in (Path(repo_root), _core_package_dir()):
+        sha = _git_head(root)
+        if sha != UNKNOWN:
+            return sha
+    values = os.environ if env is None else env
+    declared = values.get(GIT_SHA_ENV, "").strip().lower()
+    return declared if _valid_sha(declared) else UNKNOWN
 
 
 class RuntimeBuildInfo:
