@@ -39,7 +39,11 @@ def read_gigarc_bool(
                 return hit[1]
         try:
             parsed = json.loads(config_path.read_text(encoding="utf-8"))
-            if isinstance(parsed, dict) and isinstance(parsed.get(flag_name), bool):
+            if not isinstance(parsed, dict):
+                return default
+            if flag_name in parsed:
+                if not isinstance(parsed[flag_name], bool):
+                    return default
                 val = bool(parsed[flag_name])
                 with _CFG_LOCK:
                     _CFG_CACHE[key] = (sig, val)
@@ -97,6 +101,38 @@ def make_ephemeral_zc_cwd(parent: Path, prefix: str = "zc-cwd-") -> Path:
     turn_dir = Path(tempfile.mkdtemp(prefix=prefix, dir=str(parent)))
     os.chmod(turn_dir, 0o700)
     return turn_dir.resolve()
+
+
+_SECRET_ENV_EXACT: Final[frozenset[str]] = frozenset(
+    {"BRIDGE_KEY", "BRIDGE_API_KEY", "INTERNAL_SERVICE_KEY", "META_API_KEY"}
+)
+_SECRET_ENV_SUFFIXES: Final[tuple[str, ...]] = ("_BRIDGE_KEY", "_SERVICE_KEY")
+
+
+def sanitize_zero_canon_env(base_env: Mapping[str, str], root: str | Path) -> dict[str, str]:
+    """Удаляет секреты хаба/моста и изолирует `XDG_{CONFIG,DATA,CACHE,STATE}_HOME` в `root`."""
+    zc_root = Path(root)
+    cleaned = {
+        k: v
+        for k, v in base_env.items()
+        if k not in _SECRET_ENV_EXACT and not k.endswith(_SECRET_ENV_SUFFIXES)
+    }
+    cleaned["HOME"] = str(zc_root)
+    cleaned["XDG_CONFIG_HOME"] = str(zc_root / ".config")
+    cleaned["XDG_DATA_HOME"] = str(zc_root / ".local" / "share")
+    cleaned["XDG_CACHE_HOME"] = str(zc_root / ".cache")
+    cleaned["XDG_STATE_HOME"] = str(zc_root / ".local" / "state")
+    return cleaned
+
+
+def resolve_hub_dynamic_config(environ: Mapping[str, str] | None = None) -> Path:
+    """Путь к `dynamic_config.json` хаба с учётом `environ['BRIDGE_DYNAMIC_CONFIG_PATH']`/`HOME`."""
+    env = os.environ if environ is None else environ
+    explicit = env.get("BRIDGE_DYNAMIC_CONFIG_PATH")
+    if explicit:
+        return Path(explicit)
+    home = env.get("HOME") or str(Path.home())
+    return Path(home) / ".config" / "cli-agent-bridge" / "dynamic_config.json"
 
 
 def cleanup_ephemeral_zc_cwd(path: Path | None) -> None:

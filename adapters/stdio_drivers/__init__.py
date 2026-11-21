@@ -20,7 +20,7 @@ from core.subbridge_zero_canon import (
     STDIO_RESIDENT_CLAUDE_CODEX_PROTOCOL_FLAG,
     normalize_review_profile,
 )
-from core.zero_canon_fs import read_gigarc_bool
+from core.zero_canon_fs import read_gigarc_bool, resolve_hub_dynamic_config
 
 _REPO_DYNAMIC_CONFIG: Path = Path(__file__).resolve().parents[2] / "dynamic_config.json"
 
@@ -128,7 +128,7 @@ def is_claude_codex_resident_protocol_enabled(
 ) -> bool:
     """Kill-switch переключения Claude/Codex на нативные протоколы (дефолт False)."""
     env = os.environ if environ is None else environ
-    default_cfg = Path(env.get("BRIDGE_DYNAMIC_CONFIG_PATH") or Path.home() / ".config/cli-agent-bridge/dynamic_config.json")
+    default_cfg = resolve_hub_dynamic_config(env)
     return read_gigarc_bool(
         STDIO_RESIDENT_CLAUDE_CODEX_PROTOCOL_FLAG,
         default_cfg if config_path is None else config_path,

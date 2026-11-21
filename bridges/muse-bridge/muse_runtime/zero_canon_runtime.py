@@ -30,6 +30,7 @@ from core.zero_canon_fs import (  # noqa: E402
     make_ephemeral_zc_cwd,
     read_gigarc_bool,
     remove_entry,
+    sanitize_zero_canon_env,
     write_atomic_0600,
 )
 
@@ -202,8 +203,7 @@ def prepare_muse_launch(
         return list(cmd), env, workdir
     zc_cwd = active.zc_cwd
     ensure_private_dir(zc_cwd, 0o700)
-    env["HOME"] = str(active.zc_home)
-    env["XDG_CONFIG_HOME"] = str(active.zc_home / ".config")
+    env = sanitize_zero_canon_env(env, active.zc_home)
     env["BRIDGE_ZERO_CANON"] = "1"
     new_cmd = apply_muse_preset_empty(cmd)
     for idx, token in enumerate(new_cmd[:-1]):

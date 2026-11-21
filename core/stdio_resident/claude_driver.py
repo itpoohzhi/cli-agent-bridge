@@ -23,7 +23,7 @@ from core.stdio_resident.protocol_driver import (
     DriverCapabilities,
     StreamJsonDriver,
 )
-from core.zero_canon_fs import ensure_private_dir, write_atomic_0600, write_atomic_text_0600
+from core.zero_canon_fs import ensure_private_dir, sanitize_zero_canon_env, write_atomic_0600, write_atomic_text_0600
 
 
 class ClaudeStreamJsonDriver(StreamJsonDriver):
@@ -141,7 +141,7 @@ class ClaudeStreamJsonDriver(StreamJsonDriver):
                 ca_src = src / name
                 if ca_src.is_file() and not ca_src.is_symlink():
                     write_atomic_0600(dst / name, ca_src.read_bytes())
-        return build_claude_zero_canon_env(base_env, root, profile="strict", config_dir=str(dst))
+        return build_claude_zero_canon_env(sanitize_zero_canon_env(base_env, root), root, profile="strict", config_dir=str(dst))
 
     def build_zero_canon_argv(self, argv: list[str], model: str = "", effort: str = "") -> list[str]:
         """Fail-closed: отвергает запрещённые флаги (вкл. -c/-r) и вставляет Zero-Canon до `--`."""

@@ -20,9 +20,8 @@ from core.subbridge_zero_canon import (
     ZERO_CANON_PROFILE,
     is_zero_canon_profile,
 )
-from core.zero_canon_fs import read_gigarc_bool
+from core.zero_canon_fs import read_gigarc_bool, resolve_hub_dynamic_config
 
-_DEFAULT_HUB_DYNAMIC_CONFIG = os.path.expanduser("~/.config/cli-agent-bridge/dynamic_config.json")
 CLAUDE_BRIDGE_URL_ENV = "HUB_ZERO_CANON_CLAUDE_BRIDGE_URL"
 DEFAULT_CLAUDE_BRIDGE_URL = "http://127.0.0.1:9881/v1"
 CLAUDE_PROTOCOLS = frozenset({"claude-stream-json", "claude_stream_json"})
@@ -49,11 +48,9 @@ def decide_zero_canon_route(
     """Zero-Canon не смешивается с резидентным пулом; мост :9881 — только по GigaRC-флагу."""
     if not is_zero_canon_profile(review_profile):
         return ZeroCanonRoute(KIND_RESIDENT)
-    from pathlib import Path
-
     env = os.environ if environ is None else environ
     is_claude = protocol in CLAUDE_PROTOCOLS or backend_id.strip().lower() in CLAUDE_BACKEND_IDS
-    cfg_path = Path(env.get("BRIDGE_DYNAMIC_CONFIG_PATH") or _DEFAULT_HUB_DYNAMIC_CONFIG)
+    cfg_path = resolve_hub_dynamic_config(env)
     if is_claude and read_gigarc_bool(HUB_ZERO_CANON_ROUTING_FLAG, cfg_path, environ=env, default=False):
         found = env_first(env, (CLAUDE_BRIDGE_URL_ENV,))
         return ZeroCanonRoute(KIND_BRIDGE, found[1] if found else DEFAULT_CLAUDE_BRIDGE_URL)

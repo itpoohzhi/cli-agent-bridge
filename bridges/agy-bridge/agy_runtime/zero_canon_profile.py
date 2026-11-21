@@ -209,6 +209,8 @@ class AgyZeroCanonProfileManager:
         for sub_name in ("skills", "plugins"):
             sub = zc_cli / "builtin" / sub_name
             if sub.is_dir() and not sub.is_symlink():
+                if (sub.stat().st_mode & 0o777) == 0o500 and not any(sub.iterdir()):
+                    continue
                 os.chmod(sub, 0o700)
                 [_remove_entry(child) for child in list(sub.iterdir())]
             elif sub.is_symlink() or sub.exists():

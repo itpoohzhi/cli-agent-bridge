@@ -16,7 +16,7 @@ from core.stdio_resident.protocol_driver import (
     StreamJsonDriver,
 )
 from core.subbridge_zero_canon import dump_toml, filter_codex_config
-from core.zero_canon_fs import ensure_private_dir, write_atomic_0600, write_atomic_text_0600
+from core.zero_canon_fs import ensure_private_dir, sanitize_zero_canon_env, write_atomic_0600, write_atomic_text_0600
 
 
 class CodexAppServerDriver(StreamJsonDriver):
@@ -175,7 +175,7 @@ class CodexAppServerDriver(StreamJsonDriver):
         src_auth = src / "auth.json" if src is not None else None
         if src_auth is not None and src_auth.is_file() and not src_auth.is_symlink():
             write_atomic_0600(dst / "auth.json", src_auth.read_bytes())
-        return {**base_env, "HOME": root, "CODEX_HOME": str(dst)}
+        return {**sanitize_zero_canon_env(base_env, root), "CODEX_HOME": str(dst)}
 
     def build_zero_canon_argv(self, argv: list[str], model: str = "", effort: str = "") -> list[str]:
         """`codex app-server`: fail-closed на запрещённых `-c`/`--config`, принудительный `project_doc_max_bytes=0`."""
