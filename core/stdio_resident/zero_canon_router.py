@@ -125,9 +125,14 @@ def proxy_zero_canon_bridge_turn(
     prompt: str,
     headers: Mapping[str, str] | None = None,
     *,
-    timeout_s: float = 180.0,
+    timeout_s: float | None = None,
 ) -> tuple[str, str]:
     """Перенаправляет Zero-Canon Claude-ход на локальный loopback claude-p-bridge (`:9881`)."""
+    effective_timeout = (
+        timeout_s
+        if timeout_s is not None
+        else float(os.environ.get("HUB_ZERO_CANON_PROXY_TIMEOUT_S", "180.0"))
+    )
     url = _validate_loopback_bridge_url(base_url) + "/chat/completions"
     body = json.dumps(
         {"model": model, "messages": [{"role": "user", "content": prompt}], "stream": False},
@@ -148,7 +153,7 @@ def proxy_zero_canon_bridge_turn(
             req_headers["Authorization"] = f"Bearer {bridge_key}"
     req = urllib.request.Request(url, data=body, headers=req_headers, method="POST")
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirectHandler())
-    with opener.open(req, timeout=timeout_s) as resp:
+    with opener.open(req, timeout=effective_timeout) as resp:
         parsed = json.loads(resp.read().decode("utf-8"))
     choices = parsed.get("choices") if isinstance(parsed, dict) else None
     if not isinstance(choices, list) or not choices:

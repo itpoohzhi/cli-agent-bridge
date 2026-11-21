@@ -63,10 +63,24 @@ class OpenCodeAcpDriver(AcpDriver):
         super().__init__()
         self._config = dict(config or {})
         self._id_counter, self._id_lock = 0, threading.Lock()
-        self._active_session_id: str | None = None
-        self._active_prompt_id: int | None = None
         self._last_error: dict[str, Any] | None = None
         self._zc_local: threading.local = threading.local()
+
+    @property
+    def _active_session_id(self) -> str | None:
+        return cast(str | None, getattr(self._zc_local, "session_id", None))
+
+    @_active_session_id.setter
+    def _active_session_id(self, value: str | None) -> None:
+        self._zc_local.session_id = value
+
+    @property
+    def _active_prompt_id(self) -> int | None:
+        return cast(int | None, getattr(self._zc_local, "prompt_id", None))
+
+    @_active_prompt_id.setter
+    def _active_prompt_id(self, value: int | None) -> None:
+        self._zc_local.prompt_id = value
 
     @property
     def _zero_canon_active(self) -> bool:

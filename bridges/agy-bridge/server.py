@@ -7826,8 +7826,9 @@ class Handler(BaseHTTPRequestHandler):
                     cwd_invalid = True
                     force_cold = True
             zc_plan = zero_canon_profile.resolve_turn_plan(self.headers, DYNAMIC_CONFIG_PATH)
-            if zc_plan.use_empty_cwd and not cwd_invalid:
+            if zc_plan.use_empty_cwd:
                 cwd = str(_zc_manager().create_turn_zc_cwd())
+                cwd_invalid = False
             # Kill-switch изоляции читается на каждом запросе: без рестарта моста.
             isolation_enabled = _is_session_isolation_enabled()
             # Горячие сессии — только агентным запросам с инструментами. Фоновые и
