@@ -1770,11 +1770,15 @@ def _launch_env(zero_canon: bool = False) -> dict:
     with _session_store_lock:
         active_cids = frozenset(_in_flight_cids)
     zero_canon_profile.maybe_rotate_agy_runtime_artifacts(Path(clean_home), active_cids=active_cids, config_path=DYNAMIC_CONFIG_PATH)
-    if not zero_canon:
+    if zero_canon:
+        from core.zero_canon_fs import sanitize_zero_canon_env
+
+        env = sanitize_zero_canon_env(env, clean_home)
+    else:
         with _AGY_HOME_LOCK:
             _verify_clean_home_root(CLEAN_HOME_DIR)
             _clean_canon_files(Path(clean_home))
-    env["HOME"] = clean_home
+        env["HOME"] = clean_home
     env.setdefault("AGY_BIN", str(AGY_BIN))
     env.setdefault(ALLOWED_MODELS_ENV, _allowed_models_file())
     env["BRIDGE_ZERO_CANON"] = "1"

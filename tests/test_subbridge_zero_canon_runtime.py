@@ -229,9 +229,12 @@ def test_opencode_kill_switch_and_permission_ask_preserved(
         for denied in ("mcp", "plugin", "instructions"):
             assert denied not in parsed_cfg
 
-        # Even if serve policy asks for "deny", Zero-Canon strictly keeps permission={"*": "ask"}
+        # If serve policy asks for "deny", Zero-Canon strictly preserves "deny" (never weakens to "ask")
         serve_env = zc.apply_serve_zero_canon_env(raw_env, "{}", "deny")
-        assert json.loads(serve_env["OPENCODE_CONFIG_CONTENT"])["permission"] == {"*": "ask"}
+        assert json.loads(serve_env["OPENCODE_CONFIG_CONTENT"])["permission"] == {"*": "deny"}
+        # If serve policy asks for "allow", Zero-Canon tightens to "ask"
+        serve_allow_env = zc.apply_serve_zero_canon_env(raw_env, "{}", "allow")
+        assert json.loads(serve_allow_env["OPENCODE_CONFIG_CONTENT"])["permission"] == {"*": "ask"}
 
 
 def test_opencode_zen_server_facade_and_spawn_proxy(
@@ -260,7 +263,7 @@ def test_opencode_zen_server_facade_and_spawn_proxy(
     ) as ctx:
         assert ctx is not None
         serve_env = server._serve_env("")
-        assert json.loads(serve_env["OPENCODE_CONFIG_CONTENT"])["permission"] == {"*": "ask"}
+        assert json.loads(serve_env["OPENCODE_CONFIG_CONTENT"])["permission"] == {"*": "deny"}
         server.spawn_registered(["opencode", "run"], cwd=str(tmp_path), env={"HOME": str(real_home)})
         assert captured["cwd"] == str(ctx.zc_cwd)
         assert captured["env"]["HOME"] == str(ctx.zc_home)

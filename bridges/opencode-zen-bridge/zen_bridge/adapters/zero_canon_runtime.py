@@ -32,6 +32,7 @@ from core.zero_canon_fs import (  # noqa: E402
     make_ephemeral_zc_cwd,
     read_gigarc_bool,
     remove_entry,
+    sanitize_zero_canon_env,
     write_atomic_0600,
 )
 
@@ -142,17 +143,15 @@ def zero_canon_scope(
 def apply_zero_canon_env(
     env: Mapping[str, str], *, ctx: OpenCodeZeroCanonContext | None = None
 ) -> dict[str, str]:
-    """Применяет Zero-Canon изоляцию env с обязательным `permission: {'*': 'ask'}`."""
-    result = dict(env)
+    """Применяет Zero-Canon изоляцию env, XDG_* и секретов с `permission: {'*': 'ask'}`."""
     active = ctx if ctx is not None else _ACTIVE_ZC.get()
     if active is None or not active.enabled:
-        return result
-    filtered = filter_opencode_config(_parse_json_dict(result.get("OPENCODE_CONFIG_CONTENT", "")))
+        return dict(env)
+    filtered = filter_opencode_config(_parse_json_dict(env.get("OPENCODE_CONFIG_CONTENT", "")))
+    result = sanitize_zero_canon_env(env, active.zc_home)
     result.update(
         {
-            "HOME": str(active.zc_home),
             "XDG_CONFIG_HOME": str(active.zc_xdg_config),
-            "XDG_DATA_HOME": str(active.zc_home / ".local" / "share"),
             "OPENCODE_CONFIG_CONTENT": json.dumps(filtered, ensure_ascii=False),
             "BRIDGE_ZERO_CANON": "1",
         }
@@ -168,12 +167,17 @@ def apply_serve_zero_canon_env(
     *,
     ctx: OpenCodeZeroCanonContext | None = None,
 ) -> dict[str, str]:
-    """Финализирует `OPENCODE_CONFIG_CONTENT` для serve (в Zero-Canon всегда `permission={'*': 'ask'}`)."""
+    """Финализирует `OPENCODE_CONFIG_CONTENT` для serve (не ослабляет `deny` до `ask`)."""
     result = dict(env)
     config = _parse_json_dict(result.get("OPENCODE_CONFIG_CONTENT") or default_config_raw)
     config["permission"] = {"*": permission_effect}
     result["OPENCODE_CONFIG_CONTENT"] = json.dumps(config, ensure_ascii=False)
-    return apply_zero_canon_env(result, ctx=ctx)
+    out = apply_zero_canon_env(result, ctx=ctx)
+    if permission_effect == "deny" and out.get("BRIDGE_ZERO_CANON") == "1":
+        strict_cfg = _parse_json_dict(out.get("OPENCODE_CONFIG_CONTENT", ""))
+        strict_cfg["permission"] = {"*": "deny"}
+        out["OPENCODE_CONFIG_CONTENT"] = json.dumps(strict_cfg, ensure_ascii=False)
+    return out
 
 
 class _ZeroCanonSpawnProxy:
