@@ -29,6 +29,7 @@ class DecodedChunk:
     is_terminal: bool = False
     is_tool_stop: bool = False
     raw: dict[str, Any] = field(default_factory=dict)
+    error: str | None = None
 
 
 @runtime_checkable

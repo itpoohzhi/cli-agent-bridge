@@ -18,6 +18,7 @@ from .process_reaper import (
 )
 
 _STDERR_RING_MAX_BYTES = 65536
+LINE, TIMEOUT, EOF = "line", "timeout", "eof"
 
 
 class StdioIoError(Exception):
@@ -41,6 +42,9 @@ class TaggedLine:
     pid: int
     is_stderr: bool = False
     timestamp_mono: float = field(default_factory=time.monotonic)
+
+
+LineOutcome = tuple[str, TaggedLine | None]
 
 
 class ResidentProcessHandle:
@@ -113,27 +117,32 @@ class ResidentProcessHandle:
             raise StdioWriteError("failed to write to process stdin") from exc
 
     def read_line(self, timeout_s: float | None = None) -> TaggedLine | None:
-        """Return the next active-generation line, dropping late output."""
+        """Return the next active-generation line; None on timeout or EOF (legacy)."""
+        kind, tagged = self.read_line_outcome(timeout_s)
+        return tagged if kind == LINE else None
+
+    def read_line_outcome(self, timeout_s: float | None = None) -> LineOutcome:
+        """Strictly separate ``("line", t)`` / ``("timeout", None)`` / ``("eof", None)``."""
         if self._closed:
-            return None
+            return (EOF, None)
         deadline = None if timeout_s is None else time.monotonic() + max(0.0, timeout_s)
         while True:
             timeout = None if deadline is None else max(0.0, deadline - time.monotonic())
             try:
                 item = self._queue.get(timeout=timeout)
             except queue.Empty:
-                return None
+                return (TIMEOUT, None)
             if item is None:
                 with self._state_lock:
                     if self._reader_error is not None:
                         raise self._reader_error
-                return None
+                return (EOF, None)
             if isinstance(item, BaseException):
                 raise item
             with self._state_lock:
                 active_generation = self.generation
             if item.generation == active_generation:
-                return item
+                return (LINE, item)
 
     def is_alive(self) -> bool:
         """Return whether the subprocess is still running."""

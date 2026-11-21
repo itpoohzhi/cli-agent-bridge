@@ -141,7 +141,7 @@ if str(_REPO_ROOT) not in sys.path:
 
 from agy_runtime import (  # noqa: E402
     long_session_config as _lsc, midstream_resilience, slot_and_session,
-    sse_body_runner, sse_stream_helpers, turn_usage_finalize as _u_fin,
+    sse_body_runner, sse_stream_helpers, turn_usage_finalize as _u_fin, zero_canon_profile,
 )
 from core.continuity_anchor_policy import mint_bridge_call_id  # noqa: E402
 from core.correlation_contract import extract_correlation, format_log_corr_suffix  # noqa: E402
@@ -171,7 +171,7 @@ from core.agy_capacity_guard import (  # noqa: E402
     summarize_capacity_text,
 )
 from core.chat_key import SOURCES_SESSION_ID, resolve_chat_key  # noqa: E402
-from core.session_continuity import ContinuityConfig, ContinuityIndex, session_key_for  # noqa: E402
+from core.session_continuity import ContinuityConfig, ContinuityIndex  # noqa: E402
 from core.prompt_truncation_notice import NoticePolicy, with_truncation_notice  # noqa: E402
 from core.cli_rejection import is_deterministic_cli_rejection  # noqa: E402
 from core.effortless_policy import effort_cli_args, resolve_request_effort  # noqa: E402
@@ -195,8 +195,9 @@ from core.tool_emulation import (  # noqa: E402
     tools_protocol_section,
 )
 from core.tool_call_schema_policy import ToolCallLimitExceededError, build_tool_turn_error_body  # noqa: E402
-from core.cli_turn_flags import format_print_timeout as _format_print_timeout, text_turn_cli_flags  # noqa: E402
-from core.env_hot_reload import file_signature as _file_signature  # noqa: E402
+from core.agy_zero_canon import zero_canon_settings_cli_arg  # noqa: E402
+from core.cli_turn_flags import build_turn_cli_flags as _build_turn_cli_flags, format_print_timeout as _format_print_timeout  # noqa: E402
+from core.env_hot_reload import file_signature as _file_signature  # noqa: E402, F401
 from core.runtime_env import synthesize_required_bash_desc_enabled  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent
@@ -1423,13 +1424,7 @@ def _ensure_symlink(link: Path, target: Path) -> None:
 def _mirror_regular_files(
     src_dir: Path, dst_dir: Path, ancestors: frozenset[Path]
 ) -> None:
-    """Пробрасывает содержимое src_dir в приватный dst_dir симлинками на файлы.
-
-    Подкаталоги не линкуются целиком: для каждого создаётся приватный каталог
-    0700 в <clean-home>, симлинками пробрасываются только файлы внутри него.
-    Так сквозная запись в реальный профиль через вложенные каталоги невозможна.
-    Циклы симлинков отсекаются по множеству resolved-предков.
-    """
+    """Пробрасывает содержимое src_dir в приватный dst_dir симлинками на файлы."""
     _ensure_private_dir(dst_dir)
     ancestors = ancestors | {src_dir.resolve()}
     for entry in src_dir.iterdir():
@@ -1437,7 +1432,6 @@ def _mirror_regular_files(
         if entry.is_dir():
             if entry.resolve() in ancestors:
                 continue
-            # Наследие прежних версий: симлинк на каталог/файл вместо приватного каталога.
             if dst.is_symlink() or (dst.exists() and not dst.is_dir()):
                 dst.unlink()
             _mirror_regular_files(entry, dst, ancestors)
@@ -1605,61 +1599,14 @@ def _agy_gemini_files(
     real_gemini: Path, real_cli: Path, clean_gemini: Path, clean_gemini_cli: Path
 ) -> tuple[tuple[Path, Path], ...]:
     """(источник в реальном профиле, каталог в <clean-home>) для auth/state-файлов."""
-    return (
-        (real_gemini / "jetski-standalone-oauth-token", clean_gemini), (real_gemini / "projects.json", clean_gemini),
-        (real_cli / "antigravity-oauth-token", clean_gemini_cli), (real_cli / "antigravity-account.json", clean_gemini_cli),
-        (real_cli / "installation_id", clean_gemini_cli), (real_cli / "jetski_state.pbtxt", clean_gemini_cli),
-        (real_cli / "settings.json", clean_gemini_cli),
-    )  # fmt: skip
+    return zero_canon_profile.agy_gemini_files(real_gemini, real_cli, clean_gemini, clean_gemini_cli)
 
 
 def _sync_agy_gemini_files(pairs: tuple[tuple[Path, Path], ...]) -> int:
-    """Копирует изменившиеся auth-файлы в <clean-home> (под _AGY_HOME_LOCK); возвращает их число.
-
-    mtime-guard действует только при первой синхронизации файла (`prev_sig is None`): более свежая
-    копия в <clean-home> (токен, обновлённый самим agy) не затирается, но подпись источника
-    запоминается. Смена подписи источника во время работы моста (переключение аккаунта) всегда
-    перезаписывает копию, а исчезновение источника (logout) удаляет ранее синхронизированную копию.
-    """
-    copied = 0
-    for src, dst in pairs:
-        key = str(src)
-        signature = _file_signature(src)
-        prev_sig = _AGY_AUTH_SIGNATURES.get(key)
-        dst_file = dst / src.name
-        if signature is None:
-            # Копия, которую мост не синхронизировал (состояние, созданное самим agy), не удаляется.
-            if prev_sig is not None and _remove_clean_home_copy(dst_file, src.name):
-                _AGY_AUTH_SIGNATURES.pop(key, None)
-            continue
-        try:
-            dst_ok = not dst_file.is_symlink() and dst_file.is_file()
-        except OSError:
-            dst_ok = False
-        # Удалённая или подменённая симлинком копия восстанавливается даже при неизменной подписи источника.
-        if dst_ok and prev_sig == signature:
-            continue
-        externally_changed = prev_sig is not None and prev_sig != signature
-        try:
-            # Симлинк на месте копии удаляется (stat пошёл бы по ссылке); файл остаётся 0600.
-            if dst_file.is_symlink():
-                dst_file.unlink()
-            if (
-                externally_changed
-                or not dst_file.exists()
-                or src.stat().st_mtime >= dst_file.stat().st_mtime
-            ):
-                _copy_private_atomic(src, dst_file)
-                copied += 1
-            else:
-                _assert_inside_clean_home(dst_file)
-                dst_file.chmod(0o600)
-        except OSError as exc:
-            # Параллельная атомарная ротация внешним agy не должна ронять запрос; подпись не фиксируется.
-            _log(f"agy-home auth sync skipped file={src.name} err={type(exc).__name__}")
-            continue
-        _AGY_AUTH_SIGNATURES[key] = signature
-    return copied
+    """Копирует изменившиеся auth-файлы в <clean-home> (под _AGY_HOME_LOCK); возвращает их число."""
+    return zero_canon_profile.sync_agy_gemini_files(
+        pairs, _AGY_AUTH_SIGNATURES, _copy_private_atomic, _remove_clean_home_copy, _assert_inside_clean_home, _log
+    )
 
 
 def _remove_clean_home_copy(dst_file: Path, name: str) -> bool:
@@ -1676,6 +1623,11 @@ def _remove_clean_home_copy(dst_file: Path, name: str) -> bool:
         return False
     _log(f"agy-home auth removed file={name}")
     return True
+
+
+def _zc_manager() -> zero_canon_profile.AgyZeroCanonProfileManager:
+    """Возвращает менеджер изолированного dual clean-home `agy-home-zc`."""
+    return zero_canon_profile.get_manager(HOME, CLEAN_HOME_DIR, config_path=DYNAMIC_CONFIG_PATH)
 
 
 def _prepare_agy_home() -> Path:
@@ -1798,7 +1750,7 @@ def _catalog_model_order() -> list[str]:
     return [mid for mid in order if _model_in_allowlist(mid, allowed)]
 
 
-def _launch_env() -> dict:
+def _launch_env(zero_canon: bool = False) -> dict:
     """Окружение для `agy`. Ключ моста потомку не передаётся.
 
     HOME указывает на изолированный <clean-home> (Zero-Canon); браузер для
@@ -1814,14 +1766,19 @@ def _launch_env() -> dict:
     env = os.environ.copy()
     env.setdefault("AGY_SKIP_PREFLIGHT", "1")
     env.pop("AGY_BRIDGE_KEY", None)
-    clean_home = str(_prepare_agy_home())
-    # Per-launch Zero-Canon: канон, появившийся после инициализации, удаляется
-    # перед каждым порождением процесса. Корень перепроверяется непосредственно
-    # перед очисткой (подмена на симлинк/другой путь), очистка сериализована.
-    with _AGY_HOME_LOCK:
-        _verify_clean_home_root(CLEAN_HOME_DIR)
-        _clean_canon_files(Path(clean_home))
-    env["HOME"] = clean_home
+    clean_home = str(_zc_manager().prepare_zc_home() if zero_canon else _prepare_agy_home())
+    with _session_store_lock:
+        active_cids = frozenset(_in_flight_cids)
+    zero_canon_profile.maybe_rotate_agy_runtime_artifacts(Path(clean_home), active_cids=active_cids, config_path=DYNAMIC_CONFIG_PATH)
+    if zero_canon:
+        from core.zero_canon_fs import sanitize_zero_canon_env
+
+        env = sanitize_zero_canon_env(env, clean_home)
+    else:
+        with _AGY_HOME_LOCK:
+            _verify_clean_home_root(CLEAN_HOME_DIR)
+            _clean_canon_files(Path(clean_home))
+        env["HOME"] = clean_home
     env.setdefault("AGY_BIN", str(AGY_BIN))
     env.setdefault(ALLOWED_MODELS_ENV, _allowed_models_file())
     env["BRIDGE_ZERO_CANON"] = "1"
@@ -3046,17 +3003,16 @@ def _resumed_turn_prompt(
 
 
 def _session_key_for(
-    model: str, cwd: str, effort: str, raw_chat_id: str = ""
+    model: str, cwd: str, effort: str, raw_chat_id: str = "", review_profile: str = "standard"
 ) -> tuple[str, ...]:
-    """Ключ горячей сессии: токен чата, иначе cwd; без обоих ключ пуст.
-
-    Сырой chat id в стор и на диск не попадает — только префикс его SHA-256.
-    """
-    return session_key_for(model, cwd, effort, raw_chat_id, CWD_MAX_LEN)
+    """Ключ горячей сессии: токен чата, иначе cwd; без обоих ключ пуст."""
+    return slot_and_session.hot_session_key(
+        model, cwd, effort, raw_chat_id, CWD_MAX_LEN, review_profile=review_profile
+    )
 
 
 def _resolve_chat_context(
-    headers: Any, extra: dict[str, object], req: dict[str, object] | None = None
+    headers: Any, extra: dict[str, object], req: dict[str, object] | None = None, review_profile: str | None = None
 ) -> tuple[str, bool, str]:
     """Возвращает (chat_id, invalid, continuity_scope); scope непуст только при _CONTINUITY.resolve."""
     extra_map = extra if isinstance(extra, dict) else {}
@@ -3064,15 +3020,16 @@ def _resolve_chat_context(
     has_cwd = all((isinstance(cwd, str), bool(str(cwd).strip()) if isinstance(cwd, str) else False))
     chat = resolve_chat_key(req, headers, extra_map, sources=SOURCES_SESSION_ID)
     subagent_id, subagent_invalid = slot_and_session.resolve_subagent_id(headers)
+    profile = review_profile if review_profile is not None else zero_canon_profile.resolve_turn_plan(headers, DYNAMIC_CONFIG_PATH).profile_tag
     result: tuple[str, bool, str] = ("", True, "")
     if not any((chat.invalid, subagent_invalid)):
         use_cont = all((not chat.value, not has_cwd, isinstance(req, dict), bool(req.get("tools")) if isinstance(req, dict) else False, _new_flag("session_continuity_enabled")))
         if use_cont:
             if isinstance(req, dict):
-                scope = slot_and_session.continuity_scope(req.get("model"), subagent_id)
+                scope = slot_and_session.continuity_scope(req.get("model"), subagent_id, review_profile=profile)
                 result = (_CONTINUITY.resolve(req.get("messages"), scope), False, scope)
         else:
-            result = (slot_and_session.combine_chat_and_subagent(chat.value, subagent_id), False, "")
+            result = (slot_and_session.combine_chat_and_subagent(chat.value, subagent_id, review_profile=profile), False, "")
     return result
 
 
@@ -5608,6 +5565,7 @@ class Run:
         policy: _TimeoutPolicy | None = None,
         add_dir: Path | None = None,
         mode: str = "agent",
+        zero_canon: bool = False,
     ):
         launcher = _launcher()
         WORKSPACE.mkdir(parents=True, exist_ok=True)
@@ -5632,8 +5590,10 @@ class Run:
             model,
             *effort_cli_args(effort),
             "--print-timeout=" + _format_print_timeout(PRINT_TIMEOUT),
-            *text_turn_cli_flags(cli_mode),
+            *_build_turn_cli_flags(cli_mode, zero_canon=zero_canon),
         ]
+        if zero_canon:
+            cmd += ["--settings", zero_canon_settings_cli_arg()]
         # Изображения хода: каталог файлов отдельным аргументом, cwd не подменяется.
         if add_dir is not None:
             cmd += ["--add-dir", str(add_dir)]
@@ -5660,7 +5620,7 @@ class Run:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 start_new_session=True,
-                env=_launch_env(),
+                env=_launch_env(zero_canon=zero_canon),
             )
         except BaseException:
             _cid_release(self.run_cid, self.turn_id)
@@ -7184,6 +7144,7 @@ class Handler(BaseHTTPRequestHandler):
                         policy=policy,
                         add_dir=img_dir if images else None,
                         **({"mode": ctx["agy_mode"]} if "agy_mode" in ctx else {}),
+                        **({"zero_canon": True} if ctx.get("zero_canon") else {}),
                     )
                 except LauncherUnavailable:
                     self._reject(
@@ -7647,6 +7608,7 @@ class Handler(BaseHTTPRequestHandler):
         use_cid = ""
         owned_cid = ""
         ctx: dict[str, object] = {}
+        zc_turn_cwd: Path | None = None
         turn_id = uuid.uuid4().hex
         try:
             raw = self.rfile.read(length) if length else b""
@@ -7870,13 +7832,18 @@ class Handler(BaseHTTPRequestHandler):
                     _log(f"cwd-nonstring-rejected type={type(raw_cwd).__name__}")
                     cwd_invalid = True
                     force_cold = True
+            zc_plan = zero_canon_profile.resolve_turn_plan(self.headers, DYNAMIC_CONFIG_PATH)
+            if zc_plan.use_empty_cwd:
+                zc_turn_cwd = _zc_manager().create_turn_zc_cwd()
+                cwd = str(zc_turn_cwd)
+                cwd_invalid = False
             # Kill-switch изоляции читается на каждом запросе: без рестарта моста.
             isolation_enabled = _is_session_isolation_enabled()
             # Горячие сессии — только агентным запросам с инструментами. Фоновые и
             # plain-запросы (в т. ч. генерация заголовка DSH, tools=0) стор не читают
             # и не пишут: ни claim, ни commit, ни invalidate.
             chat_id, chat_id_invalid, continuity_scope = _resolve_chat_context(
-                self.headers, cast(dict, extra), req if isinstance(req, dict) else None
+                self.headers, cast(dict, extra), req if isinstance(req, dict) else None, review_profile=zc_plan.profile_tag
             )
             sess_key: tuple[str, ...] | None = (
                 _session_key_for(
@@ -7884,6 +7851,7 @@ class Handler(BaseHTTPRequestHandler):
                     cwd,
                     cast(str, effort),
                     chat_id,
+                    review_profile=zc_plan.profile_tag,
                 )
                 if tools_count > 0 and isolation_enabled and not cwd_invalid
                 else None
@@ -8005,6 +7973,7 @@ class Handler(BaseHTTPRequestHandler):
                 "img_dir": img_dir,
                 "universal_fallback": universal,
                 "stripped_full_prompt": stripped_val,
+                "zero_canon": zc_plan.enabled,
             }
             if ctx["stream"]:
                 self._serve_sse(ctx)
@@ -8018,6 +7987,8 @@ class Handler(BaseHTTPRequestHandler):
                 _cid_release(use_cid or owned_cid, turn_id)
             if reserved and budget is not None:
                 budget.release(reserved)
+            if zc_turn_cwd is not None and not ctx.get("job_owns_cid"):
+                zero_canon_profile.AgyZeroCanonProfileManager.cleanup_turn_zc_cwd(zc_turn_cwd)
 
     @staticmethod
     def _graceful_notice(reason: str, limit_s: object) -> str:

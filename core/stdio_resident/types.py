@@ -237,6 +237,7 @@ class SlotAffinityKey:
     model: str
     effort: str
     cwd_norm: str
+    review_profile: str = "standard"
 
 
 @dataclass(frozen=True)

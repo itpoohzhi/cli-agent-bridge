@@ -17,7 +17,13 @@ from adapters.stdio_drivers.muse_codec import (
     build_session_start_msg, build_turn_start_msg, decode_msp_line, is_uuid7, uuid7,
 )
 from adapters.stdio_drivers.muse_env import (
-    build_muse_env, compute_muse_fingerprint, get_fingerprint_field, resolve_pinned_path, verify_binary,
+    build_muse_env,
+    build_muse_zero_canon_argv,
+    build_muse_zero_canon_env,
+    compute_muse_fingerprint,
+    get_fingerprint_field,
+    resolve_pinned_path,
+    verify_binary,
 )
 from core.stdio_resident.process_io import StdioIoError
 from core.stdio_resident.protocol_driver import DecodedChunk, DriverCapabilities, StdioProtocolDriver
@@ -112,6 +118,22 @@ class MuseMspDriver(StdioProtocolDriver):
         _ = base_env
         raw_bin = get_fingerprint_field(self._config, "binary_path")
         return build_muse_env(os.environ, resolve_pinned_path(raw_bin) if raw_bin else "", turn_sandbox=turn_sandbox)
+
+    def build_zero_canon_env(self, base_env: Mapping[str, str], root: str) -> dict[str, str]:
+        """Build isolated Zero-Canon environment for Muse resident turn (trusted os.environ only)."""
+        _ = base_env
+        raw_bin = get_fingerprint_field(self._config, "binary_path")
+        return build_muse_zero_canon_env(
+            None,
+            resolve_pinned_path(raw_bin) if raw_bin else "",
+            root,
+            server_env=os.environ,
+        )
+
+    def build_zero_canon_argv(self, argv: list[str], model: str = "", effort: str = "") -> list[str]:
+        """Append `--preset empty` for Zero-Canon Muse turns."""
+        _ = (model, effort)
+        return build_muse_zero_canon_argv(argv)
 
     def compute_fingerprint(self) -> str:
         """Compute deterministic SHA-256 fingerprint for ``SlotAffinityKey``."""

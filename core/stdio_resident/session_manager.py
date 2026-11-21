@@ -4,9 +4,7 @@
 
 from __future__ import annotations
 
-import fcntl
 import hashlib
-import json
 import os
 import shutil
 import tempfile
@@ -20,8 +18,11 @@ from typing import IO, Any, cast
 
 from core.stdio_resident.config import StdioPoolConfig
 from core.stdio_resident.process_pool import ResidentProcessPool, SlotLeaseTimeoutError
+from core.stdio_resident.process_io import TIMEOUT
 from core.stdio_resident.protocol_driver import DecodedChunk, StdioProtocolDriver
 from core.stdio_resident.types import ExecutionFingerprint, SlotAffinityKey
+from core.stdio_resident.zero_canon_router import ZeroCanonIsolation, zero_canon_isolation
+from core.zero_canon_fs import acquire_turn_lock, cleanup_turn_sandbox
 
 __all__ = ["SessionTurnMode", "SessionTurnResult", "SlotLeaseTimeoutError", "StdioSessionManager"]
 
@@ -72,9 +73,7 @@ class StdioSessionManager:
         cancel_event: threading.Event | None = None,
     ) -> SessionTurnResult:
         """Execute and materialize one turn, including process metadata."""
-        stream = self._execute_turn(
-            affinity_key, prompt, argv_builder, cwd, env, turn_context, cancel_event
-        )
+        stream = self._execute_turn(affinity_key, prompt, argv_builder, cwd, env, turn_context, cancel_event)
         while True:
             try:
                 _ = next(stream)
@@ -93,9 +92,7 @@ class StdioSessionManager:
         is_ephemeral: bool = False,
     ) -> Iterator[DecodedChunk]:
         """Yield decoded chunks until the protocol reports turn completion."""
-        return self._execute_turn(
-            affinity_key, prompt, argv_builder, cwd, env, turn_context, cancel_event, is_ephemeral=is_ephemeral
-        )
+        return self._execute_turn(affinity_key, prompt, argv_builder, cwd, env, turn_context, cancel_event, is_ephemeral=is_ephemeral)
 
     def _execute_turn(
         self,
@@ -109,7 +106,8 @@ class StdioSessionManager:
         is_ephemeral: bool = False,
     ) -> Generator[DecodedChunk, None, SessionTurnResult]:
         session_key = self._session_key(affinity_key)
-        with self._get_session_lock(session_key):
+        with self._get_session_lock(session_key), zero_canon_isolation(self._driver, affinity_key.review_profile) as iso:
+            is_ephemeral = is_ephemeral or iso.active  # Zero-Canon не смешивается с пулом
             cfg = self._config or getattr(self._pool, "_config", None) or StdioPoolConfig()
             turn_idle_s = float(getattr(cfg, "turn_idle_timeout_s", 180.0))
             turn_total_s = float(getattr(cfg, "turn_total_timeout_s", 600.0))
@@ -117,22 +115,30 @@ class StdioSessionManager:
             leave_timeout_s = float(getattr(cfg, "leave_timeout_s", 2.0))
             verify_fn = getattr(self._driver, "verify_environment", None)
             if callable(verify_fn):
-                ok, reason = verify_fn()
+                ok, reason = cast(tuple[bool, str], verify_fn())
                 if not ok:
                     raise RuntimeError(reason or "driver environment verification failed")
             sandbox_args_fn = getattr(self._driver, "build_sandbox_args", None)
-            sandbox_args = list(sandbox_args_fn()) if callable(sandbox_args_fn) else []
-            base_argv = list(argv_builder())
+            sandbox_args = list(cast(list[str], sandbox_args_fn())) if callable(sandbox_args_fn) else []
+            base_argv = iso.argv(list(argv_builder()), affinity_key.model, affinity_key.effort)
             argv = base_argv + [f for f in sandbox_args if f not in base_argv]
+            effective_cwd = iso.cwd if (iso.active and iso.cwd) else cwd
             fp_fn = getattr(self._driver, "compute_fingerprint", None)
-            fingerprint = self._build_fingerprint(argv, cwd, env, str(fp_fn()) if callable(fp_fn) else "")
+            fingerprint = self._build_fingerprint(argv, effective_cwd, env, str(fp_fn()) if callable(fp_fn) else "")
             self._invalidate_changed_slot(session_key, fingerprint)
             turn_sandbox = tempfile.mkdtemp(prefix="turn-")
             os.chmod(turn_sandbox, 0o700)
-            spawn_env = self._resolve_spawn_env(env)
-            turn_context_for_turn: dict[str, Any] = {**(turn_context or {}), "turn_sandbox": turn_sandbox}
+            spawn_env = self._resolve_spawn_env(env, iso)
+            turn_context_for_turn: dict[str, Any] = {
+                **(turn_context or {}),
+                "turn_sandbox": turn_sandbox,
+                "cwd": effective_cwd,
+                "review_profile": affinity_key.review_profile,
+            }
             try:
-                slot = self._pool.acquire(affinity_key, lambda: list(argv), cwd, spawn_env, is_ephemeral=is_ephemeral)
+                slot = self._pool.acquire(
+                    affinity_key, lambda: list(argv), effective_cwd, spawn_env, is_ephemeral=is_ephemeral
+                )
             except BaseException:
                 with suppress(FileNotFoundError):
                     shutil.rmtree(turn_sandbox)
@@ -171,14 +177,20 @@ class StdioSessionManager:
                     if remaining_total_s <= 0.0:
                         raise RuntimeError("turn total timeout exceeded")
                     timeout = min(turn_idle_s, remaining_total_s)
-                    tagged_line = slot.handle.read_line(timeout_s=timeout)
+                    read_outcome = getattr(slot.handle, "read_line_outcome", None)
+                    kind, tagged_line = (
+                        cast(tuple[str, Any], read_outcome(timeout_s=timeout))
+                        if callable(read_outcome)
+                        else ("", slot.handle.read_line(timeout_s=timeout))
+                    )
+                    if kind == TIMEOUT:
+                        raise TimeoutError(f"resident process idle {timeout:g}s without output")
                     if tagged_line is None:
                         raise RuntimeError("resident process ended before the terminal marker")
                     raw_line = tagged_line.line
                     decoded = self._driver.decode_line(raw_line)
                     if decoded is not None:
-                        chunk_error = getattr(decoded, "error", None)
-                        if chunk_error is not None:
+                        if (chunk_error := getattr(decoded, "error", None)) is not None:
                             self._pool.release(slot.slot_id, cancel=True, lease_id=lease_id)
                             released = True
                             self._forget_slot(session_key, slot.slot_id)
@@ -213,40 +225,28 @@ class StdioSessionManager:
                             lock_file.close()
             return SessionTurnResult(mode=mode, chunks=chunks, pid=slot.handle.pid, generation=turn_generation, is_tool_stop=is_tool_stop)
 
-    def _resolve_spawn_env(self, env: Mapping[str, str] | None, _turn_sandbox: str | None = None) -> Mapping[str, str] | None:
-        base_env = dict(os.environ if env is None else env)
+    def _resolve_spawn_env(self, env: Mapping[str, str] | None, iso: ZeroCanonIsolation | None = None) -> Mapping[str, str] | None:
+        if iso is not None and iso.active:
+            # Zero-Canon использует строго доверенный os.environ, без caller-supplied env.
+            isolated = iso.env(dict(os.environ))
+            if isolated is not None:
+                return isolated
+        base_env = dict(os.environ)
+        if env is not None:
+            base_env.update(env)
         build_env_fn = getattr(self._driver, "build_env", None)
         if not callable(build_env_fn):
             return env
-        built_env = build_env_fn(base_env, turn_sandbox=None)
+        built_env = cast(Mapping[str, str], build_env_fn(base_env, turn_sandbox=None))
         return None if (env is None and built_env == base_env) else built_env
 
     @staticmethod
     def _acquire_lock(lock_path: str, handle: Any) -> IO[str]:
-        lock_file = open(lock_path, "w", encoding="utf-8")
-        try:
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-            pid = getattr(handle, "pid", 0)
-            payload = {"pid": pid, "pgid": getattr(handle, "_pgid", pid), "start_time": getattr(handle, "_start_time", "")}
-            lock_file.write(json.dumps(payload, separators=(",", ":")))
-            lock_file.flush()
-        except BaseException:
-            lock_file.close()
-            raise
-        return lock_file
+        return cast(IO[str], acquire_turn_lock(lock_path, handle))
 
     @staticmethod
     def _cleanup_sandbox(turn_sandbox: str, lock_file: IO[str] | None, lock_path: str | None) -> None:
-        with suppress(FileNotFoundError):
-            shutil.rmtree(turn_sandbox)
-        if lock_file is not None:
-            with suppress(OSError):
-                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
-            with suppress(OSError):
-                lock_file.close()
-        if lock_path is not None:
-            with suppress(FileNotFoundError):
-                os.unlink(lock_path)
+        cleanup_turn_sandbox(turn_sandbox, lock_file, lock_path)
 
     def _invalidate_changed_slot(self, session_key: str, fingerprint: ExecutionFingerprint) -> None:
         with self._state_lock:
@@ -273,7 +273,7 @@ class StdioSessionManager:
 
     @staticmethod
     def _session_key(affinity_key: SlotAffinityKey) -> str:
-        return "\0".join((affinity_key.owner_hash, affinity_key.chat_key))
+        return "\0".join((affinity_key.owner_hash, affinity_key.chat_key, affinity_key.review_profile))
 
     @staticmethod
     def _build_fingerprint(argv: list[str], cwd: str, env: Mapping[str, str] | None, driver_fp: str = "") -> ExecutionFingerprint:

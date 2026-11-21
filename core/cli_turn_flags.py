@@ -1,4 +1,4 @@
-"""Флаги CLI для ходов без нативных инструментов (текст и эмуляция клиентских tools)."""
+"""Флаги CLI для ходов без нативных инструментов (текст, эмуляция и Zero-Canon)."""
 
 from __future__ import annotations
 
@@ -10,15 +10,28 @@ SLASH_COMMANDS_FLAG_ENV = "AGY_BRIDGE_DISABLE_SLASH_COMMANDS"
 _TEXT_ONLY_CLI_MODES = frozenset(("ask", "plan"))
 
 
-def text_turn_cli_flags(
-    mode: str, environ: Mapping[str, str] | None = None
+def build_turn_cli_flags(
+    mode: str,
+    environ: Mapping[str, str] | None = None,
+    zero_canon: bool = False,
 ) -> list[str]:
-    """Флаги, изолирующие ход `ask`/`plan` от слэш-команд (`AGY_BRIDGE_DISABLE_SLASH_COMMANDS=0` — выкл)."""
+    """Флаги CLI для хода; при `zero_canon=True` блокирует слэш-команды во всех режимах."""
+    if zero_canon:
+        return ["--disable-slash-commands"]
     if mode not in _TEXT_ONLY_CLI_MODES:
         return []
     source = os.environ if environ is None else environ
     raw = str(source.get(SLASH_COMMANDS_FLAG_ENV, "1")).strip().lower()
     return [] if raw in ("0", "false", "no", "off") else ["--disable-slash-commands"]
+
+
+def text_turn_cli_flags(
+    mode: str,
+    environ: Mapping[str, str] | None = None,
+    zero_canon: bool = False,
+) -> list[str]:
+    """Обратно совместимая обёртка над `build_turn_cli_flags`."""
+    return build_turn_cli_flags(mode, environ, zero_canon=zero_canon)
 
 
 def format_print_timeout(val: object) -> str:

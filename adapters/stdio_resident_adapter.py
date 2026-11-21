@@ -10,17 +10,8 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from typing import Any, cast, override
 
 from core.backend_adapter import (
-    ADAPTER_API as BACKEND_ADAPTER_API,
-    SESSIONS_RESIDENT,
-    STREAMING_NATIVE,
-    BackendAdapter,
-    BackendModel,
-    Capabilities,
-    KindConstraints,
-    Qualification,
-    StreamSink,
-    TurnContext,
-    TurnResult,
+    ADAPTER_API as BACKEND_ADAPTER_API, SESSIONS_RESIDENT, STREAMING_NATIVE, BackendAdapter,
+    BackendModel, Capabilities, KindConstraints, Qualification, StreamSink, TurnContext, TurnResult,
 )
 from core.stdio_resident.config import StdioPoolConfig
 from core.stdio_resident.process_pool import ResidentProcessPool
@@ -29,6 +20,8 @@ from core.stdio_resident.rpc_drivers import create_protocol_driver
 from core.stdio_resident.session_manager import StdioSessionManager
 from core.stdio_resident.turn_stream import TurnStreamAssembler
 from core.stdio_resident.types import SlotAffinityKey
+from core.stdio_resident.zero_canon_router import execute_routed_turn
+from core.subbridge_zero_canon import normalize_review_profile, review_profile_from_headers
 
 ADAPTER_API = BACKEND_ADAPTER_API
 KIND = "stdio_resident"
@@ -47,7 +40,10 @@ class StdioResidentAdapter(BackendAdapter):
         base_url_allowed=False,
         api_key_env_allowed=False,
         options_schema={
-            "protocol": ("stream-json", "stream-jsonrpc", "acp", "msp-v1", "opencode-acp"),
+            "protocol": (
+                "stream-json", "stream-jsonrpc", "acp", "msp-v1", "opencode-acp",
+                "claude-stream-json", "codex-app-server",
+            ),
             "step_dedup": ("arbiter", "off"),
         },
     )
@@ -155,6 +151,7 @@ class StdioResidentAdapter(BackendAdapter):
             model=self._string_value(data, "model", "default"),
             effort=self._string_value(data, "effort", "medium"),
             cwd_norm=normalized_cwd,
+            review_profile=normalize_review_profile(self._string_value(data, "review_profile", "")),
         )
         env = self._string_mapping(data.get("env"))
         turn_context = self._mapping_or_none(data.get("turn_context"))
@@ -165,6 +162,7 @@ class StdioResidentAdapter(BackendAdapter):
             cwd=normalized_cwd,
             env=env,
             turn_context=turn_context,
+            is_ephemeral=bool(data.get("is_ephemeral", False)),
         )
         assembler = TurnStreamAssembler()
         for chunk in stream:
@@ -270,30 +268,22 @@ class StdioResidentAdapter(BackendAdapter):
         ctx: TurnContext,
         sse_writer: StreamSink | None,
     ) -> TurnResult:
-        text: list[str] = []
-        reasoning: list[str] = []
+        raw_headers = getattr(getattr(ctx, "handler", None), "headers", None)
         request = {
             "chat_key": ctx.turn_id or ctx.rid or "default",
+            "backend_id": self.id,
             "model": ctx.model,
             "effort": ctx.effort,
             "cwd": ctx.cwd or os.getcwd(),
             "prompt": ctx.prompt,
             "env": ctx.fwd_env,
+            "review_profile": review_profile_from_headers(raw_headers),
         }
-        for chunk in self.execute_chat(request):
-            choices = cast(list[dict[str, Any]], chunk["choices"])
-            delta = cast(dict[str, Any], choices[0]["delta"])
-            content = delta.get("content")
-            thought = delta.get("reasoning_content")
-            if isinstance(content, str):
-                text.append(content)
-                if sse_writer is not None:
-                    _ = sse_writer("content", content)
-            if isinstance(thought, str):
-                reasoning.append(thought)
-                if sse_writer is not None:
-                    _ = sse_writer("reasoning_content", thought)
-        return TurnResult(text="".join(text), reasoning="".join(reasoning))
+        hdr_map = dict(raw_headers.items()) if hasattr(raw_headers, "items") else None
+        text, reasoning = execute_routed_turn(
+            self.execute_chat, self._protocol, request, sse_writer, headers=hdr_map
+        )
+        return TurnResult(text=text, reasoning=reasoning)
 
     @override
     def close_session(self, sid: str) -> None:

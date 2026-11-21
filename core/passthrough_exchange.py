@@ -16,20 +16,29 @@ from urllib.parse import SplitResult, urlsplit
 
 from core.backend_adapter import PreSendTransientError, _base_url_allowed
 from core.passthrough_headers import outbound_headers
+from core.subbridge_zero_canon import (
+    REVIEW_PROFILE_HEADER, ZERO_CANON_PROFILE, normalize_review_profile,
+    should_forward_review_profile,
+)
 from core.transport_credentials import credential_required, resolve_credential
 
 _BASE_PATH_CHARS = frozenset(ascii_lowercase + digits + "/._-")
 _INTERNAL_SUBAGENT: ContextVar[str] = ContextVar("internal_subagent", default="")
+_INTERNAL_REVIEW_PROFILE: ContextVar[str] = ContextVar("internal_review_profile", default="")
 
 
 @contextmanager
 def internal_trace_scope(extra_headers: Iterable[tuple[str, str]]) -> Iterator[None]:
-    """Изолирует внутреннюю атрибуцию и восстанавливает прежний контекст."""
-    subagent_id = next((v for k, v in extra_headers if k.lower() == "x-subagent-id"), "")
+    """Изолирует внутреннюю атрибуцию (subagent-id и review-profile) на время вызова."""
+    pairs = tuple(extra_headers)
+    subagent_id = next((v for k, v in pairs if k.lower() == "x-subagent-id"), "")
+    profile = next((v for k, v in pairs if k.lower() == "x-review-profile"), "")
     token = _INTERNAL_SUBAGENT.set(subagent_id)
+    profile_token = _INTERNAL_REVIEW_PROFILE.set(profile)
     try:
         yield
     finally:
+        _INTERNAL_REVIEW_PROFILE.reset(profile_token)
         _INTERNAL_SUBAGENT.reset(token)
 
 
@@ -177,6 +186,14 @@ def _route_credential(config: Mapping[str, object]) -> str:
     return credential
 
 
+def _scoped_review_profile(client: Mapping[str, str]) -> str:
+    """Профиль из внутреннего scope, иначе из клиентских заголовков (retry/failover)."""
+    raw = _INTERNAL_REVIEW_PROFILE.get() or next(
+        (v for k, v in client.items() if k.lower() == "x-review-profile"), "",
+    )
+    return normalize_review_profile(raw)
+
+
 def _wire_headers(
     adapter: ExchangeAdapter,
     headers: Mapping[str, str],
@@ -196,12 +213,13 @@ def _wire_headers(
         forwarded = {k: v for k, v in forwarded.items() if k.lower() not in replaced}
         forwarded.update(upstream_headers)
     subagent_id = _INTERNAL_SUBAGENT.get()
-    if (
-        subagent_id
-        and not adapter._base_path.startswith("/sg-")
-        and adapter.config.get("trust_profile") != "external"
-    ):
+    trusted = should_forward_review_profile(
+        adapter._base_path, str(adapter.config.get("trust_profile") or ""),
+    )
+    if subagent_id and trusted:
         forwarded["X-Subagent-Id"] = subagent_id
+    if trusted and _scoped_review_profile(headers) == ZERO_CANON_PROFILE:
+        forwarded[REVIEW_PROFILE_HEADER] = ZERO_CANON_PROFILE
     forwarded["Host"] = f"{adapter._host}:{adapter._port}"
     forwarded["Content-Length"] = str(size)
     forwarded["Accept-Encoding"] = "identity"

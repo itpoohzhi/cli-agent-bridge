@@ -5,7 +5,9 @@
 from __future__ import annotations
 
 import json
+import tomllib
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any, ClassVar, cast, override
 
 from core.stdio_resident.protocol_driver import (
@@ -13,6 +15,8 @@ from core.stdio_resident.protocol_driver import (
     DriverCapabilities,
     StreamJsonDriver,
 )
+from core.subbridge_zero_canon import dump_toml, filter_codex_config
+from core.zero_canon_fs import ensure_private_dir, sanitize_zero_canon_env, write_atomic_0600, write_atomic_text_0600
 
 
 class CodexAppServerDriver(StreamJsonDriver):
@@ -106,6 +110,11 @@ class CodexAppServerDriver(StreamJsonDriver):
         if not tool_calls:
             tool_calls = self._extract_tool_calls(payload)
         error = self._mapping(payload.get("error"))
+        err_text = (
+            str(error.get("message") or error)
+            if error is not None
+            else (str(payload["error"]) if "error" in payload and payload["error"] is not None else None)
+        )
         is_terminal = method == "turn/completed" or (
             "id" in payload and ("result" in payload or "error" in payload)
         )
@@ -117,6 +126,7 @@ class CodexAppServerDriver(StreamJsonDriver):
             is_terminal=is_terminal,
             is_tool_stop=is_tool_stop,
             raw=error if error is not None else payload,
+            error=err_text,
         )
 
     @override
@@ -147,9 +157,73 @@ class CodexAppServerDriver(StreamJsonDriver):
     def build_cancel_payload(self) -> bytes | None:
         return b'{"jsonrpc": "2.0", "method": "turn/cancel", "params": {}}\n'
 
+    def build_zero_canon_env(self, base_env: Mapping[str, str], root: str) -> dict[str, str]:
+        """Изолированные HOME/CODEX_HOME: config.toml без mcp_servers/hooks, без AGENTS.md."""
+        home = base_env.get("HOME", "")
+        config = base_env.get("CODEX_HOME") or (f"{home}/.codex" if home else "")
+        src = Path(config) if config else None
+        dst = Path(root) / ".codex"
+        ensure_private_dir(dst, 0o700)
+        raw: dict[str, Any] = {}
+        src_cfg = src / "config.toml" if src is not None else None
+        if src_cfg is not None and src_cfg.is_file() and not src_cfg.is_symlink():
+            try:
+                raw = tomllib.loads(src_cfg.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                raw = {}
+        write_atomic_text_0600(dst / "config.toml", dump_toml(filter_codex_config(raw)))
+        src_auth = src / "auth.json" if src is not None else None
+        if src_auth is not None and src_auth.is_file() and not src_auth.is_symlink():
+            write_atomic_0600(dst / "auth.json", src_auth.read_bytes())
+        return {**sanitize_zero_canon_env(base_env, root), "CODEX_HOME": str(dst)}
+
+    def build_zero_canon_argv(self, argv: list[str], model: str = "", effort: str = "") -> list[str]:
+        """`codex app-server`: fail-closed на запрещённых `-c`/`--config`, принудительный `project_doc_max_bytes=0`."""
+        denied_cfg = ("mcp_servers", "plugins", "notify", "hooks")
+        overrides = {"project_doc_max_bytes": "0"}
+        if model and model != "default":
+            overrides["model"] = json.dumps(model)
+        if effort and effort != "default":
+            overrides["model_reasoning_effort"] = json.dumps(effort)
+        cleaned: list[str] = []
+        idx = 0
+        while idx < len(argv):
+            tok = argv[idx]
+            cfg_val: str | None = None
+            step = 1
+            if tok in ("-c", "--config") and idx + 1 < len(argv):
+                cfg_val, step = argv[idx + 1], 2
+            elif tok.startswith(("-c=", "--config=")):
+                cfg_val = tok.split("=", 1)[1]
+            if cfg_val is not None:
+                key_part = cfg_val.split("=", 1)[0].strip()
+                if any(key_part == d or key_part.startswith(f"{d}.") for d in denied_cfg):
+                    raise ValueError(f"forbidden_codex_zero_canon_config:{key_part}")
+                if key_part in overrides:
+                    idx += step
+                    continue
+            cleaned.append(tok)
+            idx += 1
+        result = cleaned if "app-server" in cleaned else [*cleaned, "app-server"]
+        for key, value in overrides.items():
+            result.extend(("-c", f"{key}={value}"))
+        return result
+
     def handshake_payload(self) -> bytes:
         """Build the Codex app-server initialization request."""
         return b'{"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"clientInfo": {"name": "cli-agent-bridge", "version": "1.0"}}}\n'
+
+    def run_handshake(self, handle: Any, timeout_s: float = 10.0) -> bool:
+        """Send JSON-RPC initialize handshake and await response."""
+        try:
+            handle.write(self.handshake_payload())
+            line_obj = handle.read_line(timeout_s=timeout_s)
+            if line_obj is None:
+                return False
+            parsed = self._parse_object(line_obj.line)
+            return parsed is not None and "error" not in parsed
+        except Exception:
+            return False
 
     @staticmethod
     def _mapping(value: object) -> dict[str, Any] | None:

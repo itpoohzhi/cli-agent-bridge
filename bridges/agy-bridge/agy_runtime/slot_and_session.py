@@ -9,6 +9,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from core.chat_key import resolve_chat_key
+from core.session_continuity import session_key_for
 
 SRC_HEADER_SUBAGENT_ID = "x-subagent-id"
 _TRUTHY = frozenset({"1", "true", "yes", "on"})
@@ -81,17 +82,59 @@ def resolve_subagent_id(headers: Mapping[str, Any] | None) -> tuple[str, bool]:
     return ("" if key.invalid else key.value), key.invalid
 
 
-def combine_chat_and_subagent(chat_id: str, subagent_id: str) -> str:
-    """Пространство имён горячей сессии с изоляцией по `X-Subagent-Id` (без NUL и <= 512)."""
+def _norm_profile(review_profile: str) -> str:
+    cleaned = str(review_profile or "standard").strip().lower()
+    return cleaned or "standard"
+
+
+def combine_chat_and_subagent(
+    chat_id: str,
+    subagent_id: str,
+    review_profile: str = "standard",
+) -> str:
+    """Пространство имён горячей сессии с изоляцией по `X-Subagent-Id` и `review_profile`."""
+    profile = _norm_profile(review_profile)
     if not subagent_id:
-        return chat_id
-    combined = f"{chat_id}|sub:{subagent_id}" if chat_id else f"subagent:{subagent_id}"
-    return f"sub:{hashlib.sha256(combined.encode('utf-8')).hexdigest()[:48]}" if len(combined) > _MAX_COMBINED_KEY_LEN else combined
+        base = chat_id
+    else:
+        base = f"{chat_id}|sub:{subagent_id}" if chat_id else f"subagent:{subagent_id}"
+    if profile != "standard" and base:
+        base = f"{base}|profile:{profile}"
+    if len(base) > _MAX_COMBINED_KEY_LEN:
+        prefix = "zc:" if profile != "standard" else "sub:"
+        return f"{prefix}{hashlib.sha256(base.encode('utf-8')).hexdigest()[:48]}"
+    return base
 
 
-def continuity_scope(model: object, subagent_id: str) -> str:
-    """Scope для `_CONTINUITY.resolve`: `subagent_id` изолирует, но не подменяет continuity."""
-    return f"{model or ''}\x00{subagent_id}\x00" if subagent_id else f"{model or ''}\x00"
+def continuity_scope(
+    model: object,
+    subagent_id: str,
+    review_profile: str = "standard",
+) -> str:
+    """Scope для `_CONTINUITY.resolve`: изолирует по `subagent_id` и `review_profile`."""
+    profile = _norm_profile(review_profile)
+    if profile == "standard":
+        return f"{model or ''}\x00{subagent_id}\x00" if subagent_id else f"{model or ''}\x00"
+    return f"{model or ''}\x00{subagent_id}\x00{profile}\x00"
+
+
+def hot_session_key(
+    model: str,
+    cwd: object,
+    effort: str,
+    raw_chat_id: str = "",
+    cwd_max_len: int = 1024,
+    review_profile: str = "standard",
+) -> tuple[str, ...]:
+    """Ключ горячей сессии с разделением контуров `standard` и `zero-canon`."""
+    base = session_key_for(model, cwd, effort, raw_chat_id, cwd_max_len)
+    profile = _norm_profile(review_profile)
+    if not base or profile == "standard":
+        return base
+    if len(base) == 4:
+        chat = raw_chat_id.strip() if isinstance(raw_chat_id, str) else ""
+        return session_key_for(model, cwd, effort, f"{chat}|profile:{profile}", cwd_max_len)
+    return (base[0], base[1], f"{base[2]}|profile:{profile}")
 
 
 def append_anti_plan_directive(section: str) -> str:

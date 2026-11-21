@@ -81,7 +81,8 @@ for _p in (str(_BRIDGE_DIR), str(_REPO_ROOT)):
 
 import zen_catalog as zc  # noqa: E402
 from core.chat_key import resolve_chat_key  # noqa: E402
-from core.proc_groups import live_proc_groups, spawn_registered  # noqa: E402
+from core.proc_groups import live_proc_groups  # noqa: E402
+from zen_bridge.adapters.zero_canon_runtime import apply_serve_zero_canon_env, apply_zero_canon_env, spawn_registered, zero_canon_scope  # noqa: E402
 from core.runtime_env import synthesize_required_bash_desc_enabled  # noqa: E402
 from core.subbridge_lifecycle import SubbridgeHooks, SubbridgeLifecycle  # noqa: E402
 from core.tool_call_schema_policy import canonicalize_tool_invocation  # noqa: E402
@@ -1535,7 +1536,7 @@ def _run_env(model_id: str = "") -> dict[str, str]:
         for name in _PROXY_VARS:
             env.pop(name, None)
         env["NO_PROXY"] = "127.0.0.1,localhost"
-    return env
+    return apply_zero_canon_env(env)
 
 
 DYNAMIC_CONFIG_PATH = Path(__file__).resolve().parent / "dynamic_config.json"
@@ -1922,10 +1923,7 @@ def _serve_env(model_id: str = "") -> dict[str, str]:
         env["HOME"] = str(os.environ["HOME"])
     if "XDG_DATA_HOME" not in env and os.environ.get("XDG_DATA_HOME"):
         env["XDG_DATA_HOME"] = str(os.environ["XDG_DATA_HOME"])
-    config_raw = env.get("OPENCODE_CONFIG_CONTENT") or OPENCODE_CONFIG_CONTENT
-    config = _as_dict(_loads_object(config_raw)) if config_raw else {}
-    config["permission"] = {"*": _serve_permission_effect()}
-    env["OPENCODE_CONFIG_CONTENT"] = json.dumps(config, ensure_ascii=False)
+    env = apply_serve_zero_canon_env(env, OPENCODE_CONFIG_CONTENT, _serve_permission_effect())
     state_dir = tempfile.mkdtemp(prefix="zen-serve-state-")
     env["XDG_STATE_HOME"] = state_dir
     env["TMPDIR"] = state_dir
@@ -8254,13 +8252,14 @@ class Handler(BaseHTTPRequestHandler):
 
     def _handle_post(self, xs: dict[str, Any]) -> None:
         if not _auth_ok(self):
-            # Непрочитанное тело иначе будет разобрано как следующий запрос keep-alive.
             self.close_connection = True
             xs["exit_reason"] = "unauthorized"
-            self._send(
-                401, {"error": {"message": "unauthorized", "type": "auth_error"}}
-            )
+            self._send(401, {"error": {"message": "unauthorized", "type": "auth_error"}})
             return
+        with zero_canon_scope(self.headers, DYNAMIC_CONFIG_PATH, workspace=WORKSPACE):
+            self._handle_post_authed(xs)
+
+    def _handle_post_authed(self, xs: dict[str, Any]) -> None:
         path = self.path.split("?", 1)[0]
         length = int(self.headers.get("Content-Length") or "0")
         raw = self.rfile.read(length) if length else b"{}"
