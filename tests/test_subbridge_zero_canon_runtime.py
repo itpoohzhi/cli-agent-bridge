@@ -224,7 +224,7 @@ def test_opencode_kill_switch_and_permission_ask_preserved(
         assert auth.is_file() and _mode(auth) == 0o600
 
         parsed_cfg = json.loads(applied["OPENCODE_CONFIG_CONTENT"])
-        assert parsed_cfg["permission"] == {"*": "ask"}
+        assert parsed_cfg["permission"] == {"*": "deny"}
         assert "provider" in parsed_cfg
         for denied in ("mcp", "plugin", "instructions"):
             assert denied not in parsed_cfg
@@ -264,6 +264,10 @@ def test_opencode_zen_server_facade_and_spawn_proxy(
         assert ctx is not None
         serve_env = server._serve_env("")
         assert json.loads(serve_env["OPENCODE_CONFIG_CONTENT"])["permission"] == {"*": "deny"}
+        orig_state = serve_env["XDG_STATE_HOME"]
+        server.spawn_registered(["opencode", "serve"], env=serve_env)
+        assert json.loads(captured["env"]["OPENCODE_CONFIG_CONTENT"])["permission"] == {"*": "deny"}
+        assert captured["env"]["XDG_STATE_HOME"] == orig_state
         server.spawn_registered(["opencode", "run"], cwd=str(tmp_path), env={"HOME": str(real_home)})
         assert captured["cwd"] == str(ctx.zc_cwd)
         assert captured["env"]["HOME"] == str(ctx.zc_home)

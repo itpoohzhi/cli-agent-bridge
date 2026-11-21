@@ -140,14 +140,32 @@ def zero_canon_scope(
         cleanup_ephemeral_zc_cwd(turn_cwd)
 
 
+def _is_isolated_serve_state(path_str: str | None) -> bool:
+    if not path_str:
+        return False
+    candidate = Path(path_str)
+    if not candidate.name.startswith("zen-serve-state-"):
+        return False
+    tmp_root = Path(tempfile.gettempdir()).resolve()
+    try:
+        resolved = candidate.resolve()
+        return resolved.parent == tmp_root
+    except OSError:
+        return False
+
+
 def apply_zero_canon_env(
     env: Mapping[str, str], *, ctx: OpenCodeZeroCanonContext | None = None
 ) -> dict[str, str]:
-    """Применяет Zero-Canon изоляцию env, XDG_* и секретов с `permission: {'*': 'ask'}`."""
+    """Применяет Zero-Canon изоляцию env, XDG_* и секретов (не ослабляет `deny` и per-serve state)."""
     active = ctx if ctx is not None else _ACTIVE_ZC.get()
     if active is None or not active.enabled:
         return dict(env)
-    filtered = filter_opencode_config(_parse_json_dict(env.get("OPENCODE_CONFIG_CONTENT", "")))
+    raw_cfg = _parse_json_dict(env.get("OPENCODE_CONFIG_CONTENT", ""))
+    filtered = filter_opencode_config(raw_cfg)
+    if raw_cfg.get("permission") == {"*": "deny"}:
+        filtered["permission"] = {"*": "deny"}
+    serve_state = env.get("XDG_STATE_HOME") if env.get("BRIDGE_ZERO_CANON") == "1" else None
     result = sanitize_zero_canon_env(env, active.zc_home)
     result.update(
         {
@@ -156,6 +174,8 @@ def apply_zero_canon_env(
             "BRIDGE_ZERO_CANON": "1",
         }
     )
+    if _is_isolated_serve_state(serve_state) and serve_state is not None:
+        result["XDG_STATE_HOME"] = serve_state
     result.pop("OPENCODE_CONFIG", None)
     return result
 
