@@ -66,7 +66,15 @@ class OpenCodeAcpDriver(AcpDriver):
         self._active_session_id: str | None = None
         self._active_prompt_id: int | None = None
         self._last_error: dict[str, Any] | None = None
-        self._zero_canon_active: bool = False
+        self._zc_local: threading.local = threading.local()
+
+    @property
+    def _zero_canon_active(self) -> bool:
+        return bool(getattr(self._zc_local, "active", False))
+
+    @_zero_canon_active.setter
+    def _zero_canon_active(self, value: bool) -> None:
+        self._zc_local.active = bool(value)
 
     def _allocate_id(self) -> int:
         with self._id_lock:
@@ -178,8 +186,8 @@ class OpenCodeAcpDriver(AcpDriver):
     def prepare_turn(self, handle: Any, turn_context: Any, timeout_s: float = 10.0) -> bool:
         """Ensure an active ACP session exists before the prompt turn."""
         ctx = dict(turn_context) if isinstance(turn_context, collections.abc.Mapping) else {}
-        if is_zero_canon_profile(str(ctx.get("review_profile") or "")):
-            self._zero_canon_active = True
+        if "review_profile" in ctx:
+            self._zero_canon_active = is_zero_canon_profile(str(ctx.get("review_profile") or ""))
         if self._active_session_id is not None:
             return True
         cwd, model = str(ctx.get("cwd") or os.getcwd()), str(ctx.get("model") or "default")

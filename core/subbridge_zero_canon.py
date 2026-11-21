@@ -124,16 +124,26 @@ def _toml_key(key: str) -> str:
     return key if bare else _toml_scalar(key)
 
 
+def _is_table_array(value: Any) -> bool:
+    return isinstance(value, list) and bool(value) and all(isinstance(item, Mapping) for item in value)
+
+
 def _dump_table(table: Mapping[str, Any], path: tuple[str, ...], out: list[str]) -> None:
-    scalars = [(k, v) for k, v in table.items() if not isinstance(v, Mapping)]
+    scalars = [(k, v) for k, v in table.items() if not isinstance(v, Mapping) and not _is_table_array(v)]
     tables = [(k, v) for k, v in table.items() if isinstance(v, Mapping)]
-    if path and (scalars or not tables):
+    arrays = [(k, v) for k, v in table.items() if _is_table_array(v)]
+    if path and (scalars or (not tables and not arrays)):
         out.append("[" + ".".join(_toml_key(part) for part in path) + "]")
     out.extend(f"{_toml_key(k)} = {_toml_scalar(v)}" for k, v in scalars)
     if scalars or path:
         out.append("")
     for key, value in tables:
         _dump_table(value, (*path, str(key)), out)
+    for key, items in arrays:
+        arr_path = ".".join(_toml_key(part) for part in (*path, str(key)))
+        for item in items:
+            out.append(f"[[{arr_path}]]")
+            _dump_table(item, (), out)
 
 
 def dump_toml(table: Mapping[str, Any]) -> str:

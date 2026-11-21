@@ -40,7 +40,10 @@ class StdioResidentAdapter(BackendAdapter):
         base_url_allowed=False,
         api_key_env_allowed=False,
         options_schema={
-            "protocol": ("stream-json", "stream-jsonrpc", "acp", "msp-v1", "opencode-acp"),
+            "protocol": (
+                "stream-json", "stream-jsonrpc", "acp", "msp-v1", "opencode-acp",
+                "claude-stream-json", "codex-app-server",
+            ),
             "step_dedup": ("arbiter", "off"),
         },
     )

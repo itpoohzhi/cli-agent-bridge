@@ -5,7 +5,6 @@
 from __future__ import annotations
 
 import json
-import os
 import tomllib
 from collections.abc import Mapping
 from pathlib import Path
@@ -17,6 +16,7 @@ from core.stdio_resident.protocol_driver import (
     StreamJsonDriver,
 )
 from core.subbridge_zero_canon import dump_toml, filter_codex_config
+from core.zero_canon_fs import ensure_private_dir, write_atomic_0600, write_atomic_text_0600
 
 
 class CodexAppServerDriver(StreamJsonDriver):
@@ -157,19 +157,18 @@ class CodexAppServerDriver(StreamJsonDriver):
         config = base_env.get("CODEX_HOME") or (f"{home}/.codex" if home else "")
         src = Path(config) if config else None
         dst = Path(root) / ".codex"
-        dst.mkdir(parents=True, exist_ok=True)
-        os.chmod(dst, 0o700)
+        ensure_private_dir(dst, 0o700)
         raw: dict[str, Any] = {}
-        if src is not None and (src / "config.toml").is_file():
+        src_cfg = src / "config.toml" if src is not None else None
+        if src_cfg is not None and src_cfg.is_file() and not src_cfg.is_symlink():
             try:
-                raw = tomllib.loads((src / "config.toml").read_text(encoding="utf-8"))
+                raw = tomllib.loads(src_cfg.read_text(encoding="utf-8"))
             except (OSError, ValueError):
                 raw = {}
-        (dst / "config.toml").write_text(dump_toml(filter_codex_config(raw)), encoding="utf-8")
-        if src is not None and (src / "auth.json").is_file():
-            target = dst / "auth.json"
-            target.write_bytes((src / "auth.json").read_bytes())
-            os.chmod(target, 0o600)
+        write_atomic_text_0600(dst / "config.toml", dump_toml(filter_codex_config(raw)))
+        src_auth = src / "auth.json" if src is not None else None
+        if src_auth is not None and src_auth.is_file() and not src_auth.is_symlink():
+            write_atomic_0600(dst / "auth.json", src_auth.read_bytes())
         return {**base_env, "HOME": root, "CODEX_HOME": str(dst)}
 
     def build_zero_canon_argv(self, argv: list[str], model: str = "", effort: str = "") -> list[str]:

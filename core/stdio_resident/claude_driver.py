@@ -5,7 +5,6 @@
 from __future__ import annotations
 
 import json
-import os
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, ClassVar, cast, override
@@ -23,6 +22,7 @@ from core.stdio_resident.protocol_driver import (
     DriverCapabilities,
     StreamJsonDriver,
 )
+from core.zero_canon_fs import ensure_private_dir, write_atomic_0600, write_atomic_text_0600
 
 
 class ClaudeStreamJsonDriver(StreamJsonDriver):
@@ -126,8 +126,7 @@ class ClaudeStreamJsonDriver(StreamJsonDriver):
         config = base_env.get("CLAUDE_CONFIG_DIR") or (f"{home}/.claude" if home else "")
         src = Path(config) if config else None
         dst = Path(root) / ".claude"
-        dst.mkdir(parents=True, exist_ok=True)
-        os.chmod(dst, 0o700)
+        ensure_private_dir(dst, 0o700)
         if src is not None:
             states = (src / ".claude.json", src.parent / ".claude.json")
             for name, keep, paths in (
@@ -136,10 +135,11 @@ class ClaudeStreamJsonDriver(StreamJsonDriver):
             ):
                 raw = next((r for r in map(self._read_json, paths) if r is not None), None)
                 if raw is not None:
-                    (dst / name).write_text(serialize_claude_json(keep(raw)), encoding="utf-8")
+                    write_atomic_text_0600(dst / name, serialize_claude_json(keep(raw)))
             for name in CLAUDE_PRESERVED_CA_FILES:
-                if (src / name).is_file():
-                    (dst / name).write_bytes((src / name).read_bytes())
+                ca_src = src / name
+                if ca_src.is_file() and not ca_src.is_symlink():
+                    write_atomic_0600(dst / name, ca_src.read_bytes())
         return build_claude_zero_canon_env(base_env, root, profile="strict", config_dir=str(dst))
 
     def build_zero_canon_argv(self, argv: list[str], model: str = "", effort: str = "") -> list[str]:

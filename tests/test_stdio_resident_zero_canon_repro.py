@@ -163,7 +163,11 @@ def test_idle_timeout_is_timeout_error_and_eof_is_runtime_error(agent: Path) -> 
 
 
 def test_review_profile_splits_resident_slots() -> None:
-    manager, pool = _manager(StreamJsonDriver())
+    class _ZcStreamDriver(StreamJsonDriver):
+        def build_zero_canon_env(self, base_env: dict[str, str], root: str) -> dict[str, str]:
+            return {**base_env, "HOME": root}
+
+    manager, pool = _manager(_ZcStreamDriver())
     argv = lambda: [sys.executable, str(FAKE_PROCESS), "--protocol", "stream-json"]  # noqa: E731
     try:
         first = manager.execute_turn(_key("same"), "a", argv, str(ROOT))
@@ -305,7 +309,8 @@ def test_execute_routed_turn_wires_turn_error_sse_and_bridge_route(monkeypatch: 
     with pytest.raises(ResidentTurnError) as exc_info:
         execute_routed_turn(boom, "stream-json", {"review_profile": "standard"}, lambda k, v: events.append((k, v)))
     assert exc_info.value.status == 429
-    assert events and events[0][0] == "error" and "rate_limit_error" in events[0][1]
+    assert events == []
+    assert "rate_limit_error" in exc_info.value.response.sse
 
     monkeypatch.setenv("HUB_ZERO_CANON_ROUTING_ENABLED", "1")
     monkeypatch.setattr(

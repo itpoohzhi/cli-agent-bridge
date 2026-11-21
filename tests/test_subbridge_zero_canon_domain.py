@@ -163,6 +163,23 @@ def test_isolation_creates_and_removes_private_root(
     assert not root.exists()
     with zero_canon_isolation(Driver(), "standard") as plain:
         assert not plain.active and plain.env({}) is None and plain.argv(["x"], "m", "e") == ["x"]
-    with zero_canon_isolation(object(), "zero-canon") as unsupported:
-        assert not unsupported.active
+    with pytest.raises(RuntimeError, match="zero_canon_unsupported_by_driver"):
+        with zero_canon_isolation(object(), "zero-canon"):
+            pass
     assert [p for p in tmp_path.iterdir() if p.name.startswith("zc-")] == []
+
+
+def test_dump_toml_preserves_array_of_tables() -> None:
+    import tomllib
+    from core.subbridge_zero_canon import dump_toml
+
+    raw = {"model": "gpt-6", "items": [{"name": "a", "k": 1}, {"name": "b", "k": 2}]}
+    parsed = tomllib.loads(dump_toml(raw))
+    assert parsed == raw
+
+
+def test_proxy_rejects_non_loopback_url() -> None:
+    from core.stdio_resident.zero_canon_router import proxy_zero_canon_bridge_turn
+
+    with pytest.raises(ValueError, match="non_loopback_zero_canon_bridge_url"):
+        proxy_zero_canon_bridge_turn("https://evil.example/v1", "m", "hi")

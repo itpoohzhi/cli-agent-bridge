@@ -120,13 +120,14 @@ class MuseMspDriver(StdioProtocolDriver):
         return build_muse_env(os.environ, resolve_pinned_path(raw_bin) if raw_bin else "", turn_sandbox=turn_sandbox)
 
     def build_zero_canon_env(self, base_env: Mapping[str, str], root: str) -> dict[str, str]:
-        """Build isolated Zero-Canon environment for Muse resident turn."""
+        """Build isolated Zero-Canon environment for Muse resident turn (trusted os.environ only)."""
+        _ = base_env
         raw_bin = get_fingerprint_field(self._config, "binary_path")
         return build_muse_zero_canon_env(
-            base_env,
+            None,
             resolve_pinned_path(raw_bin) if raw_bin else "",
             root,
-            server_env=base_env,
+            server_env=os.environ,
         )
 
     def build_zero_canon_argv(self, argv: list[str], model: str = "", effort: str = "") -> list[str]:

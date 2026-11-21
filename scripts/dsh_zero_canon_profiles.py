@@ -204,7 +204,8 @@ def build_parser() -> argparse.ArgumentParser:
     """Парсер CLI-аргументов для подготовки Zero-Canon профилей DSH."""
     today = datetime.date.today().isoformat()
     parser = argparse.ArgumentParser(description="Prepare non-invasive DSH Zero-Canon profiles.")
-    parser.add_argument("--dry-run", action="store_true", help="Report planned actions without writing.")
+    parser.add_argument("--apply", action="store_true", help="Apply changes on disk (default is dry-run).")
+    parser.add_argument("--dry-run", action="store_true", help="Explicitly force dry-run mode (default).")
     parser.add_argument("--dsh-dir", default="~/.dsh", help="DSH directory (default: ~/.dsh).")
     parser.add_argument("--claude-src", default="~/.claude", help="Source Claude config dir.")
     parser.add_argument("--codex-src", default="~/.codex", help="Source Codex config dir.")
@@ -215,13 +216,14 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     """Точка входа CLI."""
     args = build_parser().parse_args(argv)
+    dry_run = bool(args.dry_run or not args.apply)
     dsh_dir = Path(args.dsh_dir).expanduser()
     claude_dst, codex_dst = dsh_dir / "zero-canon" / "claude", dsh_dir / "zero-canon" / "codex"
     summary = {
-        "dry_run": args.dry_run,
-        "claude": prepare_claude_zc_profile(args.claude_src, claude_dst, dry_run=args.dry_run),
-        "codex": prepare_codex_zc_profile(args.codex_src, codex_dst, dry_run=args.dry_run),
-        "stale_backups": [str(p) for p in collect_stale_backups(dsh_dir, args.backup_dir, dry_run=args.dry_run)],
+        "dry_run": dry_run,
+        "claude": prepare_claude_zc_profile(args.claude_src, claude_dst, dry_run=dry_run),
+        "codex": prepare_codex_zc_profile(args.codex_src, codex_dst, dry_run=dry_run),
+        "stale_backups": [str(p) for p in collect_stale_backups(dsh_dir, args.backup_dir, dry_run=dry_run)],
     }
     sys.stdout.write(json.dumps(summary, indent=2, ensure_ascii=False) + "\n\n")
     sys.stdout.write(render_optin_cordis_snippet(claude_dst, codex_dst))

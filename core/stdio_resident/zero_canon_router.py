@@ -6,6 +6,7 @@ import json
 import os
 import shutil
 import tempfile
+import urllib.parse
 import urllib.request
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
@@ -82,12 +83,16 @@ class ZeroCanonIsolation:
 
 @contextmanager
 def zero_canon_isolation(driver: Any, review_profile: str | None) -> Iterator[ZeroCanonIsolation]:
-    """Создаёт одноразовый корень `zc-*` (0700) и гарантированно удаляет его."""
-    if not is_zero_canon_profile(review_profile) or not callable(
-        getattr(driver, "build_zero_canon_env", None)
-    ):
+    """Создаёт одноразовый корень `zc-*` (0700) и гарантированно удаляет его.
+
+    Fail-closed: если запрошен Zero-Canon, а драйвер не реализует `build_zero_canon_env`,
+    поднимает `RuntimeError` вместо молчаливого обхода изоляции.
+    """
+    if not is_zero_canon_profile(review_profile):
         yield ZeroCanonIsolation(driver, None)
         return
+    if not callable(getattr(driver, "build_zero_canon_env", None)):
+        raise RuntimeError(f"zero_canon_unsupported_by_driver:{type(driver).__name__}")
     root = tempfile.mkdtemp(prefix="zc-")
     os.chmod(root, 0o700)
     cwd_dir = os.path.join(root, "cwd")
@@ -99,6 +104,21 @@ def zero_canon_isolation(driver: Any, review_profile: str | None) -> Iterator[Ze
         shutil.rmtree(root, ignore_errors=True)
 
 
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req: Any, fp: Any, code: int, msg: str, headers: Any, newurl: str) -> None:
+        raise urllib.error.HTTPError(newurl, code, f"redirect blocked ({msg})", headers, fp)
+
+
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+
+
+def _validate_loopback_bridge_url(base_url: str) -> str:
+    parsed = urllib.parse.urlparse(base_url)
+    if parsed.scheme != "http" or parsed.hostname not in _LOOPBACK_HOSTS:
+        raise ValueError(f"non_loopback_zero_canon_bridge_url:{base_url}")
+    return base_url.rstrip("/")
+
+
 def proxy_zero_canon_bridge_turn(
     base_url: str,
     model: str,
@@ -107,8 +127,8 @@ def proxy_zero_canon_bridge_turn(
     *,
     timeout_s: float = 180.0,
 ) -> tuple[str, str]:
-    """Перенаправляет Zero-Canon Claude-ход на claude-p-bridge (`:9881`)."""
-    url = base_url.rstrip("/") + "/chat/completions"
+    """Перенаправляет Zero-Canon Claude-ход на локальный loopback claude-p-bridge (`:9881`)."""
+    url = _validate_loopback_bridge_url(base_url) + "/chat/completions"
     body = json.dumps(
         {"model": model, "messages": [{"role": "user", "content": prompt}], "stream": False},
         ensure_ascii=False,
@@ -119,10 +139,16 @@ def proxy_zero_canon_bridge_turn(
     }
     if headers:
         for key, value in headers.items():
-            if key.lower() == "x-subagent-id" and value:
-                req_headers["X-Subagent-Id"] = value
+            lower = key.lower()
+            if lower in ("x-subagent-id", "authorization", "x-bridge-key") and value:
+                req_headers[key] = value
+    if "Authorization" not in req_headers and "authorization" not in req_headers:
+        bridge_key = os.environ.get("CLAUDE_BRIDGE_KEY") or os.environ.get("BRIDGE_API_KEY") or ""
+        if bridge_key:
+            req_headers["Authorization"] = f"Bearer {bridge_key}"
     req = urllib.request.Request(url, data=body, headers=req_headers, method="POST")
-    with urllib.request.urlopen(req, timeout=timeout_s) as resp:
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirectHandler())
+    with opener.open(req, timeout=timeout_s) as resp:
         parsed = json.loads(resp.read().decode("utf-8"))
     choices = parsed.get("choices") if isinstance(parsed, dict) else None
     if not isinstance(choices, list) or not choices:
@@ -185,7 +211,5 @@ def execute_routed_turn(
                     _ = sse_writer("reasoning_content", thought)
     except Exception as exc:
         err = build_turn_error(exc, live_sent=live_sent)
-        if sse_writer is not None:
-            _ = sse_writer("error", err.sse)
         raise ResidentTurnError(err) from exc
     return "".join(text), "".join(reasoning)

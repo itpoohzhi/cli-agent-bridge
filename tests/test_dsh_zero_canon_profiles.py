@@ -221,7 +221,18 @@ def test_cli_main_dry_run_and_apply_strictly_in_tmp_path(
     assert not backup_dir.exists()
     assert stale.exists()
 
+    rc_default = main([
+        "--dsh-dir", str(dsh_dir),
+        "--claude-src", str(claude_src),
+        "--codex-src", str(codex_src),
+        "--backup-dir", str(backup_dir),
+    ])
+    assert rc_default == 0
+    _ = capsys.readouterr().out
+    assert not (dsh_dir / "zero-canon").exists()
+
     rc_apply = main([
+        "--apply",
         "--dsh-dir", str(dsh_dir),
         "--claude-src", str(claude_src),
         "--codex-src", str(codex_src),
