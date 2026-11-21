@@ -2,16 +2,23 @@
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import tempfile
+import urllib.request
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any
 
 from core.runtime_env import env_bool, env_first
-from core.subbridge_zero_canon import HUB_ZERO_CANON_ROUTING_FLAG, is_zero_canon_profile
+from core.subbridge_zero_canon import (
+    HUB_ZERO_CANON_ROUTING_FLAG,
+    REVIEW_PROFILE_HEADER,
+    ZERO_CANON_PROFILE,
+    is_zero_canon_profile,
+)
 
 CLAUDE_BRIDGE_URL_ENV = "HUB_ZERO_CANON_CLAUDE_BRIDGE_URL"
 DEFAULT_CLAUDE_BRIDGE_URL = "http://127.0.0.1:9881/v1"
@@ -52,6 +59,7 @@ class ZeroCanonIsolation:
 
     def __init__(self, driver: object, root: str | None) -> None:
         self.root = root
+        self.cwd: str | None = os.path.join(root, "cwd") if root is not None else None
         self._env: Callable[..., dict[str, str]] | None = getattr(driver, "build_zero_canon_env", None)
         self._argv: Callable[..., list[str]] | None = getattr(driver, "build_zero_canon_argv", None)
 
@@ -82,7 +90,102 @@ def zero_canon_isolation(driver: Any, review_profile: str | None) -> Iterator[Ze
         return
     root = tempfile.mkdtemp(prefix="zc-")
     os.chmod(root, 0o700)
+    cwd_dir = os.path.join(root, "cwd")
+    os.makedirs(cwd_dir, mode=0o700, exist_ok=True)
+    os.chmod(cwd_dir, 0o700)
     try:
         yield ZeroCanonIsolation(driver, root)
     finally:
         shutil.rmtree(root, ignore_errors=True)
+
+
+def proxy_zero_canon_bridge_turn(
+    base_url: str,
+    model: str,
+    prompt: str,
+    headers: Mapping[str, str] | None = None,
+    *,
+    timeout_s: float = 180.0,
+) -> tuple[str, str]:
+    """Перенаправляет Zero-Canon Claude-ход на claude-p-bridge (`:9881`)."""
+    url = base_url.rstrip("/") + "/chat/completions"
+    body = json.dumps(
+        {"model": model, "messages": [{"role": "user", "content": prompt}], "stream": False},
+        ensure_ascii=False,
+    ).encode("utf-8")
+    req_headers: dict[str, str] = {
+        "Content-Type": "application/json",
+        REVIEW_PROFILE_HEADER: ZERO_CANON_PROFILE,
+    }
+    if headers:
+        for key, value in headers.items():
+            if key.lower() == "x-subagent-id" and value:
+                req_headers["X-Subagent-Id"] = value
+    req = urllib.request.Request(url, data=body, headers=req_headers, method="POST")
+    with urllib.request.urlopen(req, timeout=timeout_s) as resp:
+        parsed = json.loads(resp.read().decode("utf-8"))
+    choices = parsed.get("choices") if isinstance(parsed, dict) else None
+    if not isinstance(choices, list) or not choices:
+        return "", ""
+    msg = choices[0].get("message") if isinstance(choices[0], dict) else {}
+    if not isinstance(msg, dict):
+        return "", ""
+    return str(msg.get("content") or ""), str(msg.get("reasoning_content") or "")
+
+
+def execute_routed_turn(
+    execute_chat: Callable[[dict[str, Any]], Iterator[dict[str, Any]]],
+    protocol: str,
+    request: dict[str, Any],
+    sse_writer: Callable[[str, str], Any] | None,
+    *,
+    headers: Mapping[str, str] | None = None,
+) -> tuple[str, str]:
+    """Выполняет ход с учётом `decide_zero_canon_route` и `build_turn_error`."""
+    from core.stdio_resident.turn_error_sse import ResidentTurnError, build_turn_error
+
+    route = decide_zero_canon_route(str(request.get("review_profile") or ""), protocol)
+    live_sent = 0
+    text: list[str] = []
+    reasoning: list[str] = []
+    try:
+        if route.kind == KIND_BRIDGE:
+            content, thought = proxy_zero_canon_bridge_turn(
+                route.base_url,
+                str(request.get("model") or "default"),
+                str(request.get("prompt") or ""),
+                headers,
+            )
+            if content:
+                text.append(content)
+                if sse_writer is not None:
+                    live_sent += 1
+                    _ = sse_writer("content", content)
+            if thought:
+                reasoning.append(thought)
+                if sse_writer is not None:
+                    live_sent += 1
+                    _ = sse_writer("reasoning_content", thought)
+            return "".join(text), "".join(reasoning)
+        routed_req = {**request, "is_ephemeral": bool(request.get("is_ephemeral")) or route.is_ephemeral}
+        for chunk in execute_chat(routed_req):
+            choices = chunk["choices"]
+            delta = choices[0]["delta"]
+            content = delta.get("content")
+            thought = delta.get("reasoning_content")
+            if isinstance(content, str):
+                text.append(content)
+                if sse_writer is not None:
+                    live_sent += 1
+                    _ = sse_writer("content", content)
+            if isinstance(thought, str):
+                reasoning.append(thought)
+                if sse_writer is not None:
+                    live_sent += 1
+                    _ = sse_writer("reasoning_content", thought)
+    except Exception as exc:
+        err = build_turn_error(exc, live_sent=live_sent)
+        if sse_writer is not None:
+            _ = sse_writer("error", err.sse)
+        raise ResidentTurnError(err) from exc
+    return "".join(text), "".join(reasoning)

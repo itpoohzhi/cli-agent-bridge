@@ -8,13 +8,12 @@ import hashlib
 import hmac
 import json
 import os
-import shutil
-import uuid
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
 from core.subbridge_zero_canon import filter_muse_settings
+from core.zero_canon_fs import ensure_private_dir, remove_entry, write_atomic_0600
 
 MUSE_ENV_ALLOWLIST: tuple[str, ...] = (
     "PATH", "HOME", "LANG", "LC_ALL", "TMPDIR", "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "MUSE_PROVIDER",
@@ -82,21 +81,6 @@ def verify_binary(config: Mapping[str, Any]) -> tuple[bool, str]:
     return (True, "")
 
 
-def _write_atomic_0600(dst: Path, payload: bytes) -> None:
-    if dst.is_symlink():
-        dst.unlink()
-    tmp = dst.parent / f".tmp_{dst.name}_{uuid.uuid4().hex}"
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    try:
-        with os.fdopen(fd, "wb") as handle:
-            handle.write(payload)
-        os.chmod(tmp, 0o600)
-        os.replace(tmp, dst)
-    except BaseException:
-        tmp.unlink(missing_ok=True)
-        raise
-
-
 def prepare_muse_zero_canon_home(
     source_home: str | Path, target_home: str | Path, *, source_xdg_config: str | Path | None = None
 ) -> Path:
@@ -106,8 +90,7 @@ def prepare_muse_zero_canon_home(
         raise RuntimeError(f"Refusing symlink Zero-Canon HOME: {zc_home}")
     zc_cfg = zc_home / ".config" / "muse"
     for directory in (zc_home, zc_home / ".config", zc_cfg):
-        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
-        os.chmod(directory, 0o700)
+        ensure_private_dir(directory, 0o700)
     candidates = ([Path(source_xdg_config) / "muse"] if source_xdg_config else []) + [
         src_home / ".config" / "muse", src_home / ".muse",
     ]
@@ -124,21 +107,15 @@ def prepare_muse_zero_canon_home(
     filtered = (json.dumps(filter_muse_settings(raw_settings), indent=2, sort_keys=True, ensure_ascii=False) + "\n").encode("utf-8")
     targets = [zc_cfg]
     if (src_home / ".muse").is_dir():
-        zc_dot = zc_home / ".muse"
-        zc_dot.mkdir(mode=0o700, parents=True, exist_ok=True)
-        os.chmod(zc_dot, 0o700)
-        targets.append(zc_dot)
+        ensure_private_dir(zc_home / ".muse", 0o700)
+        targets.append(zc_home / ".muse")
     for target in targets:
         if auth_src is not None:
-            _write_atomic_0600(target / "auth.json", auth_src.read_bytes())
-        _write_atomic_0600(target / "settings.json", filtered)
+            write_atomic_0600(target / "auth.json", auth_src.read_bytes())
+        write_atomic_0600(target / "settings.json", filtered)
     for base in (zc_home, *targets):
         for name in _MUSE_FORBIDDEN_NAMES:
-            entry = base / name
-            if entry.is_symlink() or entry.is_file():
-                entry.unlink(missing_ok=True)
-            elif entry.is_dir():
-                shutil.rmtree(entry, ignore_errors=True)
+            remove_entry(base / name)
     return zc_home.resolve()
 
 

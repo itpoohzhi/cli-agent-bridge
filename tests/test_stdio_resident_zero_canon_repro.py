@@ -77,16 +77,21 @@ def _manager(driver: object, idle: float = 180.0) -> tuple[StdioSessionManager, 
 
 
 def test_infer_protocol_recognizes_claude_and_codex() -> None:
-    assert infer_protocol("claude-p", {}, {}) == "claude-stream-json"
-    assert infer_protocol("claude", {}, {}) == "claude-stream-json"
-    assert infer_protocol("codex", {}, {}) == "codex-app-server"
-    assert infer_protocol("x", {"wrapper": "/opt/bin/claude-p-cli.sh"}, {}) == "claude-stream-json"
-    assert infer_protocol("x", {"wrapper_path": "/opt/bin/codex"}, {}) == "codex-app-server"
+    # По умолчанию kill-switch выключен (fail-safe): legacy behaviour -> stream-json.
+    assert infer_protocol("claude-p", {}, {}, environ={}) == "stream-json"
+    assert infer_protocol("codex", {}, {}, environ={}) == "stream-json"
+    # С включённым kill-switch переключается на нативные протоколы.
+    enabled = {"STDIO_RESIDENT_CLAUDE_CODEX_PROTOCOL_ENABLED": "1"}
+    assert infer_protocol("claude-p", {}, {}, environ=enabled) == "claude-stream-json"
+    assert infer_protocol("claude", {}, {}, environ=enabled) == "claude-stream-json"
+    assert infer_protocol("codex", {}, {}, environ=enabled) == "codex-app-server"
+    assert infer_protocol("x", {"wrapper": "/opt/bin/claude-p-cli.sh"}, {}, environ=enabled) == "claude-stream-json"
+    assert infer_protocol("x", {"wrapper_path": "/opt/bin/codex"}, {}, environ=enabled) == "codex-app-server"
     # Регрессия: прежние выводы и явная опция не изменились.
-    assert infer_protocol("muse", {}, {}) == "msp-v1"
-    assert infer_protocol("opencode", {}, {}) == "opencode-acp"
-    assert infer_protocol("claude-p", {}, {"protocol": "acp"}) == "acp"
-    assert infer_protocol("other", {}, {}) == "stream-json"
+    assert infer_protocol("muse", {}, {}, environ={}) == "msp-v1"
+    assert infer_protocol("opencode", {}, {}, environ={}) == "opencode-acp"
+    assert infer_protocol("claude-p", {}, {"protocol": "acp"}, environ={}) == "acp"
+    assert infer_protocol("other", {}, {}, environ=enabled) == "stream-json"
 
 
 def test_slot_affinity_key_review_profile_is_backward_compatible() -> None:
@@ -243,3 +248,93 @@ def test_turn_error_sse_before_first_chunk_has_status_and_done() -> None:
     mid = build_turn_error(RuntimeError("boom"), live_sent=17)
     assert mid.status == 200 and mid.sse.endswith("data: [DONE]\n\n")
     assert len(build_turn_error(RuntimeError("x" * 900), 0, max_chars=40).message) == 40
+
+
+def test_opencode_driver_denies_permission_in_zero_canon(tmp_path: Path) -> None:
+    from adapters.stdio_drivers.opencode_driver import OpenCodeAcpDriver
+
+    req = json.dumps({"jsonrpc": "2.0", "id": 7, "method": "session/request_permission", "params": {}})
+    std = OpenCodeAcpDriver()
+    std_chunk = std.decode_line(req)
+    assert std_chunk is not None and json.loads(std_chunk.reply_bytes.decode())["result"]["decision"] == "allow"
+
+    zc = OpenCodeAcpDriver()
+    zc.build_zero_canon_env({"HOME": str(tmp_path), "PATH": "/bin"}, str(tmp_path / "zc"))
+    zc_chunk = zc.decode_line(req)
+    assert zc_chunk is not None and json.loads(zc_chunk.reply_bytes.decode())["result"]["decision"] == "deny"
+
+
+def test_muse_driver_supports_zero_canon_isolation(tmp_path: Path) -> None:
+    from adapters.stdio_drivers.muse_driver import MuseMspDriver
+
+    src = tmp_path / "real_home"
+    (src / ".config" / "muse").mkdir(parents=True)
+    (src / ".config" / "muse" / "auth.json").write_text('{"tok": "x"}', encoding="utf-8")
+    (src / ".config" / "muse" / "settings.json").write_text(
+        '{"provider": "meta", "hooks": ["bad"]}', encoding="utf-8"
+    )
+    driver = MuseMspDriver()
+    env = driver.build_zero_canon_env({"HOME": str(src), "PATH": "/bin"}, str(tmp_path / "iso"))
+    assert env["HOME"] == str((tmp_path / "iso" / "home").resolve())
+    assert env["BRIDGE_ZERO_CANON"] == "1"
+    argv = driver.build_zero_canon_argv(["muse", "serve"])
+    assert "--preset" in argv and "empty" in argv
+
+
+def test_session_manager_preserves_home_path_and_isolates_cwd(tmp_path: Path) -> None:
+    from core.stdio_resident.zero_canon_router import ZeroCanonIsolation
+
+    pool = ResidentProcessPool(_config(2.0))
+    mgr = StdioSessionManager(pool, ClaudeStreamJsonDriver(), _config(2.0))  # type: ignore[arg-type]
+    try:
+        resolved = mgr._resolve_spawn_env({"CUSTOM_VAR": "1"}, ZeroCanonIsolation(ClaudeStreamJsonDriver(), None))
+        assert resolved is not None and "PATH" in resolved and resolved["CUSTOM_VAR"] == "1"
+    finally:
+        pool.shutdown(0.5)
+
+
+def test_execute_routed_turn_wires_turn_error_sse_and_bridge_route(monkeypatch: pytest.MonkeyPatch) -> None:
+    from core.stdio_resident.turn_error_sse import ResidentTurnError
+    from core.stdio_resident.zero_canon_router import execute_routed_turn
+
+    events: list[tuple[str, str]] = []
+
+    def boom(_req: dict[str, object]) -> object:
+        raise RuntimeError("429 rate limit exceeded")
+
+    with pytest.raises(ResidentTurnError) as exc_info:
+        execute_routed_turn(boom, "stream-json", {"review_profile": "standard"}, lambda k, v: events.append((k, v)))
+    assert exc_info.value.status == 429
+    assert events and events[0][0] == "error" and "rate_limit_error" in events[0][1]
+
+    monkeypatch.setenv("HUB_ZERO_CANON_ROUTING_ENABLED", "1")
+    monkeypatch.setattr(
+        "core.stdio_resident.zero_canon_router.proxy_zero_canon_bridge_turn",
+        lambda url, model, prompt, headers: (f"proxied:{url}:{model}", ""),
+    )
+    txt, _ = execute_routed_turn(
+        boom,
+        "claude-stream-json",
+        {"review_profile": "zero-canon", "model": "claude-sonnet-5-5", "prompt": "hi"},
+        None,
+    )
+    assert txt == "proxied:http://127.0.0.1:9881/v1:claude-sonnet-5-5"
+
+
+def test_parallel_zero_canon_cwds_are_isolated_per_turn(tmp_path: Path) -> None:
+    import sys as _sys
+
+    agy_dir = str(ROOT / "bridges" / "agy-bridge")
+    if agy_dir not in _sys.path:
+        _sys.path.insert(0, agy_dir)
+    from agy_runtime.zero_canon_profile import AgyZeroCanonProfileManager
+
+    mgr = AgyZeroCanonProfileManager(tmp_path / "real", tmp_path / "clean")
+    c1 = mgr.create_turn_zc_cwd()
+    c2 = mgr.create_turn_zc_cwd()
+    assert c1 != c2 and c1.is_dir() and c2.is_dir()
+    (c1 / "scratch.txt").write_text("a", encoding="utf-8")
+    assert list(c2.iterdir()) == []
+    mgr.cleanup_turn_zc_cwd(c1)
+    mgr.cleanup_turn_zc_cwd(c2)
+    assert not c1.exists() and not c2.exists()

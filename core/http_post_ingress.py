@@ -186,8 +186,10 @@ def _serve_fallback_alias(context: PostRequestContext) -> bool:
             headers=dict(handler.headers.items()), sink=sink,
         )
 
+    trace_fn: Any = getattr(context.host, "_trace_headers", None)
+    trace_hdrs: list[tuple[str, str]] = list(trace_fn(handler._trace)) if callable(trace_fn) else []
     scoped = [
-        *context.host._trace_headers(handler._trace),
+        *trace_hdrs,
         *(
             (name, value) for name, value in handler.headers.items()
             if name.lower() == "x-review-profile"

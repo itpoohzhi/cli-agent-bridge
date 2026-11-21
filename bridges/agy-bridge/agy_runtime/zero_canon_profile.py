@@ -3,10 +3,8 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 import threading
 import time
-import uuid
 from collections.abc import Callable, Mapping, Set as AbstractSet
 from pathlib import Path
 from typing import Final
@@ -17,36 +15,30 @@ from core.agy_zero_canon import (
     build_agy_zero_canon_plan, filter_agy_settings, serialize_agy_json,
 )
 from core.env_hot_reload import file_signature
+from core.zero_canon_fs import (
+    cleanup_ephemeral_zc_cwd,
+    make_ephemeral_zc_cwd,
+    read_gigarc_bool,
+    remove_entry,
+    write_atomic_0600,
+    write_atomic_text_0600,
+)
 
 _DEFAULT_CFG: Final[Path] = Path(__file__).resolve().parent.parent / "dynamic_config.json"
-_ENV_BOOL: Final[dict[str, bool]] = {"1": True, "true": True, "yes": True, "on": True, "0": False, "false": False, "no": False, "off": False}
 _ROTATE_SUBDIRS: Final[tuple[str, ...]] = ("log", "presence", "conversations", "brain")
-_CFG_LOCK, _CFG_CACHE = threading.Lock(), {}  # type: ignore[var-annotated]
+_ROTATE_LOCK = threading.Lock()
+_ROTATE_LAST: dict[str, float] = {}
 _MGR_LOCK, _MANAGERS = threading.Lock(), {}  # type: ignore[var-annotated]
 
 
 def is_agy_zero_canon_enabled(config_path: Path | None = None, *, environ: Mapping[str, str] | None = None) -> bool:
     """Читает kill-switch `AGY_ZERO_CANON_ENABLED` с дефолтом False (fail-closed)."""
-    env_val = str((os.environ if environ is None else environ).get(AGY_ZERO_CANON_FLAG, "")).strip().lower()
-    if env_val in _ENV_BOOL:
-        return _ENV_BOOL[env_val]
-    path = _DEFAULT_CFG if config_path is None else Path(config_path)
-    try:
-        st = path.stat()
-    except OSError:
-        return False
-    sig, key = (st.st_mtime_ns, st.st_size, st.st_ino), str(path)
-    with _CFG_LOCK:
-        if (hit := _CFG_CACHE.get(key)) is not None and hit[0] == sig:
-            return bool(hit[1])
-    try:
-        parsed = json.loads(path.read_text(encoding="utf-8"))
-        enabled = bool(parsed[AGY_ZERO_CANON_FLAG]) if isinstance(parsed, dict) and isinstance(parsed.get(AGY_ZERO_CANON_FLAG), bool) else False
-    except (OSError, ValueError):
-        enabled = False
-    with _CFG_LOCK:
-        _CFG_CACHE[key] = (sig, enabled)
-    return enabled
+    return read_gigarc_bool(
+        AGY_ZERO_CANON_FLAG,
+        _DEFAULT_CFG if config_path is None else Path(config_path),
+        environ=environ,
+        default=False,
+    )
 
 
 def resolve_turn_plan(headers: object, config_path: Path | None = None, *, environ: Mapping[str, str] | None = None) -> AgyZeroCanonPlan:
@@ -89,25 +81,35 @@ def sync_agy_gemini_files(pairs: tuple[tuple[Path, Path], ...], signatures: dict
 
 
 def _write_atomic_0600(dst: Path, *, text: str | None = None, src: Path | None = None) -> None:
-    if dst.is_symlink():
-        dst.unlink()
-    tmp = dst.parent / f".tmp_{dst.name}_{uuid.uuid4().hex}"
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    try:
-        with os.fdopen(fd, "w" if text is not None else "wb", encoding="utf-8" if text is not None else None) as out:
-            if text is not None:
-                out.write(text)
-            elif src is not None:
-                out.write(src.read_bytes())
-        os.chmod(tmp, 0o600)
-        os.replace(tmp, dst)
-    except BaseException:
-        Path(tmp).unlink(missing_ok=True)
-        raise
+    if text is not None:
+        write_atomic_text_0600(dst, text)
+    elif src is not None:
+        write_atomic_0600(dst, src.read_bytes())
 
 
 def _remove_entry(entry: Path) -> None:
-    shutil.rmtree(entry, ignore_errors=True) if (entry.is_dir() and not entry.is_symlink()) else entry.unlink(missing_ok=True)
+    remove_entry(entry)
+
+
+def maybe_rotate_agy_runtime_artifacts(
+    agy_home: Path,
+    *,
+    min_interval_s: float = 300.0,
+    active_cids: AbstractSet[str] = frozenset(),
+    config_path: Path | None = None,
+) -> int:
+    """Периодически запускает `rotate_agy_runtime_artifacts` не чаще `min_interval_s`."""
+    key = str(agy_home)
+    now_mono = time.monotonic()
+    with _ROTATE_LOCK:
+        last = _ROTATE_LAST.get(key)
+        if last is not None and (now_mono - last) < min_interval_s:
+            return 0
+        _ROTATE_LAST[key] = now_mono
+    try:
+        return rotate_agy_runtime_artifacts(agy_home, active_cids=active_cids, config_path=config_path)
+    except OSError:
+        return 0
 
 
 def rotate_agy_runtime_artifacts(agy_home: Path, *, max_age_s: float | None = None, max_files: int | None = None, active_cids: AbstractSet[str] = frozenset(), now: float | None = None, config_path: Path | None = None) -> int:
@@ -121,6 +123,12 @@ def rotate_agy_runtime_artifacts(agy_home: Path, *, max_age_s: float | None = No
         for tmp in (base.glob("jetbox_summaries_proto.pb.*.tmp") if base.is_dir() and not base.is_symlink() else ()):
             if tmp.is_file() and not tmp.is_symlink() and tmp.stat().st_mtime < cutoff:
                 tmp.unlink(missing_ok=True)
+                removed += 1
+    zc_cwd_root = agy_home.parent / "agy-zc-cwd"
+    if zc_cwd_root.is_dir() and not zc_cwd_root.is_symlink():
+        for turn_dir in zc_cwd_root.glob("turn-*"):
+            if not turn_dir.is_symlink() and turn_dir.stat().st_mtime < cutoff:
+                _remove_entry(turn_dir)
                 removed += 1
     for sub in _ROTATE_SUBDIRS:
         if (target := cli_dir / sub).is_symlink() or not target.is_dir():
@@ -230,13 +238,25 @@ class AgyZeroCanonProfileManager:
             return resolved
 
     def ensure_zc_cwd(self) -> Path:
-        """Создаёт и очищает пустой изолированный `cwd` для Zero-Canon ходов."""
+        """Создаёт и полностью очищает пустой изолированный `cwd` для Zero-Canon."""
         with self._lock:
             resolved = self._reject_overlap(self.zc_cwd, "agy-zc-cwd")
             self._ensure_dir(self.zc_cwd, self.zc_cwd)
-            for name in (*AGY_CANON_FILE_NAMES, ".gemini"):
-                _remove_entry(self.zc_cwd / name)
+            for entry in list(self.zc_cwd.iterdir()):
+                _remove_entry(entry)
             return resolved
+
+    def create_turn_zc_cwd(self) -> Path:
+        """Создаёт уникальный пустой `cwd` (`0o700`) для одного Zero-Canon хода."""
+        with self._lock:
+            self._reject_overlap(self.zc_cwd, "agy-zc-cwd")
+            self._ensure_dir(self.zc_cwd, self.zc_cwd)
+            return make_ephemeral_zc_cwd(self.zc_cwd, prefix="turn-")
+
+    @staticmethod
+    def cleanup_turn_zc_cwd(path: Path | None) -> None:
+        """Удаляет одноразовый `cwd` Zero-Canon хода."""
+        cleanup_ephemeral_zc_cwd(path)
 
 
 def get_manager(real_home: Path, clean_home: Path, *, config_path: Path | None = None) -> AgyZeroCanonProfileManager:

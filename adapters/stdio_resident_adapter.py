@@ -20,6 +20,7 @@ from core.stdio_resident.rpc_drivers import create_protocol_driver
 from core.stdio_resident.session_manager import StdioSessionManager
 from core.stdio_resident.turn_stream import TurnStreamAssembler
 from core.stdio_resident.types import SlotAffinityKey
+from core.stdio_resident.zero_canon_router import execute_routed_turn
 from core.subbridge_zero_canon import normalize_review_profile, review_profile_from_headers
 
 ADAPTER_API = BACKEND_ADAPTER_API
@@ -158,6 +159,7 @@ class StdioResidentAdapter(BackendAdapter):
             cwd=normalized_cwd,
             env=env,
             turn_context=turn_context,
+            is_ephemeral=bool(data.get("is_ephemeral", False)),
         )
         assembler = TurnStreamAssembler()
         for chunk in stream:
@@ -263,8 +265,7 @@ class StdioResidentAdapter(BackendAdapter):
         ctx: TurnContext,
         sse_writer: StreamSink | None,
     ) -> TurnResult:
-        text: list[str] = []
-        reasoning: list[str] = []
+        raw_headers = getattr(getattr(ctx, "handler", None), "headers", None)
         request = {
             "chat_key": ctx.turn_id or ctx.rid or "default",
             "model": ctx.model,
@@ -272,22 +273,13 @@ class StdioResidentAdapter(BackendAdapter):
             "cwd": ctx.cwd or os.getcwd(),
             "prompt": ctx.prompt,
             "env": ctx.fwd_env,
-            "review_profile": review_profile_from_headers(getattr(getattr(ctx, "handler", None), "headers", None)),
+            "review_profile": review_profile_from_headers(raw_headers),
         }
-        for chunk in self.execute_chat(request):
-            choices = cast(list[dict[str, Any]], chunk["choices"])
-            delta = cast(dict[str, Any], choices[0]["delta"])
-            content = delta.get("content")
-            thought = delta.get("reasoning_content")
-            if isinstance(content, str):
-                text.append(content)
-                if sse_writer is not None:
-                    _ = sse_writer("content", content)
-            if isinstance(thought, str):
-                reasoning.append(thought)
-                if sse_writer is not None:
-                    _ = sse_writer("reasoning_content", thought)
-        return TurnResult(text="".join(text), reasoning="".join(reasoning))
+        hdr_map = dict(raw_headers.items()) if hasattr(raw_headers, "items") else None
+        text, reasoning = execute_routed_turn(
+            self.execute_chat, self._protocol, request, sse_writer, headers=hdr_map
+        )
+        return TurnResult(text=text, reasoning=reasoning)
 
     @override
     def close_session(self, sid: str) -> None:

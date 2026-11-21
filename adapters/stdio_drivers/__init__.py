@@ -16,7 +16,13 @@ from adapters.stdio_drivers.muse_driver import MuseMspDriver
 from adapters.stdio_drivers.opencode_driver import OpenCodeAcpDriver
 from core.stdio_resident.rpc_drivers import register_protocol_driver
 from core.stdio_resident.types import SlotAffinityKey
-from core.subbridge_zero_canon import normalize_review_profile
+from core.subbridge_zero_canon import (
+    STDIO_RESIDENT_CLAUDE_CODEX_PROTOCOL_FLAG,
+    normalize_review_profile,
+)
+from core.zero_canon_fs import read_gigarc_bool
+
+_REPO_DYNAMIC_CONFIG: Path = Path(__file__).resolve().parents[2] / "dynamic_config.json"
 
 register_protocol_driver("opencode-acp", OpenCodeAcpDriver)
 
@@ -115,10 +121,26 @@ def _extract_wrapper_path(config: Mapping[str, Any]) -> str:
     return ""
 
 
+def is_claude_codex_resident_protocol_enabled(
+    environ: Mapping[str, str] | None = None,
+    *,
+    config_path: Path | None = None,
+) -> bool:
+    """Kill-switch переключения Claude/Codex на нативные протоколы (дефолт False)."""
+    return read_gigarc_bool(
+        STDIO_RESIDENT_CLAUDE_CODEX_PROTOCOL_FLAG,
+        _REPO_DYNAMIC_CONFIG if config_path is None else config_path,
+        environ=environ,
+        default=False,
+    )
+
+
 def infer_protocol(
     actual_id: str,
     actual_config: Mapping[str, Any],
     options: Mapping[str, Any],
+    *,
+    environ: Mapping[str, str] | None = None,
 ) -> str:
     """Infer driver protocol from explicit options, backend id, or wrapper basename."""
     explicit = options.get("protocol")
@@ -128,9 +150,10 @@ def infer_protocol(
         return "msp-v1"
     if actual_id in ("opencode", "opencode-resident"):
         return "opencode-acp"
-    if actual_id.lower() in _CLAUDE_IDS:
+    native_cc = is_claude_codex_resident_protocol_enabled(environ)
+    if native_cc and actual_id.lower() in _CLAUDE_IDS:
         return "claude-stream-json"
-    if actual_id.lower() in _CODEX_IDS:
+    if native_cc and actual_id.lower() in _CODEX_IDS:
         return "codex-app-server"
     wrapper_path = _extract_wrapper_path(actual_config)
     name = os.path.basename(wrapper_path.replace("\\", "/")).lower() if wrapper_path else ""
@@ -138,9 +161,9 @@ def infer_protocol(
         return "msp-v1"
     if "opencode" in name:
         return "opencode-acp"
-    if name.split(".")[0] in _CLAUDE_IDS or name.startswith("claude-p-"):
+    if native_cc and (name.split(".")[0] in _CLAUDE_IDS or name.startswith("claude-p-")):
         return "claude-stream-json"
-    if name.split(".")[0] in _CODEX_IDS:
+    if native_cc and name.split(".")[0] in _CODEX_IDS:
         return "codex-app-server"
     return "stream-json"
 

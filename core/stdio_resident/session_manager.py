@@ -116,22 +116,30 @@ class StdioSessionManager:
             leave_timeout_s = float(getattr(cfg, "leave_timeout_s", 2.0))
             verify_fn = getattr(self._driver, "verify_environment", None)
             if callable(verify_fn):
-                ok, reason = verify_fn()
+                ok, reason = cast(tuple[bool, str], verify_fn())
                 if not ok:
                     raise RuntimeError(reason or "driver environment verification failed")
             sandbox_args_fn = getattr(self._driver, "build_sandbox_args", None)
-            sandbox_args = list(sandbox_args_fn()) if callable(sandbox_args_fn) else []
+            sandbox_args = list(cast(list[str], sandbox_args_fn())) if callable(sandbox_args_fn) else []
             base_argv = iso.argv(list(argv_builder()), affinity_key.model, affinity_key.effort)
             argv = base_argv + [f for f in sandbox_args if f not in base_argv]
+            effective_cwd = iso.cwd if (iso.active and iso.cwd) else cwd
             fp_fn = getattr(self._driver, "compute_fingerprint", None)
-            fingerprint = self._build_fingerprint(argv, cwd, env, str(fp_fn()) if callable(fp_fn) else "")
+            fingerprint = self._build_fingerprint(argv, effective_cwd, env, str(fp_fn()) if callable(fp_fn) else "")
             self._invalidate_changed_slot(session_key, fingerprint)
             turn_sandbox = tempfile.mkdtemp(prefix="turn-")
             os.chmod(turn_sandbox, 0o700)
             spawn_env = self._resolve_spawn_env(env, iso)
-            turn_context_for_turn: dict[str, Any] = {**(turn_context or {}), "turn_sandbox": turn_sandbox}
+            turn_context_for_turn: dict[str, Any] = {
+                **(turn_context or {}),
+                "turn_sandbox": turn_sandbox,
+                "cwd": effective_cwd,
+                "review_profile": affinity_key.review_profile,
+            }
             try:
-                slot = self._pool.acquire(affinity_key, lambda: list(argv), cwd, spawn_env, is_ephemeral=is_ephemeral)
+                slot = self._pool.acquire(
+                    affinity_key, lambda: list(argv), effective_cwd, spawn_env, is_ephemeral=is_ephemeral
+                )
             except BaseException:
                 with suppress(FileNotFoundError):
                     shutil.rmtree(turn_sandbox)
@@ -171,7 +179,11 @@ class StdioSessionManager:
                         raise RuntimeError("turn total timeout exceeded")
                     timeout = min(turn_idle_s, remaining_total_s)
                     read_outcome = getattr(slot.handle, "read_line_outcome", None)
-                    kind, tagged_line = read_outcome(timeout_s=timeout) if callable(read_outcome) else ("", slot.handle.read_line(timeout_s=timeout))
+                    kind, tagged_line = (
+                        cast(tuple[str, Any], read_outcome(timeout_s=timeout))
+                        if callable(read_outcome)
+                        else ("", slot.handle.read_line(timeout_s=timeout))
+                    )
                     if kind == TIMEOUT:
                         raise TimeoutError(f"resident process idle {timeout:g}s without output")
                     if tagged_line is None:
@@ -215,13 +227,15 @@ class StdioSessionManager:
             return SessionTurnResult(mode=mode, chunks=chunks, pid=slot.handle.pid, generation=turn_generation, is_tool_stop=is_tool_stop)
 
     def _resolve_spawn_env(self, env: Mapping[str, str] | None, iso: ZeroCanonIsolation | None = None) -> Mapping[str, str] | None:
-        base_env = dict(os.environ if env is None else env)
+        base_env = dict(os.environ)
+        if env is not None:
+            base_env.update(env)
         if iso is not None and (isolated := iso.env(base_env)) is not None:
             return isolated
         build_env_fn = getattr(self._driver, "build_env", None)
         if not callable(build_env_fn):
             return env
-        built_env = build_env_fn(base_env, turn_sandbox=None)
+        built_env = cast(Mapping[str, str], build_env_fn(base_env, turn_sandbox=None))
         return None if (env is None and built_env == base_env) else built_env
 
     @staticmethod

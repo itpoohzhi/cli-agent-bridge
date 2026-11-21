@@ -52,3 +52,12 @@ def build_turn_error(
         error_type=error_type, code=code, message=message,
         sse=frame + DONE_FRAME, body=body,
     )
+
+
+class ResidentTurnError(RuntimeError):
+    """Исключение хода с готовым HTTP-статусом и SSE error-фреймом."""
+
+    def __init__(self, response: TurnErrorResponse) -> None:
+        super().__init__(response.message)
+        self.response: TurnErrorResponse = response
+        self.status: int = response.status

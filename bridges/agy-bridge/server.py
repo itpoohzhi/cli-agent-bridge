@@ -1767,6 +1767,7 @@ def _launch_env(zero_canon: bool = False) -> dict:
     env.setdefault("AGY_SKIP_PREFLIGHT", "1")
     env.pop("AGY_BRIDGE_KEY", None)
     clean_home = str(_zc_manager().prepare_zc_home() if zero_canon else _prepare_agy_home())
+    zero_canon_profile.maybe_rotate_agy_runtime_artifacts(Path(clean_home), config_path=DYNAMIC_CONFIG_PATH)
     if not zero_canon:
         with _AGY_HOME_LOCK:
             _verify_clean_home_root(CLEAN_HOME_DIR)
@@ -7826,7 +7827,7 @@ class Handler(BaseHTTPRequestHandler):
                     force_cold = True
             zc_plan = zero_canon_profile.resolve_turn_plan(self.headers, DYNAMIC_CONFIG_PATH)
             if zc_plan.use_empty_cwd and not cwd_invalid:
-                cwd = str(_zc_manager().ensure_zc_cwd())
+                cwd = str(_zc_manager().create_turn_zc_cwd())
             # Kill-switch изоляции читается на каждом запросе: без рестарта моста.
             isolation_enabled = _is_session_isolation_enabled()
             # Горячие сессии — только агентным запросам с инструментами. Фоновые и

@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
-from typing import Any, Final
+from collections.abc import Iterable, Mapping, Sequence
+from typing import Any, Final, cast
 
 REVIEW_PROFILE_HEADER: Final[str] = "X-Review-Profile"
 ZERO_CANON_PROFILE: Final[str] = "zero-canon"
@@ -27,6 +27,9 @@ OPENCODE_DENY_KEYS: Final[tuple[str, ...]] = (
 OPENCODE_FORCED_PERMISSION: Final[Mapping[str, str]] = {"*": "ask"}
 
 HUB_ZERO_CANON_ROUTING_FLAG: Final[str] = "HUB_ZERO_CANON_ROUTING_ENABLED"
+STDIO_RESIDENT_CLAUDE_CODEX_PROTOCOL_FLAG: Final[str] = (
+    "STDIO_RESIDENT_CLAUDE_CODEX_PROTOCOL_ENABLED"
+)
 
 __all__ = (
     "REVIEW_PROFILE_HEADER", "ZERO_CANON_PROFILE", "STANDARD_PROFILE",
@@ -60,8 +63,9 @@ def review_profile_from_headers(headers: Any) -> str:
     if not callable(items):
         return STANDARD_PROFILE
     wanted = REVIEW_PROFILE_HEADER.lower()
+    raw_items = cast(Iterable[tuple[Any, Any]], items())
     return normalize_review_profile(
-        next((str(v) for k, v in items() if str(k).lower() == wanted), None)
+        next((str(v) for k, v in raw_items if str(k).lower() == wanted), None)
     )
 
 
