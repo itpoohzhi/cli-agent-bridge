@@ -271,6 +271,7 @@ class StdioResidentAdapter(BackendAdapter):
         raw_headers = getattr(getattr(ctx, "handler", None), "headers", None)
         request = {
             "chat_key": ctx.turn_id or ctx.rid or "default",
+            "backend_id": self.id,
             "model": ctx.model,
             "effort": ctx.effort,
             "cwd": ctx.cwd or os.getcwd(),

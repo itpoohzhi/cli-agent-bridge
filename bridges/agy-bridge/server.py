@@ -7983,7 +7983,7 @@ class Handler(BaseHTTPRequestHandler):
                 _cid_release(use_cid or owned_cid, turn_id)
             if reserved and budget is not None:
                 budget.release(reserved)
-            if zc_turn_cwd is not None:
+            if zc_turn_cwd is not None and not ctx.get("job_owns_cid"):
                 zero_canon_profile.AgyZeroCanonProfileManager.cleanup_turn_zc_cwd(zc_turn_cwd)
 
     @staticmethod

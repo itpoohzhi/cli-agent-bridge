@@ -172,7 +172,8 @@ class CodexAppServerDriver(StreamJsonDriver):
         return {**base_env, "HOME": root, "CODEX_HOME": str(dst)}
 
     def build_zero_canon_argv(self, argv: list[str], model: str = "", effort: str = "") -> list[str]:
-        """`codex app-server` с принудительными `-c` оверрайдами и без AGENTS.md."""
+        """`codex app-server`: fail-closed на запрещённых `-c`/`--config`, принудительный `project_doc_max_bytes=0`."""
+        denied_cfg = ("mcp_servers", "plugins", "notify", "hooks")
         overrides = {"project_doc_max_bytes": "0"}
         if model and model != "default":
             overrides["model"] = json.dumps(model)
@@ -182,9 +183,19 @@ class CodexAppServerDriver(StreamJsonDriver):
         idx = 0
         while idx < len(argv):
             tok = argv[idx]
-            if tok == "-c" and idx + 1 < len(argv) and any(argv[idx + 1].startswith(f"{k}=") for k in overrides):
-                idx += 2
-                continue
+            cfg_val: str | None = None
+            step = 1
+            if tok in ("-c", "--config") and idx + 1 < len(argv):
+                cfg_val, step = argv[idx + 1], 2
+            elif tok.startswith(("-c=", "--config=")):
+                cfg_val = tok.split("=", 1)[1]
+            if cfg_val is not None:
+                key_part = cfg_val.split("=", 1)[0].strip()
+                if any(key_part == d or key_part.startswith(f"{d}.") for d in denied_cfg):
+                    raise ValueError(f"forbidden_codex_zero_canon_config:{key_part}")
+                if key_part in overrides:
+                    idx += step
+                    continue
             cleaned.append(tok)
             idx += 1
         result = cleaned if "app-server" in cleaned else [*cleaned, "app-server"]

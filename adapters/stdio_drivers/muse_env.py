@@ -120,11 +120,21 @@ def prepare_muse_zero_canon_home(
 
 
 def build_muse_zero_canon_argv(argv: list[str]) -> list[str]:
-    """Append `--preset empty` to Muse argv when not already set."""
-    result = list(argv)
-    if not any(arg == "--preset" or arg.startswith("--preset=") for arg in result):
-        result.extend(("--preset", "empty"))
-    return result
+    """Принудительно выставляет `--preset empty`, заменяя любой существующий `--preset`."""
+    cleaned: list[str] = []
+    idx = 0
+    while idx < len(argv):
+        tok = argv[idx]
+        if tok == "--preset":
+            idx += 2 if idx + 1 < len(argv) else 1
+            continue
+        if tok.startswith("--preset="):
+            idx += 1
+            continue
+        cleaned.append(tok)
+        idx += 1
+    cleaned.extend(("--preset", "empty"))
+    return cleaned
 
 
 def build_muse_env(

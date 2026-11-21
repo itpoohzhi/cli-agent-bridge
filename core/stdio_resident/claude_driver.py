@@ -144,16 +144,27 @@ class ClaudeStreamJsonDriver(StreamJsonDriver):
         return build_claude_zero_canon_env(base_env, root, profile="strict", config_dir=str(dst))
 
     def build_zero_canon_argv(self, argv: list[str], model: str = "", effort: str = "") -> list[str]:
-        """Fail-closed: отвергает запрещённые флаги и принудительно выставляет Zero-Canon флаги."""
+        """Fail-closed: отвергает запрещённые флаги (вкл. -c/-r) и вставляет Zero-Canon до `--`."""
         zc_flags = build_claude_zero_canon_flags()
-        managed = {f for f in zc_flags if f.startswith("--")}
+        value_flags = frozenset({"--tools", "--setting-sources"})
+        bool_flags = frozenset({"--strict-mcp-config", "--disable-slash-commands", "--no-session-persistence"})
+        if "--" in argv:
+            split_idx = argv.index("--")
+            head, tail = list(argv[:split_idx]), list(argv[split_idx:])
+        else:
+            head, tail = list(argv), []
         cleaned: list[str] = []
         idx = 0
-        while idx < len(argv):
-            tok = argv[idx]
+        while idx < len(head):
+            tok = head[idx]
+            if tok in ("-c", "-r"):
+                raise ValueError(f"forbidden_claude_zero_canon_flags:{tok}")
             flag_name = tok.split("=", 1)[0]
-            if flag_name in managed:
-                idx += 2 if ("=" not in tok and idx + 1 < len(argv) and not argv[idx + 1].startswith("--")) else 1
+            if flag_name in bool_flags:
+                idx += 1
+                continue
+            if flag_name in value_flags:
+                idx += 2 if ("=" not in tok and idx + 1 < len(head)) else 1
                 continue
             cleaned.append(tok)
             idx += 1
@@ -164,7 +175,7 @@ class ClaudeStreamJsonDriver(StreamJsonDriver):
         for flag, value in (("--model", model), ("--effort", effort)):
             if value and value != "default" and not self._has_flag(cleaned, flag):
                 cleaned.extend((flag, value))
-        return cleaned
+        return [*cleaned, *tail]
 
     @staticmethod
     def _read_json(path: Path) -> dict[str, Any] | None:

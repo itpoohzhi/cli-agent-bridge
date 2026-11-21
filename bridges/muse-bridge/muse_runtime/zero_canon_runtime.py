@@ -165,13 +165,22 @@ def zero_canon_scope(
 
 
 def apply_muse_preset_empty(cmd: list[str]) -> list[str]:
-    """Добавляет `--preset empty` в аргументы Muse, если флаг ещё не задан."""
-    result = list(cmd)
-    if any(arg == "--preset" or arg.startswith("--preset=") for arg in result):
-        return result
+    """Принудительно выставляет `--preset empty`, заменяя любой предустановленный `--preset`."""
+    result: list[str] = []
+    idx = 0
+    while idx < len(cmd):
+        tok = cmd[idx]
+        if tok == "--preset":
+            idx += 2 if idx + 1 < len(cmd) else 1
+            continue
+        if tok.startswith("--preset="):
+            idx += 1
+            continue
+        result.append(tok)
+        idx += 1
     if "--prompt-file" in result:
-        idx = result.index("--prompt-file")
-        result[idx:idx] = ["--preset", "empty"]
+        pos = result.index("--prompt-file")
+        result[pos:pos] = ["--preset", "empty"]
     else:
         result.extend(("--preset", "empty"))
     return result
