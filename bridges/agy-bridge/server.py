@@ -1767,7 +1767,9 @@ def _launch_env(zero_canon: bool = False) -> dict:
     env.setdefault("AGY_SKIP_PREFLIGHT", "1")
     env.pop("AGY_BRIDGE_KEY", None)
     clean_home = str(_zc_manager().prepare_zc_home() if zero_canon else _prepare_agy_home())
-    zero_canon_profile.maybe_rotate_agy_runtime_artifacts(Path(clean_home), config_path=DYNAMIC_CONFIG_PATH)
+    with _session_store_lock:
+        active_cids = frozenset(_in_flight_cids)
+    zero_canon_profile.maybe_rotate_agy_runtime_artifacts(Path(clean_home), active_cids=active_cids, config_path=DYNAMIC_CONFIG_PATH)
     if not zero_canon:
         with _AGY_HOME_LOCK:
             _verify_clean_home_root(CLEAN_HOME_DIR)
@@ -7826,8 +7828,10 @@ class Handler(BaseHTTPRequestHandler):
                     cwd_invalid = True
                     force_cold = True
             zc_plan = zero_canon_profile.resolve_turn_plan(self.headers, DYNAMIC_CONFIG_PATH)
+            zc_turn_cwd: Path | None = None
             if zc_plan.use_empty_cwd:
-                cwd = str(_zc_manager().create_turn_zc_cwd())
+                zc_turn_cwd = _zc_manager().create_turn_zc_cwd()
+                cwd = str(zc_turn_cwd)
                 cwd_invalid = False
             # Kill-switch изоляции читается на каждом запросе: без рестарта моста.
             isolation_enabled = _is_session_isolation_enabled()
@@ -7979,6 +7983,8 @@ class Handler(BaseHTTPRequestHandler):
                 _cid_release(use_cid or owned_cid, turn_id)
             if reserved and budget is not None:
                 budget.release(reserved)
+            if zc_turn_cwd is not None:
+                zero_canon_profile.AgyZeroCanonProfileManager.cleanup_turn_zc_cwd(zc_turn_cwd)
 
     @staticmethod
     def _graceful_notice(reason: str, limit_s: object) -> str:

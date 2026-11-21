@@ -4,9 +4,7 @@
 
 from __future__ import annotations
 
-import fcntl
 import hashlib
-import json
 import os
 import shutil
 import tempfile
@@ -24,6 +22,7 @@ from core.stdio_resident.process_io import TIMEOUT
 from core.stdio_resident.protocol_driver import DecodedChunk, StdioProtocolDriver
 from core.stdio_resident.types import ExecutionFingerprint, SlotAffinityKey
 from core.stdio_resident.zero_canon_router import ZeroCanonIsolation, zero_canon_isolation
+from core.zero_canon_fs import acquire_turn_lock, cleanup_turn_sandbox
 
 __all__ = ["SessionTurnMode", "SessionTurnResult", "SlotLeaseTimeoutError", "StdioSessionManager"]
 
@@ -243,30 +242,11 @@ class StdioSessionManager:
 
     @staticmethod
     def _acquire_lock(lock_path: str, handle: Any) -> IO[str]:
-        lock_file = open(lock_path, "w", encoding="utf-8")
-        try:
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-            pid = getattr(handle, "pid", 0)
-            payload = {"pid": pid, "pgid": getattr(handle, "_pgid", pid), "start_time": getattr(handle, "_start_time", "")}
-            lock_file.write(json.dumps(payload, separators=(",", ":")))
-            lock_file.flush()
-        except BaseException:
-            lock_file.close()
-            raise
-        return lock_file
+        return cast(IO[str], acquire_turn_lock(lock_path, handle))
 
     @staticmethod
     def _cleanup_sandbox(turn_sandbox: str, lock_file: IO[str] | None, lock_path: str | None) -> None:
-        with suppress(FileNotFoundError):
-            shutil.rmtree(turn_sandbox)
-        if lock_file is not None:
-            with suppress(OSError):
-                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
-            with suppress(OSError):
-                lock_file.close()
-        if lock_path is not None:
-            with suppress(FileNotFoundError):
-                os.unlink(lock_path)
+        cleanup_turn_sandbox(turn_sandbox, lock_file, lock_path)
 
     def _invalidate_changed_slot(self, session_key: str, fingerprint: ExecutionFingerprint) -> None:
         with self._state_lock:

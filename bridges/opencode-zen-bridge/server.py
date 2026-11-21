@@ -8245,20 +8245,21 @@ class Handler(BaseHTTPRequestHandler):
         self._zen_probe = False
         xs = self._xs = _new_exit_state()
         try:
-            with ToolSchemaScope.bind(None), zero_canon_scope(self.headers, DYNAMIC_CONFIG_PATH, workspace=WORKSPACE):
+            with ToolSchemaScope.bind(None):
                 self._handle_post(xs)
         finally:
             _log_exit(xs)
 
     def _handle_post(self, xs: dict[str, Any]) -> None:
         if not _auth_ok(self):
-            # Непрочитанное тело иначе будет разобрано как следующий запрос keep-alive.
             self.close_connection = True
             xs["exit_reason"] = "unauthorized"
-            self._send(
-                401, {"error": {"message": "unauthorized", "type": "auth_error"}}
-            )
+            self._send(401, {"error": {"message": "unauthorized", "type": "auth_error"}})
             return
+        with zero_canon_scope(self.headers, DYNAMIC_CONFIG_PATH, workspace=WORKSPACE):
+            self._handle_post_authed(xs)
+
+    def _handle_post_authed(self, xs: dict[str, Any]) -> None:
         path = self.path.split("?", 1)[0]
         length = int(self.headers.get("Content-Length") or "0")
         raw = self.rfile.read(length) if length else b"{}"

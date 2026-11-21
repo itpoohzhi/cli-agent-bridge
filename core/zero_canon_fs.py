@@ -102,3 +102,72 @@ def cleanup_ephemeral_zc_cwd(path: Path | None) -> None:
     """Удаляет одноразовый `cwd` хода."""
     if path is not None:
         shutil.rmtree(path, ignore_errors=True)
+
+
+def prepare_opencode_zc_env(base_env: Mapping[str, str], env: dict[str, str], root: str) -> dict[str, str]:
+    """Готовит изолированные HOME/XDG/cwd и `OPENCODE_CONFIG_CONTENT` для OpenCode."""
+    from core.subbridge_zero_canon import filter_opencode_config
+
+    zc_root = Path(root)
+    zc_cfg, zc_oc_cfg = zc_root / ".config", zc_root / ".config" / "opencode"
+    zc_data, zc_data_oc, zc_cwd = zc_root / ".local" / "share", zc_root / ".local" / "share" / "opencode", zc_root / "cwd"
+    for directory in (zc_root, zc_cfg, zc_oc_cfg, zc_root / ".local", zc_data, zc_data_oc, zc_cwd):
+        ensure_private_dir(directory, 0o700)
+    src_data = Path(base_env.get("XDG_DATA_HOME") or f"{base_env.get('HOME', '')}/.local/share")
+    auth_src = src_data / "opencode" / "auth.json"
+    if auth_src.is_file() and not auth_src.is_symlink():
+        write_atomic_0600(zc_data_oc / "auth.json", auth_src.read_bytes())
+    raw_cfg: dict[str, object] = {}
+    raw_str = base_env.get("OPENCODE_CONFIG_CONTENT", "")
+    if raw_str:
+        try:
+            parsed = json.loads(raw_str)
+            if isinstance(parsed, dict):
+                raw_cfg = parsed
+        except (ValueError, TypeError):
+            pass
+    env.update(
+        {
+            "HOME": str(zc_root),
+            "XDG_CONFIG_HOME": str(zc_cfg),
+            "XDG_DATA_HOME": str(zc_data),
+            "OPENCODE_CONFIG_CONTENT": json.dumps(filter_opencode_config(raw_cfg), ensure_ascii=False),
+            "BRIDGE_ZERO_CANON": "1",
+        }
+    )
+    env.pop("OPENCODE_CONFIG", None)
+    return env
+
+
+def acquire_turn_lock(lock_path: str, handle: object) -> object:
+    """Берёт эксклюзивный flock на `lock_path` с метаданными процесса."""
+    import fcntl
+
+    lock_file = open(lock_path, "w", encoding="utf-8")
+    try:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        pid = getattr(handle, "pid", 0)
+        payload = {"pid": pid, "pgid": getattr(handle, "_pgid", pid), "start_time": getattr(handle, "_start_time", "")}
+        lock_file.write(json.dumps(payload, separators=(",", ":")))
+        lock_file.flush()
+    except BaseException:
+        lock_file.close()
+        raise
+    return lock_file
+
+
+def cleanup_turn_sandbox(turn_sandbox: str, lock_file: object | None, lock_path: str | None) -> None:
+    """Удаляет песочницу хода и освобождает lock-файл."""
+    import fcntl
+    from contextlib import suppress
+
+    with suppress(FileNotFoundError):
+        shutil.rmtree(turn_sandbox)
+    if lock_file is not None:
+        with suppress(OSError):
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)  # type: ignore[attr-defined]
+        with suppress(OSError):
+            lock_file.close()  # type: ignore[attr-defined]
+    if lock_path is not None:
+        with suppress(FileNotFoundError):
+            os.unlink(lock_path)

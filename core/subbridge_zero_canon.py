@@ -43,11 +43,18 @@ __all__ = (
 )
 
 
+_TRUSTED_LOCAL_BASE_PATHS: Final[frozenset[str]] = frozenset(("", "/", "/v1"))
+_TRUSTED_LOCAL_PREFIXES: Final[tuple[str, ...]] = ("/claude", "/agy", "/muse", "/opencode")
+
+
 def should_forward_review_profile(base_path: str, trust_profile: str) -> bool:
-    """True только для доверенных локальных суб-мостов (не `/sg-*`, не external)."""
-    return not str(base_path).startswith(EXTERNAL_BASE_PREFIX) and (
-        trust_profile != EXTERNAL_TRUST_PROFILE
-    )
+    """Fail-closed allowlist: True только для доверенных локальных суб-мостов (не `/sg-*`, не `/go/*`)."""
+    if trust_profile == EXTERNAL_TRUST_PROFILE:
+        return False
+    norm_path = str(base_path or "").strip().rstrip("/") or "/"
+    if norm_path != "/" and not norm_path.startswith("/"):
+        norm_path = "/" + norm_path
+    return norm_path in _TRUSTED_LOCAL_BASE_PATHS or norm_path.startswith(_TRUSTED_LOCAL_PREFIXES)
 
 
 def normalize_review_profile(value: str | None) -> str:

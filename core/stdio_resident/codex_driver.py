@@ -172,16 +172,24 @@ class CodexAppServerDriver(StreamJsonDriver):
         return {**base_env, "HOME": root, "CODEX_HOME": str(dst)}
 
     def build_zero_canon_argv(self, argv: list[str], model: str = "", effort: str = "") -> list[str]:
-        """`codex app-server` с явными `-c` оверрайдами модели/effort и без AGENTS.md."""
-        result = [*argv] if "app-server" in argv else [*argv, "app-server"]
+        """`codex app-server` с принудительными `-c` оверрайдами и без AGENTS.md."""
         overrides = {"project_doc_max_bytes": "0"}
         if model and model != "default":
             overrides["model"] = json.dumps(model)
         if effort and effort != "default":
             overrides["model_reasoning_effort"] = json.dumps(effort)
+        cleaned: list[str] = []
+        idx = 0
+        while idx < len(argv):
+            tok = argv[idx]
+            if tok == "-c" and idx + 1 < len(argv) and any(argv[idx + 1].startswith(f"{k}=") for k in overrides):
+                idx += 2
+                continue
+            cleaned.append(tok)
+            idx += 1
+        result = cleaned if "app-server" in cleaned else [*cleaned, "app-server"]
         for key, value in overrides.items():
-            if not any(item.startswith(f"{key}=") for item in result):
-                result.extend(("-c", f"{key}={value}"))
+            result.extend(("-c", f"{key}={value}"))
         return result
 
     def handshake_payload(self) -> bytes:

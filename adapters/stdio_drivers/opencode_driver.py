@@ -12,13 +12,12 @@ import threading
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any, ClassVar, cast, override
 
 from core.stdio_resident.protocol_driver import DecodedChunk, DriverCapabilities
 from core.stdio_resident.rpc_drivers import AcpDriver
-from core.subbridge_zero_canon import filter_opencode_config, is_zero_canon_profile
-from core.zero_canon_fs import ensure_private_dir, write_atomic_0600
+from core.subbridge_zero_canon import is_zero_canon_profile
+from core.zero_canon_fs import prepare_opencode_zc_env
 
 _OPENCODE_ENV_ALLOWLIST: tuple[str, ...] = (
     "PATH", "HOME", "LANG", "LC_ALL", "TMPDIR", "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY",
@@ -123,23 +122,7 @@ class OpenCodeAcpDriver(AcpDriver):
     def build_zero_canon_env(self, base_env: Mapping[str, str], root: str) -> dict[str, str]:
         """Isolated HOME/XDG_CONFIG_HOME, empty cwd, and forced `permission={'*': 'ask'}`."""
         self._zero_canon_active = True
-        env, zc_root = self.build_env(base_env, turn_sandbox=root), Path(root)
-        zc_cfg, zc_oc_cfg = zc_root / ".config", zc_root / ".config" / "opencode"
-        zc_data, zc_data_oc, zc_cwd = zc_root / ".local" / "share", zc_root / ".local" / "share" / "opencode", zc_root / "cwd"
-        for directory in (zc_root, zc_cfg, zc_oc_cfg, zc_root / ".local", zc_data, zc_data_oc, zc_cwd):
-            ensure_private_dir(directory, 0o700)
-        src_data = Path(base_env.get("XDG_DATA_HOME") or f"{base_env.get('HOME', '')}/.local/share")
-        auth_src = src_data / "opencode" / "auth.json"
-        if auth_src.is_file() and not auth_src.is_symlink():
-            write_atomic_0600(zc_data_oc / "auth.json", auth_src.read_bytes())
-        raw_cfg = _parse_config_content(base_env.get("OPENCODE_CONFIG_CONTENT", ""))
-        env.update({
-            "HOME": str(zc_root), "XDG_CONFIG_HOME": str(zc_cfg), "XDG_DATA_HOME": str(zc_data),
-            "OPENCODE_CONFIG_CONTENT": json.dumps(filter_opencode_config(raw_cfg), ensure_ascii=False),
-            "BRIDGE_ZERO_CANON": "1",
-        })
-        env.pop("OPENCODE_CONFIG", None)
-        return env
+        return prepare_opencode_zc_env(base_env, self.build_env(base_env, turn_sandbox=root), root)
 
     def build_zero_canon_argv(self, argv: list[str], model: str = "", effort: str = "") -> list[str]:
         """Ensure `opencode acp` argv under Zero-Canon."""

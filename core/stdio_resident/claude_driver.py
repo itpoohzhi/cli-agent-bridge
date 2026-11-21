@@ -15,6 +15,7 @@ from core.claude_zero_canon import (
     build_claude_zero_canon_flags,
     filter_claude_settings,
     filter_claude_state,
+    find_forbidden_claude_flags,
     serialize_claude_json,
 )
 from core.stdio_resident.protocol_driver import (
@@ -143,17 +144,27 @@ class ClaudeStreamJsonDriver(StreamJsonDriver):
         return build_claude_zero_canon_env(base_env, root, profile="strict", config_dir=str(dst))
 
     def build_zero_canon_argv(self, argv: list[str], model: str = "", effort: str = "") -> list[str]:
-        """Добавляет изолирующие флаги Zero-Canon, `--model` и `--effort` (без дублей)."""
-        flags, extra, index = build_claude_zero_canon_flags(), [], 0
-        while index < len(flags):
-            width = 2 if index + 1 < len(flags) and not flags[index + 1].startswith("--") else 1
-            if not self._has_flag(argv, flags[index]):
-                extra.extend(flags[index:index + width])
-            index += width
+        """Fail-closed: отвергает запрещённые флаги и принудительно выставляет Zero-Canon флаги."""
+        zc_flags = build_claude_zero_canon_flags()
+        managed = {f for f in zc_flags if f.startswith("--")}
+        cleaned: list[str] = []
+        idx = 0
+        while idx < len(argv):
+            tok = argv[idx]
+            flag_name = tok.split("=", 1)[0]
+            if flag_name in managed:
+                idx += 2 if ("=" not in tok and idx + 1 < len(argv) and not argv[idx + 1].startswith("--")) else 1
+                continue
+            cleaned.append(tok)
+            idx += 1
+        forbidden = find_forbidden_claude_flags(cleaned)
+        if forbidden:
+            raise ValueError(f"forbidden_claude_zero_canon_flags:{','.join(forbidden)}")
+        cleaned.extend(zc_flags)
         for flag, value in (("--model", model), ("--effort", effort)):
-            if value and value != "default" and not self._has_flag(argv, flag):
-                extra.extend((flag, value))
-        return [*argv, *extra]
+            if value and value != "default" and not self._has_flag(cleaned, flag):
+                cleaned.extend((flag, value))
+        return cleaned
 
     @staticmethod
     def _read_json(path: Path) -> dict[str, Any] | None:
