@@ -110,6 +110,11 @@ class CodexAppServerDriver(StreamJsonDriver):
         if not tool_calls:
             tool_calls = self._extract_tool_calls(payload)
         error = self._mapping(payload.get("error"))
+        err_text = (
+            str(error.get("message") or error)
+            if error is not None
+            else (str(payload["error"]) if "error" in payload and payload["error"] is not None else None)
+        )
         is_terminal = method == "turn/completed" or (
             "id" in payload and ("result" in payload or "error" in payload)
         )
@@ -121,6 +126,7 @@ class CodexAppServerDriver(StreamJsonDriver):
             is_terminal=is_terminal,
             is_tool_stop=is_tool_stop,
             raw=error if error is not None else payload,
+            error=err_text,
         )
 
     @override
@@ -206,6 +212,18 @@ class CodexAppServerDriver(StreamJsonDriver):
     def handshake_payload(self) -> bytes:
         """Build the Codex app-server initialization request."""
         return b'{"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"clientInfo": {"name": "cli-agent-bridge", "version": "1.0"}}}\n'
+
+    def run_handshake(self, handle: Any, timeout_s: float = 10.0) -> bool:
+        """Send JSON-RPC initialize handshake and await response."""
+        try:
+            handle.write(self.handshake_payload())
+            line_obj = handle.read_line(timeout_s=timeout_s)
+            if line_obj is None:
+                return False
+            parsed = self._parse_object(line_obj.line)
+            return parsed is not None and "error" not in parsed
+        except Exception:
+            return False
 
     @staticmethod
     def _mapping(value: object) -> dict[str, Any] | None:

@@ -7604,6 +7604,7 @@ class Handler(BaseHTTPRequestHandler):
         use_cid = ""
         owned_cid = ""
         ctx: dict[str, object] = {}
+        zc_turn_cwd: Path | None = None
         turn_id = uuid.uuid4().hex
         try:
             raw = self.rfile.read(length) if length else b""
@@ -7828,7 +7829,6 @@ class Handler(BaseHTTPRequestHandler):
                     cwd_invalid = True
                     force_cold = True
             zc_plan = zero_canon_profile.resolve_turn_plan(self.headers, DYNAMIC_CONFIG_PATH)
-            zc_turn_cwd: Path | None = None
             if zc_plan.use_empty_cwd:
                 zc_turn_cwd = _zc_manager().create_turn_zc_cwd()
                 cwd = str(zc_turn_cwd)

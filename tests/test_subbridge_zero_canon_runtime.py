@@ -70,7 +70,8 @@ def test_muse_kill_switch_defaults_false_and_fail_closed(
     cfg.write_text('{"MUSE_ZERO_CANON_ENABLED": true}', encoding="utf-8")
     assert zc.is_muse_zero_canon_enabled(cfg) is True
 
-    assert zc.is_muse_zero_canon_enabled(cfg, environ={"MUSE_ZERO_CANON_ENABLED": "0"}) is False
+    cfg.write_text('{"MUSE_ZERO_CANON_ENABLED": false}', encoding="utf-8")
+    assert zc.is_muse_zero_canon_enabled(cfg, environ={"MUSE_ZERO_CANON_ENABLED": "1"}) is False
     assert zc.is_muse_zero_canon_enabled(tmp_path / "missing.json", environ={"MUSE_ZERO_CANON_ENABLED": "1"}) is True
 
 

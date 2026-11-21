@@ -99,8 +99,8 @@ def test_gigarc_flag_defaults_kill_switch_and_fail_closed(tmp_path: Path, monkey
     cfg.write_text('{"AGY_ZERO_CANON_ENABLED": false}', encoding="utf-8")
     assert zcp.is_agy_zero_canon_enabled(cfg, environ={}) is False
 
-    cfg.write_text('{"AGY_ZERO_CANON_ENABLED": true}', encoding="utf-8")
-    assert zcp.is_agy_zero_canon_enabled(cfg, environ={"AGY_ZERO_CANON_ENABLED": "false"}) is False
+    cfg.write_text('{"AGY_ZERO_CANON_ENABLED": false}', encoding="utf-8")
+    assert zcp.is_agy_zero_canon_enabled(cfg, environ={"AGY_ZERO_CANON_ENABLED": "true"}) is False
 
 
 def test_zc_home_isolation_modes_settings_and_ro_builtin(tmp_path: Path) -> None:

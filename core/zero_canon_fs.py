@@ -25,32 +25,33 @@ def read_gigarc_bool(
     environ: Mapping[str, str] | None = None,
     default: bool = False,
 ) -> bool:
-    """Читает булев kill-switch из env или `dynamic_config.json` (fail-closed)."""
+    """Читает булев kill-switch с каноническим приоритетом `dynamic_config.json > env > default`."""
+    try:
+        st = config_path.stat()
+    except OSError:
+        st = None
+    if st is not None:
+        sig = (st.st_mtime_ns, st.st_size, st.st_ino)
+        key = (str(config_path), flag_name)
+        with _CFG_LOCK:
+            hit = _CFG_CACHE.get(key)
+            if hit is not None and hit[0] == sig:
+                return hit[1]
+        try:
+            parsed = json.loads(config_path.read_text(encoding="utf-8"))
+            if isinstance(parsed, dict) and isinstance(parsed.get(flag_name), bool):
+                val = bool(parsed[flag_name])
+                with _CFG_LOCK:
+                    _CFG_CACHE[key] = (sig, val)
+                return val
+        except (OSError, ValueError):
+            return default  # fail-closed при битом конфиге
     env_val = str((os.environ if environ is None else environ).get(flag_name, "")).strip().lower()
     if env_val in _ENV_TRUE:
         return True
     if env_val in _ENV_FALSE:
         return False
-    try:
-        st = config_path.stat()
-    except OSError:
-        return default
-    sig = (st.st_mtime_ns, st.st_size, st.st_ino)
-    key = (str(config_path), flag_name)
-    with _CFG_LOCK:
-        hit = _CFG_CACHE.get(key)
-        if hit is not None and hit[0] == sig:
-            return hit[1]
-    enabled = default
-    try:
-        parsed = json.loads(config_path.read_text(encoding="utf-8"))
-        if isinstance(parsed, dict) and isinstance(parsed.get(flag_name), bool):
-            enabled = bool(parsed[flag_name])
-    except (OSError, ValueError):
-        enabled = default
-    with _CFG_LOCK:
-        _CFG_CACHE[key] = (sig, enabled)
-    return enabled
+    return default
 
 
 def ensure_private_dir(path: Path, mode: int = 0o700) -> None:

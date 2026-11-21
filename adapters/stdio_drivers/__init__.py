@@ -127,10 +127,12 @@ def is_claude_codex_resident_protocol_enabled(
     config_path: Path | None = None,
 ) -> bool:
     """Kill-switch переключения Claude/Codex на нативные протоколы (дефолт False)."""
+    env = os.environ if environ is None else environ
+    default_cfg = Path(env.get("BRIDGE_DYNAMIC_CONFIG_PATH") or Path.home() / ".config/cli-agent-bridge/dynamic_config.json")
     return read_gigarc_bool(
         STDIO_RESIDENT_CLAUDE_CODEX_PROTOCOL_FLAG,
-        _REPO_DYNAMIC_CONFIG if config_path is None else config_path,
-        environ=environ,
+        default_cfg if config_path is None else config_path,
+        environ=env,
         default=False,
     )
 
