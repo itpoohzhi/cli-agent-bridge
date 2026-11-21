@@ -227,11 +227,14 @@ class StdioSessionManager:
             return SessionTurnResult(mode=mode, chunks=chunks, pid=slot.handle.pid, generation=turn_generation, is_tool_stop=is_tool_stop)
 
     def _resolve_spawn_env(self, env: Mapping[str, str] | None, iso: ZeroCanonIsolation | None = None) -> Mapping[str, str] | None:
+        if iso is not None and iso.active:
+            # Zero-Canon использует строго доверенный os.environ, без caller-supplied env.
+            isolated = iso.env(dict(os.environ))
+            if isolated is not None:
+                return isolated
         base_env = dict(os.environ)
         if env is not None:
             base_env.update(env)
-        if iso is not None and (isolated := iso.env(base_env)) is not None:
-            return isolated
         build_env_fn = getattr(self._driver, "build_env", None)
         if not callable(build_env_fn):
             return env

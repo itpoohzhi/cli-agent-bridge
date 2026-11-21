@@ -128,22 +128,25 @@ def _is_table_array(value: Any) -> bool:
     return isinstance(value, list) and bool(value) and all(isinstance(item, Mapping) for item in value)
 
 
-def _dump_table(table: Mapping[str, Any], path: tuple[str, ...], out: list[str]) -> None:
+def _dump_table(
+    table: Mapping[str, Any], path: tuple[str, ...], out: list[str], *, emit_header: bool = True
+) -> None:
     scalars = [(k, v) for k, v in table.items() if not isinstance(v, Mapping) and not _is_table_array(v)]
     tables = [(k, v) for k, v in table.items() if isinstance(v, Mapping)]
     arrays = [(k, v) for k, v in table.items() if _is_table_array(v)]
-    if path and (scalars or (not tables and not arrays)):
+    if emit_header and path and (scalars or (not tables and not arrays)):
         out.append("[" + ".".join(_toml_key(part) for part in path) + "]")
     out.extend(f"{_toml_key(k)} = {_toml_scalar(v)}" for k, v in scalars)
-    if scalars or path:
+    if scalars or (emit_header and path):
         out.append("")
     for key, value in tables:
         _dump_table(value, (*path, str(key)), out)
     for key, items in arrays:
-        arr_path = ".".join(_toml_key(part) for part in (*path, str(key)))
+        arr_tuple = (*path, str(key))
+        arr_path = ".".join(_toml_key(part) for part in arr_tuple)
         for item in items:
             out.append(f"[[{arr_path}]]")
-            _dump_table(item, (), out)
+            _dump_table(item, arr_tuple, out, emit_header=False)
 
 
 def dump_toml(table: Mapping[str, Any]) -> str:

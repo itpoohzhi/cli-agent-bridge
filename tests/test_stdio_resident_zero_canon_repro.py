@@ -204,16 +204,20 @@ def test_claude_zero_canon_env_filters_settings_and_isolates_home(tmp_path: Path
     assert "--model" not in driver.build_zero_canon_argv(["claude"], model="default", effort="")
 
 
-def test_manager_runs_zero_canon_claude_in_isolated_ephemeral_home(agent: Path, tmp_path: Path) -> None:
+def test_manager_runs_zero_canon_claude_in_isolated_ephemeral_home(
+    agent: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     real = tmp_path / "real"
     (real / ".claude").mkdir(parents=True)
     (real / ".claude" / "settings.json").write_text('{"env": {"A": "1"}, "hooks": {"x": 1}}', encoding="utf-8")
+    monkeypatch.setenv("HOME", str(real))
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
     manager, pool = _manager(ClaudeStreamJsonDriver())
     try:
         result = manager.execute_turn(
             _key("zc", "zero-canon", "opus"), "hi",
             lambda: [sys.executable, str(agent), "claude"], str(ROOT),
-            env={"HOME": str(real), "PATH": "/usr/bin:/bin"},
+            env={"HOME": "/evil/caller", "CLAUDE_CONFIG_DIR": "/evil/cfg"},
         )
     finally:
         pool.shutdown()

@@ -136,7 +136,7 @@ class ClaudeStreamJsonDriver(StreamJsonDriver):
                 raw = next((r for r in map(self._read_json, paths) if r is not None), None)
                 if raw is not None:
                     write_atomic_text_0600(dst / name, serialize_claude_json(keep(raw)))
-            for name in CLAUDE_PRESERVED_CA_FILES:
+            for name in (*CLAUDE_PRESERVED_CA_FILES, ".credentials.json", "credentials.json", "auth.json"):
                 ca_src = src / name
                 if ca_src.is_file() and not ca_src.is_symlink():
                     write_atomic_0600(dst / name, ca_src.read_bytes())
@@ -157,6 +157,8 @@ class ClaudeStreamJsonDriver(StreamJsonDriver):
 
     @staticmethod
     def _read_json(path: Path) -> dict[str, Any] | None:
+        if path.is_symlink():
+            return None
         try:
             raw = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError):

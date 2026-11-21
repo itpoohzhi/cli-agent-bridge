@@ -178,7 +178,13 @@ def test_dump_toml_preserves_array_of_tables() -> None:
     import tomllib
     from core.subbridge_zero_canon import dump_toml
 
-    raw = {"model": "gpt-6", "items": [{"name": "a", "k": 1}, {"name": "b", "k": 2}]}
+    raw = {
+        "model": "gpt-6",
+        "items": [
+            {"name": "a", "k": 1, "nested": {"x": 10}},
+            {"name": "b", "k": 2, "nested": {"x": 20}},
+        ],
+    }
     parsed = tomllib.loads(dump_toml(raw))
     assert parsed == raw
 

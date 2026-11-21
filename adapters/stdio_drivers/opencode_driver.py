@@ -169,6 +169,9 @@ class OpenCodeAcpDriver(AcpDriver):
 
     def run_handshake(self, handle: Any, timeout_s: float = 10.0) -> bool:
         """Run ACP initialize handshake over the resident process handle."""
+        self._active_session_id = None
+        self._active_prompt_id = None
+        self._zc_local.handle_id = id(handle)
         req_id, data = self.handshake_payload()
         try:
             handle.write(data)
@@ -200,6 +203,10 @@ class OpenCodeAcpDriver(AcpDriver):
     def prepare_turn(self, handle: Any, turn_context: Any, timeout_s: float = 10.0) -> bool:
         """Ensure an active ACP session exists before the prompt turn."""
         ctx = dict(turn_context) if isinstance(turn_context, collections.abc.Mapping) else {}
+        if getattr(self._zc_local, "handle_id", None) != id(handle):
+            self._active_session_id = None
+            self._active_prompt_id = None
+            self._zc_local.handle_id = id(handle)
         if "review_profile" in ctx:
             self._zero_canon_active = is_zero_canon_profile(str(ctx.get("review_profile") or ""))
         if self._active_session_id is not None:
