@@ -7560,23 +7560,10 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
                 with sse_lock:
                     sink_closed.set()
         except Exception as exc:  # noqa: BLE001 - RW-211: клиенту нужен конверт, а не сырой сбой
-            if self._client_write_dead:
-                _log(
-                    f"client_write_dead: dispatch error suppressed err={_err_summary(repr(exc), 160)!r}"
-                )
-                lease.record_discard("client_disconnected")
+            from core.stdio_resident.sse_error_bridge import SseErrorContext, handle_sse_stream_exception
+            if handle_sse_stream_exception(exc, live_sent[0], SseErrorContext(self, lease, emit, stream_error_frame, _log)):
                 return
-            if not live_sent[0]:
-                raise
-            _log(f"live_dispatch_failed err={_err_summary(repr(exc), 160)!r}")
-            lease.record_failure(exc)
-            emit(
-                stream_error_frame(
-                    str(exc)[:500] or exc.__class__.__name__, finish_reason=None
-                )
-            )
-            emit("data: [DONE]\n\n")
-            return
+            raise
         if self._client_write_dead:
             # RW-203: сокет отверг живую запись — терминальные кадры (tool_call, stop,
             # usage, error) и [DONE] мёртвому клиенту не отправляются.

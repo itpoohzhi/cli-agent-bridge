@@ -14,6 +14,12 @@ from dataclasses import dataclass
 from typing import Any
 
 from core.runtime_env import env_first
+from core.stdio_resident.turn_error_sse import (
+    DONE_FRAME,
+    ResidentTurnError,
+    TurnErrorResponse,
+    build_turn_error,
+)
 from core.subbridge_zero_canon import (
     HUB_ZERO_CANON_ROUTING_FLAG,
     REVIEW_PROFILE_HEADER,
@@ -164,6 +170,49 @@ def proxy_zero_canon_bridge_turn(
     return str(msg.get("content") or ""), str(msg.get("reasoning_content") or "")
 
 
+def _build_routed_turn_error(exc: BaseException, live_sent: int) -> TurnErrorResponse:
+    if isinstance(exc, RuntimeError) and str(exc).startswith("zero_canon_unsupported_by_driver:"):
+        status = 503 if not live_sent else 200
+        error_type = "zero_canon_unsupported"
+        code = "zero_canon_unsupported_by_driver"
+        message = str(exc)[:500]
+        body: dict[str, object] = {"error": {"message": message, "type": error_type, "code": code}}
+        sse = "data: " + json.dumps(body, ensure_ascii=False) + "\n\n" + DONE_FRAME
+        return TurnErrorResponse(
+            status=status, error_type=error_type, code=code, message=message, sse=sse, body=body
+        )
+    return build_turn_error(exc, live_sent=live_sent)
+
+
+def _stream_routed_chunks(
+    execute_chat: Callable[[dict[str, Any]], Iterator[dict[str, Any]]],
+    route: ZeroCanonRoute,
+    request: dict[str, Any],
+    headers: Mapping[str, str] | None,
+) -> Iterator[tuple[str, str]]:
+    if route.kind == KIND_BRIDGE:
+        content, thought = proxy_zero_canon_bridge_turn(
+            route.base_url,
+            str(request.get("model") or "default"),
+            str(request.get("prompt") or ""),
+            headers,
+        )
+        if content:
+            yield "content", content
+        if thought:
+            yield "reasoning_content", thought
+        return
+    routed_req = {**request, "is_ephemeral": bool(request.get("is_ephemeral")) or route.is_ephemeral}
+    for chunk in execute_chat(routed_req):
+        delta = chunk["choices"][0]["delta"]
+        content = delta.get("content")
+        thought = delta.get("reasoning_content")
+        if isinstance(content, str):
+            yield "content", content
+        if isinstance(thought, str):
+            yield "reasoning_content", thought
+
+
 def execute_routed_turn(
     execute_chat: Callable[[dict[str, Any]], Iterator[dict[str, Any]]],
     protocol: str,
@@ -173,52 +222,18 @@ def execute_routed_turn(
     headers: Mapping[str, str] | None = None,
 ) -> tuple[str, str]:
     """Выполняет ход с учётом `decide_zero_canon_route` и `build_turn_error`."""
-    from core.stdio_resident.turn_error_sse import ResidentTurnError, build_turn_error
-
     route = decide_zero_canon_route(
-        str(request.get("review_profile") or ""),
-        protocol,
-        backend_id=str(request.get("backend_id") or ""),
+        str(request.get("review_profile") or ""), protocol, backend_id=str(request.get("backend_id") or "")
     )
+    parts: dict[str, list[str]] = {"content": [], "reasoning_content": []}
     live_sent = 0
-    text: list[str] = []
-    reasoning: list[str] = []
     try:
-        if route.kind == KIND_BRIDGE:
-            content, thought = proxy_zero_canon_bridge_turn(
-                route.base_url,
-                str(request.get("model") or "default"),
-                str(request.get("prompt") or ""),
-                headers,
-            )
-            if content:
-                text.append(content)
-                if sse_writer is not None:
-                    live_sent += 1
-                    _ = sse_writer("content", content)
-            if thought:
-                reasoning.append(thought)
-                if sse_writer is not None:
-                    live_sent += 1
-                    _ = sse_writer("reasoning_content", thought)
-            return "".join(text), "".join(reasoning)
-        routed_req = {**request, "is_ephemeral": bool(request.get("is_ephemeral")) or route.is_ephemeral}
-        for chunk in execute_chat(routed_req):
-            choices = chunk["choices"]
-            delta = choices[0]["delta"]
-            content = delta.get("content")
-            thought = delta.get("reasoning_content")
-            if isinstance(content, str):
-                text.append(content)
-                if sse_writer is not None:
-                    live_sent += 1
-                    _ = sse_writer("content", content)
-            if isinstance(thought, str):
-                reasoning.append(thought)
-                if sse_writer is not None:
-                    live_sent += 1
-                    _ = sse_writer("reasoning_content", thought)
+        for kind, value in _stream_routed_chunks(execute_chat, route, request, headers):
+            parts[kind].append(value)
+            if sse_writer is not None:
+                live_sent += 1
+                _ = sse_writer(kind, value)
     except Exception as exc:
-        err = build_turn_error(exc, live_sent=live_sent)
+        err = _build_routed_turn_error(exc, live_sent)
         raise ResidentTurnError(err) from exc
-    return "".join(text), "".join(reasoning)
+    return "".join(parts["content"]), "".join(parts["reasoning_content"])
