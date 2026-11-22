@@ -6,6 +6,7 @@ import pytest
 
 import core.tool_emulation as emulation
 from core.tool_mode import ToolMode, ToollessTagPolicy
+from core.tool_post_call_policy import PostCallPolicy
 from tests.unit._tool_mode_stream import STRICT_MODES, VALID_CALL, make
 
 OFF, FORBID, EMULATE = ToolMode.OFF, ToolMode.FORBID, ToolMode.EMULATE
@@ -223,4 +224,72 @@ def test_non_strict_forbid_still_rejects_envelopes(text: str) -> None:
     with pytest.raises(emulation.LiveParserError):
         capture.feed_chars(text)
     assert capture.text == "" and capture.calls == []
+
+
+def test_orphan_tool_close_calls_zero_fails_closed_even_with_cutoff() -> None:
+    capture = make(EMULATE)
+    capture.normalizer.configure_post_call_policy(PostCallPolicy(cutoff_enabled=True))
+    with pytest.raises(emulation.LiveParserError, match="unexpected service tag: tool_call"):
+        capture.feed_chars("</tool_call>")
+    assert capture.normalizer.post_call_suppressed is False
+    assert capture.text == "" and capture.calls == []
+
+
+@pytest.mark.parametrize("mode,policy", STRICT_MODES)
+@pytest.mark.parametrize(
+    "tag,expected",
+    (("</tool_call>", "unexpected service tag: tool_call"), ("</arg_key>", "unexpected service tag: arg_key")),
+)
+def test_non_strict_reject_tools_fails_closed_on_orphan_tags(
+    mode: ToolMode, policy: ToollessTagPolicy, tag: str, expected: str
+) -> None:
+    capture = make(mode, policy, strict_live=False)
+    capture.normalizer.configure_post_call_policy(PostCallPolicy(cutoff_enabled=True))
+    with pytest.raises(emulation.LiveParserError, match=expected):
+        capture.feed_chars(tag)
+    assert capture.normalizer.post_call_suppressed is False
+
+
+@pytest.mark.parametrize("mode,policy", ((EMULATE, TEXT), (EMULATE, ERROR), (OFF, TEXT)))
+def test_non_strict_without_reject_tools_keeps_orphan_tags_active(
+    mode: ToolMode, policy: ToollessTagPolicy
+) -> None:
+    capture = make(mode, policy, strict_live=False)
+    capture.normalizer.configure_post_call_policy(PostCallPolicy(cutoff_enabled=True))
+    capture.feed_chars("a </tool_call> b </arg_key> c")
+    capture.normalizer.finish()
+    assert capture.text == "a </tool_call> b </arg_key> c"
+    assert capture.calls == []
+    assert capture.normalizer.post_call_suppressed is False
+
+
+def test_strict_orphan_reasoning_close_still_fails_after_calls_with_cutoff() -> None:
+    capture = make(EMULATE)
+    capture.normalizer.configure_post_call_policy(PostCallPolicy(cutoff_enabled=True))
+    capture.feed_chars(VALID_CALL)
+    with pytest.raises(emulation.LiveParserError, match="unexpected service tag: think"):
+        capture.feed_chars("</think>")
+    assert capture.normalizer.post_call_suppressed is False
+
+
+def test_post_call_cutoff_toggle_logs_once_and_clears_tail(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    off = make(EMULATE)
+    with pytest.raises(emulation.LiveParserError, match="unexpected service tag: tool_call"):
+        off.feed_chars(VALID_CALL + "</tool_call>tail")
+    assert off.normalizer.post_call_suppressed is False
+
+    on = make(EMULATE)
+    on.normalizer.configure_post_call_policy(PostCallPolicy(cutoff_enabled=True))
+    with caplog.at_level("WARNING", logger="core.tool_emulation"):
+        on.feed_chars(VALID_CALL + "</tool_call>dropped_tail" + VALID_CALL)
+        on.feed_chars("extra_after_cutoff")
+        on.normalizer.finish()
+    assert on.normalizer.post_call_suppressed is True
+    assert on.normalizer._buf == ""
+    assert len(on.calls) == 1
+    assert on.text == ""
+    assert len([r for r in caplog.records if "post_call_cutoff" in r.getMessage()]) == 1
+
 

@@ -154,6 +154,7 @@ class AgyToolingTests(unittest.TestCase):
             "FAKE_TOOLING_SCENARIO": str(self.scenario),
             "AGY_BRIDGE_SESSIONS_FILE": str(self.tmp / "sessions.json"),
             "AGY_SQLITE_REASONING_ENABLED": "0",
+            "BRIDGE_DYNAMIC_CONFIG_PATH": str(self.tmp / "dynamic_config.json"),
         }
         _ = stack.enter_context(mock.patch.dict(os.environ, env))
         for key in (
@@ -324,8 +325,6 @@ class AgyToolingTests(unittest.TestCase):
         self.assertNotIn("# Tool calling protocol", self.prompt_log.read_text("utf-8"))
 
     def test_multiple_sequential_tool_calls_in_one_turn(self) -> None:
-        import json
-
         expected = [
             {"path": "first.txt", "content": "first"},
             {"path": "second.txt", "content": "second"},
@@ -351,8 +350,7 @@ class AgyToolingTests(unittest.TestCase):
                 if reason is not None:
                     finish_reasons.append(reason)
                 for call in choice.get("delta", {}).get("tool_calls", []):
-                    index = call["index"]
-                    entry = calls.setdefault(index, {"name": "", "arguments": ""})
+                    entry = calls.setdefault(call["index"], {"name": "", "arguments": ""})
                     function = call.get("function", {})
                     entry["name"] += function.get("name", "")
                     entry["arguments"] += function.get("arguments", "")
@@ -361,11 +359,9 @@ class AgyToolingTests(unittest.TestCase):
             self.assertEqual(calls[index]["name"], "write_file")
             self.assertEqual(json.loads(calls[index]["arguments"]), arguments)
         self.assertEqual(set(finish_reasons), {"tool_calls"})
-        self.assertNotIn(b"agy emitted a malformed tool call", raw)
+        self.assertNotIn(b"upstream emitted a malformed tool call", raw)
 
     def test_unclosed_tool_call_at_eof_fails_closed(self) -> None:
-        import json
-
         incomplete = '<tool_call>{"name": "write_file", "arguments": {"path": "x"}'
         for stream in (False, True):
             with self.subTest(stream=stream):
@@ -373,50 +369,26 @@ class AgyToolingTests(unittest.TestCase):
                 status, raw, _ = self._post(self._body(stream=stream, tools=_TOOLS))
                 if stream and status == 200:
                     chunks, _ = self._sse_chunks(raw)
-                    reasons = [
-                        choice.get("finish_reason")
-                        for chunk in chunks
-                        for choice in chunk.get("choices", [])
-                    ]
+                    reasons = [c.get("finish_reason") for ch in chunks for c in ch.get("choices", [])]
                     self.assertNotIn("tool_calls", reasons, raw)
                     self.assertIn("error", reasons, raw)
                 else:
                     self.assertEqual(status, 502, raw)
                     payload = json.loads(raw)
                     self.assertIn("error", payload, payload)
-                    self.assertNotIn(
-                        "tool_calls",
-                        [
-                            choice.get("finish_reason")
-                            for choice in payload.get("choices", [])
-                        ],
-                        payload,
-                    )
+                    self.assertEqual(payload["error"]["type"], "tool_call_parse_error")
+                    self.assertEqual(payload["error"]["code"], 502)
+                    self.assertEqual(payload["error"]["message"], "upstream emitted a malformed tool call")
+                    self.assertNotIn("tool_calls", [c.get("finish_reason") for c in payload.get("choices", [])], payload)
                 self.assertIn(b"unclosed tool_call block", raw)
 
     def test_stalled_open_block_timeout(self) -> None:
-        import os
-        from unittest.mock import patch
-
-        with patch.dict(
-            os.environ,
-            {
-                "AGY_TOOL_CALL_STALL_TIMEOUT_S": "0.1",
-                "WATCHDOG_INTERVAL_S": "0.05",
-            },
-        ):
-            self._scenario(
-                ['<tool_call>{"name": "write_file", "arguments": {"path": "x"}'],
-                hang_s=5.0,
-            )
+        with mock.patch.dict(os.environ, {"AGY_TOOL_CALL_STALL_TIMEOUT_S": "0.1", "WATCHDOG_INTERVAL_S": "0.05"}):
+            self._scenario(['<tool_call>{"name": "write_file", "arguments": {"path": "x"}'], hang_s=5.0)
             status, raw, elapsed = self._post(self._body(stream=True, tools=_TOOLS))
         if status == 200:
             chunks, _ = self._sse_chunks(raw)
-            reasons = [
-                choice.get("finish_reason")
-                for chunk in chunks
-                for choice in chunk.get("choices", [])
-            ]
+            reasons = [c.get("finish_reason") for ch in chunks for c in ch.get("choices", [])]
             self.assertIn("error", reasons, raw)
             self.assertNotIn("tool_calls", reasons, raw)
         else:
@@ -425,20 +397,8 @@ class AgyToolingTests(unittest.TestCase):
         self.assertLess(elapsed, 4.0, "Ожидали stall timeout, а не EOF процесса")
 
     def test_settle_timeout_completes_turn_when_silent_after_tool_call(self) -> None:
-        import json
-        import os
-        from unittest.mock import patch
-
-        deltas = [
-            '<tool_call>{"name": "write_file", "arguments": {"path": "a.txt", "content": "123"}}</tool_call>'
-        ]
-        with patch.dict(
-            os.environ,
-            {
-                "AGY_TOOL_SETTLE_TIMEOUT_S": "0.1",
-                "WATCHDOG_INTERVAL_S": "0.05",
-            },
-        ):
+        deltas = ['<tool_call>{"name": "write_file", "arguments": {"path": "a.txt", "content": "123"}}</tool_call>']
+        with mock.patch.dict(os.environ, {"AGY_TOOL_SETTLE_TIMEOUT_S": "0.1", "WATCHDOG_INTERVAL_S": "0.05"}):
             self._scenario(deltas, hang_s=5.0)
             status, raw, elapsed = self._post(self._body(stream=True, tools=_TOOLS))
         self.assertEqual(status, 200, raw)
@@ -452,38 +412,25 @@ class AgyToolingTests(unittest.TestCase):
                 if reason is not None:
                     finish_reasons.append(reason)
                 for call in choice.get("delta", {}).get("tool_calls", []):
-                    entry = calls.setdefault(
-                        call["index"], {"name": "", "arguments": ""}
-                    )
+                    entry = calls.setdefault(call["index"], {"name": "", "arguments": ""})
                     function = call.get("function", {})
                     entry["name"] += function.get("name", "")
                     entry["arguments"] += function.get("arguments", "")
         self.assertEqual(set(calls), {0}, raw)
         self.assertEqual(calls[0]["name"], "write_file")
-        self.assertEqual(
-            json.loads(calls[0]["arguments"]),
-            {"path": "a.txt", "content": "123"},
-        )
+        self.assertEqual(json.loads(calls[0]["arguments"]), {"path": "a.txt", "content": "123"})
         self.assertEqual(set(finish_reasons), {"tool_calls"}, raw)
         self.assertNotIn(b'"error"', raw)
-        self.assertNotIn(b"agy emitted a malformed tool call", raw)
-        self.assertLess(
-            elapsed,
-            4.0,
-            "Ожидали settle timeout 0.1с, а не ожидание hang_s 5.0с",
-        )
+        self.assertNotIn(b"upstream emitted a malformed tool call", raw)
+        self.assertLess(elapsed, 4.0, "Ожидали settle timeout 0.1с, а не ожидание hang_s 5.0с")
 
     def test_tool_call_count_exceeded_limit(self) -> None:
-        import json
-        import os
-        from unittest.mock import patch
-
         deltas = [
             '<tool_call>{"name": "write_file", "arguments": {"path": "1"}}</tool_call>',
             '<tool_call>{"name": "write_file", "arguments": {"path": "2"}}</tool_call>',
             '<tool_call>{"name": "write_file", "arguments": {"path": "3"}}</tool_call>',
         ]
-        with patch.dict(os.environ, {"AGY_MAX_TOOL_CALLS": "2"}):
+        with mock.patch.dict(os.environ, {"AGY_MAX_TOOL_CALLS": "2"}):
             self._scenario(deltas)
             status, raw, _ = self._post(self._body(stream=False, tools=_TOOLS))
         payload = json.loads(raw)
@@ -491,14 +438,10 @@ class AgyToolingTests(unittest.TestCase):
         self.assertIn(b"tool call count exceeded limit", raw)
 
     def test_tool_call_bytes_exceeded_limit_multibyte_utf8(self) -> None:
-        import json
-        import os
-        from unittest.mock import patch
-
         text = "я" * 50
         self.assertLess(len(text), 80)
         self.assertGreater(len(text.encode("utf-8")), 80)
-        with patch.dict(os.environ, {"AGY_MAX_TOOL_BYTES": "80"}):
+        with mock.patch.dict(os.environ, {"AGY_MAX_TOOL_BYTES": "80"}):
             self._scenario([text])
             status, raw, _ = self._post(self._body(stream=False, tools=_TOOLS))
         payload = json.loads(raw)
@@ -506,33 +449,28 @@ class AgyToolingTests(unittest.TestCase):
         self.assertIn(b"tool call buffer exceeded max bytes", raw)
 
     def test_env_timeout_validation_rejects_nan_and_negative(self) -> None:
-        import os
-        from unittest.mock import patch
-
         bridge = _load_bridge()
         _safe_float_env = bridge._safe_float_env
         _safe_int_env = bridge._safe_int_env
         _ToolTurn = bridge._ToolTurn
 
         self.assertEqual(_safe_float_env("TEST_FLOAT_NAN", 1.5), 1.5)
-        with patch.dict(os.environ, {"TEST_FLOAT_NAN": "nan"}):
+        with mock.patch.dict(os.environ, {"TEST_FLOAT_NAN": "nan"}):
             self.assertEqual(_safe_float_env("TEST_FLOAT_NAN", 1.5), 1.5)
-        with patch.dict(os.environ, {"TEST_FLOAT_NEG": "-2.0"}):
+        with mock.patch.dict(os.environ, {"TEST_FLOAT_NEG": "-2.0"}):
             self.assertEqual(_safe_float_env("TEST_FLOAT_NEG", 1.5), 1.5)
-        with patch.dict(os.environ, {"TEST_FLOAT_ZERO": "0.0"}):
+        with mock.patch.dict(os.environ, {"TEST_FLOAT_ZERO": "0.0"}):
             self.assertEqual(_safe_float_env("TEST_FLOAT_ZERO", 1.5), 1.5)
-        with patch.dict(os.environ, {"TEST_FLOAT_POS": "3.5"}):
+        with mock.patch.dict(os.environ, {"TEST_FLOAT_POS": "3.5"}):
             self.assertEqual(_safe_float_env("TEST_FLOAT_POS", 1.5), 3.5)
 
-        with patch.dict(os.environ, {"TEST_INT_NEG": "-5"}):
+        with mock.patch.dict(os.environ, {"TEST_INT_NEG": "-5"}):
             self.assertEqual(_safe_int_env("TEST_INT_NEG", 10), 10)
-        with patch.dict(os.environ, {"TEST_INT_POS": "42"}):
+        with mock.patch.dict(os.environ, {"TEST_INT_POS": "42"}):
             self.assertEqual(_safe_int_env("TEST_INT_POS", 10), 42)
 
         # Проверяем, что _ToolTurn с невалидными env безопасно применяет дефолты
-        with patch.dict(
-            os.environ, {"AGY_TOOL_SETTLE_TIMEOUT_S": "nan", "AGY_MAX_TOOL_CALLS": "-1"}
-        ):
+        with mock.patch.dict(os.environ, {"AGY_TOOL_SETTLE_TIMEOUT_S": "nan", "AGY_MAX_TOOL_CALLS": "-1"}):
             turn = _ToolTurn([], lambda _c: True, lambda _r: True, lambda _k: True)
             self.assertEqual(turn._settle_timeout_s, 5.0)
             self.assertEqual(turn._max_calls, 64)
@@ -562,21 +500,12 @@ class AgyToolingTests(unittest.TestCase):
     def test_inter_call_activity_resets_settle_timer_and_delivers_both_calls(
         self,
     ) -> None:
-        import os
-        from unittest.mock import patch
-
         call1 = '<tool_call>{"name": "write_file", "arguments": {"path": "1.txt"}}</tool_call>'
         inter_text = "Промежуточный шаг анализа перед следующим действием."
         call2 = '<tool_call>{"name": "write_file", "arguments": {"path": "2.txt"}}</tool_call>'
 
         # Задаем settle-таймаут 0.15с
-        with patch.dict(
-            os.environ,
-            {
-                "AGY_TOOL_SETTLE_TIMEOUT_S": "0.15",
-                "WATCHDOG_INTERVAL_S": "0.05",
-            },
-        ):
+        with mock.patch.dict(os.environ, {"AGY_TOOL_SETTLE_TIMEOUT_S": "0.15", "WATCHDOG_INTERVAL_S": "0.05"}):
             # Межделтовая задержка 0.10с: между call1 и call2 проходит 2*0.10 = 0.20с,
             # что больше settle-таймаута 0.15с. Промежуточная дельта сбрасывает таймер,
             # доказывая работу notify_activity().
@@ -592,9 +521,7 @@ class AgyToolingTests(unittest.TestCase):
                 if reason is not None:
                     finish_reasons.append(reason)
                 for call in choice.get("delta", {}).get("tool_calls", []):
-                    entry = calls.setdefault(
-                        call["index"], {"name": "", "arguments": ""}
-                    )
+                    entry = calls.setdefault(call["index"], {"name": "", "arguments": ""})
                     func = call.get("function", {})
                     entry["name"] += func.get("name", "")
                     entry["arguments"] += func.get("arguments", "")
@@ -604,28 +531,13 @@ class AgyToolingTests(unittest.TestCase):
         self.assertEqual(set(finish_reasons), {"tool_calls"})
 
     def test_split_tool_call_tag_prefix_keeps_turn_alive(self) -> None:
-        import os
-        from unittest.mock import patch
-
         tag = "<tool_call>"
         # Проверяем все точки разреза открывающего тега: от '<' (длина 1) до '<tool_call' (длина 10)
         for cut in range(1, len(tag)):
             with self.subTest(cut=cut, prefix=tag[:cut]):
-                call1 = (
-                    '<tool_call>{"name": "write_file", "arguments": {"path": "1.txt"}}</tool_call>\n'
-                    + tag[:cut]
-                )
-                call2 = (
-                    tag[cut:]
-                    + '{"name": "write_file", "arguments": {"path": "2.txt"}}</tool_call>'
-                )
-                with patch.dict(
-                    os.environ,
-                    {
-                        "AGY_TOOL_SETTLE_TIMEOUT_S": "0.15",
-                        "WATCHDOG_INTERVAL_S": "0.05",
-                    },
-                ):
+                call1 = '<tool_call>{"name": "write_file", "arguments": {"path": "1.txt"}}</tool_call>\n' + tag[:cut]
+                call2 = tag[cut:] + '{"name": "write_file", "arguments": {"path": "2.txt"}}</tool_call>'
+                with mock.patch.dict(os.environ, {"AGY_TOOL_SETTLE_TIMEOUT_S": "0.15", "WATCHDOG_INTERVAL_S": "0.05"}):
                     self._scenario([call1, call2], delta_sleep_s=0.45)
                     status, raw, _ = self._post(self._body(stream=True, tools=_TOOLS))
                 self.assertEqual(status, 200, raw)
@@ -634,19 +546,64 @@ class AgyToolingTests(unittest.TestCase):
                 for chunk in chunks:
                     for choice in chunk.get("choices", []):
                         for call in choice.get("delta", {}).get("tool_calls", []):
-                            entry = calls.setdefault(
-                                call["index"], {"name": "", "arguments": ""}
-                            )
+                            entry = calls.setdefault(call["index"], {"name": "", "arguments": ""})
                             func = call.get("function", {})
                             entry["name"] += func.get("name", "")
                             entry["arguments"] += func.get("arguments", "")
-                self.assertEqual(
-                    set(calls),
-                    {0, 1},
-                    f"Ожидали 2 вызова при разрезе tag[:{cut}]={tag[:cut]!r}, получили {calls}",
-                )
+                self.assertEqual(set(calls), {0, 1}, f"Ожидали 2 вызова при разрезе tag[:{cut}]={tag[:cut]!r}, получили {calls}")
                 self.assertEqual(calls[0]["name"], "write_file")
                 self.assertEqual(calls[1]["name"], "write_file")
+
+    def test_malformed_calls_zero_redacts_logs_and_error_body(self) -> None:
+        secret = "sk-proj-secret_token_alpha_99999999"
+        logs: list[str] = []
+        with mock.patch.dict(os.environ, {"BRIDGE_POST_CALL_CUTOFF_ENABLED": "1"}), mock.patch.object(
+            self.srv, "_log", side_effect=lambda msg: logs.append(str(msg))
+        ):
+            self._scenario([f'<tool_call>{{"name":"write_file","api_key":"{secret}","broken":</tool_call>'])
+            status, raw, _ = self._post(self._body(stream=False, tools=_TOOLS))
+            self.assertEqual(status, 502, raw)
+            err = json.loads(raw)["error"]
+            self.assertEqual(err["type"], "tool_call_parse_error")
+            self.assertEqual(err["code"], 502)
+            self.assertEqual(err["message"], "upstream emitted a malformed tool call")
+            self.assertNotIn(secret, raw.decode("utf-8"))
+            self.assertTrue(logs)
+            self.assertFalse(any(secret in line for line in logs), logs)
+
+            self._scenario(["</tool_call>"])
+            status2, raw2, _ = self._post(self._body(stream=False, tools=_TOOLS))
+            self.assertEqual(status2, 502, raw2)
+            err2 = json.loads(raw2)["error"]
+            self.assertEqual(err2["type"], "tool_call_parse_error")
+            self.assertEqual(err2["code"], 502)
+            self.assertEqual(err2["message"], "upstream emitted a malformed tool call")
+
+    def test_kill_switch_toggle_and_orphan_reasoning_close(self) -> None:
+        valid_call = "".join(_TOOL_DELTAS[1:])
+        with mock.patch.dict(os.environ, {"BRIDGE_POST_CALL_CUTOFF_ENABLED": "0"}):
+            self._scenario([valid_call, "</tool_call>tail"])
+            status, raw, _ = self._post(self._body(stream=False, tools=_TOOLS))
+            self.assertEqual(status, 502, raw)
+            err = json.loads(raw)["error"]
+            self.assertEqual(err["type"], "tool_call_parse_error")
+            self.assertEqual(err["code"], 502)
+            self.assertEqual(err["message"], "upstream emitted a malformed tool call")
+
+        with mock.patch.dict(os.environ, {"BRIDGE_POST_CALL_CUTOFF_ENABLED": "1"}):
+            self._scenario([valid_call, "</tool_call>tail"])
+            status2, raw2, _ = self._post(self._body(stream=False, tools=_TOOLS))
+            self.assertEqual(status2, 200, raw2)
+            choice = json.loads(raw2)["choices"][0]
+            self.assertEqual(choice["finish_reason"], "tool_calls")
+            self.assertEqual(len(choice["message"]["tool_calls"]), 1)
+
+            self._scenario([valid_call, "</think>"])
+            status3, raw3, _ = self._post(self._body(stream=False, tools=_TOOLS))
+            self.assertEqual(status3, 502, raw3)
+            err3 = json.loads(raw3)["error"]
+            self.assertEqual(err3["type"], "tool_call_parse_error")
+            self.assertEqual(err3["code"], 502)
 
 
 class TestD1SettleGuards(unittest.TestCase):
@@ -703,19 +660,37 @@ class TestD1SettleGuards(unittest.TestCase):
                     normalizer._buf = "preceding text " + literal[:length]
                     self.assertTrue(normalizer.has_open_tool_call())
 
-
+    def test_post_call_suppressed_settle_and_max_bytes(self) -> None:
+        bridge = _load_bridge()
+        with tempfile.TemporaryDirectory(prefix="agy-post-call-") as td, mock.patch.dict(
+            os.environ,
+            {
+                "BRIDGE_DYNAMIC_CONFIG_PATH": str(Path(td) / "dynamic_config.json"),
+                "BRIDGE_POST_CALL_CUTOFF_ENABLED": "1",
+                "AGY_MAX_TOOL_BYTES": "120",
+            },
+        ):
+            turn = bridge._ToolTurn(_TOOLS, lambda _c: True, lambda _r: True, lambda _k: True)
+            self.assertTrue(turn.feed("".join(_TOOL_DELTAS[1:]) + "</tool_call>"))
+            self.assertTrue(turn._normalizer.post_call_suppressed)
+            self.assertEqual(turn.error, "")
+            self.assertTrue(turn.feed("z" * 500))
+            self.assertEqual(turn.error, "")
+            turn._calls_closed_ts = time.monotonic() - 10.0
+            turn._last_chunk_ts = turn._calls_closed_ts
+            dec = turn.settle_decision(proc_exited=False, result_received=False)
+            self.assertEqual(dec.action, "clean_complete")
+            self.assertTrue(dec.tool_turn_clean_eof)
 
     def test_tool_turn_repetition_loop_classification(self) -> None:
         """_ToolTurn классифицирует RepetitionLoopDetected как upstream_repetition_loop, а не malformed tool call."""
         from core.tool_emulation import RepetitionLoopDetected
         from unittest.mock import MagicMock
         bridge = _load_bridge()
-        _ToolTurn = bridge._ToolTurn
-        turn = _ToolTurn([], lambda c: True, lambda r: True, lambda tc: True)
+        turn = bridge._ToolTurn([], lambda c: True, lambda r: True, lambda tc: True)
         turn._normalizer = MagicMock()
         turn._normalizer.feed_text.side_effect = RepetitionLoopDetected("upstream_repetition_loop: excessive token repetitions")
         turn._normalizer.has_open_tool_call.return_value = False
-        
         turn.feed("test")
         self.assertTrue(getattr(turn, "_is_repetition_loop", False))
         body = turn.error_body()

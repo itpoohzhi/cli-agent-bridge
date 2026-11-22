@@ -24,6 +24,9 @@ from core.transport_failure_contracts import (
 
 CONFIG_PATH_ENV = "BRIDGE_DYNAMIC_CONFIG_PATH"
 CONFIG_MAX_BYTES_ENV = "BRIDGE_RECOVERY_CONFIG_MAX_BYTES"
+POST_CALL_CUTOFF_FLAG_ENV = "BRIDGE_POST_CALL_CUTOFF_ENABLED"
+DIAGNOSTIC_WINDOW_ENV = "BRIDGE_DIAGNOSTIC_WINDOW_CHARS"
+DIAGNOSTIC_MARGIN_ENV = "BRIDGE_DIAGNOSTIC_REDACT_MARGIN_CHARS"
 DEFAULT_CONFIG_MAX_BYTES = 65536
 DEFAULT_CONFIG_PATH = "~/.config/cli-agent-bridge/dynamic_config.json"
 TRUE_VALUES = ("1", "true", "yes", "on")
@@ -127,13 +130,40 @@ def read_number(
     if isinstance(config, dict):
         sources.append(config.get(name))
     for raw in sources:
+        if not isinstance(raw, (int, float, str)) or isinstance(raw, bool):
+            continue
         try:
-            value = float(raw)  # type: ignore[arg-type]
+            value = float(raw)
         except (TypeError, ValueError):
             continue
         if math.isfinite(value) and bounds[0] <= value <= bounds[1]:
             return value
     return default
+
+
+def read_post_call_cutoff_enabled(
+    env: Mapping[str, str] | None = None, config_path: Path | None = None
+) -> bool:
+    """Прочитать kill-switch отсечения пост-вызовного вывода (fail-closed, default False)."""
+    return read_recovery_switch(POST_CALL_CUTOFF_FLAG_ENV, env=env, config_path=config_path)
+
+
+def read_diagnostic_window_chars(
+    env: Mapping[str, str] | None = None, config_path: Path | None = None
+) -> int:
+    """Ширина диагностического окна (32..1024, default 120) из env/dynamic_config."""
+    values = _env(env)
+    cfg = _load(values, config_path)
+    return int(read_number(DIAGNOSTIC_WINDOW_ENV, 120.0, (32.0, 1024.0), values, cfg))
+
+
+def read_diagnostic_redact_margin_chars(
+    env: Mapping[str, str] | None = None, config_path: Path | None = None
+) -> int:
+    """Запас контекста для редактирования (256..16384, default 2048) из env/dynamic_config."""
+    values = _env(env)
+    cfg = _load(values, config_path)
+    return int(read_number(DIAGNOSTIC_MARGIN_ENV, 2048.0, (256.0, 16384.0), values, cfg))
 
 
 def read_retry_budget_config(

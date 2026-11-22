@@ -39,6 +39,7 @@ class ToolTurnSettleState:
     calls_closed_ts: float
     proc_exited: bool = False
     result_received: bool = False
+    post_call_suppressed: bool = False
 
 
 @dataclass(frozen=True)
@@ -92,7 +93,11 @@ def _evaluate_closed_calls(
     if state.proc_exited:
         decision = _WAIT_DONE
     elif past_total:
-        decision = _CLEAN_COMPLETE if state.result_received else _FORCED_STOP
+        decision = (
+            _CLEAN_COMPLETE
+            if (state.result_received or state.post_call_suppressed)
+            else _FORCED_STOP
+        )
     elif state.result_received:
         decision = _WAIT_DONE
     elif past_settle:
