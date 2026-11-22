@@ -5,7 +5,7 @@ kind: passthrough
 enabled: true
 required: false
 priority: 20
-# Резерв для deepseek-v4.1-flash: первичный пул — opencode-go-sub1/sub2 (weight 50/50).
+# Резерв для deepseek-v4.1-flash: первичный маршрут — neuralwatt (weight 100), затем opencode-go-sub1/sub2 (weight 0).
 routing: {weight: 0}
 owned_by: deepseek
 transport:

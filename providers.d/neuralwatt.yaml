@@ -1,0 +1,44 @@
+# NeuralWatt Standard (deepseek-v4.1-flash, non-flex) через локальный model-georouter :10830/neuralwatt -> AI-group :10820.
+# Первичный маршрут 100% (priority 5, weight 100) для deepseek-v4.1-flash; failover -> opencode-go-sub1 (11) -> opencode-go-sub2 (12) -> deepseek-direct (20).
+manifest_version: 1
+provider_id: neuralwatt
+kind: passthrough
+enabled: true
+required: false
+priority: 5
+routing: {weight: 100}
+owned_by: neuralwatt
+failover: {statuses: [402, 403, 429, 503], error_types: [permission_error, credit_exhausted, payment_required, rate_limit_error], message_markers: [credit, quota, payment, insufficient], pool: neuralwatt, pool_label: 'NeuralWatt'}
+transport:
+  bridge: {base_url: 'http://127.0.0.1:10830/neuralwatt/v1', api_key_env: NEURALWATT_API_KEY}
+allow_base_url:
+- {scheme: http, host: 127.0.0.1, port: 10830, path_prefix: /neuralwatt/v1}
+# Квота аккаунта NeuralWatt tier=max (GET /v1/rate_limits 2026-11-22T17:21:34Z, deepseek-ai/DeepSeek-V4.1-Flash):
+# floor=15, flex_floor=22, burst_ceiling=20, effective_concurrency=20.
+# Standard lane (без flex_floor): 2 (bridge neuralwatt) + 3 (OpenCode CLI) + 6 (DSH) + 1 (ARL sem) = 12 <= 15 (floor).
+# Совместный worst-case с neuralwatt-flex (max_concurrent: 8): 2 + 8 + 3 + 6 + 1 = 20 <= 20 (burst_ceiling).
+limits: {max_concurrent: 2, quota_group: neuralwatt, timeout_s: 300}
+discovery:
+  method: static
+  static: [deepseek-v4.1-flash]
+family_rule:
+  type: exact_map
+  exact_map:
+    deepseek-v4.1-flash: DeepSeek
+models_overrides:
+  deepseek-v4.1-flash:
+    name: DeepSeek V4.1 Flash (NeuralWatt)
+    efforts: ['off', low, high, max]
+    default_effort: high
+    context_window: 1048560
+    max_tokens: 393216
+    input: [text]
+    images: {cli_registry: explicit_supported, status: unverified, method: null, proof: null}
+    # Роли deepseek-v4.1-flash (ARL/Brief-review/Coordinator/Explorer) ограничены <=112640 Б (<200K токенов) для безопасного failover на opencode-go.
+    policy_lines: [108, 121, 127, 133, 136]
+params:
+  effort_field: reasoning_effort
+  effort_map:
+    'off':
+      reasoning_effort: none
+  adaptive_whitelist: [reasoning_effort, temperature, top_p]
