@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>BRIDGE_INVOKE_NORMALIZATION_ENABLED</key>
+		<string>true</string>
+		<key>BRIDGE_MAX_CONCURRENT</key>
+		<string>1024</string>
+		<key>BRIDGE_MAX_HTTP_CONNECTIONS</key>
+		<string>1024</string>
+		<key>BRIDGE_REPETITION_GUARD_ENABLED</key>
+		<string>true</string>
+		<key>BRIDGE_SUBAGENT_MAX_CONCURRENT</key>
+		<string>128</string>
+		<key>HOME</key>
+		<string>__HOME__</string>
+		<key>PATH</key>
+		<string>__HOME__/.local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+		<key>SUBAGENT_MAX_CONCURRENT</key>
+		<string>128</string>
+	</dict>
+	<key>ExitTimeOut</key>
+	<integer>180</integer>
+	<key>HardResourceLimits</key>
+	<dict>
+		<key>NumberOfFiles</key>
+		<integer>8192</integer>
+	</dict>
+	<key>KeepAlive</key>
+	<true/>
+	<key>Label</key>
+	<string>com.user.dsh-hub</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/bin/bash</string>
+		<string>__HOME__/work/src/cli-agent-bridge/start.sh</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>SoftResourceLimits</key>
+	<dict>
+		<key>NumberOfFiles</key>
+		<integer>4096</integer>
+	</dict>
+	<key>StandardErrorPath</key>
+	<string>__HOME__/work/src/cli-agent-bridge/logs/bridge.err</string>
+	<key>StandardOutPath</key>
+	<string>__HOME__/work/src/cli-agent-bridge/logs/bridge.out</string>
+	<key>ThrottleInterval</key>
+	<integer>5</integer>
+	<key>WorkingDirectory</key>
+	<string>__HOME__/work/src/cli-agent-bridge/workspace</string>
+</dict>
+</plist>
