@@ -379,6 +379,34 @@
     "note": "резерв байт по заявленному Content-Length ДО чтения тела; семафор исполнения (128) и TCP backlog лимитами HTTP-обработчиков и памяти не считаются"
   },
   "backends": {
+    "neuralwatt": {
+      "kind": "passthrough",
+      "enabled": true,
+      "owned_by": "neuralwatt",
+      "max_concurrent": 2,
+      "base_url": "http://127.0.0.1:10830/neuralwatt/v1",
+      "api_key_env": "NEURALWATT_API_KEY",
+      "failover_statuses": [
+        402,
+        403,
+        429,
+        503
+      ],
+      "failover_error_types": [
+        "permission_error",
+        "credit_exhausted",
+        "payment_required",
+        "rate_limit_error"
+      ],
+      "failover_message_markers": [
+        "credit",
+        "quota",
+        "payment",
+        "insufficient"
+      ],
+      "failover_pool": "neuralwatt",
+      "failover_pool_label": "NeuralWatt"
+    },
     "agy": {
       "kind": "passthrough",
       "enabled": true,
@@ -598,6 +626,64 @@
     }
   },
   "models": [
+    {
+      "id": "deepseek-v4.1-flash",
+      "backend": "neuralwatt",
+      "name": "DeepSeek V4.1 Flash (NeuralWatt)",
+      "efforts": [
+        "off",
+        "low",
+        "high",
+        "max"
+      ],
+      "default_effort": "high",
+      "context_window": 1048560,
+      "max_tokens": 393216,
+      "images": {
+        "cli_registry": "explicit_supported",
+        "status": "unverified"
+      },
+      "policy_lines": [
+        108,
+        121,
+        127,
+        133,
+        136
+      ],
+      "routing": {
+        "algorithm": "weighted-sha256-v1",
+        "enabled": true,
+        "catalog_hash": "d744e33d3cfdeacc5ec5f7cbb258d9e1d14117577feee88bd1b5da3b7020d55f",
+        "legacy_backend": "neuralwatt",
+        "disabled_backend": "neuralwatt",
+        "routes": [
+          {
+            "route_id": "deepseek-direct",
+            "backend": "deepseek-direct",
+            "weight": 0,
+            "priority": 20
+          },
+          {
+            "route_id": "neuralwatt",
+            "backend": "neuralwatt",
+            "weight": 100,
+            "priority": 5
+          },
+          {
+            "route_id": "opencode-go-sub1",
+            "backend": "opencode-go-sub1",
+            "weight": 0,
+            "priority": 11
+          },
+          {
+            "route_id": "opencode-go-sub2",
+            "backend": "opencode-go-sub2",
+            "weight": 0,
+            "priority": 12
+          }
+        ]
+      }
+    },
     {
       "id": "gemini-3.8-flash",
       "backend": "agy",
@@ -917,71 +1003,6 @@
       ]
     },
     {
-      "id": "deepseek-v4.1-flash",
-      "backend": "opencode-go-sub1",
-      "name": "DeepSeek V4.1 Flash (OpenCode Go sub1)",
-      "efforts": [
-        "off",
-        "low",
-        "high",
-        "max"
-      ],
-      "default_effort": "high",
-      "context_window": 1000000,
-      "max_tokens": 384000,
-      "images": {
-        "cli_registry": "explicit_supported",
-        "status": "unverified"
-      },
-      "policy_lines": [
-        106,
-        394,
-        432
-      ],
-      "routing": {
-        "algorithm": "weighted-sha256-v1",
-        "enabled": true,
-        "catalog_hash": "5e85567a835e0f55cac11a1bf7b9f57eccdedb8c3f4e93c878452105f6f897a8",
-        "legacy_backend": "opencode-go-sub1",
-        "disabled_backend": "opencode-go-sub1",
-        "routes": [
-          {
-            "route_id": "deepseek-direct",
-            "backend": "deepseek-direct",
-            "weight": 0,
-            "priority": 20
-          },
-          {
-            "route_id": "opencode-go-sub1",
-            "backend": "opencode-go-sub1",
-            "weight": 50,
-            "priority": 11
-          },
-          {
-            "route_id": "opencode-go-sub2",
-            "backend": "opencode-go-sub2",
-            "weight": 50,
-            "priority": 12
-          }
-        ]
-      }
-    },
-    {
-      "id": "kimi-k3.1-pro-flex",
-      "backend": "neuralwatt-flex",
-      "name": "Kimi K3.1 Pro Flex (NeuralWatt)",
-      "efforts": [
-        "high",
-        "max"
-      ],
-      "default_effort": "high",
-      "context_window": 1000000,
-      "max_tokens": 131072,
-      "images": {
-        "status": "unverified"
-      }
-    },
-    {
       "id": "deepseek-v4.1-flash-flex",
       "backend": "neuralwatt-flex",
       "name": "DeepSeek V4.1 Flash Flex (NeuralWatt)",
@@ -995,6 +1016,21 @@
       "default_effort": "high",
       "context_window": 1048560,
       "max_tokens": 393216,
+      "images": {
+        "status": "unverified"
+      }
+    },
+    {
+      "id": "kimi-k3.1-pro-flex",
+      "backend": "neuralwatt-flex",
+      "name": "Kimi K3.1 Pro Flex (NeuralWatt)",
+      "efforts": [
+        "high",
+        "max"
+      ],
+      "default_effort": "high",
+      "context_window": 1000000,
+      "max_tokens": 131072,
       "images": {
         "status": "unverified"
       }

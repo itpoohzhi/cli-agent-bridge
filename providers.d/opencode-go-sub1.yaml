@@ -8,7 +8,8 @@ kind: passthrough
 enabled: true
 required: false
 priority: 11
-routing: {weight: 50}
+# Резерв failover для deepseek-v4.1-flash: первичный маршрут — neuralwatt (weight 100, priority 5).
+routing: {weight: 0}
 owned_by: opencode-go
 failover: {statuses: [402, 403], error_types: [permission_error, credit_exhausted, payment_required], message_markers: [credit, subscription, 'usage limit', 'go usage', payment], pool: opencode-go, pool_label: 'OpenCode Go'}
 transport:

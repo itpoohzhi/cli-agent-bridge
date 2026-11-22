@@ -167,7 +167,7 @@ def test_real_fleet_model_override_beats_provider_without_bleed(monkeypatch: pyt
     [
         ("gpt-6.1-sol", ["codex=100", "openai-key-3=0"], "codex"),
         ("gpt-6.1-terra", ["codex=0", "openai-key-3=100"], "openai-key-3"),
-        ("deepseek-v4.1-flash", ["deepseek-direct=100", "opencode-go-sub1=0", "opencode-go-sub2=0"], "deepseek-direct"),
+        ("deepseek-v4.1-flash", ["neuralwatt=0", "deepseek-direct=100", "opencode-go-sub1=0", "opencode-go-sub2=0"], "deepseek-direct"),
     ],
 )
 def test_real_fleet_multi_route_models_hot_path(
