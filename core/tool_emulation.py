@@ -12,7 +12,7 @@ import re
 import uuid
 from dataclasses import dataclass, replace
 from typing import Any, Callable
-from core import tool_block_parsing as _tbp, tool_post_call_policy as _tpcp
+from core import tool_block_parsing as _tbp, tool_json_repair as _tjr, tool_post_call_policy as _tpcp
 from core.backend_adapter import ToolCall, ToolFunction, TurnEvent, TurnResult
 from core.log_redaction import redact_log_text
 from core.invoke_xml_parser import (
@@ -23,6 +23,7 @@ from core.invoke_xml_parser import (
 )
 from core.tool_call_schema_policy import (
     canonicalize_tool_invocation as _canonicalize_tool_invocation,
+    resolve_parameters_schema as _resolve_parameters_schema,
     strip_undeclared_bash_metadata as _strip_undeclared_bash_metadata,
 )
 from core.tool_call_shape import (
@@ -242,6 +243,23 @@ def _strip_code_fence(text: str) -> str:
 
 
 _EXEC_SYNONYMS = frozenset({"execute", "run_command", "shell", "terminal"})
+_DECLARED_TOOL_NAME_RE = re.compile(r'"(?:name|tool|action|tool_name)"\s*:\s*"([^"\\]+)"')
+
+
+def _schema_arg_keys(text: str, tool_schemas: dict[str, Any] | None) -> tuple[frozenset[str] | None, frozenset[str] | None]:
+    match = _DECLARED_TOOL_NAME_RE.search(text[:512]) if tool_schemas else None
+    if match is None:
+        return None, None
+    name = match.group(1).strip()
+    params = _resolve_parameters_schema(name, tool_schemas)
+    if params is None and name.casefold() in _EXEC_SYNONYMS:
+        params = _resolve_parameters_schema("bash", tool_schemas)
+    if params is None:
+        return None, None
+    props, req = params.get("properties"), params.get("required")
+    required = frozenset(filter(lambda k: isinstance(k, str), req)) if isinstance(req, list) else frozenset()
+    allowed = (frozenset(props) if isinstance(props, dict) else frozenset()) | required
+    return (allowed or None), (required or None)
 
 
 def _canonical_tool_invocation(
@@ -269,34 +287,27 @@ def _extract_tool_call_name(obj: dict[str, Any]) -> str | None:
     return None
 
 
-def _parse_tool_call_block(
-    inner: str, tool_schemas: dict[str, Any] | None = None
-) -> dict | None:
-    """Содержимое блока -> {"name","arguments"}; None, если блок невалиден.
+def _extract_name_and_args(obj: dict[str, Any]) -> tuple[str, dict[str, Any]] | None:
+    target = obj["function"] if ("name" not in obj and isinstance(obj.get("function"), dict)) else obj
+    name = _extract_tool_call_name(target)
+    arguments = None if name is None else ({} if "arguments" not in target else _normalize_arguments(target.get("arguments")))
+    return None if (name is None or arguments is None) else (name, arguments)
 
-    Отсутствие ключа arguments — допустимый вызов с {}; присутствующее, но
-    не-объектное значение (строка-не-JSON, список, число, null) — вызов
-    отклоняем, чтобы не запускать инструмент с пустыми аргументами.
-    Синонимы исполнения команд (_EXEC_SYNONYMS) приводятся к имени "bash".
-    """
+
+def _parse_tool_call_block(
+    inner: str, tool_schemas: dict[str, Any] | None = None, *, json_repair_enabled: bool = False
+) -> dict | None:
+    """Содержимое блока -> {"name","arguments"}; None, если блок невалиден."""
+    stripped = _strip_code_fence(inner)
+    allowed, required = _schema_arg_keys(stripped, tool_schemas) if json_repair_enabled else (None, None)
     try:
-        obj = _loads_tolerant(_strip_code_fence(inner))
+        obj = _loads_tolerant(stripped, json_repair_enabled=json_repair_enabled, allowed_arg_keys=allowed, required_arg_keys=required)
     except ValueError:
         return None
-    if not isinstance(obj, dict):
+    extracted = _extract_name_and_args(obj) if isinstance(obj, dict) else None
+    if extracted is None:
         return None
-    if "name" not in obj and isinstance(obj.get("function"), dict):
-        # OpenAI tool_calls: {"id", "type", "function": {"name", "arguments"}}
-        obj = obj["function"]
-    name = _extract_tool_call_name(obj)
-    if name is None:
-        return None
-    arguments = (
-        {} if "arguments" not in obj else _normalize_arguments(obj.get("arguments"))
-    )
-    if arguments is None:
-        return None
-    name, arguments = _canonical_tool_invocation(name, arguments, tool_schemas)
+    name, arguments = _canonical_tool_invocation(extracted[0], extracted[1], tool_schemas)
     return {"name": name, "arguments": arguments}
 
 
@@ -358,15 +369,10 @@ def _split_tool_call_inner(inner: str) -> list[str]:
 
 
 def _parse_tool_call_blocks(
-    inner: str, tool_schemas: dict[str, Any] | None = None
+    inner: str, tool_schemas: dict[str, Any] | None = None, *, json_repair_enabled: bool = False
 ) -> list[dict] | None:
-    """Содержимое блока -> список вызовов; None, если блок (или любой его член) невалиден.
-
-    Обычный блок даёт один вызов. Если он не разбирается, но внутри есть
-    несколько `<tool_call>` без промежуточных закрывающих тегов, блок делится на
-    сегменты; пачка принимается только целиком (все сегменты валидны).
-    """
-    single = _parse_tool_call_block(inner, tool_schemas)
+    """Содержимое блока -> список вызовов; None, если блок (или любой его член) невалиден."""
+    single = _parse_tool_call_block(inner, tool_schemas, json_repair_enabled=json_repair_enabled)
     if single is not None:
         return [single]
     if TOOL_CALL_OPEN not in inner:
@@ -376,7 +382,7 @@ def _parse_tool_call_blocks(
         return None
     calls: list[dict] = []
     for segment in segments:
-        call = _parse_tool_call_block(segment, tool_schemas)
+        call = _parse_tool_call_block(segment, tool_schemas, json_repair_enabled=json_repair_enabled)
         if call is None:
             return None
         calls.append(call)
@@ -689,35 +695,29 @@ def _parse_execute_block(
     return _parse_execute_block_impl(buf, start, tool_schemas=tool_schemas)
 
 
-def _log_malformed_tool_block(
-    inner: str, window_chars: int, redact_margin_chars: int
-) -> None:
-    stripped = _strip_code_fence(inner)
-    err_pos: int | None = None
+def _log_malformed_tool_block(inner: str, window_chars: int, redact_margin_chars: int) -> None:
+    stripped, err_pos = _strip_code_fence(inner), None
     try:
         _loads_tolerant(stripped)
     except json.JSONDecodeError as exc:
         err_pos = exc.pos + max(0, inner.find(stripped))
     except ValueError:
         pass
-    msg = _tbp.format_malformed_tool_block_log(
-        inner,
-        err_pos=err_pos,
-        window_chars=window_chars,
-        redact_margin_chars=redact_margin_chars,
-        redact_fn=redact_log_text,
-    )
-    logger.warning("%s", msg)
+    logger.warning("%s", _tbp.format_malformed_tool_block_log(inner, err_pos=err_pos, window_chars=window_chars, redact_margin_chars=redact_margin_chars, redact_fn=redact_log_text))
 
 
 class ToolCallParser:
-    """Поток текстовых дельт -> content и завершённые вызовы инструментов.
-    Префикс тега удерживается до разрешения. `strict_live=True` (AD-002) запрещает
-    повреждённым/незакрытым блокам уйти в content; legacy nonstream сохраняет текст.
-    """
-
+    """Поток текстовых дельт -> content и завершённые вызовы инструментов."""
     _diagnostic_window_chars: int = 120
     _diagnostic_redact_margin_chars: int = 2048
+    _json_repair_enabled: bool = False
+    _suppressed: bool = False
+    _scanner: _tjr.ActiveBlockScanner | None = None
+    def configure_json_repair(self, enabled: bool) -> None: self._json_repair_enabled = bool(enabled)
+    def flush_recovered_block(self, inner: str, open_tag: str, close_tag: str) -> None: self._finish_active_block(inner, open_tag, close_tag)
+    def suppress_tail(self) -> None:
+        self._suppressed, self._buf, self._active, self._scanner, self._deferred_chars = True, "", None, None, 0
+        self._deferred_parts.clear()
 
     def __init__(
         self,
@@ -821,12 +821,15 @@ class ToolCallParser:
                 self._trailing_pending = 0
                 self._on_tool_call(call)
 
+    def _fast_plain(self, text: str) -> bool:
+        return not self._buf and ("<" not in text or self._quoted_until - self._history_chars >= len(text) or bool(self._fence_state[1] and "\n" not in text))
+
     def feed(self, text: str) -> None:
-        if not text:
+        if not text or self._suppressed:
             return
         if self._active is not None:
             self._feed_active(text)
-            if self._active is None:
+            if self._active is None and not self._suppressed:
                 self._drain(final=False)
             return
         if self._wait_at:
@@ -834,40 +837,52 @@ class ToolCallParser:
             self._deferred_chars += len(text)
             if len(self._buf) + self._deferred_chars < self._wait_at:
                 return
-            text = "".join(self._deferred_parts)
+            text, self._deferred_chars = "".join(self._deferred_parts), 0
             self._deferred_parts.clear()
-            self._deferred_chars = 0
-        if not self._buf and (
-            "<" not in text
-            or self._quoted_until - self._history_chars >= len(text)
-            or (self._fence_state[1] and "\n" not in text)
-        ):
+        if self._fast_plain(text):
             self._emit(text)
             return
         self._buf += text
         self._drain(final=False)
 
+    def _odd_parse_fn(self, open_tag: str, close_tag: str) -> Callable[[str], object | None]:
+        span_re = _tbp.odd_span_regex(open_tag, close_tag)
+        base_fn = (lambda s: _parse_tool_call_blocks(s, self._tool_schemas, json_repair_enabled=True)) if self._parse_blocks is _parse_tool_call_blocks else self._parse_blocks
+        return lambda s: None if (close_tag in s and span_re.search(s)) else base_fn(s)
+
+    def _recover_odd_active_blocks(self) -> None:
+        while self._active is not None and self._json_repair_enabled and self._scanner is not None and not self._suppressed:
+            open_tag, close_tag = self._active
+            recovered = self._scanner.recover_odd_close(self._odd_parse_fn(open_tag, close_tag))
+            if recovered is None:
+                break
+            self._active = self._scanner = None
+            self._finish_active_block(recovered[0], open_tag, close_tag)
+            if self._suppressed:
+                return
+            self._buf = recovered[1] + self._buf
+            self._drain(final=True)
+
     def finish(self) -> None:
+        if self._suppressed:
+            return
         if self._deferred_parts:
-            self._buf += "".join(self._deferred_parts)
+            self._buf, self._deferred_chars = self._buf + "".join(self._deferred_parts), 0
             self._deferred_parts.clear()
-            self._deferred_chars = 0
+        self._recover_odd_active_blocks()
+        if self._suppressed:
+            return
         if self._active is not None:
-            # Пустой открывающий тег в конце хода (без тела) — не ошибка: отбрасываем,
-            # иначе strict_live роняет ход и теряет уже распознанные вызовы.
-            inner_so_far = "".join(self._parts)
+            inner_so_far = self._scanner.unclosed_text() if self._scanner is not None else ""
             if inner_so_far.strip():
                 if self.strict_live:
                     raise LiveParserError("unclosed tool_call block")
-                self._emit(self._active[0] + inner_so_far + self._close_tail)
-            self._active = None
-            self._parts.clear()
-            self._close_tail = ""
+                self._emit(self._active[0] + inner_so_far)
+            self._active = self._scanner = None
         self._drain(final=True)
 
     def has_open_tool_call(self) -> bool:
-        """Незавершённый вызов или префикс его тега, без сканирования тела JSON."""
-        return self._active is not None or bool(self._buf)
+        return False if self._suppressed else (self._active is not None or bool(self._buf))
 
     def _classify_open(self, after: int, final: bool) -> str:
         """`<tool_call>` в буфере: "real" | "quoted" (inline-код markdown) | "wait" (нужен следующий символ)."""
@@ -976,94 +991,56 @@ class ToolCallParser:
         """Позиция `</tool_call>` вне строковых литералов JSON, или -1."""
         return _find_tool_close_outside_string(self._buf, start)
 
-    _JSON_MARKERS = re.compile(r'["\\<]')
-
     def _emit_parsed_calls(self, calls: list[dict[str, Any]]) -> None:
         if self._allowed_tools is not None and self.strict_live:
             for call in calls:
                 self._check_allowed(str(call.get("name") or ""))
         self._remember(_OPAQUE_BLOCK)
         for call in calls:
-            if not self._check_allowed(str(call.get("name") or "")):
+            if self._suppressed or not self._check_allowed(str(call.get("name") or "")):
+                if self._suppressed:
+                    return
                 continue
             self.tool_calls_count += 1
-            self.trailing_chars_after_tool = 0
+            self.trailing_chars_after_tool = self._trailing_pending = 0
             self._trailing_started = False
-            self._trailing_pending = 0
             self._on_tool_call(call)
 
-    def _finish_active_block(
-        self, inner: str, open_tag: str, close_tag: str
-    ) -> None:
-        if not inner.strip():
+    def _parse_active_inner(self, inner: str, repair: bool) -> list[dict[str, Any]] | None:
+        return _parse_tool_call_blocks(inner, self._tool_schemas, json_repair_enabled=repair) if self._parse_blocks is _parse_tool_call_blocks else self._parse_blocks(inner)
+
+    def _resolve_active_calls(self, inner: str, open_tag: str, close_tag: str) -> list[dict[str, Any]] | None:
+        has_span = self._json_repair_enabled and close_tag in inner and bool(_tbp.odd_span_regex(open_tag, close_tag).search(inner))
+        calls = self._parse_active_inner(inner, repair=self._json_repair_enabled and not has_span)
+        if calls is None and has_span:
+            split = _tbp.split_merged_odd_block(inner, open_tag, close_tag, self._odd_parse_fn(open_tag, close_tag))
+            if split is not None:
+                calls, self._buf = self._parse_active_inner(split[0], repair=True), split[1] + self._buf
+        return calls
+
+    def _finish_active_block(self, inner: str, open_tag: str, close_tag: str) -> None:
+        if self._suppressed or not inner.strip():
             return
-        calls = (
-            _parse_tool_call_blocks(inner, self._tool_schemas)
-            if self._parse_blocks is _parse_tool_call_blocks
-            else self._parse_blocks(inner)
-        )
+        calls = self._resolve_active_calls(inner, open_tag, close_tag)
         if calls is not None:
             self._emit_parsed_calls(calls)
             return
         if self.strict_live:
-            _log_malformed_tool_block(
-                inner, self._diagnostic_window_chars, self._diagnostic_redact_margin_chars
-            )
+            _log_malformed_tool_block(inner, self._diagnostic_window_chars, self._diagnostic_redact_margin_chars)
             raise LiveParserError("malformed tool_call block")
         self._emit(open_tag + inner + close_tag)
 
-    def _prepare_active_text(self, text: str) -> tuple[int, str]:
-        if self._close_tail:
-            text, self._close_tail = self._close_tail + text, ""
-        if self._escaped and text:
-            self._escaped = False
-            return 1, text
-        return 0, text
-
-    def _handle_active_lt(self, text: str, index: int) -> bool:
-        assert self._active is not None
-        open_tag, close_tag = self._active
-        tail = text[index:]
-        if len(tail) < len(close_tag) and close_tag.startswith(tail):
-            self._parts.append(text[:index])
-            self._scan_pos += index
-            self._close_tail = tail
-            return True
-        if tail.startswith(close_tag):
-            self._parts.append(text[:index])
-            inner = "".join(self._parts)
-            self._parts.clear()
-            self._active = None
-            self._finish_active_block(inner, open_tag, close_tag)
-            self._buf = text[index + len(close_tag) :]
-            return True
-        return False
-
     def _feed_active(self, text: str) -> None:
-        """Каждый символ JSON просматривается один раз; тело собирается одним join."""
-        index, text = self._prepare_active_text(text)
-        while True:
-            match = self._JSON_MARKERS.search(text, index)
-            if match is None:
-                self._parts.append(text)
-                self._scan_pos += len(text)
-                return
-            index = match.start()
-            char = text[index]
-            if char == "\\" and self._in_string:
-                index += 2
-                self._escaped = index > len(text)
-            elif char == '"':
-                self._in_string = not self._in_string
-                index += 1
-            elif (
-                char == "<"
-                and not self._in_string
-                and self._handle_active_lt(text, index)
-            ):
-                return
-            else:
-                index += 1
+        if self._scanner is None:
+            assert self._active is not None
+            self._scanner = _tjr.ActiveBlockScanner(*self._active)
+        inner, tail = self._scanner.feed(text)
+        if inner is not None:
+            open_tag, close_tag = self._active or ("", "")
+            self._active = self._scanner = None
+            self._finish_active_block(inner, open_tag, close_tag)
+            if not self._suppressed:
+                self._buf += tail
 
     def _pending_prefix(self) -> int:
         """Длина хвоста — префикса открывающего тега (его нельзя отдать в content)."""
@@ -1366,6 +1343,7 @@ class StreamNormalizer:
         self._post_call_policy = _tpcp.PostCallPolicy()
         self._post_call_state = _tpcp.PostCallState.ACTIVE
         self._tool_close_cursor: _tbp.ToolCloseCursor | None = None
+        self._tail_suppressed = False
 
     def _apply_mode_spec(self, mode_spec: NormalizerModeSpec) -> None:
         active = mode_spec.mode is not ToolMode.OFF or mode_spec.policy is ToollessTagPolicy.ERROR
@@ -1405,14 +1383,22 @@ class StreamNormalizer:
         return self._post_call_state is _tpcp.PostCallState.POST_CALL_SUPPRESSED
 
     def configure_post_call_policy(self, policy: _tpcp.PostCallPolicy) -> None:
-        """Настраивает политику отсечения и окна диагностики."""
         self._post_call_policy = policy
         if self._parser is not None:
             self._parser._diagnostic_window_chars = policy.diagnostic_window_chars
             self._parser._diagnostic_redact_margin_chars = policy.diagnostic_redact_margin_chars
+            self._parser.configure_json_repair(policy.json_repair_enabled)
+
+    def suppress_tail(self) -> None:
+        self._tail_suppressed, self._buf, self._state, self._tool_close_cursor = True, "", "text", None
+        self._pending_content.clear()
+        if self._parser is not None:
+            self._parser.suppress_tail()
 
     def has_open_tool_call(self) -> bool:
         """Есть ли незакрытый блок вызова инструмента, рассуждения или удержанный префикс."""
+        if self._tail_suppressed:
+            return False
         return (
             self._state in ("tool", "reasoning")
             or (self._parser is not None and self._parser.has_open_tool_call())
@@ -1424,7 +1410,7 @@ class StreamNormalizer:
         self.feed_text(text)
 
     def feed_text(self, text: str) -> None:
-        if not text:
+        if not text or self._tail_suppressed:
             return
         if self._post_call_state is _tpcp.PostCallState.POST_CALL_SUPPRESSED:
             _tpcp.PostCallFSM.decide(self._post_call_state, _tpcp.PostCallEvent.TEXT_CHUNK, self._post_call_ctx())
@@ -1448,22 +1434,21 @@ class StreamNormalizer:
                 self.feed_text(text)
 
     def finish(self) -> None:
-        if self._post_call_state is _tpcp.PostCallState.POST_CALL_SUPPRESSED:
-            dec = _tpcp.PostCallFSM.decide(self._post_call_state, _tpcp.PostCallEvent.EOF, self._post_call_ctx())
-            if dec.clean_complete:
-                return
+        if self._tail_suppressed or (self._post_call_state is _tpcp.PostCallState.POST_CALL_SUPPRESSED and _tpcp.PostCallFSM.decide(self._post_call_state, _tpcp.PostCallEvent.EOF, self._post_call_ctx()).clean_complete):
+            return
         self._drain(final=True)
+        if self._tail_suppressed:
+            return
         if self._parser is not None:
             self._parser.finish()
-        if self._pending_content:
+        if self._pending_content and not self._tail_suppressed:
             for piece in self._pending_content:
                 self._content_pieces.append(piece)
                 self._on_content(piece)
             self._pending_content.clear()
 
-    # -- sink-и нормализатора: аккумулятор сначала, уведомление следом ----------
     def _emit_content(self, text: str) -> None:
-        if not text:
+        if not text or self._tail_suppressed:
             return
         if self._parser is None:
             self._content_pieces.append(text)
@@ -1476,13 +1461,13 @@ class StreamNormalizer:
         self._pending_content.append(text)
 
     def _emit_reasoning(self, text: str) -> None:
-        if text:
+        if text and not self._tail_suppressed:
             self._reasoning_pieces.append(text)
             self._on_reasoning(text)
 
     def _emit_call(self, call: dict) -> None:
-        if not str(call.get("name") or "").strip():
-            return  # вызов без имени не tool_call
+        if self._tail_suppressed or not str(call.get("name") or "").strip():
+            return
         self._calls.append(call)
         if self._pending_content:
             preamble = "".join(self._pending_content)
@@ -1512,7 +1497,7 @@ class StreamNormalizer:
         return best
 
     def _drain(self, final: bool) -> None:
-        while True:
+        while not self._tail_suppressed:
             if self._state == "reasoning":
                 if not self._drain_reasoning(final):
                     return
@@ -1656,25 +1641,37 @@ class StreamNormalizer:
         self._buf = self._buf[len(open_lit) :]
         return True
 
+    def _recover_odd_tool_close(self) -> bool:
+        if not (self._post_call_policy.json_repair_enabled and self._parser is not None):
+            return False
+        end = _tjr.resolve_odd_quote_tool_close(self._buf, len(TOOL_CALL_OPEN), TOOL_CALL_CLOSE, self._parser._odd_parse_fn(TOOL_CALL_OPEN, TOOL_CALL_CLOSE))
+        if end == -1:
+            return False
+        inner = self._buf[len(TOOL_CALL_OPEN) : end]
+        self._buf, self._state, self._tool_close_cursor = self._buf[end + len(TOOL_CALL_CLOSE) :], "text", None
+        self._doc += _OPAQUE_BLOCK
+        self._parser.flush_recovered_block(inner, TOOL_CALL_OPEN, TOOL_CALL_CLOSE)
+        return True
+
     def _drain_tool(self, final: bool) -> bool:
         """Шаг внутри `<tool_call>`: блок непрозрачен, целиком уходит в ToolCallParser."""
-        if self._tool_close_cursor is None:
-            self._tool_close_cursor = _tbp.ToolCloseCursor()
+        self._tool_close_cursor = self._tool_close_cursor or _tbp.ToolCloseCursor()
         end = self._tool_close_cursor.find_close(self._buf, len(TOOL_CALL_OPEN))
         if end == -1:
-            if final:
-                if self.strict_live:
-                    dec = _tpcp.PostCallFSM.decide(
-                        self._post_call_state, _tpcp.PostCallEvent.UNCLOSED_AT_EOF, self._post_call_ctx()
-                    )
-                    self._post_call_state = dec.next_state
-                    raise LiveParserError("unclosed tool_call block")
-                self._feed_parser(self._buf)
-                self._buf, self._state, self._tool_close_cursor = "", "text", None
+            if not final:
+                return False
+            if self._recover_odd_tool_close():
+                return not self._tail_suppressed
+            if self.strict_live:
+                self._post_call_state = _tpcp.PostCallFSM.decide(self._post_call_state, _tpcp.PostCallEvent.UNCLOSED_AT_EOF, self._post_call_ctx()).next_state
+                raise LiveParserError("unclosed tool_call block")
+            self._feed_parser(self._buf)
+            self._buf, self._state, self._tool_close_cursor = "", "text", None
             return False
         self._feed_parser(self._buf[: end + len(TOOL_CALL_CLOSE)])
-        self._buf = self._buf[end + len(TOOL_CALL_CLOSE) :]
-        self._state, self._tool_close_cursor = "text", None
+        if self._tail_suppressed:
+            return False
+        self._buf, self._state, self._tool_close_cursor = self._buf[end + len(TOOL_CALL_CLOSE) :], "text", None
         return True
 
 

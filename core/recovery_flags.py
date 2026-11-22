@@ -25,6 +25,8 @@ from core.transport_failure_contracts import (
 CONFIG_PATH_ENV = "BRIDGE_DYNAMIC_CONFIG_PATH"
 CONFIG_MAX_BYTES_ENV = "BRIDGE_RECOVERY_CONFIG_MAX_BYTES"
 POST_CALL_CUTOFF_FLAG_ENV = "BRIDGE_POST_CALL_CUTOFF_ENABLED"
+TOOL_JSON_REPAIR_FLAG_ENV = "BRIDGE_TOOL_JSON_REPAIR_ENABLED"
+TOOL_CALL_CAP_CUTOFF_FLAG_ENV = "BRIDGE_TOOL_CALL_CAP_CUTOFF_ENABLED"
 DIAGNOSTIC_WINDOW_ENV = "BRIDGE_DIAGNOSTIC_WINDOW_CHARS"
 DIAGNOSTIC_MARGIN_ENV = "BRIDGE_DIAGNOSTIC_REDACT_MARGIN_CHARS"
 DEFAULT_CONFIG_MAX_BYTES = 65536
@@ -146,6 +148,20 @@ def read_post_call_cutoff_enabled(
 ) -> bool:
     """Прочитать kill-switch отсечения пост-вызовного вывода (fail-closed, default False)."""
     return read_recovery_switch(POST_CALL_CUTOFF_FLAG_ENV, env=env, config_path=config_path)
+
+
+def read_tool_json_repair_enabled(
+    env: Mapping[str, str] | None = None, config_path: Path | None = None
+) -> bool:
+    """Kill-switch fallback-ремонта JSON-escape / '\"' / нечётных '\"' (default False)."""
+    return read_recovery_switch(TOOL_JSON_REPAIR_FLAG_ENV, env=env, config_path=config_path)
+
+
+def read_tool_call_cap_cutoff_enabled(
+    env: Mapping[str, str] | None = None, config_path: Path | None = None
+) -> bool:
+    """Kill-switch graceful cap-cutoff на границе max_calls (default False)."""
+    return read_recovery_switch(TOOL_CALL_CAP_CUTOFF_FLAG_ENV, env=env, config_path=config_path)
 
 
 def read_diagnostic_window_chars(

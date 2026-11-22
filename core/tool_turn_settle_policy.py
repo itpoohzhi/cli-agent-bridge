@@ -40,6 +40,7 @@ class ToolTurnSettleState:
     proc_exited: bool = False
     result_received: bool = False
     post_call_suppressed: bool = False
+    cap_cutoff: bool = False
 
 
 @dataclass(frozen=True)
@@ -110,7 +111,7 @@ def evaluate_tool_turn_settle(
 ) -> SettleDecision:
     """Вычисляет детерминированное решение завершения tool-turn без побочных эффектов."""
     decision = _CONTINUE
-    if state.has_error:
+    if state.has_error or state.cap_cutoff:
         decision = _FORCED_STOP
     elif state.has_open_tool_call:
         decision = _evaluate_open_call(state, config)

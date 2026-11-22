@@ -141,14 +141,13 @@ if str(_REPO_ROOT) not in sys.path:
 
 from agy_runtime import (  # noqa: E402
     long_session_config as _lsc, midstream_resilience, slot_and_session,
-    sse_body_runner, sse_stream_helpers, turn_usage_finalize as _u_fin, zero_canon_profile,
+    sse_body_runner, sse_stream_helpers, tool_turn_helpers, turn_usage_finalize as _u_fin, zero_canon_profile,
 )
-from core.continuity_anchor_policy import mint_bridge_call_id  # noqa: E402
 from core.correlation_contract import extract_correlation, format_log_corr_suffix  # noqa: E402
 from core.prompt_budget_policy import LazyPromptMaterializer, compute_prompt_budget, resolve_ctx_prompt  # noqa: E402
 from core.slot_acquire import SlotWaitOptions, acquire_slot_timed  # noqa: E402
 from core.tool_turn_settle_policy import (  # noqa: E402
-    SettleDecision, ToolTurnSettleState, decide_session_commit,
+    SettleDecision, decide_session_commit,
     evaluate_tool_turn_settle, resolve_tool_turn_stop, suppress_post_call_content,
 )
 from core.turn_usage_fsm import should_emit_wire_usage  # noqa: E402
@@ -160,7 +159,10 @@ from core.watchdog import (  # noqa: E402
 from core.runtime_build_info import UNKNOWN as BUILD_UNKNOWN, RuntimeBuildInfo  # noqa: E402
 from core import turn_resilience_facade as _TURN_RESILIENCE  # noqa: E402
 from core.log_redaction import mask_credential_context, mask_long_tokens, redact_log_text, safe_log_tokens  # noqa: E402
-from core.recovery_flags import read_diagnostic_redact_margin_chars, read_diagnostic_window_chars, read_post_call_cutoff_enabled  # noqa: E402
+from core.recovery_flags import (  # noqa: E402
+    read_diagnostic_redact_margin_chars, read_diagnostic_window_chars, read_post_call_cutoff_enabled,
+    read_tool_call_cap_cutoff_enabled, read_tool_json_repair_enabled,
+)
 from core.tool_post_call_policy import PostCallPolicy, format_live_parser_error_log  # noqa: E402
 from core.agy_capacity_guard import (  # noqa: E402
     CAPACITY_REASON,
@@ -187,16 +189,13 @@ from core.turn_finalization import (  # noqa: E402
 )
 from core.tool_emulation import (  # noqa: E402
     LiveParserError, RepetitionLoopDetected, StreamNormalizer,
-    _tool_choice_none, build_tool_schemas, has_unnamed_call,
-    pure_text_protocol_instruction,
-    sanitize_tool_call,
+    _tool_choice_none, build_tool_schemas, pure_text_protocol_instruction,
     tools_protocol_section,
 )
 from core.tool_call_schema_policy import ToolCallLimitExceededError, build_tool_turn_error_body  # noqa: E402
 from core.agy_zero_canon import zero_canon_settings_cli_arg  # noqa: E402
 from core.cli_turn_flags import build_turn_cli_flags as _build_turn_cli_flags, format_print_timeout as _format_print_timeout  # noqa: E402
 from core.env_hot_reload import file_signature as _file_signature  # noqa: E402, F401
-from core.runtime_env import synthesize_required_bash_desc_enabled  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent
 HOME = Path.home()
@@ -5387,6 +5386,8 @@ class _ToolTurn:
         self._is_repetition_loop = False
         self._finished = False
         self._max_calls = _safe_int_env("AGY_MAX_TOOL_CALLS", 64)
+        self._cap_cutoff_enabled = read_tool_call_cap_cutoff_enabled()
+        self._cap_cutoff = False
         self._limit_error: ToolCallLimitExceededError | None = None
         self._max_bytes = _safe_int_env("AGY_MAX_TOOL_BYTES", 10 * 1024 * 1024)
         self._settle_cfg = _lsc.tool_settle_config(config_path=DYNAMIC_CONFIG_PATH)
@@ -5401,6 +5402,7 @@ class _ToolTurn:
             cutoff_enabled=read_post_call_cutoff_enabled(),
             diagnostic_window_chars=read_diagnostic_window_chars(),
             diagnostic_redact_margin_chars=read_diagnostic_redact_margin_chars(),
+            json_repair_enabled=read_tool_json_repair_enabled(),
         ))
 
     @property
@@ -5434,36 +5436,7 @@ class _ToolTurn:
             self.ok = False
 
     def _call(self, call: dict[str, Any]) -> None:
-        # Ошибка монотонна: после неё вызовы того же прохода `feed_text` не накапливаются и не публикуются.
-        if self.error:
-            return
-        if len(self.calls) >= self._max_calls:
-            return self._limit(len(self.calls) + 1)
-        entry: dict[str, object] = {
-            "index": len(self.calls),
-            "id": mint_bridge_call_id(),
-            "type": "function",
-            "function": {"name": str(call.get("name") or ""), "arguments": json.dumps(call.get("arguments") or {}, ensure_ascii=False)},
-        }
-        if has_unnamed_call(entry):
-            self.error = self.error or "tool call without function name dropped"
-            self.ok = False
-            return
-        synth = synthesize_required_bash_desc_enabled()
-        published = [dict(cast("dict[str, object]", item), index=len(self.calls) + i) for i, item in enumerate(sanitize_tool_call(entry, self._schemas, synthesize_required_description=synth))]
-        if len(self.calls) + len(published) > self._max_calls:
-            return self._limit(len(self.calls) + len(published))
-        if not published:
-            return
-        self.calls.extend(published)
-        if self.ok and not self._on_calls(published):
-            self.ok = False
-
-    def _limit(self, observed: int) -> None:
-        """Превышение лимита вызовов — отдельный класс ошибки, не parse_error."""
-        msg = f"tool call count exceeded limit ({self._max_calls})"
-        self._limit_error = ToolCallLimitExceededError("calls", observed, self._max_calls, msg)
-        self.error = msg
+        tool_turn_helpers.handle_tool_call(self, call, _log)
 
     def _run_normalizer(self, fn: Callable[[], None], stage: str) -> None:
         """Выполнить шаг нормализатора с редактированным логированием ошибок разбора."""
@@ -5477,13 +5450,10 @@ class _ToolTurn:
 
     def feed(self, text: str) -> bool:
         """Принять дельту; ошибки разбора и превышение лимитов — fail-closed."""
-        if self.error or self._finished or not text or self._normalizer.post_call_suppressed is True:
+        if tool_turn_helpers.should_ignore_feed(self, text):
             return self.ok
-        chunk_bytes = len(text.encode("utf-8"))
-        if self._total_bytes + chunk_bytes > self._max_bytes:
-            self.error = f"tool call buffer exceeded max bytes ({self._max_bytes})"
+        if not tool_turn_helpers.check_bytes_limit(self, len(text.encode("utf-8")), _log):
             return self.ok
-        self._total_bytes += chunk_bytes
         if not suppress_post_call_content(has_calls=bool(self.calls), has_open_tool_call=self._normalizer.has_open_tool_call()):
             self.notify_activity()
         if self._normalizer.has_open_tool_call():
@@ -5500,7 +5470,8 @@ class _ToolTurn:
 
     def finish(self) -> None:
         """На EOF сбросить хвост; незакрытый блок зафиксировать как ошибку."""
-        if self.error or self._finished:
+        if self.error or self._finished or self._cap_cutoff:
+            self._finished = True
             return
         self._finished = True
         self._run_normalizer(self._normalizer.finish, "finish")
@@ -5516,13 +5487,8 @@ class _ToolTurn:
         self, *, proc_exited: bool = False, result_received: bool = False
     ) -> SettleDecision:
         """Вычисляет решение завершения tool-turn через чистую политику."""
-        st = ToolTurnSettleState(
-            now=time.monotonic(), has_error=bool(self.error),
-            has_open_tool_call=self._normalizer.has_open_tool_call(),
-            has_calls=bool(self.calls), last_open_chunk_ts=self._last_open_chunk_ts,
-            last_chunk_ts=self._last_chunk_ts, calls_closed_ts=self._calls_closed_ts,
-            proc_exited=proc_exited, result_received=result_received,
-            post_call_suppressed=self._normalizer.post_call_suppressed is True,
+        st = tool_turn_helpers.build_settle_state(
+            self, time.monotonic(), proc_exited=proc_exited, result_received=result_received
         )
         dec = evaluate_tool_turn_settle(st, self._settle_cfg)
         if dec.error_message:

@@ -486,81 +486,9 @@ def _wave_graceful() -> Result:
 
 def _wave_tools(config: GateConfig) -> Result:
     _bridge()
-    from core.tool_emulation import StreamNormalizer, sanitize_tool_calls_list
+    from scripts.qa_incident_cases import run_wave_tools_incidents
 
-    open_tag = "<tool_" + "call>"
-    close_tag = "</tool_" + "call>"
-    cases = [
-        (
-            open_tag + '{"name":"read_file","arguments":{"path":"a"}}}}' + close_tag,
-            1,
-        ),
-        (
-            open_tag + '{"name":"read_file","arguments":""}' + close_tag,
-            0,
-        ),
-        (
-            "Пример: `" + open_tag + '{"name":"example"}' + close_tag + "` — это код.",
-            0,
-        ),
-        (
-            "".join(
-                open_tag
-                + '{"name":"read_file","arguments":{"path":"'
-                + p
-                + '"}}'
-                + close_tag
-                for p in ("a", "b", "c")
-            ),
-            3,
-        ),
-    ]
-    checks: dict[str, bool] = {}
-    for idx, (raw, count) in enumerate(cases):
-        parser = StreamNormalizer(strict_live=False)
-        for offset in range(0, len(raw), config.parser_chunk_chars):
-            parser.feed(raw[offset : offset + config.parser_chunk_chars])
-        parser.finish()
-        calls = sanitize_tool_calls_list(
-            [dict(call, index=99) for call in parser.tool_calls]
-        )
-        checks[f"case_{idx}_count"] = len(calls) == count
-        checks[f"case_{idx}_indices"] = [call["index"] for call in calls] == list(
-            range(count)
-        )
-        if idx == 0 and calls:
-            checks["recovered_braces_arguments"] = calls[0]["arguments"] == {
-                "path": "a"
-            }
-        if idx == 2:
-            checks["inline_code_preserved"] = parser.content == raw
-    schemas = {
-        "read_file": {
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "path": {"type": "string"},
-                    "optional": {"type": "string"},
-                    "command": {"type": "string"},
-                },
-                "required": ["path"],
-            }
-        }
-    }
-    cleaned = sanitize_tool_calls_list(
-        [
-            {
-                "name": "read_file",
-                "arguments": {"path": "a", "optional": "", "command": ""},
-            }
-        ],
-        schemas,
-    )
-    checks["empty_optional_sanitized_payload_preserved"] = cleaned[0]["arguments"] == {
-        "path": "a",
-        "command": "",
-    }
-    return _result(checks)
+    return _result(run_wave_tools_incidents(_bridge, config.parser_chunk_chars))
 
 
 def run_incident_replay_suite(config: GateConfig | None = None) -> Result:
