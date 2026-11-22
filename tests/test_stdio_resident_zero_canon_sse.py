@@ -33,8 +33,8 @@ class _Lease:
         self.discards.append(reason)
 
 
-def _bridge(*, headers: bool = True, dead: bool = False):
-    handler = SimpleNamespace(
+def _bridge(*, headers: bool = True, dead: bool = False, bare: bool = False):
+    handler = SimpleNamespace() if bare else SimpleNamespace(
         _client_write_dead=dead,
         _headers_already_sent=headers,
         _response_status=200,
@@ -214,3 +214,50 @@ def test_server_sse_facade_emits_zero_canon_error_without_raising() -> None:
     assert lease.discards == [] and len(written) == 2
     assert _error_payload(written[1]) == error.response.body["error"]
     assert "".join(written).endswith(DONE_FRAME)
+
+
+def test_claude_bridge_forwards_prompt_and_does_not_fall_through(monkeypatch) -> None:
+    captured = []
+    writes = []
+    execute_chat = Mock(side_effect=AssertionError("must not fall through after bridge return"))
+
+    def proxy(url, model, prompt, headers):
+        captured.append((url, model, prompt, headers))
+        return "ans", "tho"
+
+    monkeypatch.setenv("HUB_ZERO_CANON_ROUTING_ENABLED", "1")
+    monkeypatch.delenv("HUB_ZERO_CANON_CLAUDE_BRIDGE_URL", raising=False)
+    monkeypatch.setattr("core.stdio_resident.zero_canon_router.proxy_zero_canon_bridge_turn", proxy)
+    request = {"review_profile": "zero-canon", "model": "claude-sonnet-5-5", "prompt": "hi-prompt"}
+    result = execute_routed_turn(
+        execute_chat, "claude-stream-json", request, lambda k, v: writes.append((k, v))
+    )
+
+    assert captured == [("http://127.0.0.1:9881/v1", "claude-sonnet-5-5", "hi-prompt", None)]
+    assert captured[0][2] == "hi-prompt"
+    execute_chat.assert_not_called()
+    assert writes == [("content", "ans"), ("reasoning_content", "tho")]
+    assert result == ("ans", "tho")
+
+
+def test_non_claude_zero_canon_route_preserves_ephemeral_default() -> None:
+    seen_req = {}
+
+    def execute_chat(request):
+        seen_req.update(request)
+        return iter(())
+
+    execute_routed_turn(execute_chat, "stream-json", {"review_profile": "zero-canon"}, None)
+
+    assert seen_req["is_ephemeral"] is True
+
+
+@pytest.mark.parametrize(("live_sent", "handled"), [(0, False), (5, True)])
+def test_bare_handler_uses_sse_error_defaults(live_sent, handled) -> None:
+    _handler, lease, emitted, _logs, _stream_error, ctx = _bridge(bare=True)
+    exc = RuntimeError("bare")
+
+    assert handle_sse_stream_exception(exc, live_sent, ctx) is handled
+    assert lease.failures == ([exc] if handled else [])
+    expected = ["data: synthetic-error\n\n", DONE_FRAME] if handled else []
+    assert emitted == expected
