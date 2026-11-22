@@ -271,6 +271,31 @@
       "backend_id": "kimi-k3.1-pro-flex",
       "backend": "neuralwatt-flex",
       "effort": "max"
+    },
+    "deepseek-v4.1-flash-flex-off": {
+      "backend_id": "deepseek-v4.1-flash-flex",
+      "backend": "neuralwatt-flex",
+      "effort": "off"
+    },
+    "deepseek-v4.1-flash-flex-low": {
+      "backend_id": "deepseek-v4.1-flash-flex",
+      "backend": "neuralwatt-flex",
+      "effort": "low"
+    },
+    "deepseek-v4.1-flash-flex-high": {
+      "backend_id": "deepseek-v4.1-flash-flex",
+      "backend": "neuralwatt-flex",
+      "effort": "high"
+    },
+    "deepseek-v4.1-flash-flex-xhigh": {
+      "backend_id": "deepseek-v4.1-flash-flex",
+      "backend": "neuralwatt-flex",
+      "effort": "xhigh"
+    },
+    "deepseek-v4.1-flash-flex-max": {
+      "backend_id": "deepseek-v4.1-flash-flex",
+      "backend": "neuralwatt-flex",
+      "effort": "max"
     }
   },
   "default_model": "muse-wonder-full-1.0",
@@ -952,6 +977,24 @@
       "default_effort": "high",
       "context_window": 1000000,
       "max_tokens": 131072,
+      "images": {
+        "status": "unverified"
+      }
+    },
+    {
+      "id": "deepseek-v4.1-flash-flex",
+      "backend": "neuralwatt-flex",
+      "name": "DeepSeek V4.1 Flash Flex (NeuralWatt)",
+      "efforts": [
+        "off",
+        "low",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "default_effort": "high",
+      "context_window": 1048560,
+      "max_tokens": 393216,
       "images": {
         "status": "unverified"
       }

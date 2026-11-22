@@ -57,6 +57,11 @@ aliases:
   claude-haiku-5-5-low: {backend_id: claude-haiku-5-5, backend: opencode-go-claude, effort: low}
   kimi-k3.1-pro-flex-high: {backend_id: kimi-k3.1-pro-flex, backend: neuralwatt-flex, effort: high}
   kimi-k3.1-pro-flex-max: {backend_id: kimi-k3.1-pro-flex, backend: neuralwatt-flex, effort: max}
+  deepseek-v4.1-flash-flex-off: {backend_id: deepseek-v4.1-flash-flex, backend: neuralwatt-flex, effort: 'off'}
+  deepseek-v4.1-flash-flex-low: {backend_id: deepseek-v4.1-flash-flex, backend: neuralwatt-flex, effort: low}
+  deepseek-v4.1-flash-flex-high: {backend_id: deepseek-v4.1-flash-flex, backend: neuralwatt-flex, effort: high}
+  deepseek-v4.1-flash-flex-xhigh: {backend_id: deepseek-v4.1-flash-flex, backend: neuralwatt-flex, effort: xhigh}
+  deepseek-v4.1-flash-flex-max: {backend_id: deepseek-v4.1-flash-flex, backend: neuralwatt-flex, effort: max}
 default_model: muse-wonder-full-1.0
 policy_ref:
   path: ~/Мой диск/Context/models.md

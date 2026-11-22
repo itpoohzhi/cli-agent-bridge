@@ -42,11 +42,30 @@ def test_neuralwatt_flex_compiled_into_fleet_json() -> None:
     assert kimi["context_window"] == 1000000
     assert kimi["max_tokens"] == 131072
 
+    assert "deepseek-v4.1-flash-flex" in models_by_id
+    ds = models_by_id["deepseek-v4.1-flash-flex"]
+    assert ds["backend"] == "neuralwatt-flex"
+    assert ds["name"] == "DeepSeek V4.1 Flash Flex (NeuralWatt)"
+    assert ds["efforts"] == ["off", "low", "high", "xhigh", "max"]
+    assert ds["default_effort"] == "high"
+    assert ds["context_window"] == 1048560
+    assert ds["max_tokens"] == 393216
+
+    # Existing deepseek-v4.1-flash route stays untouched on opencode-go / deepseek-direct
+    assert models_by_id["deepseek-v4.1-flash"]["backend"] != "neuralwatt-flex"
+
     assert fleet["aliases"]["kimi-k3.1-pro-flex-high"]["effort"] == "high"
     assert fleet["aliases"]["kimi-k3.1-pro-flex-max"]["effort"] == "max"
+    for eff in ("off", "low", "high", "xhigh", "max"):
+        alias = fleet["aliases"][f"deepseek-v4.1-flash-flex-{eff}"]
+        assert alias["backend_id"] == "deepseek-v4.1-flash-flex"
+        assert alias["backend"] == "neuralwatt-flex"
+        assert alias["effort"] == eff
 
 
 def test_compile_from_disk_accepts_neuralwatt_flex() -> None:
     res = compile_from_disk(kinds=ADAPTER_KINDS)
     assert "neuralwatt-flex" not in res.rejected_providers
     assert "neuralwatt-flex" in res.fleet["backends"]
+    ds_entry = next(m for m in res.fleet["models"] if m["id"] == "deepseek-v4.1-flash-flex")
+    assert ds_entry["backend"] == "neuralwatt-flex"
