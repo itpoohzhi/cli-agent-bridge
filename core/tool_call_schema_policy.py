@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import Enum
 from typing import Literal, TypeAlias, cast, final, override
+
+from core.log_redaction import redact_log_text
 
 JsonMap: TypeAlias = Mapping[str, object]
 MutableJsonMap: TypeAlias = dict[str, object]
@@ -122,7 +124,9 @@ def _promote_summary_to_description(args: MutableJsonMap) -> None:
 
 def _has_tool_schema(schemas: JsonMap, target: str) -> bool:
     target_cf = target.casefold()
-    return target in schemas or any(isinstance(k, str) and k.casefold() == target_cf for k in schemas)
+    return target in schemas or any(
+        isinstance(cast("object", k), str) and k.casefold() == target_cf for k in schemas
+    )
 
 
 def _is_required_parameter(params: JsonMap, name: str) -> bool:
@@ -227,24 +231,29 @@ def classify_tool_turn_error(
     *,
     is_repetition_loop: bool = False,
     limit_error: ToolCallLimitExceededError | None = None,
+    provider_label: str = "upstream",
+    redact_fn: Callable[[str], str] | None = None,
 ) -> ToolTurnErrorSpec:
     """Классифицирует ошибку шага инструментов в ``ToolTurnErrorSpec``."""
+    sanitizer = redact_log_text if redact_fn is None else redact_fn
+    detail = sanitizer(error_text)
     if limit_error is not None:
         msg = (
             f"tool call limit exceeded ({limit_error.limit_kind}): "
             f"observed {limit_error.observed}, limit {limit_error.limit}"
         )
-        return ToolTurnErrorSpec(ToolTurnErrorKind.LIMIT_EXCEEDED, msg, error_text)
+        return ToolTurnErrorSpec(ToolTurnErrorKind.LIMIT_EXCEEDED, msg, detail)
     if is_repetition_loop or ToolTurnErrorKind.REPETITION_LOOP.value in error_text:
         return ToolTurnErrorSpec(
             ToolTurnErrorKind.REPETITION_LOOP,
             "upstream repetition loop detected",
-            error_text,
+            detail,
         )
+    label = provider_label.strip() or "upstream"
     return ToolTurnErrorSpec(
         ToolTurnErrorKind.PARSE_ERROR,
-        "agy emitted a malformed tool call",
-        error_text,
+        f"{label} emitted a malformed tool call",
+        detail,
     )
 
 
@@ -253,10 +262,16 @@ def build_tool_turn_error_body(
     *,
     is_repetition_loop: bool = False,
     limit_error: ToolCallLimitExceededError | None = None,
+    provider_label: str = "upstream",
+    redact_fn: Callable[[str], str] | None = None,
 ) -> MutableJsonMap:
     """Формирует тело ошибки OpenAI/SSE с честным разделением классов сбоя."""
     spec = classify_tool_turn_error(
-        error_text, is_repetition_loop=is_repetition_loop, limit_error=limit_error
+        error_text,
+        is_repetition_loop=is_repetition_loop,
+        limit_error=limit_error,
+        provider_label=provider_label,
+        redact_fn=redact_fn,
     )
     return {
         "message": spec.message,

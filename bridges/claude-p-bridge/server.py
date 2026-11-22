@@ -38,12 +38,10 @@ from core.claude_zero_canon import (  # noqa: E402
     filter_claude_settings, filter_claude_state, serialize_claude_json,
 )
 from core.proc_groups import live_proc_groups, spawn_registered as _spawn_registered  # noqa: E402
+from core.recovery_flags import read_diagnostic_redact_margin_chars, read_diagnostic_window_chars, read_post_call_cutoff_enabled  # noqa: E402
 from core.subbridge_lifecycle import SubbridgeHooks, SubbridgeLifecycle  # noqa: E402
-from core.usage_wire import (  # noqa: E402
-    CACHE_READ_KEYS,
-    build_wire_usage,
-    extract_cache_creation_tokens,
-)
+from core.tool_post_call_policy import PostCallPolicy  # noqa: E402
+from core.usage_wire import CACHE_READ_KEYS, build_wire_usage, extract_cache_creation_tokens  # noqa: E402
 
 try:
     from core.watchdog import AdaptiveTimeoutController
@@ -67,13 +65,8 @@ try:
         sanitize_tool_call,
     )
     from core.tool_mode import (
-        TOOLLESS_PURE_TEXT_HINT,
-        NormalizerModeSpec,
-        NormalizerSinks,
-        ToolMode,
-        build_mode_spec,
-        format_tool_mode_log,
-        resolve_tool_mode,
+        TOOLLESS_PURE_TEXT_HINT, NormalizerModeSpec, NormalizerSinks, ToolMode,
+        build_mode_spec, format_tool_mode_log, resolve_tool_mode,
     )
 except ImportError as exc:
     # Fail-closed (AD-002): без согласованного core мост не запускается;
@@ -634,6 +627,11 @@ class _Execution:
             mode_spec, NormalizerSinks(self.add_content, self.add_reasoning, self.add_call),
             strict_live=True, tool_schemas=self.schemas,
         )
+        self.normalizer.configure_post_call_policy(PostCallPolicy(
+            cutoff_enabled=read_post_call_cutoff_enabled(),
+            diagnostic_window_chars=read_diagnostic_window_chars(),
+            diagnostic_redact_margin_chars=read_diagnostic_redact_margin_chars(),
+        ))
 
     def state(self, name: str, rc: int, err: str = "") -> dict:
         return {"rc": rc, "text": self.normalizer.content, "usage": self.usage,

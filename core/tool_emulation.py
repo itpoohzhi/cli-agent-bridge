@@ -9,11 +9,12 @@ import binascii
 import json
 import logging
 import re
-import unicodedata
 import uuid
 from dataclasses import dataclass, replace
 from typing import Any, Callable
+from core import tool_block_parsing as _tbp, tool_post_call_policy as _tpcp
 from core.backend_adapter import ToolCall, ToolFunction, TurnEvent, TurnResult
+from core.log_redaction import redact_log_text
 from core.invoke_xml_parser import (
     INVOKE_CANDIDATE_RE as _INVOKE_CANDIDATE_RE,
     drain_invoke as _drain_invoke_impl,
@@ -59,6 +60,9 @@ from core.tool_mode import (
 )
 
 logger = logging.getLogger(__name__)
+_recover_trailing_braces = _tbp.recover_trailing_braces
+_loads_tolerant = _tbp.loads_tolerant_json
+_find_tool_close_outside_string = _tbp.find_tool_close_outside_string
 
 TOOL_CALL_OPEN = "<tool_call>"
 TOOL_CALL_CLOSE = "</tool_call>"
@@ -237,8 +241,6 @@ def _strip_code_fence(text: str) -> str:
     return body.strip()
 
 
-_MAX_EXTRA_BRACES = 16  # предел лишних `}` после полного объекта вызова
-_TRAILING_COMMA_RE = re.compile(r",\s*([}\]])")
 _EXEC_SYNONYMS = frozenset({"execute", "run_command", "shell", "terminal"})
 
 
@@ -254,51 +256,6 @@ def _canonical_tool_invocation(
         name, arguments, tool_schemas, synthesize_required_description=synthesize_required_description
     )
     return canon_name, dict(canon_args)
-
-
-def _recover_trailing_braces(text: str) -> dict | None:
-    """Первый JSON-объект, за которым идут только пробелы и 1..16 лишних `}`; иначе None (холодный путь).
-
-    strict=False: сырые управляющие символы (например, переводы строк) внутри строк допустимы.
-    """
-    body = text.lstrip()
-    try:
-        obj, end = json.JSONDecoder(strict=False).raw_decode(body)
-    except (ValueError, RecursionError):
-        return None
-    tail = body[end:]
-    if (
-        isinstance(obj, dict)
-        and 1 <= tail.count("}") <= _MAX_EXTRA_BRACES
-        and not tail.strip(" \t\r\n}")
-    ):
-        return obj
-    return None
-
-
-def _loads_tolerant(text: str) -> Any:
-    """json.loads, допускающий лишние `}` после полного объекта (модель закрыла скобок больше нужного),
-    висячие запятые перед закрывающими скобками и сырые управляющие символы внутри строк.
-
-    Слишком глубокая вложенность (RecursionError) — невалидный JSON (ValueError).
-    """
-    try:
-        return json.loads(text, strict=False)
-    except (ValueError, RecursionError) as exc:
-        cleaned = _TRAILING_COMMA_RE.sub(r"\1", text)
-        if cleaned != text:
-            try:
-                return json.loads(cleaned, strict=False)
-            except (ValueError, RecursionError):
-                pass
-        recovered = _recover_trailing_braces(cleaned) if cleaned != text else None
-        if recovered is None:
-            recovered = _recover_trailing_braces(text)
-        if recovered is None:
-            if isinstance(exc, RecursionError):
-                raise ValueError("JSON is nested too deeply") from exc
-            raise
-        return recovered
 
 
 def _extract_tool_call_name(obj: dict[str, Any]) -> str | None:
@@ -350,6 +307,9 @@ class LiveParserError(Exception):
     без sink) этот блок, как раньше, молча отдаёт текстом — исключение означает
     fail-close всего live-хода (сырой XML клиенту не уходит).
     """
+
+    def __init__(self, *args: object) -> None:
+        super().__init__(*(redact_log_text(str(arg)) for arg in args))
 
 
 def _is_quoted_open(text: str, start: int) -> bool:
@@ -444,21 +404,6 @@ def _fence_run(line: str) -> tuple[str, int, str]:
 def _is_fence_open(char: str, run: int, rest: str) -> bool:
     """Строка-забор открывает блок: в info-строке бэктик-забора нет бэктиков."""
     return bool(run) and (char == "~" or "`" not in rest)
-
-
-def _find_closing_run(doc: str, start: int, end: int, ticks: int) -> int:
-    """Конец первой серии ровно из `ticks` бэктиков в `doc[start:end]`, или -1."""
-    index = start
-    while index < end:
-        if doc[index] != "`":
-            index += 1
-            continue
-        run_start = index
-        while index < end and doc[index] == "`":
-            index += 1
-        if index - run_start == ticks:
-            return index
-    return -1
 
 
 def _is_atx_heading(line: str) -> bool:
@@ -631,13 +576,6 @@ def _strip_inline_code_line(raw_line: str, inline_ticks: int) -> tuple[str, int]
     return "".join(out), inline_ticks
 
 
-def _fence_state_after(
-    text: str, state: tuple[Any, ...] | None
-) -> tuple[str, int, int] | None:
-    """Состояние fenced/inline-кода после `text` при входном состоянии `state`."""
-    return _strip_code_for_guard(text, state)[1]
-
-
 def _strip_code_for_guard(
     text: str, state: tuple[Any, ...] | None = None
 ) -> tuple[str, tuple[str, int, int] | None]:
@@ -660,14 +598,6 @@ def _strip_code_for_guard(
         stripped_line, inline_ticks = _strip_inline_code_line(raw_line, inline_ticks)
         out.append(stripped_line)
     return "".join(out), _pack_guard_state(fence_char, fence_len, inline_ticks)
-
-
-def _is_separator_token(token: str) -> bool:
-    """Токен только из символов пунктуации и табличных разделителей (Markdown, списки, запятые)."""
-    return bool(token) and all(
-        unicodedata.category(c).startswith("P") or c in "-=*_|~" or c.isspace()
-        for c in token
-    )
 
 
 class RepetitionGuard:
@@ -759,32 +689,25 @@ def _parse_execute_block(
     return _parse_execute_block_impl(buf, start, tool_schemas=tool_schemas)
 
 
-def _find_tool_close_outside_string(text: str, start: int) -> int:
-    """Позиция `</tool_call>` вне строковых литералов JSON в `text[start:]`, или -1.
-
-    Закрывающий тег внутри JSON-строки (например значение аргумента содержит
-    `</tool_call>`) границей блока не является. Экранированные кавычки `\\"`
-    строку не закрывают.
-    """
-    index = start
-    length = len(text)
-    in_string = False
-    escaped = False
-    while index < length:
-        char = text[index]
-        if in_string:
-            if escaped:
-                escaped = False
-            elif char == "\\":
-                escaped = True
-            elif char == '"':
-                in_string = False
-        elif char == '"':
-            in_string = True
-        elif text.startswith(TOOL_CALL_CLOSE, index):
-            return index
-        index += 1
-    return -1
+def _log_malformed_tool_block(
+    inner: str, window_chars: int, redact_margin_chars: int
+) -> None:
+    stripped = _strip_code_fence(inner)
+    err_pos: int | None = None
+    try:
+        _loads_tolerant(stripped)
+    except json.JSONDecodeError as exc:
+        err_pos = exc.pos + max(0, inner.find(stripped))
+    except ValueError:
+        pass
+    msg = _tbp.format_malformed_tool_block_log(
+        inner,
+        err_pos=err_pos,
+        window_chars=window_chars,
+        redact_margin_chars=redact_margin_chars,
+        redact_fn=redact_log_text,
+    )
+    logger.warning("%s", msg)
 
 
 class ToolCallParser:
@@ -792,6 +715,9 @@ class ToolCallParser:
     Префикс тега удерживается до разрешения. `strict_live=True` (AD-002) запрещает
     повреждённым/незакрытым блокам уйти в content; legacy nonstream сохраняет текст.
     """
+
+    _diagnostic_window_chars: int = 120
+    _diagnostic_redact_margin_chars: int = 2048
 
     def __init__(
         self,
@@ -1080,7 +1006,9 @@ class ToolCallParser:
             self._emit_parsed_calls(calls)
             return
         if self.strict_live:
-            logger.warning("malformed tool_call block raw=%r", inner[:300])
+            _log_malformed_tool_block(
+                inner, self._diagnostic_window_chars, self._diagnostic_redact_margin_chars
+            )
             raise LiveParserError("malformed tool_call block")
         self._emit(open_tag + inner + close_tag)
 
@@ -1435,6 +1363,9 @@ class StreamNormalizer:
         self._content_pieces: list[str] = []
         self._reasoning_pieces: list[str] = []
         self._calls: list[dict] = []
+        self._post_call_policy = _tpcp.PostCallPolicy()
+        self._post_call_state = _tpcp.PostCallState.ACTIVE
+        self._tool_close_cursor: _tbp.ToolCloseCursor | None = None
 
     def _apply_mode_spec(self, mode_spec: NormalizerModeSpec) -> None:
         active = mode_spec.mode is not ToolMode.OFF or mode_spec.policy is ToollessTagPolicy.ERROR
@@ -1469,6 +1400,17 @@ class StreamNormalizer:
     def tool_calls(self) -> list[dict]:
         return list(self._calls)
 
+    @property
+    def post_call_suppressed(self) -> bool:
+        return self._post_call_state is _tpcp.PostCallState.POST_CALL_SUPPRESSED
+
+    def configure_post_call_policy(self, policy: _tpcp.PostCallPolicy) -> None:
+        """Настраивает политику отсечения и окна диагностики."""
+        self._post_call_policy = policy
+        if self._parser is not None:
+            self._parser._diagnostic_window_chars = policy.diagnostic_window_chars
+            self._parser._diagnostic_redact_margin_chars = policy.diagnostic_redact_margin_chars
+
     def has_open_tool_call(self) -> bool:
         """Есть ли незакрытый блок вызова инструмента, рассуждения или удержанный префикс."""
         return (
@@ -1482,9 +1424,13 @@ class StreamNormalizer:
         self.feed_text(text)
 
     def feed_text(self, text: str) -> None:
-        if text:
-            self._buf += text
-            self._drain(final=False)
+        if not text:
+            return
+        if self._post_call_state is _tpcp.PostCallState.POST_CALL_SUPPRESSED:
+            _tpcp.PostCallFSM.decide(self._post_call_state, _tpcp.PostCallEvent.TEXT_CHUNK, self._post_call_ctx())
+            return
+        self._buf += text
+        self._drain(final=False)
 
     def feed_thinking(self, text: str) -> None:
         """Нативная дельта размышления транспорта (мимо парсера инструментов)."""
@@ -1502,6 +1448,10 @@ class StreamNormalizer:
                 self.feed_text(text)
 
     def finish(self) -> None:
+        if self._post_call_state is _tpcp.PostCallState.POST_CALL_SUPPRESSED:
+            dec = _tpcp.PostCallFSM.decide(self._post_call_state, _tpcp.PostCallEvent.EOF, self._post_call_ctx())
+            if dec.clean_complete:
+                return
         self._drain(final=True)
         if self._parser is not None:
             self._parser.finish()
@@ -1615,21 +1565,60 @@ class StreamNormalizer:
         self._emit_content(self._buf)
         self._buf = ""
 
+    def _post_call_ctx(self) -> _tpcp.PostCallContext:
+        has_open = self._state in ("tool", "reasoning") or (
+            self._parser is not None and self._parser._active is not None
+        )
+        return _tpcp.PostCallContext(
+            self._post_call_policy.cutoff_enabled, self.strict_live,
+            self._reject_tools, has_open, len(self._calls),
+        )
+
+    def _apply_post_call_suppression(self, dec: _tpcp.PostCallDecision) -> None:
+        if dec.log_cutoff_once:
+            msg = _tpcp.format_live_parser_error_log(
+                dec.reason or "post_call_orphan_tool_close", stage="post_call_cutoff", redact_fn=redact_log_text
+            )
+            logger.warning("%s", msg)
+        if dec.clear_tail_buf:
+            self._buf = ""
+            if self._parser is not None:
+                self._parser._buf = ""
+
+    def _handle_orphan_tag(self, literal: str, tag: str) -> bool | None:
+        ev = _tpcp.PostCallEvent.ORPHAN_TOOL_CLOSE if literal == TOOL_CALL_CLOSE else (
+            _tpcp.PostCallEvent.ORPHAN_REASONING_CLOSE if tag else _tpcp.PostCallEvent.ORPHAN_OTHER_SERVICE_TAG
+        )
+        dec = _tpcp.PostCallFSM.decide(self._post_call_state, ev, self._post_call_ctx())
+        self._post_call_state = dec.next_state
+        if dec.raise_parse_error:
+            raise LiveParserError(f"unexpected service tag: {literal.strip('<>/')}")
+        if dec.drop_silently:
+            self._apply_post_call_suppression(dec)
+            return False
+        return None
+
+    def _handle_non_code_candidate(self, literal: str, kind: str, tag: str) -> bool | None:
+        if kind == "reasoning_open":
+            self._state, self._tag, self._depth = "reasoning", tag, 1
+            self._buf = self._buf[len(literal) :]
+            return True
+        if kind == "tool_open":
+            if self._reject_tools and not tag:
+                raise LiveParserError(f"unexpected service tag: {literal.strip('<>/')}")
+            self._state, self._tool_close_cursor = "tool", None
+            return True
+        return self._handle_orphan_tag(literal, tag) if kind == "orphan" else None
+
     def _handle_candidate(self, candidate: tuple[str, str, str], final: bool) -> bool:
         literal, kind, tag = candidate
         context = _code_context(self._doc + self._buf, len(self._doc), final)
         if context == "wait":
             return False
         if context != "code":
-            if kind == "reasoning_open":
-                self._state, self._tag, self._depth = "reasoning", tag, 1
-                self._buf = self._buf[len(literal) :]
-                return True
-            if (self._reject_tools and not tag) or (self.strict_live and kind == "orphan"):
-                raise LiveParserError(f"unexpected service tag: {literal.strip('<>/')}")
-            if kind == "tool_open":
-                self._state = "tool"
-                return True
+            handled = self._handle_non_code_candidate(literal, kind, tag)
+            if handled is not None:
+                return handled
         self._feed_parser(literal)
         self._buf = self._buf[len(literal) :]
         return True
@@ -1669,18 +1658,23 @@ class StreamNormalizer:
 
     def _drain_tool(self, final: bool) -> bool:
         """Шаг внутри `<tool_call>`: блок непрозрачен, целиком уходит в ToolCallParser."""
-        end = _find_tool_close_outside_string(self._buf, len(TOOL_CALL_OPEN))
+        if self._tool_close_cursor is None:
+            self._tool_close_cursor = _tbp.ToolCloseCursor()
+        end = self._tool_close_cursor.find_close(self._buf, len(TOOL_CALL_OPEN))
         if end == -1:
             if final:
                 if self.strict_live:
+                    dec = _tpcp.PostCallFSM.decide(
+                        self._post_call_state, _tpcp.PostCallEvent.UNCLOSED_AT_EOF, self._post_call_ctx()
+                    )
+                    self._post_call_state = dec.next_state
                     raise LiveParserError("unclosed tool_call block")
                 self._feed_parser(self._buf)
-                self._buf = ""
-                self._state = "text"
+                self._buf, self._state, self._tool_close_cursor = "", "text", None
             return False
         self._feed_parser(self._buf[: end + len(TOOL_CALL_CLOSE)])
         self._buf = self._buf[end + len(TOOL_CALL_CLOSE) :]
-        self._state = "text"
+        self._state, self._tool_close_cursor = "text", None
         return True
 
 

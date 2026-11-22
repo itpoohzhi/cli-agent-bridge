@@ -159,11 +159,9 @@ from core.watchdog import (  # noqa: E402
 )
 from core.runtime_build_info import UNKNOWN as BUILD_UNKNOWN, RuntimeBuildInfo  # noqa: E402
 from core import turn_resilience_facade as _TURN_RESILIENCE  # noqa: E402
-from core.log_redaction import (  # noqa: E402
-    mask_credential_context,
-    mask_long_tokens,
-    safe_log_tokens,
-)
+from core.log_redaction import mask_credential_context, mask_long_tokens, redact_log_text, safe_log_tokens  # noqa: E402
+from core.recovery_flags import read_diagnostic_redact_margin_chars, read_diagnostic_window_chars, read_post_call_cutoff_enabled  # noqa: E402
+from core.tool_post_call_policy import PostCallPolicy, format_live_parser_error_log  # noqa: E402
 from core.agy_capacity_guard import (  # noqa: E402
     CAPACITY_REASON,
     capacity_error_body,
@@ -5398,9 +5396,12 @@ class _ToolTurn:
         self._last_chunk_ts = time.monotonic()
         self._last_open_chunk_ts = 0.0
         self._calls_closed_ts = 0.0
-        self._normalizer = StreamNormalizer(
-            self._content, self._reasoning, self._call, strict_live=True, tool_schemas=self._schemas
-        )
+        self._normalizer = StreamNormalizer(self._content, self._reasoning, self._call, strict_live=True, tool_schemas=self._schemas)
+        self._normalizer.configure_post_call_policy(PostCallPolicy(
+            cutoff_enabled=read_post_call_cutoff_enabled(),
+            diagnostic_window_chars=read_diagnostic_window_chars(),
+            diagnostic_redact_margin_chars=read_diagnostic_redact_margin_chars(),
+        ))
 
     @property
     def content(self) -> str:
@@ -5464,9 +5465,19 @@ class _ToolTurn:
         self._limit_error = ToolCallLimitExceededError("calls", observed, self._max_calls, msg)
         self.error = msg
 
+    def _run_normalizer(self, fn: Callable[[], None], stage: str) -> None:
+        """Выполнить шаг нормализатора с редактированным логированием ошибок разбора."""
+        try:
+            fn()
+        except LiveParserError as exc:
+            if isinstance(exc, RepetitionLoopDetected):
+                self._is_repetition_loop = True
+            self.error = str(exc) or type(exc).__name__
+            _log(format_live_parser_error_log(exc, stage=stage, redact_fn=redact_log_text))
+
     def feed(self, text: str) -> bool:
         """Принять дельту; ошибки разбора и превышение лимитов — fail-closed."""
-        if self.error or self._finished or not text:
+        if self.error or self._finished or not text or self._normalizer.post_call_suppressed is True:
             return self.ok
         chunk_bytes = len(text.encode("utf-8"))
         if self._total_bytes + chunk_bytes > self._max_bytes:
@@ -5477,13 +5488,7 @@ class _ToolTurn:
             self.notify_activity()
         if self._normalizer.has_open_tool_call():
             self._last_open_chunk_ts = self._last_chunk_ts
-        try:
-            self._normalizer.feed_text(text)
-        except RepetitionLoopDetected as exc:
-            self._is_repetition_loop = True
-            self.error = str(exc) or type(exc).__name__
-        except LiveParserError as exc:
-            self.error = str(exc) or type(exc).__name__
+        self._run_normalizer(lambda: self._normalizer.feed_text(text), "feed")
         if self._normalizer.has_open_tool_call():
             self._last_open_chunk_ts = self._last_chunk_ts
             self._calls_closed_ts = 0.0
@@ -5498,13 +5503,7 @@ class _ToolTurn:
         if self.error or self._finished:
             return
         self._finished = True
-        try:
-            self._normalizer.finish()
-        except RepetitionLoopDetected as exc:
-            self._is_repetition_loop = True
-            self.error = str(exc) or type(exc).__name__
-        except LiveParserError as exc:
-            self.error = str(exc) or type(exc).__name__
+        self._run_normalizer(self._normalizer.finish, "finish")
 
     def recovery_snapshot(self) -> str:
         """Снять статус без побочных эффектов завершения хода."""
@@ -5523,6 +5522,7 @@ class _ToolTurn:
             has_calls=bool(self.calls), last_open_chunk_ts=self._last_open_chunk_ts,
             last_chunk_ts=self._last_chunk_ts, calls_closed_ts=self._calls_closed_ts,
             proc_exited=proc_exited, result_received=result_received,
+            post_call_suppressed=self._normalizer.post_call_suppressed is True,
         )
         dec = evaluate_tool_turn_settle(st, self._settle_cfg)
         if dec.error_message:
