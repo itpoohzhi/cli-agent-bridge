@@ -1,0 +1,34 @@
+# NeuralWatt Flex (kimi-k3.1-pro-flex) через локальный model-georouter :10830/neuralwatt -> AI-group :10820.
+manifest_version: 1
+provider_id: neuralwatt-flex
+kind: passthrough
+enabled: true
+required: false
+priority: 15
+routing: {weight: 50}
+owned_by: neuralwatt-flex
+transport:
+  bridge: {base_url: 'http://127.0.0.1:10830/neuralwatt/v1', api_key_env: NEURALWATT_API_KEY}
+allow_base_url:
+- {scheme: http, host: 127.0.0.1, port: 10830, path_prefix: /neuralwatt/v1}
+# Квота аккаунта NeuralWatt tier=max: floor=15, flex_floor=22, burst_ceiling=20.
+# 8 (bridge) + 3 (OpenCode CLI / судьи) + 6 (DSH) = 17 <= 20 (burst_ceiling) < 22 (flex_floor).
+limits: {max_concurrent: 8, quota_group: neuralwatt-flex, timeout_s: 600}
+discovery:
+  method: static
+  static: [kimi-k3.1-pro-flex]
+family_rule:
+  type: exact_map
+  exact_map: {kimi-k3.1-pro-flex: Moonshot}
+models_overrides:
+  kimi-k3.1-pro-flex:
+    name: Kimi K3.1 Pro Flex (NeuralWatt)
+    efforts: [high, max]
+    default_effort: high
+    context_window: 1000000
+    max_tokens: 131072
+    input: [text]
+    images: {cli_registry: implicit_supported, status: unverified, method: null, proof: null}
+params:
+  effort_field: reasoning_effort
+  adaptive_whitelist: [reasoning_effort, temperature, top_p]

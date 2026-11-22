@@ -261,6 +261,16 @@
       "backend_id": "claude-haiku-5-5",
       "backend": "opencode-go-claude",
       "effort": "low"
+    },
+    "kimi-k3.1-pro-flex-high": {
+      "backend_id": "kimi-k3.1-pro-flex",
+      "backend": "neuralwatt-flex",
+      "effort": "high"
+    },
+    "kimi-k3.1-pro-flex-max": {
+      "backend_id": "kimi-k3.1-pro-flex",
+      "backend": "neuralwatt-flex",
+      "effort": "max"
     }
   },
   "default_model": "muse-wonder-full-1.0",
@@ -483,6 +493,14 @@
       "per_request_headers": {
         "x-opencode-session": "{session_affinity}"
       }
+    },
+    "neuralwatt-flex": {
+      "kind": "passthrough",
+      "enabled": true,
+      "owned_by": "neuralwatt-flex",
+      "max_concurrent": 8,
+      "base_url": "http://127.0.0.1:10830/neuralwatt/v1",
+      "api_key_env": "NEURALWATT_API_KEY"
     },
     "opencode-go-claude": {
       "kind": "passthrough",
@@ -921,6 +939,21 @@
             "priority": 12
           }
         ]
+      }
+    },
+    {
+      "id": "kimi-k3.1-pro-flex",
+      "backend": "neuralwatt-flex",
+      "name": "Kimi K3.1 Pro Flex (NeuralWatt)",
+      "efforts": [
+        "high",
+        "max"
+      ],
+      "default_effort": "high",
+      "context_window": 1000000,
+      "max_tokens": 131072,
+      "images": {
+        "status": "unverified"
       }
     },
     {
