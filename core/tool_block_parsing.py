@@ -8,6 +8,8 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Final, cast
 
+from core.tool_json_repair import repair_invalid_json_escapes, repair_unescaped_json_quotes, resolve_odd_quote_tool_close
+
 _DEFAULT_CLOSE_TAG: Final[str] = "</tool_call>"
 _DEFAULT_MAX_EXTRA_BRACES: Final[int] = 16
 _DEFAULT_WINDOW_CHARS: Final[int] = 120
@@ -124,21 +126,33 @@ def _recover_after_repair(candidate: str) -> tuple[bool, object]:
     return False, None
 
 
-def loads_tolerant_json(text: str) -> object:
-    """Толерантный JSON: strict -> repair `\\'` -> string-aware trailing commas + extra `}`."""
+def _try_candidate(candidate: str) -> tuple[bool, object]:
+    ok, parsed = _try_loads(candidate)
+    return (True, parsed) if ok else _recover_after_repair(candidate)
+
+
+def loads_tolerant_json(
+    text: str, *, json_repair_enabled: bool = False,
+    allowed_arg_keys: frozenset[str] | None = None, required_arg_keys: frozenset[str] | None = None,
+) -> object:
+    """Единый толерантный JSON-конвейер: strict -> escape-repair -> opt-in quote-repair -> trailing."""
     try:
         return cast("object", json.loads(text, strict=False))
     except (ValueError, RecursionError) as exc:
-        repaired = repair_invalid_single_quote_escape(text)
-        if repaired != text:
-            ok, parsed = _try_loads(repaired)
-            if ok:
-                return parsed
-        ok, recovered = _recover_after_repair(repaired)
-        if ok:
-            return recovered
         if isinstance(exc, RecursionError):
             raise ValueError("JSON is nested too deeply") from exc
+        escaped = repair_invalid_json_escapes(text) if json_repair_enabled else repair_invalid_single_quote_escape(text)
+        ok, parsed = _try_candidate(escaped)
+        if ok:
+            return parsed
+        if json_repair_enabled:
+            quoted = repair_unescaped_json_quotes(
+                escaped, allowed_arg_keys=allowed_arg_keys, required_arg_keys=required_arg_keys
+            )
+            if quoted is not None:
+                ok, parsed = _try_candidate(repair_invalid_json_escapes(quoted))
+                if ok:
+                    return parsed
         raise
 
 
@@ -265,3 +279,20 @@ def format_malformed_tool_block_log(
         center = min(len(redacted), len(redact_fn(pre_window[:rel_pos])))
     snippet = redacted[max(0, center - win) : center + win]
     return f"malformed tool_call block raw={snippet}"
+
+
+_ODD_SPAN_CACHE: dict[tuple[str, str], re.Pattern[str]] = {}
+
+
+def odd_span_regex(open_tag: str, close_tag: str) -> re.Pattern[str]:
+    key = (open_tag, close_tag)
+    if key not in _ODD_SPAN_CACHE:
+        _ODD_SPAN_CACHE[key] = re.compile(r"\}(?:\s*(?:```|~~~))?\s*" + re.escape(close_tag) + r"\s*" + re.escape(open_tag))
+    return _ODD_SPAN_CACHE[key]
+
+
+def split_merged_odd_block(inner: str, open_tag: str, close_tag: str, parse_fn: Callable[[str], object | None]) -> tuple[str, str] | None:
+    if close_tag not in inner or not odd_span_regex(open_tag, close_tag).search(inner):
+        return None
+    idx = resolve_odd_quote_tool_close(inner + close_tag, 0, close_tag, parse_fn)
+    return None if idx < 0 else (inner[:idx], inner[idx + len(close_tag) :] + close_tag)

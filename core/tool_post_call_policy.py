@@ -48,6 +48,7 @@ class PostCallPolicy:
     cutoff_enabled: bool = False
     diagnostic_window_chars: int = 120
     diagnostic_redact_margin_chars: int = 2048
+    json_repair_enabled: bool = False
 
 
 @dataclass(frozen=True, slots=True)
