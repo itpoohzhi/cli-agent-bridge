@@ -47,7 +47,7 @@ unset DROID_DSH_BRIDGE_KEY _k _name 2>/dev/null || true
 
 # Родные ключи upstream: окружение имеет приоритет, .env читается без исполнения.
 if [[ -f "$HOME/.dsh/.env" ]]; then
-  for _name in CLAUDE_P_BRIDGE_KEY AGY_BRIDGE_KEY OPENCODE_ZEN_BRIDGE_KEY CODEX_LB_API_KEY INTERNAL_SERVICE_KEY; do
+  for _name in CLAUDE_P_BRIDGE_KEY AGY_BRIDGE_KEY OPENCODE_ZEN_BRIDGE_KEY CODEX_LB_API_KEY INTERNAL_SERVICE_KEY NEURALWATT_API_KEY; do
     if [[ -n "${!_name+x}" ]]; then
       continue
     fi
