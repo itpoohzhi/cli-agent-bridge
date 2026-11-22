@@ -51,9 +51,9 @@ def _load_agy() -> Any:
 
 def test_agy_concurrency_limits_aligned_to_four() -> None:
     manifest = yaml.safe_load((ROOT / "providers.d/agy.yaml").read_text(encoding="utf-8"))
-    assert manifest["limits"]["max_concurrent"] == 4
+    assert manifest["limits"]["max_concurrent"] == 128, "RED-AGY128: max_concurrent must be 128"
     fleet = json.loads((ROOT / "fleet.json").read_text(encoding="utf-8"))
-    assert fleet["backends"]["agy"]["max_concurrent"] == 4
+    assert fleet["backends"]["agy"]["max_concurrent"] == 128, "RED-AGY128: fleet max_concurrent must be 128"
 
 
 def test_acquire_slot_cancellable_ok_timeout_and_client_gone() -> None:

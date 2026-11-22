@@ -348,7 +348,7 @@
       "kind": "passthrough",
       "enabled": true,
       "owned_by": "agy-bridge",
-      "max_concurrent": 4,
+      "max_concurrent": 128,
       "base_url": "http://127.0.0.1:9887/v1",
       "api_key_env": "AGY_BRIDGE_KEY"
     },
@@ -377,7 +377,7 @@
         "binary_sha256": "ffb95b823e2a71f49ce98f9ddcb7cd7c731b77615aae9f5f253819c69453079f",
         "binary_path": "~/.local/bin/muse"
       },
-      "proxy_port": 10816
+      "proxy_port": 10820
     },
     "opencode-go": {
       "kind": "passthrough",

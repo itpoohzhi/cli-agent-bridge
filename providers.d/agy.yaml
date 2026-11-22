@@ -20,7 +20,7 @@ transport:
       output: {format: text}
 allow_base_url:
 - {scheme: http, host: 127.0.0.1, port: 9887, path_prefix: /v1}
-limits: {max_concurrent: 4, quota_group: google-agy, timeout_s: 600}
+limits: {max_concurrent: 128, quota_group: google-agy, timeout_s: 600}
 fingerprint: {binary_path: ~/.local/bin/agy.real}
 discovery:
   method: static

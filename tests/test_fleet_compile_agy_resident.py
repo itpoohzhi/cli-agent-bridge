@@ -11,14 +11,19 @@ from core.fleet_compiler import compile_from_disk
 ROOT = Path(__file__).resolve().parents[1]
 AGY_MODELS = {
     "gemini-3.8-flash",
+    "gemini-3.8-flash-agy",
     "gemini-4-argon",
     "gemini-4-carbon",
     "gemini-4-hydrogen",
+    "gemini-4-neon",
+    "gemini-pro-orchestrator",
+    "gemini-pro-orchestrator-argon",
+    "gemini-pro-orchestrator-neon",
 }
 
 
 def test_agy_manifests_compile_resident_primary_and_disabled_alternate() -> None:
-    """W2j-AC3: AGY получает resident primary и выключенный passthrough alternate."""
+    """W2j-AC3 / AD-001: AGY компилируется в passthrough primary (max_concurrent=128) с выключенным alternate."""
 
     compiled = compile_from_disk(
         ROOT / "providers.d",
@@ -29,7 +34,8 @@ def test_agy_manifests_compile_resident_primary_and_disabled_alternate() -> None
     backends = compiled["backends"]
     models = {model["id"]: model for model in compiled["models"]}
 
-    assert backends["agy"]["kind"] == "stdio_resident"
+    assert backends["agy"]["kind"] == "passthrough"
+    assert backends["agy"]["max_concurrent"] == 128, "RED-AGY128: agy max_concurrent must be 128"
     assert {model_id for model_id in models if models[model_id]["backend"] == "agy"} == (
         AGY_MODELS
     )

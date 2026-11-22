@@ -4,6 +4,10 @@
 <dict>
 	<key>EnvironmentVariables</key>
 	<dict>
+		<key>AGY_BRIDGE_BREAKER_COOLDOWN_S</key>
+		<string>15</string>
+		<key>AGY_BRIDGE_BREAKER_FAILURES</key>
+		<string>8</string>
 		<key>AGY_BRIDGE_MAX_CONCURRENT</key>
 		<string>128</string>
 		<key>AGY_BRIDGE_PORT</key>
@@ -13,9 +17,19 @@
 		<key>BRIDGE_EXIT_TIMEOUT_S</key>
 		<string>180</string>
 		<key>HOME</key>
-		<string>/Users/aazhiry1</string>
+		<string>__HOME__</string>
 		<key>PATH</key>
-		<string>/Users/aazhiry1/.local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+		<string>__HOME__/.local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+	</dict>
+	<key>HardResourceLimits</key>
+	<dict>
+		<key>NumberOfFiles</key>
+		<integer>8192</integer>
+	</dict>
+	<key>SoftResourceLimits</key>
+	<dict>
+		<key>NumberOfFiles</key>
+		<integer>4096</integer>
 	</dict>
 	<key>ExitTimeOut</key>
 	<integer>180</integer>
@@ -26,17 +40,17 @@
 	<key>ProgramArguments</key>
 	<array>
 		<string>/bin/bash</string>
-		<string>/Users/aazhiry1/.dsh/bridges/agy-bridge/start.sh</string>
+		<string>__HOME__/.dsh/bridges/agy-bridge/start.sh</string>
 	</array>
 	<key>RunAtLoad</key>
 	<true/>
 	<key>StandardErrorPath</key>
-	<string>/Users/aazhiry1/.dsh/bridges/agy-bridge/logs/bridge.err</string>
+	<string>__HOME__/.dsh/bridges/agy-bridge/logs/bridge.err</string>
 	<key>StandardOutPath</key>
-	<string>/Users/aazhiry1/.dsh/bridges/agy-bridge/logs/bridge.out</string>
+	<string>__HOME__/.dsh/bridges/agy-bridge/logs/bridge.out</string>
 	<key>ThrottleInterval</key>
 	<integer>5</integer>
 	<key>WorkingDirectory</key>
-	<string>/Users/aazhiry1/.dsh/bridges/agy-bridge/workspace</string>
+	<string>__HOME__/.dsh/bridges/agy-bridge/workspace</string>
 </dict>
 </plist>
