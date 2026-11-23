@@ -136,14 +136,18 @@ def build_session_start_msg(
     approval_mode: str = "denyUnmatched",
     command_id: str | None = None,
     request_id: int | str = 2,
+    *,
+    clear_developer_prompt: bool = False,
 ) -> bytes:
     """Build an MSP v1 ``session/start`` JSON-RPC request line."""
-    params = {
+    params: dict[str, Any] = {
         "commandId": command_id or uuid7(),
         "sessionId": session_id,
         "modelId": model_id,
         "approvalMode": approval_mode,
     }
+    if clear_developer_prompt:
+        params["config"] = {"developerPrompt": None}
     return _encode_rpc("session/start", params, request_id)
 
 

@@ -125,7 +125,9 @@ class StdioResidentAdapter(BackendAdapter):
         self._protocol: str = infer_protocol(actual_id, actual_config, self._options)
         self._config: StdioPoolConfig = StdioPoolConfig.from_env()
         self._pool: ResidentProcessPool = ResidentProcessPool(self._config)
-        self._driver: StdioProtocolDriver = create_protocol_driver(self._protocol)
+        self._driver: StdioProtocolDriver = create_protocol_driver(
+            self._protocol, config=actual_config
+        )
         self._session_manager: StdioSessionManager = StdioSessionManager(
             self._pool, self._driver
         )

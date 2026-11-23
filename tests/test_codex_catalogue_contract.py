@@ -192,15 +192,14 @@ def test_deepseek_canonical_owner_is_neuralwatt_not_local_go_fixture() -> None:
     assert model["routing"]["disabled_backend"] == "neuralwatt"
     routes = {route["backend"]: route["weight"] for route in model["routing"]["routes"]}
     assert routes == {
-        "neuralwatt": 100,
+        "neuralwatt": 60,
+        "opencode-go": 40,
         "deepseek-direct": 0,
-        "opencode-go-sub1": 0,
-        "opencode-go-sub2": 0,
     }
     registry = AdapterRegistry.from_fleet(catalog, ADAPTER_KINDS, lambda: catalog)
     try:
         assert registry.adapter_for_model(DEEPSEEK).id == "neuralwatt"
-        assert DEEPSEEK in {m.id for m in registry.get("opencode-go-sub1").get_models()}
+        assert DEEPSEEK in {m.id for m in registry.get("opencode-go").get_models()}
     finally:
         registry.shutdown()
 

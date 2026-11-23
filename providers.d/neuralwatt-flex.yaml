@@ -16,12 +16,14 @@ allow_base_url:
 limits: {max_concurrent: 8, quota_group: neuralwatt-flex, timeout_s: 600}
 discovery:
   method: static
-  static: [kimi-k3.1-pro-flex, deepseek-v4.1-flash-flex]
+  static: [kimi-k3.1-pro-flex, deepseek-v4.1-flash-flex, glm-5.3-flex, mimo-v2.6-pro-flex]
 family_rule:
   type: exact_map
   exact_map:
     kimi-k3.1-pro-flex: Moonshot
     deepseek-v4.1-flash-flex: DeepSeek
+    glm-5.3-flex: Z.ai
+    mimo-v2.6-pro-flex: Xiaomi
 models_overrides:
   kimi-k3.1-pro-flex:
     name: Kimi K3.1 Pro Flex (NeuralWatt)
@@ -37,6 +39,22 @@ models_overrides:
     default_effort: high
     context_window: 1048560
     max_tokens: 393216
+    input: [text]
+    images: {cli_registry: implicit_supported, status: unverified, method: null, proof: null}
+  glm-5.3-flex:
+    name: GLM 5.3 Flex (NeuralWatt)
+    efforts: [low, high, max]
+    default_effort: high
+    context_window: 1000000
+    max_tokens: 131072
+    input: [text]
+    images: {cli_registry: explicit_unsupported, status: unsupported, method: null, proof: null}
+  mimo-v2.6-pro-flex:
+    name: MiMo V2.6 Pro Flex (NeuralWatt)
+    efforts: ['off', high]
+    default_effort: high
+    context_window: 1000000
+    max_tokens: 131072
     input: [text]
     images: {cli_registry: implicit_supported, status: unverified, method: null, proof: null}
 params:

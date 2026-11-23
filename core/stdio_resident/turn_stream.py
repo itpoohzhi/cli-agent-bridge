@@ -134,6 +134,24 @@ def _delta_utf8_bytes(delta: AssembledStreamDelta) -> int:
     return total
 
 
+_MUSE_DELTA_METHODS: frozenset[str] = frozenset(
+    {"item/delta", "item.delta", "run.output.delta"}
+)
+
+
+def _muse_item_event(raw: object) -> tuple[bool, str] | None:
+    if not isinstance(raw, dict):
+        return None
+    method = raw.get("method")
+    if method in _MUSE_DELTA_METHODS:
+        params = raw.get("params")
+        item_id = params.get("itemId") if isinstance(params, dict) else ""
+        return True, str(item_id or "")
+    if method == "item/completed":
+        return False, ""
+    return None
+
+
 class TurnStreamAssembler:
     """Byte-preserving stream assembler with typed step boundaries and aggregate byte cap."""
 
@@ -159,6 +177,8 @@ class TurnStreamAssembler:
         self._pending_step_separator: str = ""
         self._last_content_tail: str = ""
         self._aggregate_bytes: int = 0
+        self._last_was_delta: bool = False
+        self._last_item_id: str = ""
 
     @property
     def aggregate_bytes(self) -> int:
@@ -200,10 +220,29 @@ class TurnStreamAssembler:
         if chunk.reasoning:
             delta.reasoning_content += chunk.reasoning
         if chunk.text:
+            self._apply_muse_item_boundary(chunk)
             self._append_text(delta, chunk.text)
 
         self._account_bytes(delta)
         return delta
+
+    def _apply_muse_item_boundary(self, chunk: DecodedChunk) -> None:
+        if self._saw_tool_calls:
+            return
+        event = _muse_item_event(getattr(chunk, "raw", None))
+        if event is None:
+            return
+        is_delta, cur_item_id = event
+        same_stream = (
+            is_delta
+            and self._last_was_delta
+            and (not cur_item_id or cur_item_id == self._last_item_id)
+        )
+        tail_ch = self._last_content_tail[-1:]
+        if not same_stream and self._has_emitted_content and tail_ch not in ("", "\n", " "):
+            self.mark_step_boundary("\n\n")
+        self._last_was_delta = is_delta
+        self._last_item_id = cur_item_id if is_delta else ""
 
     def _append_text(self, delta: AssembledStreamDelta, text: str) -> None:
         if self._saw_tool_calls:
