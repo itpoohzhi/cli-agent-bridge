@@ -7,18 +7,17 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from enum import Enum
 from typing import Final, Protocol
+from core.replay_policy import parse_retry_budget_header, quota_failover_eligibility  # noqa: F401
 from core.retry_control import MAX_TOTAL_ATTEMPTS_LIMIT
 from core.route_health_policy import AttemptDecision, RetryBudgetConfig, RetryReason, compute_attempt_decision, validate_retry_config
 from core.routing_contract import PreSendTransientError
 
-DEFAULT_ROUTE_FAILOVER_STATUSES = frozenset({401, 429, 503})
-# Статусы, которые провайдер вообще вправе объявить отказом слота (per-route opt-in).
+DEFAULT_ROUTE_FAILOVER_STATUSES = frozenset({401, 503})
 ALLOWED_FAILOVER_STATUSES = frozenset({401, 402, 403, 429, 503})
 ENV_POOL_EXHAUSTED_RETRY_AFTER_S = "BRIDGE_POOL_EXHAUSTED_RETRY_AFTER_S"
 DEFAULT_POOL_EXHAUSTED_RETRY_AFTER_S = 60
 # Маркеры исчерпания слота не зашиты в ядро: провайдер объявляет их декларативно
 # (`failover.message_markers` манифеста -> `failover_message_markers` бэкенда).
-# Безопасные причины для сводной ошибки: без quota-лексики и типов, маскируемых клиентом.
 _SAFE_REASONS = {
     401: "upstream rejected the slot key (HTTP 401)",
     402: "payment required by upstream (HTTP 402)",

@@ -168,6 +168,7 @@ def _hygiene_rt() -> HygieneRuntime:
 from agy_runtime import history_compaction_adapter as _hca  # noqa: E402
 from agy_runtime.history_compaction_domain import json_text_bytes as _json_text_bytes, middle_prune_text as _middle_prune_text  # noqa: E402
 from core.correlation_contract import extract_correlation, format_log_corr_suffix  # noqa: E402
+from core.error_taxonomy import blocks_pre_delivery_replay, upstream_error_body  # noqa: E402
 from core.prompt_budget_policy import LazyPromptMaterializer, compute_prompt_budget, resolve_ctx_prompt  # noqa: E402
 from core.slot_acquire import SlotWaitOptions, acquire_slot_timed  # noqa: E402
 from core.tool_turn_settle_policy import (  # noqa: E402
@@ -7264,15 +7265,12 @@ class Handler(BaseHTTPRequestHandler):
                     and AGY_BRIDGE_ENABLE_TRANSIENT_502_RECOVERY
                     and out["state"] in ("agy_error", "pump_error")
                     and not delivered
+                    and not blocks_pre_delivery_replay(out.get("err"))
                     and _is_transient_upstream_error(out.get("err"))
                 ):
-                    # Сбой upstream (502/503/сеть), а не разговора: сессия не
-                    # инвалидируется, lease cid остаётся в _in_flight_cids до finally
-                    # HTTP-хендлера, повтор идёт в тот же conversation_id.
                     if attempt == 2 or not _TURN_RESILIENCE.take(ctx, out, _retry_take, _log):
                         if attempt != 2:
                             _log(f"retry-budget-exhausted state={out['state']} {tag}")
-                        # Повторы исчерпаны: сломанная сессия не достаётся следующим ходам.
                         _TURN_RESILIENCE.invalidate(ctx, out, _session_invalidate, _log)
                         break
                     _log(
@@ -7295,6 +7293,7 @@ class Handler(BaseHTTPRequestHandler):
                         out["state"] == "agy_error"
                         and not delivered
                         and not _is_cli_rejection_outcome(out)
+                        and not blocks_pre_delivery_replay(out.get("err"))
                     ):
                         if not _retry_take():
                             _log(f"retry-budget-exhausted state={out['state']} {tag}")
@@ -7309,6 +7308,7 @@ class Handler(BaseHTTPRequestHandler):
                     out["state"] in ("agy_error", "pump_error", "done")
                     and not delivered
                     and not _is_cli_rejection_outcome(out)
+                    and not blocks_pre_delivery_replay(out.get("err"))
                 )
                 if not transient or attempt == 2:
                     break
@@ -7453,11 +7453,7 @@ class Handler(BaseHTTPRequestHandler):
         if st == "capacity_exhausted":
             return capacity_error_body(detail=out.get("err"))
         if st == "agy_error":
-            return {
-                "message": str(out.get("err") or "agy reported an error")[:500],
-                "type": "agy_error",
-                "code": 502,
-            }
+            return upstream_error_body(out.get("err"), out.get("request_id"))
         if resilience is None:
             resilience = _new_flag("AGY_BRIDGE_STREAM_RESILIENCE_ENABLED", True)
         has_payload = bool(out.get("text"))
@@ -8186,13 +8182,16 @@ class Handler(BaseHTTPRequestHandler):
         retained_reasoning = retained_cache[0][1] if retained_cache else ""
         reasoning = str(out.get("reasoning") or "") + retained_reasoning
         reasoning += "".join(markers)
-        err = self._error_body(out, bool(ctx.get("stream_resilience_enabled", True)))
+        err = self._error_body(out | {"request_id": ctx.get("req_id")}, bool(ctx.get("stream_resilience_enabled", True)))
         if err is None and tool_turn is not None:
             tool_turn.finish()
             if tool_turn.error:
                 err = tool_turn.error_body()
         if err is not None:
-            self._send(err["code"], {"error": err})
+            status = cast(int, err.pop("_status", err["code"]))
+            headers = cast("dict[str, str] | None", err.pop("_headers", None))
+            self._pending_response_headers = headers
+            self._send(status, {"error": err})
             return
         reg = ctx.get("register_post_turn")
         if callable(reg):
