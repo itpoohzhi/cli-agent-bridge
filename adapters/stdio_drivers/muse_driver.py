@@ -193,15 +193,17 @@ class MuseMspDriver(StdioProtocolDriver):
         if not raw_line.strip():
             return None
         chunk = decode_msp_line(raw_line)
+        if chunk is None:
+            return None
         raw = chunk.raw if isinstance(chunk.raw, Mapping) else {}
         method = raw.get("method")
         params = raw.get("params") if isinstance(raw.get("params"), Mapping) else {}
         sid = str(params.get("sessionId") or "")
-        if method in {"item.delta", "item/delta"} and (chunk.text or chunk.reasoning):
+        if sid and method in {"item.delta", "item/delta"} and (chunk.text or chunk.reasoning):
             if item_id := str(params.get("itemId") or ""):
                 with self._id_lock:
                     self._streamed_items.setdefault(sid, set()).add(item_id)
-        elif method == "item/completed":
+        elif sid and method == "item/completed":
             item = params.get("item") if isinstance(params.get("item"), Mapping) else {}
             item_id = str(item.get("itemId") or "")
             if item_id:
@@ -211,7 +213,16 @@ class MuseMspDriver(StdioProtocolDriver):
                     if seen is not None:
                         seen.discard(item_id)
                 if already_streamed:
-                    return MuseDecodedChunk(raw=chunk.raw)
+                    chunk = MuseDecodedChunk(
+                        text="",
+                        reasoning="",
+                        tool_calls=chunk.tool_calls,
+                        is_terminal=chunk.is_terminal,
+                        is_tool_stop=chunk.is_tool_stop,
+                        raw=chunk.raw,
+                        error=getattr(chunk, "error", None),
+                        reply_bytes=getattr(chunk, "reply_bytes", None),
+                    )
         if chunk.is_terminal and sid:
             with self._id_lock:
                 self._streamed_items.pop(sid, None)

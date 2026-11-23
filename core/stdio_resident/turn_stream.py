@@ -55,8 +55,13 @@ class TurnStreamAssembler:
                 delta.reasoning_content += chunk.text
             else:
                 content = chunk.text
+                raw = getattr(chunk, "raw", None)
+                is_delta = isinstance(raw, dict) and raw.get("method") in {
+                    "item/delta", "item.delta", "run.output.delta",
+                }
                 if (
-                    self._has_emitted_content
+                    not is_delta
+                    and self._has_emitted_content
                     and self._last_char
                     and self._last_char not in ("\n", " ")
                 ):

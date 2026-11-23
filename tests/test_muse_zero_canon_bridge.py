@@ -169,6 +169,19 @@ def test_server_sse_suppresses_replay_for_live_stdio_resident() -> None:
     assert 'out.get("backend_kind") == "stdio_resident" and live_sent[0] > 0' in src
 
 
+def test_turn_stream_assembler_preserves_token_deltas_without_double_newlines() -> None:
+    from core.stdio_resident.turn_stream import TurnStreamAssembler
+    drv = MuseMspDriver({})
+    asm = TurnStreamAssembler()
+    lines = [
+        json.dumps({"jsonrpc": "2.0", "method": "item/delta", "params": {"sessionId": "s2", "itemId": "i1", "field": "text", "delta": "PANEL-N"}}),
+        json.dumps({"jsonrpc": "2.0", "method": "item/delta", "params": {"sessionId": "s2", "itemId": "i1", "field": "text", "delta": "ONCE: 123"}}),
+        json.dumps({"jsonrpc": "2.0", "method": "item/completed", "params": {"sessionId": "s2", "item": {"itemId": "i1", "kind": "agentMessage", "text": "PANEL-NONCE: 123"}}}),
+    ]
+    out = "".join(asm.process_chunk(c).content for l in lines if (c := drv.decode_line(l)) is not None)
+    assert out == "PANEL-NONCE: 123"
+
+
 def test_subbridge_prepare_muse_launch_sets_muse_bin(tmp_path: Path) -> None:
     import importlib.util
     import sys
