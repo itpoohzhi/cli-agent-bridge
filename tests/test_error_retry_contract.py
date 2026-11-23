@@ -11,7 +11,12 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from core.error_taxonomy import classify_upstream_error, error_response  # noqa: E402
+from core.error_taxonomy import (  # noqa: E402
+    classify_upstream_error,
+    error_response,
+    extract_upstream_error_meta,
+    sanitize_error_text,
+)
 from core.replay_policy import (  # noqa: E402
     apply_budget_to_proof,
     build_replay_proof,
@@ -37,7 +42,7 @@ def test_quota_contract_preserves_phrase_and_headers_without_secret() -> None:
     status, payload, headers = error_response(result)
     assert status == 429
     assert payload["error"] == {
-        "message": "Individual quota reached; [REDACTED]; retry-after: 17",
+        "message": "Individual quota reached; token=[REDACTED]; retry-after: 17",
         "type": "quota_exhausted",
         "code": "QUOTA",
         "request_id": "req_123",
@@ -105,7 +110,10 @@ def test_working_router_applies_quota_group_opt_in(
         if backend == "first":
             attempt.advance(AttemptPhase.SENDING)
             attempt.advance(AttemptPhase.RESPONSE_HEADERS, 429)
-            raise RouteRefusal(429)
+            raise RouteRefusal(
+                429,
+                response_body=b'{"error":{"type":"quota_exhausted","message":"quota reached"}}',
+            )
         return "ok"
 
     ports = SimpleNamespace(ready=lambda _: True, acquire=lambda *_: lease,
@@ -156,6 +164,41 @@ def test_authorization_bearer_value_is_fully_redacted() -> None:
     assert secret not in result.error_body()["message"]
 
 
+@pytest.mark.parametrize(
+    ("raw", "safe"),
+    [
+        ('"api_key": "opaque123"', '"api_key": "[REDACTED]"'),
+        ('"token": "secret456"', '"token": "[REDACTED]"'),
+        ('"authorization": "Basic dXNlcjpwYXNz"', '"authorization": "Basic [REDACTED]"'),
+        ("token=opaque-val", "token=[REDACTED]"),
+        ("Authorization: Basic dXNlcjpwYXNz", "Authorization: Basic [REDACTED]"),
+        ("Authorization: Bearer xyz", "Authorization: Bearer [REDACTED]"),
+        ("access_token='opaque'", "access_token='[REDACTED]'"),
+        ("x-api-key=opaque", "x-api-key=[REDACTED]"),
+    ],
+)
+def test_secret_fields_keep_diagnostic_prefix(raw: str, safe: str) -> None:
+    assert sanitize_error_text(raw) == safe
+
+
+@pytest.mark.parametrize(
+    ("out", "expected"),
+    [
+        ({"status_code": 429, "headers": {"Retry-After": "4"}}, (429, {"Retry-After": "4"})),
+        ({"upstream_status_code": None, "status_code": 429,
+          "upstream_headers": None, "headers": {"Retry-After": "4"}},
+         (429, {"Retry-After": "4"})),
+        ({"upstream_status_code": 503, "status_code": 429,
+          "upstream_headers": {"X": "canonical"}, "headers": {"X": "legacy"}},
+         (503, {"X": "canonical"})),
+    ],
+)
+def test_extract_upstream_error_meta_fallbacks(
+    out: dict[str, object], expected: tuple[object, object]
+) -> None:
+    assert extract_upstream_error_meta(out) == expected
+
+
 def test_structured_429_preserves_retry_after_without_quota_wording() -> None:
     result = classify_upstream_error(
         "request rejected", status_code=429, headers={"retry-after": "19"}
@@ -173,3 +216,35 @@ def test_interrupted_adds_subtype_without_changing_legacy_type() -> None:
     result = classify_upstream_error("PI_AI_ERROR: client_disconnect")
     assert (result.http_status, result.type, result.code) == (502, "agy_error", 502)
     assert result.cancellation_subtype == "client_disconnect"
+
+
+def test_status_only_429_and_quota_429_have_distinct_failover_contracts() -> None:
+    def run(body: bytes, opt_in: bool, groups: tuple[str, str]) -> list[str]:
+        seen: list[str] = []
+        lease = SimpleNamespace(finish=lambda *_: None, close=lambda: None)
+        def execute(backend: str, attempt: Any) -> str:
+            seen.append(backend)
+            if backend == "first":
+                attempt.advance(AttemptPhase.SENDING)
+                attempt.advance(AttemptPhase.RESPONSE_HEADERS, 429)
+                raise RouteRefusal(429, response_body=body)
+            return "ok"
+        ports = SimpleNamespace(ready=lambda _: True, acquire=lambda *_: lease,
+            execute=execute, retry_token=lambda: True, cancelled=lambda: False)
+        failovers = {name: RouteFailover(frozenset({429}), quota_group=group,
+            quota_failover_opt_in=opt_in if name == "first" else False)
+            for name, group in zip(("first", "second"), groups, strict=True)}
+        runner = RouteAttemptRunner(("first", "second"), ports, RetryBudgetConfig(),
+            lambda: 0.0, failover_by_backend=failovers)
+        try:
+            runner.run()
+        except RouteRefusal:
+            pass
+        return seen
+
+    assert run(b"", False, ("", "")) == ["first", "second"]
+    quota = b'{"error":{"type":"quota_exhausted","message":"quota reached"}}'
+    assert run(quota, False, ("a", "b")) == ["first"]
+    assert run(quota, True, ("a", "a")) == ["first"]
+    assert run(quota, True, ("", "b")) == ["first"]
+    assert run(quota, True, ("a", "b")) == ["first", "second"]

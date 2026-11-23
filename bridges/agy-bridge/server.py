@@ -168,7 +168,7 @@ def _hygiene_rt() -> HygieneRuntime:
 from agy_runtime import history_compaction_adapter as _hca  # noqa: E402
 from agy_runtime.history_compaction_domain import json_text_bytes as _json_text_bytes, middle_prune_text as _middle_prune_text  # noqa: E402
 from core.correlation_contract import extract_correlation, format_log_corr_suffix  # noqa: E402
-from core.error_taxonomy import classify_upstream_error, upstream_error_body  # noqa: E402
+from core.error_taxonomy import classify_upstream_error, extract_upstream_error_meta, upstream_error_body  # noqa: E402
 from core.replay_policy import apply_budget_to_proof, build_replay_proof, calculate_retry_budget, parse_retry_budget_header  # noqa: E402
 from core.prompt_budget_policy import LazyPromptMaterializer, compute_prompt_budget, resolve_ctx_prompt  # noqa: E402
 from core.slot_acquire import SlotWaitOptions, acquire_slot_timed  # noqa: E402
@@ -3739,10 +3739,11 @@ def _retry_take() -> bool:
 
 
 def _incident_retry_allowed(ctx: dict, out: dict, delivered: bool, total_s: float) -> bool:
-    proof = build_replay_proof(int(delivered), bool(out.get("response_started", delivered)),
-        int(bool(out.get("tool_calls"))), str(out.get("fail_stage") or ""), out.get("upstream_not_started") is True)
-    return classify_upstream_error(out.get("err"), replay_proof=apply_budget_to_proof(
-        proof, calculate_retry_budget(total_s, ctx.get("client_retry_budget")))).retryable
+    status, headers = extract_upstream_error_meta(out)
+    proof = build_replay_proof(int(delivered), bool(out.get("response_started", delivered)), int(bool(out.get("tool_calls"))),
+                               str(out.get("fail_stage") or ""), out.get("upstream_not_started") is True)
+    bounded = apply_budget_to_proof(proof, calculate_retry_budget(total_s, ctx.get("client_retry_budget")))
+    return classify_upstream_error(out.get("err"), status_code=status, headers=headers, replay_proof=bounded).retryable
 
 
 def _retry_pause_s(attempt: int, rng: Callable[[], float] | None = None) -> float:
@@ -6206,12 +6207,12 @@ class Run:
                         (
                             "result",
                             {
-                                "conversation_id": result.get("conversation_id") or "",
-                                "status": str(result.get("status") or ""),
-                                "error": str(result.get("error") or ""),
-                                "duration_s": result.get("duration_seconds"),
-                                "num_turns": result.get("num_turns"),
-                                "usage": result.get("usage") or {},
+                                "conversation_id": result.get("conversation_id") or "", "status": str(result.get("status") or ""),
+                                "error": str(result.get("error") or ""), "duration_s": result.get("duration_seconds"),
+                                "num_turns": result.get("num_turns"), "usage": result.get("usage") or {},
+                                "upstream_status_code": result.get("upstream_status_code"), "upstream_headers": result.get("upstream_headers"),
+                                "upstream_not_started": result.get("upstream_not_started") is True,
+                                "fail_stage": result.get("fail_stage") if isinstance(result.get("fail_stage"), str) else "",
                             },
                         )
                     )
@@ -6593,20 +6594,20 @@ class Handler(BaseHTTPRequestHandler):
         gone = [False]
 
         def state(name: str, rc: int, err: str = "") -> dict:
-            return {
-                "rc": rc,
-                "text": "".join(pieces),
-                "reasoning": "".join(reasoning_pieces),
-                "usage": usage,
-                "result": result_ev,
-                "state": name,
-                "err": err,
+            out = {
+                "rc": rc, "text": "".join(pieces),
+                "reasoning": "".join(reasoning_pieces), "usage": usage,
+                "result": result_ev, "state": name, "err": err,
                 "conversation_id": conversation_id,
-                "duration_s": result_ev.get("duration_s"),
-                "num_turns": result_ev.get("num_turns"),
+                "duration_s": result_ev.get("duration_s"), "num_turns": result_ev.get("num_turns"),
                 "tool_events": tool_events,
                 "tool_calls": [],
             }
+            status, headers = extract_upstream_error_meta(result_ev)
+            out.update(upstream_status_code=status, upstream_headers=headers)
+            if result_ev.get("upstream_not_started") is True: out["upstream_not_started"] = True  # noqa: E701
+            if isinstance(result_ev.get("fail_stage"), str): out["fail_stage"] = result_ev["fail_stage"]  # noqa: E701
+            return out
 
         def add_content(text: str) -> None:
             if gone[0] or not text:
@@ -7126,11 +7127,12 @@ class Handler(BaseHTTPRequestHandler):
                     self._registry_job is not None and self._registry_job.cancelled.is_set()
                 )
                 policy = None if cancelled else _build_timeout_policy(t_req_start)
-                if policy is None and client_budget.allow_retry and client_budget.attempt_s:
+                if not cancelled and policy is None and client_budget.allow_retry and client_budget.attempt_s:
                     policy = _TimeoutPolicy(t_req_start, min(IDLE_TIMEOUT_S, client_budget.attempt_s),
                                             T_REQ_BUDGET_S, client_budget.attempt_s)
                 elif policy is not None and client_budget.allow_retry and client_budget.attempt_s:
-                    policy.effective_max_timeout_s = min(policy.effective_max_timeout_s, client_budget.attempt_s)
+                    policy = _TimeoutPolicy(policy.t_req_start, policy.idle_timeout_s, policy.max_timeout_s,
+                                            min(policy.effective_max_timeout_s, client_budget.attempt_s), policy.can_start)
                 allowed, reason = should_allow_retry_attempt(
                     attempt=attempt, cancelled=cancelled, can_start=policy is None or policy.can_start
                 )
@@ -7450,10 +7452,8 @@ class Handler(BaseHTTPRequestHandler):
         if st == "capacity_exhausted":
             return capacity_error_body(detail=out.get("err"))
         if st == "agy_error":
-            status = out.get("upstream_status_code", out.get("status_code"))
-            headers = out.get("upstream_headers", out.get("headers"))
-            return upstream_error_body(out.get("err"), out.get("request_id"),
-                status if type(status) is int else None, headers if isinstance(headers, Mapping) else None)
+            status, headers = extract_upstream_error_meta(out)
+            return upstream_error_body(out.get("err"), out.get("request_id"), status, headers)
         if resilience is None:
             resilience = _new_flag("AGY_BRIDGE_STREAM_RESILIENCE_ENABLED", True)
         has_payload = bool(out.get("text"))

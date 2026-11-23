@@ -1066,6 +1066,7 @@ def _result_ev(
     status: str = "OK",
     error: str = "",
     response: str = "ответ",
+    **meta: object,
 ) -> dict[str, object]:
     result: dict[str, object] = {
         "response": response,
@@ -1075,6 +1076,7 @@ def _result_ev(
     }
     if error:
         result["error"] = error
+    result.update(meta)
     return {"t": t, "op": "stdout", "line": {"event": "result", "result": result}}
 
 
@@ -1823,11 +1825,12 @@ class DeliveredReasoningTests(unittest.TestCase):
             self.assertEqual(turn.out["state"], "agy_error")
             self.assertEqual(turn.reasoning(), "мышление до сбоя квоты")
 
-    def test_tc72_failure_before_any_delivery_is_still_retried(self) -> None:
+    def test_tc72_unproven_failure_before_delivery_is_fail_closed(self) -> None:
         with _Fixture() as fx:
             failing = [
                 _init_ev(0.05),
-                _result_ev(0.2, status="ERROR", error="boom", response=""),
+                _result_ev(0.2, status="ERROR", error="connection refused",
+                           response="", fail_stage="connect", upstream_not_started=True),
                 _exit_ev(0.25, code=1),
             ]
             fine = [_init_ev(0.05), _text_ev(0.1), _result_ev(0.15), _exit_ev(0.2)]
@@ -1838,9 +1841,9 @@ class DeliveredReasoningTests(unittest.TestCase):
 
             fx.patch("_rng", no_pause)
             turn = _run_turn()
-            self.assertEqual(len(fx.spawns()), 2)
-            self.assertEqual(turn.out["state"], "done")
-            self.assertEqual(turn.out["text"], "ответ")
+            # No positive upstream-not-started proof: before-first-byte is uncertain.
+            self.assertEqual(len(fx.spawns()), 1)
+            self.assertEqual(turn.out["state"], "agy_error")
 
 
 class _HttpBridge:
@@ -1864,12 +1867,16 @@ class _HttpBridge:
         _ = _ofn(self.server, "server_close")()
         self.thread.join(10)
 
-    def post(self, body: dict[str, object]) -> tuple[int, dict[str, object]]:
+    def post(
+        self, body: dict[str, object], retry_budget: int | None = None
+    ) -> tuple[int, dict[str, object]]:
         conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=60)
         headers = {
             "Content-Type": "application/json",
             "Authorization": "Bearer " + _str(_bval("AUTH_KEY")),
         }
+        if retry_budget is not None:
+            headers["X-Bridge-Retry-Budget"] = str(retry_budget)
         conn.request(
             "POST", "/v1/chat/completions", body=json.dumps(body), headers=headers
         )
@@ -2279,7 +2286,8 @@ class BreakerAndBudgetTests(unittest.TestCase):
             # hot -> cold fallback тоже стоит 10 десятых; пустой бюджет повтор не даёт
             failing = [
                 _init_ev(0.05),
-                _result_ev(0.2, status="ERROR", error="boom", response=""),
+                _result_ev(0.2, status="ERROR", error="connection refused",
+                           response="", fail_stage="connect", upstream_not_started=True),
                 _exit_ev(0.25, code=1),
             ]
             fine = [_init_ev(0.05), _text_ev(0.1), _result_ev(0.15), _exit_ev(0.2)]
@@ -2291,6 +2299,7 @@ class BreakerAndBudgetTests(unittest.TestCase):
                 tools_count=1,
                 full_prompt="полная история",
                 prompt="новое",
+                client_retry_budget=1,
             )
             turn = _run_turn(ctx)
             self.assertEqual(turn.out["state"], "done")
@@ -3350,7 +3359,8 @@ class ExecuteDrainRetryTests(unittest.TestCase):
         self.assertEqual(out["reasoning"], "мысль-1 мысль-2")
         self.assertEqual(out["err"], "Individual quota reached")
         with _Fixture():
-            for stream, expected_runs in ((True, 1), (False, 2)):
+            # QUOTA is terminal in both streaming and buffered modes.
+            for stream, expected_runs in ((True, 1), (False, 1)):
                 with self.subTest(stream=stream):
                     _StubRun.count.clear()
                     reasoning_out: dict[str, object] = dict(out)
@@ -3379,7 +3389,7 @@ class ExecuteDrainRetryTests(unittest.TestCase):
                     self.assertEqual(len(_StubRun.count), expected_runs)
                     self.assertEqual(result["state"], "agy_error")
                     err = _dict(_ofn(_bval("Handler"), "_error_body")(result))
-                    self.assertEqual(err["type"], "agy_error")
+                    self.assertEqual(err["type"], "quota_exhausted")
 
 
 def _fake_launcher_path() -> str:
@@ -5193,7 +5203,9 @@ class SilentTimeoutPolicyTests(unittest.TestCase):
             "state": "agy_error",
             "rc": 1,
             "text": "",
-            "err": "x",
+            "err": "connection refused",
+            "fail_stage": "connect",
+            "upstream_not_started": True,
             "usage": {},
             "conversation_id": "",
         }
@@ -5209,25 +5221,27 @@ class SilentTimeoutPolicyTests(unittest.TestCase):
             _clean_flags(fx)
             fx.set_env(_FLAG_ENV["extended_timeout_enabled"], "1")
             clock = _clocked(fx)
-            out, seen = self._run_once_policy(fx, clock, [err, ok], [1000.0, 1.0])
+            out, seen = self._run_once_policy(
+                fx, clock, [err, ok], [1000.0, 1.0], {"client_retry_budget": 1}
+            )
             self.assertEqual(out["state"], "done")
             self.assertEqual(seen[-1], 2)
             first, second = seen[0], seen[1]
-            self.assertEqual(_oval(first, "effective_max_timeout_s"), 3594.5)
+            self.assertEqual(_oval(first, "effective_max_timeout_s"), 1800.0)
             # вторая попытка: бюджет НЕ перезапущен, 1000 с уже потрачены
-            self.assertEqual(_oval(second, "effective_max_timeout_s"), 2594.5)
+            self.assertEqual(_oval(second, "effective_max_timeout_s"), 1800.0)
             clock2 = _clocked(fx)
-            out, seen = self._run_once_policy(fx, clock2, [err, ok], [3595.0, 1.0])
+            out, seen = self._run_once_policy(fx, clock2, [err, ok], [3595.0, 1.0], {"client_retry_budget": 1})
             self.assertEqual(seen[-1], 1)  # remaining = 5с <= 5.5 -> 0 новых attempts
             self.assertEqual(out["state"], "agy_error")
             clock3 = _clocked(fx)
             out, seen = self._run_once_policy(
-                fx, clock3, [err, ok], [3593.0, 1.0]
+                fx, clock3, [err, ok], [3593.0, 1.0], {"client_retry_budget": 1}
             )  # остаток 7с: попытка допустима
             self.assertEqual(seen[-1], 2)
             clock4 = _clocked(fx)
             out, seen = self._run_once_policy(
-                fx, clock4, [err, ok], [3594.0, 1.0]
+                fx, clock4, [err, ok], [3594.0, 1.0], {"client_retry_budget": 1}
             )  # остаток 6с: полезное окно < 1с -> новой попытки нет
             self.assertEqual(seen[-1], 1)
 
@@ -6528,7 +6542,9 @@ if mode in ("ok", "text_then_error"):
     emit({"event": "step_update", "step_update": {"step_type": "agent_response", "step_index": 9, "text_delta": "ответ"}})
 status = "ERROR" if mode in ("error", "text_then_error") else "OK"
 emit({"event": "result", "result": {"response": "" if status == "ERROR" else "ответ", "status": status,
-      "error": "boom" if status == "ERROR" else "", "conversation_id": cid,
+      "error": "connection refused" if beh.get("precommit") else ("boom" if status == "ERROR" else ""),
+      "fail_stage": "connect" if beh.get("precommit") else "",
+      "upstream_not_started": beh.get("precommit") is True, "conversation_id": cid,
       "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}}})
 rec["t1"] = time.time()
 save()
@@ -7335,7 +7351,7 @@ class ImageHistoryTests(unittest.TestCase):
 
     def test_hist05_hot_failure_falls_back_to_cold_with_all_files(self) -> None:
         with _ImgEnv() as env:
-            env.write_scen([{"cid": _CID}, {"mode": "error"}, {"mode": "ok"}])
+            env.write_scen([{"cid": _CID}, {"mode": "error", "precommit": True}, {"mode": "ok"}])
             turn1 = [_img_msg(_img_part("image/png", _IMG_RAW_A))]
             turn2 = turn1 + [
                 _txt_msg("assistant", "ок"),
@@ -7344,7 +7360,7 @@ class ImageHistoryTests(unittest.TestCase):
             bridge = _HttpBridge()
             try:
                 _ = bridge.post(_img_body(turn1, tools=True))
-                code, _body = bridge.post(_img_body(turn2, tools=True))
+                code, _body = bridge.post(_img_body(turn2, tools=True), retry_budget=1)
             finally:
                 bridge.close()
             self.assertEqual(code, 200)
@@ -7613,10 +7629,13 @@ class ImageLifecycleTests(unittest.TestCase):
                 with self.subTest(variant=name):
                     _SnapRun.attempts.clear()
                     ctx = _img_ctx(msgs, over=over)
+                    ctx["client_retry_budget"] = 1
                     out = _run_once_direct(
                         ctx,
                         _sequence_execute(
-                            [_scripted_out("agy_error"), _scripted_out("done")]
+                            [_scripted_out("agy_error", err="connection refused",
+                                fail_stage="connect", upstream_not_started=True),
+                             _scripted_out("done")]
                         ),
                     )
                     self.assertEqual(out["state"], "done")
@@ -8023,9 +8042,11 @@ class ImageResourceTests(unittest.TestCase):
                 with self.subTest(budget_tenths=budget):
                     _SnapRun.attempts.clear()
                     setattr(_bridge(), "_retry_tenths", budget)
-                    ctx = _img_ctx(msgs)
+                    ctx = _img_ctx(msgs, over={"client_retry_budget": 1})
                     out = _run_once_direct(
-                        ctx, _sequence_execute([_scripted_out("agy_error")])
+                        ctx, _sequence_execute([_scripted_out("agy_error",
+                            err="connection refused", fail_stage="connect",
+                            upstream_not_started=True)])
                     )
                     self.assertEqual(out["state"], "agy_error")
                     self.assertEqual(len(_SnapRun.attempts), expected)
@@ -12682,8 +12703,10 @@ class AgyBridgeHistoryTruncationResilienceTests(unittest.TestCase):
                 _result_ev(
                     0.2,
                     status="ERROR",
-                    error="502 Server Error: Bad Gateway",
+                    error="ConnectionResetError: 502 Bad Gateway",
                     response="",
+                    fail_stage="connect",
+                    upstream_not_started=True,
                 ),
                 _exit_ev(0.25, code=1),
             ]
@@ -12704,6 +12727,7 @@ class AgyBridgeHistoryTruncationResilienceTests(unittest.TestCase):
                 full_prompt="полная история",
                 prompt="новое",
                 turn_id="turn-1",
+                client_retry_budget=1,
             )
             turn = _run_turn(ctx)
             self.assertEqual(turn.out["state"], "done")
@@ -12734,6 +12758,7 @@ class AgyBridgeHistoryTruncationResilienceTests(unittest.TestCase):
                 full_prompt="полная история",
                 prompt="новое",
                 turn_id="turn-3",
+                client_retry_budget=1,
             )
             turn = _run_turn(ctx)
             self.assertNotEqual(turn.out["state"], "done")
@@ -12766,20 +12791,19 @@ class AgyBridgeHistoryTruncationResilienceTests(unittest.TestCase):
                 turn_id="turn-1",
             )
             turn = _run_turn(ctx)
-            self.assertEqual(turn.out["state"], "done")
+            # По fail-closed контракту неклассифицированный boom не делает cold retry,
+            # но сломанная hot-сессия гарантированно инвалидируется в памяти и на диске.
+            self.assertEqual(turn.out["state"], "agy_error")
             spawns = fx.spawns()
-            self.assertEqual(len(spawns), 2)
+            self.assertEqual(len(spawns), 1)
             self.assertIn("--conversation", spawns[0])
-            self.assertNotIn("--conversation", spawns[1])  # холодный повтор
             self.assertEqual(ctx["conversation_id"], "")
             self.assertIs(ctx["hot_resumed"], False)
             self.assertEqual(ctx["prompt"], "полная история")
-            # Сломанная сессия удалена из памяти и с диска; холодный ход записал новую.
             store = cast("dict[object, dict[str, object]]", _bval("_session_store"))
-            self.assertEqual([entry["cid"] for entry in store.values()], [_CID_B])
+            self.assertNotIn(key, store)
             on_disk = path.read_text(encoding="utf-8")
             self.assertNotIn(_CID, on_disk)
-            self.assertIn(_CID_B, on_disk)
             # Kill-switch транзиентного восстановления: 502 инвалидирует как раньше.
             cast("set[str]", _bval("_in_flight_cids")).clear()  # finally хендлера
             _ = _bfn("_session_commit")(key, _CID)

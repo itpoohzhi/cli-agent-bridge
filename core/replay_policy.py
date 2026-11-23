@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable
 from dataclasses import dataclass, replace
 from typing import Final
 
@@ -82,12 +82,13 @@ def parse_retry_budget(value: object) -> int:
     return parsed if 0 <= parsed <= MAX_RETRIES else 0
 
 
-def parse_retry_budget_header(headers: Mapping[str, object] | None) -> int:
-    """Read the retry budget from a case-insensitive header mapping."""
-    if not isinstance(headers, Mapping):
+def parse_retry_budget_header(headers: object) -> int:
+    """Read the retry budget from a case-insensitive header mapping or HTTPMessage."""
+    items_fn = getattr(headers, "items", None)
+    if not callable(items_fn):
         return 0
     value = next(
-        (item for key, item in headers.items() if key.lower() == "x-bridge-retry-budget"),
+        (item for key, item in items_fn() if str(key).lower() == "x-bridge-retry-budget"),
         None,
     )
     return parse_retry_budget(value)

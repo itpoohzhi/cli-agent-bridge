@@ -24,9 +24,10 @@ _RETRY_AFTER_RE: Final[re.Pattern[str]] = re.compile(
     r"retry[ -]?after\s*[:=]?\s*(\d+(?:\.\d+)?)", re.IGNORECASE
 )
 _SECRET_RE: Final[re.Pattern[str]] = re.compile(
-    r"(authorization\s*[:=]\s*bearer\s+)[^\s,;]+|"
+    r"((?:\"(?:api[_-]?key|apikey|access_token|refresh_token|token|secret|password|authorization|x-api-key)\"|'(?:api[_-]?key|apikey|access_token|refresh_token|token|secret|password|authorization|x-api-key)')\s*[:=]\s*)([\"'])((?:bearer|basic)\s+)?[^\"']*\2|"
+    r"(authorization\s*[:=]\s*(?:bearer|basic)\s+)[^\s,;]+|"
+    r"((?:api[_-]?key|apikey|access_token|refresh_token|token|secret|password|authorization|x-api-key)\s*[:=]\s*)([\"']?)[^\s,;\"']+\6|"
     r"(bearer\s+)[a-z0-9._~+/=-]+|"
-    r"((?:api[_-]?key|token|authorization|secret|password)\s*[:=]\s*)[^\s,;]+|"
     r"(?:sk-[a-z0-9_-]{8,}|ghp_[a-z0-9]{8,}|eyj[a-z0-9_-]+\.[a-z0-9_-]+\.[a-z0-9_-]+)",
     re.IGNORECASE,
 )
@@ -150,6 +151,22 @@ def upstream_error_body(
     return body
 
 
+def extract_upstream_error_meta(
+    out: Mapping[str, object],
+) -> tuple[int | None, Mapping[str, object] | None]:
+    """Prefer non-null canonical metadata, falling back to legacy fields."""
+    status = out.get("upstream_status_code")
+    headers = out.get("upstream_headers")
+    if status is None:
+        status = out.get("status_code")
+    if headers is None:
+        headers = out.get("headers")
+    return (
+        status if type(status) is int else None,
+        dict(headers.items()) if callable(getattr(headers, "items", None)) else None,
+    )
+
+
 def is_precommit_transport_error(error: object) -> bool:
     """Identify transport errors; the caller must separately prove pre-commit facts."""
     return classify_upstream_error(error).category == "TRANSPORT"
@@ -172,9 +189,10 @@ def _retry_after(message: str, headers: Mapping[str, object] | None) -> int | No
 
 
 def _header(headers: Mapping[str, object] | None, name: str) -> object | None:
-    if not isinstance(headers, Mapping):
+    items_fn = getattr(headers, "items", None)
+    if not callable(items_fn):
         return None
-    return next((value for key, value in headers.items() if key.lower() == name), None)
+    return next((value for key, value in items_fn() if str(key).lower() == name), None)
 
 
 def _sanitize_request_id(value: object) -> str:
@@ -183,8 +201,11 @@ def _sanitize_request_id(value: object) -> str:
 
 
 def _redact_secret(match: re.Match[str]) -> str:
-    prefix = (match.group(1) or match.group(2) or "")
-    return prefix + "[REDACTED]"
+    if match.group(1):
+        return f'{match.group(1)}{match.group(2)}{match.group(3) or ""}[REDACTED]{match.group(2)}'
+    if match.group(5):
+        return f'{match.group(5)}{match.group(6)}[REDACTED]{match.group(6)}'
+    return next(group for group in (match.group(4), match.group(7)) if group) + "[REDACTED]"
 
 
 # Short aliases are useful to transports while retaining descriptive public names.

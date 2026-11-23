@@ -7,6 +7,7 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from enum import Enum
 from typing import Final, Protocol
+from core.error_taxonomy import classify_upstream_error
 from core.replay_policy import quota_failover_eligibility
 from core.retry_control import MAX_TOTAL_ATTEMPTS_LIMIT
 from core.route_health_policy import AttemptDecision, RetryBudgetConfig, RetryReason, compute_attempt_decision, validate_retry_config
@@ -50,9 +51,10 @@ def is_route_refusal_status(
     extra_error_types: Iterable[str] = (),
     message_markers: Iterable[str] = (),
 ) -> bool:
-    """Отказ слота: глобальные статусы или per-route расширение по телу ошибки.
+    """Отказ слота: defaults или явно настроенный статус маршрута.
 
-    Расширение действует только для статусов из `extra_statuses` конкретного
+    429 требует `extra_statuses`; квотный переход также требует opt-in и
+    разные непустые quota_group. Расширение действует для статусов конкретного
     маршрута. Если маршрут объявил `extra_error_types` и/или `message_markers`,
     отказом считается только совпадение типа ошибки или маркера в сообщении
     (без захардкоженных провайдерных эвристик ядра: 402 сам по себе и чужие
@@ -60,7 +62,7 @@ def is_route_refusal_status(
     не повторялся другим ключом. Статус-only opt-in (ни типов, ни маркеров)
     считает сам статус из `extra_statuses` явным объявлением отказа слота.
     """
-    if status == 429 or status in DEFAULT_ROUTE_FAILOVER_STATUSES:
+    if status in DEFAULT_ROUTE_FAILOVER_STATUSES:
         return True
     if status not in frozenset(extra_statuses) & ALLOWED_FAILOVER_STATUSES:
         return False
@@ -119,13 +121,7 @@ class RouteFailover:
         )
 
     def is_refusal(self, status: int, body: bytes = b"") -> bool:
-        """Универсальный отказ слота, сужаемый только явным контрактом провайдера.
-
-        Любой не-2xx — кандидат на pre-commit failover. Провайдер вправе объявить,
-        что конкретный статус (например 403 у OpenCode Go) означает отказ слота
-        лишь при совпадении payload-подписи; остальные статусы остаются
-        универсальными, поэтому allowlist статусов не требуется.
-        """
+        """Любой не-2xx — pre-commit кандидат; payload-контракт может сузить статус."""
         if 200 <= status < 300:
             return False
         if status in self.statuses and (self.error_types or self.message_markers):
@@ -469,6 +465,8 @@ class RouteAttemptRunner:
     def _quota_candidate_allowed(self, source: str, candidate: str) -> bool:
         if not isinstance(self._last_error, RouteRefusal) or self._last_error.status_code != 429:
             return True
+        kind, message = parse_upstream_error(self._last_error.response_body)
+        if classify_upstream_error(f"{kind} {message}").category != "QUOTA": return True  # noqa: E701
         current = self._failover_by_backend.get(source, RouteFailover())
         target = self._failover_by_backend.get(candidate, RouteFailover())
         return quota_failover_eligibility(current.quota_group, (target.quota_group,),
