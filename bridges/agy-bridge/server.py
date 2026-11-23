@@ -140,7 +140,7 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from agy_runtime import (  # noqa: E402
-    long_session_config as _lsc, midstream_resilience, slot_and_session,
+    long_session_config as _lsc, midstream_resilience, slot_and_session, sqlite_ro_pool as _ro_pool,
     sse_body_runner, sse_stream_helpers, tool_turn_helpers, turn_usage_finalize as _u_fin, zero_canon_profile,
 )
 from core.correlation_contract import extract_correlation, format_log_corr_suffix  # noqa: E402
@@ -157,7 +157,7 @@ from core.watchdog import (  # noqa: E402
     AdaptiveTimeoutController,
 )
 from core.runtime_build_info import UNKNOWN as BUILD_UNKNOWN, RuntimeBuildInfo  # noqa: E402
-from core import turn_resilience_facade as _TURN_RESILIENCE  # noqa: E402
+from core import timeout_ladder as _tl, turn_resilience_facade as _TURN_RESILIENCE  # noqa: E402
 from core.log_redaction import mask_credential_context, mask_long_tokens, redact_log_text, safe_log_tokens  # noqa: E402
 from core.recovery_flags import (  # noqa: E402
     read_diagnostic_redact_margin_chars, read_diagnostic_window_chars, read_post_call_cutoff_enabled,
@@ -376,63 +376,32 @@ class _BridgeConfig:
 
 def _build_bridge_config() -> _BridgeConfig:
     """Собрать снимок конфигурации из текущего окружения."""
+    try:
+        ladder = _tl.load_timeout_ladder_config(os.environ)
+    except ValueError:
+        if _env_bool(_tl.FLAG_TIMEOUT_LADDER, False):
+            raise
+        ladder = _tl.TimeoutLadderConfig()
     return _BridgeConfig(
         port=_env_int("AGY_BRIDGE_PORT", 9887, 1, 65535),
         max_concurrent=_env_int("AGY_BRIDGE_MAX_CONCURRENT", 32, 1, 128),
-        wal_max_bytes=_env_int(
-            "AGY_BRIDGE_WAL_MAX_BYTES", 16 * 1024 * 1024, 1, 2147483647
-        ),
-        queue_timeout_s=_chain_int(
-            ("AGY_BRIDGE_QUEUE_TIMEOUT_S", "AGY_BRIDGE_QUEUE_TIMEOUT"), 900, 1, 86400
-        ),
-        timeout_s=_chain_int(
-            ("AGY_BRIDGE_TIMEOUT_S", "AGY_BRIDGE_TIMEOUT"), 1800, 1, 86400
-        ),
-        keepalive_s=_chain_float(
-            ("AGY_BRIDGE_KEEPALIVE_S", "AGY_BRIDGE_KEEPALIVE"), 15.0, 0.5, 300.0
-        ),
-        first_token_timeout_s=_chain_float(
-            ("AGY_BRIDGE_FIRST_TOKEN_TIMEOUT_S", "AGY_BRIDGE_FIRST_TOKEN_TIMEOUT"),
-            120.0,
-            5.0,
-            3600.0,
-        ),
+        wal_max_bytes=_env_int("AGY_BRIDGE_WAL_MAX_BYTES", 16 * 1024 * 1024, 1, 2147483647),
+        queue_timeout_s=_chain_int(("AGY_BRIDGE_QUEUE_TIMEOUT_S", "AGY_BRIDGE_QUEUE_TIMEOUT"), 900, 1, 86400),
+        timeout_s=_chain_int(("AGY_BRIDGE_TIMEOUT_S", "AGY_BRIDGE_TIMEOUT"), 1800, 1, 86400),
+        keepalive_s=_chain_float(("AGY_BRIDGE_KEEPALIVE_S", "AGY_BRIDGE_KEEPALIVE"), 15.0, 0.5, 300.0),
+        first_token_timeout_s=(ladder.effective_first_event_s if ladder.enabled else _chain_float(
+            ("AGY_BRIDGE_FIRST_TOKEN_TIMEOUT_S", "AGY_BRIDGE_FIRST_TOKEN_TIMEOUT"), 120.0, 5.0, 3600.0)),
         transcript_poll_s=_chain_float(
-            ("AGY_BRIDGE_TRANSCRIPT_POLL_S", "AGY_BRIDGE_TRANSCRIPT_POLL"),
-            0.05,
-            0.01,
-            10.0,
-        ),
-        req_budget_s=_env_float("AGY_BRIDGE_REQ_BUDGET_S", 3600.0, 10.0, 86400.0),
-        reserve_s=_chain_float(
-            ("AGY_BRIDGE_RESERVE_S", "AGY_BRIDGE_T_RESERVE_S"), 5.5, 0.5, 60.0
-        ),
+            ("AGY_BRIDGE_TRANSCRIPT_POLL_S", "AGY_BRIDGE_TRANSCRIPT_POLL"), 0.05, 0.01, 10.0),
+        req_budget_s=(ladder.safety_cap_s if ladder.enabled else _env_float("AGY_BRIDGE_REQ_BUDGET_S", 3600.0, 10.0, 86400.0)),
+        reserve_s=_chain_float(("AGY_BRIDGE_RESERVE_S", "AGY_BRIDGE_T_RESERVE_S"), 5.5, 0.5, 60.0),
         min_attempt_s=_env_float("AGY_BRIDGE_MIN_ATTEMPT_S", 1.0, 0.1, 300.0),
-        ext_max_timeout_s=_chain_float(
-            ("AGY_BRIDGE_EXT_MAX_TIMEOUT_S", "AGY_TIMEOUT_S"), 3600.0, 10.0, 86400.0
-        ),
+        ext_max_timeout_s=_chain_float(("AGY_BRIDGE_EXT_MAX_TIMEOUT_S", "AGY_TIMEOUT_S"), 3600.0, 10.0, 86400.0),
         ext_idle_timeout_s=_chain_float(
-            (
-                "AGY_BRIDGE_IDLE_TIMEOUT_S",
-                "AGY_IDLE_TIMEOUT_S",
-                "AGY_BRIDGE_IDLE_TIMEOUT",
-            ),
-            1800.0,
-            5.0,
-            86400.0,
-        ),
-        idle_timeout_s=_chain_float(
-            ("AGY_BRIDGE_BASE_IDLE_TIMEOUT_S", "AGY_BRIDGE_IDLE_TIMEOUT"),
-            float(_CORE_IDLE_TIMEOUT_S),
-            5.0,
-            86400.0,
-        ),
-        watchdog_interval_s=_env_float(
-            "AGY_BRIDGE_WATCHDOG_INTERVAL_S",
-            float(_CORE_WATCHDOG_INTERVAL_S),
-            0.5,
-            60.0,
-        ),
+            ("AGY_BRIDGE_IDLE_TIMEOUT_S", "AGY_IDLE_TIMEOUT_S", "AGY_BRIDGE_IDLE_TIMEOUT"), 1800.0, 5.0, 86400.0),
+        idle_timeout_s=(ladder.effective_idle_s if ladder.enabled else _chain_float(
+            ("AGY_BRIDGE_BASE_IDLE_TIMEOUT_S", "AGY_BRIDGE_IDLE_TIMEOUT"), float(_CORE_IDLE_TIMEOUT_S), 5.0, 86400.0)),
+        watchdog_interval_s=_env_float("AGY_BRIDGE_WATCHDOG_INTERVAL_S", float(_CORE_WATCHDOG_INTERVAL_S), 0.5, 60.0),
         kill_term_grace_s=_env_float("AGY_BRIDGE_KILL_TERM_GRACE_S", 2.0, 0.1, 30.0),
         proc_exit_wait_s=_env_float("AGY_BRIDGE_PROC_EXIT_WAIT_S", 0.05, 0.01, 60.0),
         drain_window_s=_chain_float(
@@ -1029,6 +998,7 @@ _sqlite_divergence_count: int = 0
 _sqlite_drain_deadline_count: int = 0
 _sqlite_open_connections: int = 0
 _sqlite_max_open_connections: int = 0
+_sqlite_ro_pool_cached: tuple[_ro_pool.SqliteRoPoolConfig, _ro_pool.SqliteRoPool] | None = None
 _rng: Callable[[], float] = random.random
 
 # Изображения: хеш бинаря agy (кэш по идентичности файла), отдельный от SQLite-флага
@@ -3986,13 +3956,7 @@ def _sqlite_open_ro(path: Path) -> sqlite3.Connection:
     global _sqlite_open_connections, _sqlite_max_open_connections
 
     def connect(uri: str) -> sqlite3.Connection:
-        conn = sqlite3.connect(
-            uri,
-            uri=True,
-            timeout=0.05,
-            isolation_level=None,
-            check_same_thread=False,
-        )
+        conn = sqlite3.connect(uri, uri=True, timeout=0.05, isolation_level=None, check_same_thread=False)
         try:
             _ = conn.execute("PRAGMA query_only = ON")
             _ = conn.execute("PRAGMA busy_timeout = 50")
@@ -4017,9 +3981,7 @@ def _sqlite_open_ro(path: Path) -> sqlite3.Connection:
         conn = connect(uri + "&immutable=1")
     with _sqlite_guard_lock:
         _sqlite_open_connections += 1
-        _sqlite_max_open_connections = max(
-            _sqlite_max_open_connections, _sqlite_open_connections
-        )
+        _sqlite_max_open_connections = max(_sqlite_max_open_connections, _sqlite_open_connections)
     return conn
 
 
@@ -4033,8 +3995,33 @@ def _sqlite_close(conn: sqlite3.Connection) -> None:
         _sqlite_open_connections = max(0, _sqlite_open_connections - 1)
 
 
+def _sqlite_ro_pool() -> _ro_pool.SqliteRoPool | None:
+    """Включённый env RO-пул (AD-002) или None — прежний `_sqlite_open_ro`."""
+    global _sqlite_ro_pool_cached
+    try:
+        config = _ro_pool.load_sqlite_ro_pool_config(os.environ)
+    except ValueError:
+        if _env_bool(_ro_pool.FLAG_SQLITE_RO_POOL, False):
+            raise
+        return None
+    if not config.enabled:
+        return None
+    with _sqlite_guard_lock:
+        if _sqlite_ro_pool_cached is None or _sqlite_ro_pool_cached[0] != config:
+            _sqlite_ro_pool_cached = (config, _ro_pool.SqliteRoPool(config))
+        return _sqlite_ro_pool_cached[1]
+
+
 def _sqlite_max_idx(db_path: Path) -> int | None:
     """Наибольший idx шага в БД (или -1); None — прочитать не удалось."""
+    pool = _sqlite_ro_pool()
+    if pool is not None:
+        try:
+            rows = pool.query_rows(db_path, "SELECT COALESCE(MAX(idx), -1) FROM steps")
+        except sqlite3.Error:
+            return None
+        value = rows[0][0] if rows else None
+        return value if isinstance(value, int) else None
     conn: sqlite3.Connection | None = None
     try:
         conn = _sqlite_open_ro(db_path)
@@ -4522,6 +4509,8 @@ class _TranscriptTail(InterruptionTailState):
             self._active_conn = None
             if conn is not None:
                 _sqlite_close(conn)
+        if (pool := _sqlite_ro_pool()) is not None:
+            pool.release_thread()
         if self.plan.mode in ("LIVE", "SHADOW"):
             _breaker_report(self.probe_gen, self.selects_ok, self.failed)
         if self._owned_cid:
@@ -4915,10 +4904,16 @@ class _TranscriptTail(InterruptionTailState):
         conn: sqlite3.Connection | None = None
         result: tuple[int, int] | None = None
         try:
-            conn = _sqlite_open_ro(self._db_path)
-            with self._conn_lock:
-                self._active_conn = conn
-            result = self._select_rows(conn)
+            if (pool := _sqlite_ro_pool()) is not None:
+                def _bind(c: sqlite3.Connection | None) -> None:
+                    with self._conn_lock:
+                        self._active_conn = c
+                result = pool.run_ro(self._db_path, self._select_rows, on_conn=_bind)
+            else:
+                conn = _sqlite_open_ro(self._db_path)
+                with self._conn_lock:
+                    self._active_conn = conn
+                result = self._select_rows(conn)
             self.last_poll = "ok"
         except sqlite3.Error as exc:
             self.last_poll = "error"
@@ -8174,7 +8169,7 @@ class Server(ThreadingHTTPServer):
     """HTTP-сервер с семафором числа соединений на уровне приёма."""
 
     daemon_threads = True
-    request_queue_size = 64
+    request_queue_size = _env_int("AGY_HTTP_REQUEST_QUEUE_SIZE", 64, 16, 4096)
     allow_reuse_address = True
 
     def __init__(self, *args: Any, **kwargs: Any):

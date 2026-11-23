@@ -89,6 +89,7 @@ from core.passthrough_sliding_window import (
 from core.runtime_env import DynamicFlagSource, bounded_int as _bounded_int
 from core.runtime_env import env_bool, positive_int as _positive_int
 from core.runtime_env import resolve_toolless_tag_policy
+from core.timeout_ladder import FLAG_TIMEOUT_LADDER, TimeoutLadderConfig, load_timeout_ladder_config
 from core.tool_mode import (
     DEFAULT_EMULATE_SPEC,
     NormalizerModeSpec,
@@ -241,6 +242,7 @@ class PassthroughLimits:
     max_keepalive_connections: int = 32
     keepalive_expiry_s: float = 30.0
     nonstream: NonstreamConfig = field(default_factory=NonstreamConfig)
+    timeout_ladder: TimeoutLadderConfig = field(default_factory=TimeoutLadderConfig)
 
     @classmethod
     def from_env(
@@ -250,41 +252,38 @@ class PassthroughLimits:
         env = os.environ if environ is None else environ
         ns = NonstreamConfig.from_env(env)
         pi, pf, bi = _positive_int, _positive_float, _bounded_int
-        c_def = pf(env, ENV_CONNECT_TIMEOUT_S, DEFAULT_CONNECT_TIMEOUT_S)
-        d_pc, d_pd = DEFAULT_MAX_PARALLEL_CALLS, DEFAULT_MAX_PARALLEL_DEPTH
-        d_ap = DEFAULT_ACC_MAX_PROCESS_BYTES
-        d_rr, d_rt = DEFAULT_MAX_REPETITION_REPEATS, DEFAULT_MAX_REPETITION_TOKEN_LEN
-        r_join = "BRIDGE_PASSTHROUGH_READER_JOIN_TIMEOUT_S"
-        r_q = "BRIDGE_PASSTHROUGH_READ_QUEUE_MAX_ENTRIES"
-        e_rg, e_in = (
-            (ENV_REPETITION_GUARD_ENABLED,),
-            (ENV_INVOKE_NORMALIZATION_ENABLED,),
-        )
+        try:
+            ladder = load_timeout_ladder_config(env)
+        except ValueError:
+            if env_bool(env, (FLAG_TIMEOUT_LADDER,), False):
+                raise
+            ladder = TimeoutLadderConfig()
+        on = ladder.enabled
+        c_def = pf(env, ENV_CONNECT_TIMEOUT_S, ladder.connect_timeout_s if on else DEFAULT_CONNECT_TIMEOUT_S)
         return cls(
-            max_keepalive_connections=pi(env, "BRIDGE_MAX_KEEPALIVE_CONNECTIONS", 32),
+            max_keepalive_connections=pi(env, "BRIDGE_PASSTHROUGH_MAX_KEEPALIVE", pi(env, "BRIDGE_MAX_KEEPALIVE_CONNECTIONS", 32)),
             keepalive_expiry_s=pf(env, "BRIDGE_KEEPALIVE_EXPIRY_S", 30.0),
-            max_parallel_calls=pi(env, ENV_MAX_PARALLEL_CALLS, d_pc),
-            max_parallel_depth=pi(env, ENV_MAX_PARALLEL_DEPTH, d_pd),
+            max_parallel_calls=pi(env, ENV_MAX_PARALLEL_CALLS, DEFAULT_MAX_PARALLEL_CALLS),
+            max_parallel_depth=pi(env, ENV_MAX_PARALLEL_DEPTH, DEFAULT_MAX_PARALLEL_DEPTH),
             max_body_bytes=pi(env, ENV_MAX_BODY_BYTES, DEFAULT_MAX_BODY_BYTES),
             accumulator_max_bytes=pi(env, ENV_ACC_MAX_BYTES, DEFAULT_ACC_MAX_BYTES),
-            accumulator_max_keys=pi(env, ENV_ACC_MAX_KEYS, max(DEFAULT_ACC_MAX_KEYS, pi(env, ENV_MAX_PARALLEL_CALLS, d_pc))),
-            accumulator_max_process_bytes=pi(env, ENV_ACC_MAX_PROCESS_BYTES, d_ap),
+            accumulator_max_keys=pi(env, ENV_ACC_MAX_KEYS, max(DEFAULT_ACC_MAX_KEYS, pi(env, ENV_MAX_PARALLEL_CALLS, DEFAULT_MAX_PARALLEL_CALLS))),
+            accumulator_max_process_bytes=pi(env, ENV_ACC_MAX_PROCESS_BYTES, DEFAULT_ACC_MAX_PROCESS_BYTES),
             connect_timeout_s=pf(env, "BRIDGE_CONNECT_TIMEOUT_S", c_def),
-            read_timeout_s=pf(env, ENV_READ_TIMEOUT_S, DEFAULT_READ_TIMEOUT_S),
-            idle_timeout_s=pf(env, "BRIDGE_IDLE_TIMEOUT_S", DEFAULT_IDLE_TIMEOUT_S),
+            read_timeout_s=pf(env, ENV_READ_TIMEOUT_S, ladder.effective_read_chunk_s if on else DEFAULT_READ_TIMEOUT_S),
+            idle_timeout_s=pf(env, "BRIDGE_IDLE_TIMEOUT_S", ladder.effective_idle_s if on else DEFAULT_IDLE_TIMEOUT_S),
             total_timeout_s=pf(env, "BRIDGE_TOTAL_TIMEOUT_S", DEFAULT_TOTAL_TIMEOUT_S),
-            stream_safety_cap_s=pf(env, "BRIDGE_STREAM_SAFETY_CAP_S", 3600.0),
+            stream_safety_cap_s=pf(env, "BRIDGE_STREAM_SAFETY_CAP_S", ladder.safety_cap_s if on else 3600.0),
             heartbeat_interval_s=pf(env, "BRIDGE_SSE_HEARTBEAT_INTERVAL_S", 12.0),
             poll_interval_s=ns.poll_interval_s,
-            reader_join_timeout_s=pf(env, r_join, 0.2),
-            read_queue_max_entries=pi(env, r_q, 1),
-            repetition_max_repeats=bi(env, ENV_REPETITION_MAX_REPEATS, d_rr, 3, 1000),
-            repetition_max_token_len=bi(
-                env, ENV_REPETITION_MAX_TOKEN_LEN, d_rt, 8, 512
-            ),
-            repetition_guard_enabled=env_bool(env, e_rg, False),
-            invoke_normalization_enabled=env_bool(env, e_in, False),
+            reader_join_timeout_s=pf(env, "BRIDGE_PASSTHROUGH_READER_JOIN_TIMEOUT_S", 0.2),
+            read_queue_max_entries=pi(env, "BRIDGE_PASSTHROUGH_READ_QUEUE_MAX_ENTRIES", 1),
+            repetition_max_repeats=bi(env, ENV_REPETITION_MAX_REPEATS, DEFAULT_MAX_REPETITION_REPEATS, 3, 1000),
+            repetition_max_token_len=bi(env, ENV_REPETITION_MAX_TOKEN_LEN, DEFAULT_MAX_REPETITION_TOKEN_LEN, 8, 512),
+            repetition_guard_enabled=env_bool(env, (ENV_REPETITION_GUARD_ENABLED,), False),
+            invoke_normalization_enabled=env_bool(env, (ENV_INVOKE_NORMALIZATION_ENABLED,), False),
             nonstream=ns,
+            timeout_ladder=ladder,
         )
 
 
