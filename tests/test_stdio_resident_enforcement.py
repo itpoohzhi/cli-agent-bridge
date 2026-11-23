@@ -507,6 +507,80 @@ def test_start_maintenance_guards_closed_stop_event_and_thread_state() -> None:
             assert not first_thread.is_alive()
 
 
+def test_drain_and_shutdown_terminates_ready_slot_with_cancel_grace(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """drain_and_shutdown терминирует READY-слот в drain-фазе с cancel_grace_s."""
+    handle = _FakeHandle(pid=7272, pgid=7272, created_at_mono=real_time.monotonic())
+    monkeypatch.setattr(
+        pool_mod.ResidentProcessHandle,
+        "spawn",
+        staticmethod(lambda *args, **kwargs: handle),
+    )
+    monkeypatch.setattr(pool_mod, "get_pgid_rss_bytes", lambda _pgid: 1024)
+
+    pool = ResidentProcessPool(
+        StdioPoolConfig(
+            enabled=True,
+            reap_interval_s=0.05,
+            cancel_grace_s=0.3,
+            shutdown_timeout_s=0.9,
+            lease_wait_s=0.1,
+        )
+    )
+    try:
+        entry = pool.acquire(_key("owner-ready-drain-grace"), lambda: ["echo"], cwd=".")
+        pool.release(entry.slot_id)
+        pool._closed = True
+        asyncio.run(pool.drain_and_shutdown(timeout_s=0.9))
+        assert handle.terminated_calls == [0.3]
+    finally:
+        pool.shutdown()
+
+
+def test_drain_and_shutdown_transitions_leased_slot_to_drain(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """drain_and_shutdown переводит арендованный слот в Drain до ожидания lease."""
+    handle = _FakeHandle(pid=7373, pgid=7373, created_at_mono=real_time.monotonic())
+    monkeypatch.setattr(
+        pool_mod.ResidentProcessHandle,
+        "spawn",
+        staticmethod(lambda *args, **kwargs: handle),
+    )
+    monkeypatch.setattr(pool_mod, "get_pgid_rss_bytes", lambda _pgid: 1024)
+
+    pool = ResidentProcessPool(
+        StdioPoolConfig(
+            enabled=True,
+            reap_interval_s=0.05,
+            cancel_grace_s=0.3,
+            shutdown_timeout_s=0.9,
+            lease_wait_s=0.1,
+        )
+    )
+    try:
+        entry = pool.acquire(_key("owner-leased-drain"), lambda: ["echo"], cwd=".")
+        assert entry.lease_id is not None
+
+        orig_transition = pool._transition
+        seen: list[tuple[str, pool_mod.SlotEvent]] = []
+
+        def _record_transition(
+            slot_entry: pool_mod._SlotEntry,
+            event: pool_mod.SlotEvent,
+        ) -> object:
+            seen.append((slot_entry.slot_id, event))
+            return orig_transition(slot_entry, event)
+
+        monkeypatch.setattr(pool, "_transition", _record_transition)
+        pool._closed = True
+        asyncio.run(pool.drain_and_shutdown(timeout_s=0.3))
+        assert (entry.slot_id, pool_mod.SlotEvent.Drain) in seen
+    finally:
+        pool.shutdown()
+
+
 def test_drain_and_shutdown_closed_with_slot_and_already_closed_empty(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
