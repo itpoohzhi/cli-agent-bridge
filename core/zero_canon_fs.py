@@ -122,6 +122,34 @@ def write_atomic_text_0600(dst: Path, text: str) -> None:
     write_atomic_0600(dst, text.encode("utf-8"))
 
 
+def replace_atomic_0600(dst: Path, data: bytes) -> None:
+    """Атомарно создаёт или обновляет обычный файл `dst` (`0o600`), fail-closed при symlink/каталоге."""
+    if dst.is_symlink():
+        raise OSError(errno.ELOOP, "Refusing symlink destination", os.fspath(dst))
+    if dst.is_dir():
+        raise IsADirectoryError(errno.EISDIR, "Refusing directory destination", os.fspath(dst))
+    tmp = dst.parent / f".tmp_{dst.name}_{uuid.uuid4().hex}"
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(os.fspath(tmp), flags, 0o600)
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "wb") as handle:
+            fd = -1
+            _ = handle.write(data)
+        if dst.is_symlink():
+            raise OSError(errno.ELOOP, "Refusing symlink destination", os.fspath(dst))
+        os.replace(os.fspath(tmp), os.fspath(dst))
+    finally:
+        if fd >= 0:
+            os.close(fd)
+        tmp.unlink(missing_ok=True)
+
+
+def replace_atomic_text_0600(dst: Path, text: str) -> None:
+    """Атомарно создаёт или обновляет UTF-8 файл `dst` (`0o600`), fail-closed при symlink/каталоге."""
+    replace_atomic_0600(dst, text.encode("utf-8"))
+
+
 def prepare_codex_zero_canon_home(base_env: Mapping[str, str], root: str | Path) -> dict[str, str]:
     """Готовит приватный per-turn Codex Zero-Canon HOME (`0o700`), filtered config и nofollow auth (`0o600`)."""
     from core.subbridge_zero_canon import dump_toml, filter_codex_config
