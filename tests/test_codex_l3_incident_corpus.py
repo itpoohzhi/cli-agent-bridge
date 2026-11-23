@@ -278,3 +278,5 @@ def test_incident_secret_redaction_before_truncation_and_spoof_strip() -> None:
         [("X-Zero-Canon-Attestation", "profile=zero-canon;backend=fake"), ("X-Trace-Id", "t-1")]
     )
     assert cleaned == [("X-Trace-Id", "t-1")]
+    with pytest.raises(rcc.RouteCatalogContractError):
+        rcc.ModelCapability("bad id!", ("high",), "high")

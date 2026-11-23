@@ -206,7 +206,8 @@ def test_secret_redaction_and_fs_nofollow_gigarc(tmp_path: Path) -> None:
         assert DUMMY_KEY not in out and DUMMY_JWT not in out and TOOL_ERR in out
 
     mid = build_turn_error(RuntimeError(raw), live_sent=1, max_chars=60)
-    assert mid.status == 200 and mid.code == TOOL_ERR
+    assert mid.status == 200 and mid.code == TOOL_ERR and mid.body["error"]["type"] == "policy_error"
+    assert build_turn_error(RuntimeError("plain upstream error"), live_sent=0).body["error"]["type"] == "upstream_error"
     assert DUMMY_KEY not in mid.sse and DUMMY_JWT not in mid.sse
 
     auth = tmp_path / "auth.json"

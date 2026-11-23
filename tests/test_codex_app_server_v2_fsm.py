@@ -295,3 +295,14 @@ def test_recovery_fsm_pong_receipt_validation() -> None:
     )
     assert st_ok.is_healthy
     assert [e.kind for e in fx_ok] == [REF.MARK_HEALTHY, REF.EMIT_RECOVERY_RECEIPT]
+
+
+def test_fsm_stale_epoch_same_ids_dropped() -> None:
+    """Stale epoch must drop frame even when threadId and turnId match active turn."""
+    s, _, _ = _boot(zero_canon=True)
+    frame = _ntf("item/agentMessage/delta", {"threadId": s.thread_id, "turnId": s.turn_id, "delta": "stale"})
+    s2, fx = _step(s, frame, epoch=s.epoch - 1)
+    assert s2 == s and fx == ()
+    fail_frame = _ntf("turn/completed", {"threadId": s.thread_id, "turn": {"id": s.turn_id, "status": "failed", "error": {"message": "boom"}}})
+    s_err, _ = _step(s, fail_frame)
+    assert s_err.phase is PH.FAILED and s_err.error_message == "boom"
