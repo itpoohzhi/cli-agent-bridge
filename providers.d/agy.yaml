@@ -29,7 +29,7 @@ family_rule:
   type: prefix
   prefix:
     verified: true
-    map: {gemini-: Google}
+    map: {gemini-: Google, claude-: Anthropic}
 models_overrides:
   gemini-3.8-flash:
     upstream_model: gemini-3.8-flash
@@ -105,6 +105,26 @@ models_overrides:
     max_tokens: 65536
     input: [text, tools]
     images: {cli_registry: implicit_supported, status: unverified, method: null, proof: null}
+  claude-sonnet-5-5:
+    name: Claude Sonnet 5.5 (AGY bridge)
+    efforts: ['off']
+    default_effort: 'off'
+    context_window: 1000000
+    max_tokens: 128000
+    input: [text]
+    images: {cli_registry: explicit_unsupported, status: unsupported, method: null, proof: "not image-verified; text-only"}
+    route_weight: 0
+    route_priority: 20
+  claude-opus-5-5:
+    name: Claude Opus 5.5 (AGY bridge)
+    efforts: ['off']
+    default_effort: 'off'
+    context_window: 1000000
+    max_tokens: 128000
+    input: [text]
+    images: {cli_registry: explicit_unsupported, status: unsupported, method: null, proof: "not image-verified; text-only"}
+    route_weight: 0
+    route_priority: 20
 params:
   effort_field: reasoning_effort
   adaptive_whitelist: [reasoning_effort, thinking, temperature, top_p, max_tokens, max_completion_tokens, tools, tool_choice]

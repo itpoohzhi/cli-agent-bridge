@@ -951,6 +951,27 @@
       "max_tokens": 128000,
       "images": {
         "status": "unverified"
+      },
+      "routing": {
+        "algorithm": "weighted-sha256-v1",
+        "enabled": true,
+        "catalog_hash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "legacy_backend": "claude-p",
+        "disabled_backend": "claude-p",
+        "routes": [
+          {
+            "route_id": "agy",
+            "backend": "agy",
+            "weight": 0,
+            "priority": 20
+          },
+          {
+            "route_id": "claude-p",
+            "backend": "claude-p",
+            "weight": 0,
+            "priority": 10
+          }
+        ]
       }
     },
     {
@@ -968,6 +989,27 @@
       "max_tokens": 128000,
       "images": {
         "status": "unverified"
+      },
+      "routing": {
+        "algorithm": "weighted-sha256-v1",
+        "enabled": true,
+        "catalog_hash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "legacy_backend": "claude-p",
+        "disabled_backend": "claude-p",
+        "routes": [
+          {
+            "route_id": "agy",
+            "backend": "agy",
+            "weight": 0,
+            "priority": 20
+          },
+          {
+            "route_id": "claude-p",
+            "backend": "claude-p",
+            "weight": 0,
+            "priority": 10
+          }
+        ]
       }
     },
     {
@@ -1179,7 +1221,6 @@
         "low",
         "medium",
         "high",
-        "xhigh",
         "max"
       ],
       "default_effort": "high",
@@ -1196,7 +1237,7 @@
         "disabled_backend": "codex",
         "routes": [
           {
-            "route_id": "codex-app-server-v2",
+            "route_id": "codex",
             "backend": "codex",
             "weight": 0,
             "priority": 10
@@ -1233,7 +1274,7 @@
         "disabled_backend": "codex",
         "routes": [
           {
-            "route_id": "codex-app-server-v2",
+            "route_id": "codex",
             "backend": "codex",
             "weight": 0,
             "priority": 10

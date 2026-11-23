@@ -70,6 +70,37 @@ def _load_bridge() -> Any:
 srv = _load_bridge()
 
 
+def test_request_id_strict_allowlist_and_generation() -> None:
+    assert srv._request_id({"X-Request-Id": "safe-id_1.2"}) == "safe-id_1.2"
+    for raw in ("foo bar", "a:b", "a\r\nInjected: yes", "x" * 65, ""):
+        value = srv._request_id({"X-Request-Id": raw})
+        assert re.fullmatch(r"req_[0-9a-f]{16}", value)
+        if raw:
+            assert raw not in value
+
+
+def test_done_log_contains_request_id_and_latency_metrics() -> None:
+    handler = srv.Handler.__new__(srv.Handler)
+    handler._request_id = "safe-id"
+    handler._last_queue_wait_ms = 7
+    now = time.monotonic()
+    handler._metric_run = SimpleNamespace(
+        started=now - 0.1,
+        spawn_ms=3,
+        first_event_at=now - 0.09,
+        first_reasoning_at=now - 0.08,
+        first_content_at=now - 0.07,
+        stream_chunks=2,
+    )
+    lines: list[str] = []
+    with mock.patch.object(srv, "_log", lines.append):
+        handler._log_done("model", {"rc": 0, "state": "done", "text": "ok"}, now - 0.2, "tag")
+    line = lines[-1]
+    assert line.startswith("done req_id=safe-id model=model")
+    for field in ("queue_wait_ms", "spawn_ms", "first_event_ms", "ttft_reasoning_ms", "ttfc_ms", "gen_ms", "stream_chunks"):
+        assert re.search(rf"\b{field}=(?:\d+|-)\b", line)
+
+
 def test_err_summary_redacts_before_truncation() -> None:
     secrets = [prefix + "z" * 40 for prefix in ("sk-", "AIza", "ghp_", "")]
     for secret in [*secrets, "api_key=short-private-value"]:
@@ -2607,7 +2638,7 @@ def _done_lines(call: Callable[[], object]) -> list[str]:
     buffer = io.StringIO()
     with mock.patch.object(sys, "stderr", buffer):
         _ = call()
-    return [line for line in buffer.getvalue().splitlines() if " done model=" in line]
+    return [line for line in buffer.getvalue().splitlines() if " done req_id=" in line]
 
 
 class ExitLogAndHealthTests(unittest.TestCase):
@@ -4016,6 +4047,9 @@ def _pump_queue(
             stdout=io.BytesIO(payload), wait=lambda timeout=None: 0
         ),
         "q": queue.Queue(),
+        "first_event_at": None,
+        "first_reasoning_at": None,
+        "stream_chunks": 0,
         "_text_seen": {},
         "_stdout_step_accum": {},
         "_tail": tail,
@@ -9543,7 +9577,7 @@ class StepScopedUsageFallbackTests(unittest.TestCase):
             resolved = _dict(_dict(result)["usage_resolved"])
             self.assertEqual(_wire(resolved)["prompt_tokens"], 1552662 // 204)
             self.assertEqual(_dict(result)["usage"], dict(_RAW_CUMULATIVE))
-            done_lines = [ln for ln in text.splitlines() if " done model=" in ln]
+            done_lines = [ln for ln in text.splitlines() if " done req_id=" in ln]
             self.assertEqual(len(done_lines), 1)
             self.assertIn("usage_source=cumulative_estimate", done_lines[0])
             self.assertIn("prompt=7611", done_lines[0])
@@ -9625,7 +9659,7 @@ class StepScopedUsageHttpTests(unittest.TestCase):
             self.assertEqual(max(0, 59286 - 56849) + 56849, 59286)
             self.assertLessEqual(59286, _USAGE_WINDOW)
             for text in (json_log, sse_log):  # лог done == wire usage
-                done = [ln for ln in text.splitlines() if " done model=" in ln]
+                done = [ln for ln in text.splitlines() if " done req_id=" in ln]
                 self.assertEqual(len(done), 1)
                 self.assertIn("usage_source=last_step", done[0])
                 self.assertIn("step_idx=3", done[0])
@@ -9728,7 +9762,7 @@ class StepScopedUsageHttpTests(unittest.TestCase):
             self.assertEqual(code, 502)
             self.assertNotIn("usage", body)
             self.assertEqual(_dict(body["error"])["type"], "agy_error")
-            done = [ln for ln in text.splitlines() if " done model=" in ln]
+            done = [ln for ln in text.splitlines() if " done req_id=" in ln]
             self.assertIn("state=agy_error", done[0])
             self.assertIn("usage_source=result", done[0])
             self.assertIn("reason=not_success", done[0])
@@ -15021,7 +15055,7 @@ def test_w2b_run_once_defer_done_log_and_legacy_default() -> None:
                     _ctx(), _text_sink, _tool_sink, _text_sink, None, **named
                 )
             assert out["state"] == "done"
-            assert sum("done model=" in line for line in logs) == (not deferred)
+            assert sum("done req_id=" in line for line in logs) == (not deferred)
 
 
 def _w2b_extended_execute(handler, manual, clock, caps):
@@ -15061,7 +15095,7 @@ def test_w2b_runner_final_log_extended_graceful_and_fail_closed(
         fx.set_env("AGY_EXTENDED_TIMEOUT_ENABLED", "1")
         fx.set_env("AGY_GRACEFUL_TIMEOUT_ON_PARTIAL", "1")
         out = runner.attempt(0, 300)
-    done = [line for line in logs if "done model=" in line]
+    done = [line for line in logs if "done req_id=" in line]
     assert caps == [1300]
     assert (out["state"], out["rc"], out["text"]) == ("timeout", 124, "")
     assert (srv.Handler._error_body(out)["code"], len(done)) == (504, 1)

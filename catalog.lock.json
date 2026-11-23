@@ -1,15 +1,15 @@
 {
-  "compiled_at": "2026-11-23T15:26:32+0300",
+  "compiled_at": "2026-11-23T21:51:11+0300",
   "compiler_version": 1,
-  "fleet_sha256": "0132e2102c320d0acc7c2118aeead5f7a64160415fc08f450527df996773cd45",
+  "fleet_sha256": "dd9ccc122262b4802c7ed26262402156adfaa258d5440c95eb059ef79e1f7d33",
   "inputs": {
     "discovery_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
     "manifests": {
-      "_fleet.yaml": "3c859dc840969dc361080e15e020a3183b6c04681a4aaa39e59c099f542cb6ff",
+      "_fleet.yaml": "52a73ffeedc5b77e10c61f198186639ba0dabdd8f2b81f9dc10f473a1038736a",
       "agy-passthrough.yaml": "7a05b980065274efc347c8c7b6bcce95c58a01954ac4b53083ab840d0118915f",
-      "agy.yaml": "f3fd34b0964e1942c2bc61cdbf536a27bc6d3c224b5cd426b8677fc1cec4eab6",
+      "agy.yaml": "b469a3321a89a32e65a219c0de5e924ed77bf4b5a6000561b25a5e4523a06917",
       "claude-p.yaml": "8ac948e1049b2ca703b010f4f54a5bec01d334caf75fd805f54fef47561246f7",
-      "codex.yaml": "62caf30d9ce2f621f35d41e3ff3fb5d2066fe0e78190097cf27956b86babc7b1",
+      "codex.yaml": "e298517b1e092d62c100cdd8bb8c5710ff848d2940ca3ef06597ae886ec77581",
       "deepseek-direct.yaml": "cd2e158fdebdc918910d2a99650b0bd9613fab3743ba93e7b698df544d2f20c9",
       "droid.yaml": "d2e2381093c695824123749e302d57028a113b7a522d7b29a8cdcc6b1c661e47",
       "muse.yaml": "5e7b7200e37d0bf99afd88f59a55239736617a29d096ae6729f8273bf05a81a6",
@@ -24,7 +24,7 @@
       "opencode-resident.yaml": "26bb3cdf0249498e7974181d77265a4db3774dad9ff92dd9e00ca1eff7b08c22",
       "opencode-zen.yaml": "9239b0e1c543c23037f5407b6c64a0db04735d092ba7ccc53d197f83f91d1636"
     },
-    "manifests_sha256": "efe64ae248755c3c2b13ae2aa8f8a4292c96d68ec3a3772eb8a7343a3854c376"
+    "manifests_sha256": "8511e2e6e56de0f57984b0de99ef40b2d410754ad496b49b8dfc5aa0fc35b74b"
   },
   "models": {
     "beam-free": {
@@ -68,7 +68,11 @@
       "status": "quarantine"
     },
     "claude-opus-5-5": {
-      "alternates": [],
+      "alternates": [
+        {
+          "provider": "agy"
+        }
+      ],
       "efforts_proven": [],
       "family": "Anthropic",
       "family_source": "owned_by",
@@ -81,6 +85,9 @@
     },
     "claude-sonnet-5-5": {
       "alternates": [
+        {
+          "provider": "agy"
+        },
         {
           "provider": "droid"
         }
