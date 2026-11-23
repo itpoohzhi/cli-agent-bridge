@@ -668,9 +668,12 @@ class EnsureSymlinkTests(CleanHomeFixture):
 
 
 class LaunchEnvTests(CleanHomeFixture):
-    def test_launch_env_forwards_request_id_without_overwriting_parent(self) -> None:
+    def test_launch_env_request_id_overrides_parent(self) -> None:
         with mock.patch.dict(os.environ, {"AGY_REQUEST_ID": "parent-id"}):
-            env = self.srv._launch_env(req_id="request-id")
+            env = self.srv._launch_env(req_id="req_fresh1")
+        self.assertEqual(env["AGY_REQUEST_ID"], "req_fresh1")
+        with mock.patch.dict(os.environ, {"AGY_REQUEST_ID": "parent-id"}):
+            env = self.srv._launch_env(req_id="")
         self.assertEqual(env["AGY_REQUEST_ID"], "parent-id")
 
     def test_launch_env_values(self) -> None:

@@ -1782,7 +1782,7 @@ def _launch_env(zero_canon: bool = False, req_id: str = "") -> dict:
     env["BRIDGE_ZERO_CANON"] = "1"
     env["BROWSER"] = "/usr/bin/false"
     if req_id:
-        env.setdefault("AGY_REQUEST_ID", req_id)
+        env["AGY_REQUEST_ID"] = req_id
     return _lsc.apply_direct_mode_policy(env, config_path=DYNAMIC_CONFIG_PATH)
 
 
@@ -6496,11 +6496,10 @@ class Handler(BaseHTTPRequestHandler):
             keepalive=keepalive,
             keepalive_interval_s=_lsc.queue_keepalive_interval_s(config_path=DYNAMIC_CONFIG_PATH),
         )
-        outcome, _wait_ms = acquire_slot_timed(
+        outcome, wait_ms = acquire_slot_timed(
             slots, max(0.0, deadline - time.monotonic()), self._job_client_gone, opts
         )
-        # Admission latency is measured from HTTP ingress, not merely semaphore polling.
-        self._last_queue_wait_ms = int((time.monotonic() - float(t_req_start)) * 1000)
+        self._last_queue_wait_ms = int(wait_ms)
         if dict(ok=True).get(outcome, False):
             _maybe_checkpoint_sqlite_wal()
             return ""
@@ -6853,7 +6852,8 @@ class Handler(BaseHTTPRequestHandler):
         wall_ms = int((time.monotonic() - t0) * 1000)
 
         def elapsed(at: object) -> str:
-            return str(int((at - run.started) * 1000)) if run is not None and isinstance(at, (int, float)) else "-"
+            started = getattr(run, "started", None) if run is not None else None
+            return str(int((at - started) * 1000)) if isinstance(at, (int, float)) and isinstance(started, (int, float)) else "-"
 
         ttfc = elapsed(getattr(run, "first_content_at", None))
         gen_ms = str(max(0, wall_ms - int(ttfc))) if ttfc != "-" else "-"
