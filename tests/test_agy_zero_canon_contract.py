@@ -258,3 +258,66 @@ def test_server_run_uses_zero_canon_flags_home_and_kill_switch(tmp_path: Path, m
     assert "--disable-slash-commands" not in cmd_std
     assert "--settings" not in cmd_std
     assert env_std["HOME"] == str(clean_home.resolve())
+
+
+def test_prepare_zc_home_repeated_calls_overwrite_settings_and_auth_and_reject_symlink(
+    tmp_path: Path,
+) -> None:
+    """Повторный prepare_zc_home() обязан атомарно обновлять settings.json/auth без FileExistsError."""
+    import os
+    import time
+
+    from core import zero_canon_fs as zfs
+
+    real_home = tmp_path / "real-home"
+    real_cli = real_home / ".gemini" / "antigravity-cli"
+    real_cli.mkdir(parents=True)
+    settings_src = real_cli / "settings.json"
+    token_src = real_cli / "antigravity-oauth-token"
+    settings_src.write_text('{"theme": "dark", "mcpServers": {"bad": {}}}', encoding="utf-8")
+    token_src.write_text("token-v1", encoding="utf-8")
+
+    clean_home = tmp_path / "runtime" / "agy-home"
+    mgr = zcp.AgyZeroCanonProfileManager(real_home, clean_home)
+
+    # 1st call creates agy-home-zc/settings.json and auth
+    zc_home = mgr.prepare_zc_home()
+    zc_cli = zc_home / ".gemini" / "antigravity-cli"
+    assert (zc_cli / "settings.json").is_file()
+    assert (zc_cli / "antigravity-oauth-token").read_text(encoding="utf-8") == "token-v1"
+
+    # Update source settings and auth with newer mtime, then invoke prepare_zc_home() a 2nd time
+    settings_src.write_text('{"theme": "light", "mcpServers": {"bad": {}}}', encoding="utf-8")
+    token_src.write_text("token-v2-updated", encoding="utf-8")
+    future = time.time() + 10.0
+    os.utime(token_src, (future, future))
+
+    mgr.prepare_zc_home()
+    assert (zc_cli / "antigravity-oauth-token").read_text(encoding="utf-8") == "token-v2-updated"
+    assert (zc_cli / "settings.json").stat().st_mode & 0o777 == 0o600
+    parsed = json.loads((zc_cli / "settings.json").read_text(encoding="utf-8"))
+    assert parsed["theme"] == "light"
+    assert parsed["mcpServers"] == {}
+
+    # Reject pre-existing symlink, directory, or symlinked parent directory
+    sym_target = tmp_path / "outside.txt"
+    sym_target.write_text("keep", encoding="utf-8")
+    sym = zc_cli / "sym-test.json"
+    sym.symlink_to(sym_target)
+    with pytest.raises(OSError):
+        zfs.replace_atomic_0600(sym, b"overwrite")
+    assert sym_target.read_text(encoding="utf-8") == "keep"
+
+    dir_dst = zc_cli / "dir-test"
+    dir_dst.mkdir()
+    with pytest.raises(IsADirectoryError):
+        zfs.replace_atomic_0600(dir_dst, b"overwrite")
+
+    real_parent = tmp_path / "outside-dir"
+    real_parent.mkdir()
+    sym_parent = zc_cli / "sym-parent"
+    sym_parent.symlink_to(real_parent)
+    with pytest.raises(OSError):
+        zfs.replace_atomic_0600(sym_parent / "file.json", b"overwrite")
+    assert not (real_parent / "file.json").exists()
+

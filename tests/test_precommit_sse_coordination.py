@@ -23,9 +23,10 @@ _FIELDS = (
     "tool_rollback_enabled max_retries retry_total_budget_s retry_reserve_s "
     "retry_min_attempt_s backoff_base_s backoff_cap_s backoff_jitter_ratio "
     "first_event_timeout_s precommit_flush_s passthrough_flush_s early_poll_interval_s "
-    "cross_hop_margin_s ledger_max_entities readonly_tools mutating_tools"
+    "cross_hop_margin_s ledger_max_entities readonly_tools mutating_tools "
+    "sliding_activity_window_enabled sliding_idle_timeout_s"
 ).split()
-_FLAGS = _FIELDS[4:8]
+_FLAGS = _FIELDS[4:8] + ["sliding_activity_window_enabled"]
 
 class _Sink:
     accepts_presend_errors, error_type, client_gone = False, "", False
@@ -89,10 +90,10 @@ def _proxy(hop, handler):
               accepts_presend_errors=False, error_type="")
     _call(hop[0], sink, hop[1])
 
-def test_config_23_neutral_params_and_four_flags_default_false(monkeypatch, tmp_path):
+def test_config_25_neutral_params_and_five_flags_default_false(monkeypatch, tmp_path):
     rt = importlib.import_module("core.stream_resilience_runtime")
     config = rt.StreamResilienceConfig.from_env({})
-    assert {f.name for f in fields(config)} == set(_FIELDS) and len(_FIELDS) == 23
+    assert {f.name for f in fields(config)} == set(_FIELDS) and len(_FIELDS) == 25
     assert all(getattr(config, flag) is False for flag in _FLAGS)
     assert (config.first_event_timeout_s, config.idle_timeout_s) == (120, 300)
     assert (config.retry_total_budget_s, config.ledger_max_entities) == (1020, 512)
@@ -129,6 +130,31 @@ def test_cross_hop_timeout_validator_and_default_off_preservation(enabled):
         with pytest.raises(ValueError):
             p.validate_cross_hop_timeouts(
                 replace(cfg, retry_total_budget_s=921.499), hop="backend")
+
+
+def test_cross_hop_sliding_activity_window_contract():
+    p = importlib.import_module("core.stream_resilience_policy")
+    rt = importlib.import_module("core.stream_resilience_runtime")
+    old = rt.StreamResilienceConfig.from_env({})
+    cfg = replace(old, midstream_retry_enabled=True, idle_timeout_s=1050,
+                  first_event_timeout_s=300, passthrough_read_timeout_s=330)
+    if hasattr(old, "sliding_activity_window_enabled"):
+        cfg = replace(cfg, sliding_activity_window_enabled=True,
+                      sliding_idle_timeout_s=300)
+    assert getattr(cfg, "sliding_activity_window_enabled", False) is True
+    sliding_idle = getattr(cfg, "sliding_idle_timeout_s", 300)
+    assert cfg.first_event_timeout_s <= sliding_idle < cfg.passthrough_read_timeout_s
+    assert cfg.retry_total_budget_s + 30 <= cfg.idle_timeout_s
+    for hop in ("passthrough", "backend"):
+        p.validate_cross_hop_timeouts(cfg, hop=hop)
+    with pytest.raises(ValueError):
+        p.validate_cross_hop_timeouts(
+            replace(cfg, passthrough_read_timeout_s=sliding_idle), hop="passthrough")
+    with pytest.raises(ValueError):
+        p.validate_cross_hop_timeouts(
+            replace(cfg, idle_timeout_s=cfg.retry_total_budget_s + 29.999),
+            hop="passthrough")
+
 
 @pytest.mark.parametrize("threshold", [15.0, 20.0])
 def test_early_commit_single_writer_keepalive_and_disconnect(threshold):

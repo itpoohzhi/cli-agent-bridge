@@ -9,6 +9,7 @@ from decimal import ROUND_FLOOR, Decimal
 from typing import NoReturn, Protocol, TypeGuard, cast, final
 
 import core.route_health_policy as routes
+import core.stream_activity_policy as activity
 from core.stream_interruption_recovery import is_transient_stream_interruption
 
 AttemptDecision = routes.AttemptDecision
@@ -61,6 +62,9 @@ def effective_attempt_budget_s(config: RetryBudgetConfig, attempt_index: int,
     decision = compute_effective_attempt_budget(
         config, attempt_index, elapsed_s, required_floor_s, backoff_cap_s )
     return decision.attempt_budget_s
+SlidingBudgetInput = activity.SlidingBudgetInput
+def effective_activity_attempt_budget_s(value: SlidingBudgetInput) -> float:
+    return activity.compute_sliding_attempt_budget_s(value)
 class CrossHopConfig(Protocol):
     first_event_timeout_s: float
     cross_hop_margin_s: float
@@ -72,17 +76,24 @@ class CrossHopConfig(Protocol):
     passthrough_read_timeout_s: float
     midstream_retry_enabled: bool
     max_retries: int
+    sliding_activity_window_enabled: bool
+    sliding_idle_timeout_s: float
 def validate_cross_hop_timeouts(config: CrossHopConfig, *, hop: str) -> None:
     c = config
     floor = c.first_event_timeout_s + c.cross_hop_margin_s
     idle_floor = ( c.retry_total_budget_s + c.cross_hop_margin_s
         if c.midstream_retry_enabled else floor )
+    sliding = getattr(c, "sliding_activity_window_enabled", False)
+    sliding_idle = getattr(c, "sliding_idle_timeout_s", 0.0)
+    sliding_ok = not sliding or all((sliding_idle > 0,
+        c.first_event_timeout_s <= sliding_idle < c.passthrough_read_timeout_s))
     checks = { "passthrough": lambda: all(
-            (c.idle_timeout_s >= idle_floor, c.passthrough_read_timeout_s >= floor) ),
+            (c.idle_timeout_s >= idle_floor, c.passthrough_read_timeout_s >= floor,
+             sliding_ok) ),
         "backend": lambda: bool(effective_attempt_budget_s(RetryBudgetConfig(
             c.retry_total_budget_s, c.retry_reserve_s, c.retry_min_attempt_s,
             c.max_retries + 1), 0, 0, c.first_event_timeout_s, c.backoff_cap_s)
-            if c.midstream_retry_enabled else True)}
+            if c.midstream_retry_enabled else True) and sliding_ok}
     check = checks.get(hop, lambda: raise_error(ValueError("unknown hop")))
     if not check():
         raise_error(ValueError("cross-hop timeout horizon is too short"))

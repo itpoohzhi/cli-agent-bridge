@@ -20,7 +20,8 @@ from core.route_attempts import BRIDGE_OWNER, STATELESS_REPLAY_ENDPOINTS, Attemp
 from core.route_eligibility import EligibilityFacts, request_snapshot, route_eligible
 from core.route_health_policy import RetryBudgetConfig, compute_attempt_decision
 from core.routing_contract import ROUTING_ALGORITHM, PreSendTransientError, parse_routes
-from core.routing_weights_runtime import base_model_routing as _model_routing, effective_model_routing
+from core.routing_weights_runtime import base_model_routing as _model_routing  # noqa: F401
+from core.routing_weights_runtime import effective_model_routing
 from core.runtime_env import NumSpec, parse_number
 from core.transport_credentials import credential_ready
 from core.transport_routing import route_order

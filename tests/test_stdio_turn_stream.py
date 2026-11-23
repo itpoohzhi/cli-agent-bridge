@@ -5,13 +5,14 @@ from __future__ import annotations
 import re
 
 from core.stdio_resident.protocol_driver import DecodedChunk
-from core.stdio_resident.turn_stream import TurnStreamAssembler
+from core.stdio_resident.turn_stream import StepBoundary, TurnStreamAssembler
 
 
 def test_assembler_separates_consecutive_steps() -> None:
     assembler = TurnStreamAssembler()
 
     first = assembler.process_chunk(DecodedChunk(text="First step."))
+    _ = assembler.process_chunk(StepBoundary())
     second = assembler.process_chunk(DecodedChunk(text="Second step."))
     combined = first.content + second.content
 
