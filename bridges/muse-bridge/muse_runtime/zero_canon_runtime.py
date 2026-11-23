@@ -120,6 +120,14 @@ def prepare_muse_zero_canon_home(
         for base in (zc_home, *targets):
             for name in _FORBIDDEN_NAMES:
                 remove_entry(base / name)
+        if sys.platform == "darwin":
+            kc_src = source_home / "Library" / "Keychains"
+            if kc_src.is_dir():
+                lib_dir = zc_home / "Library"
+                ensure_private_dir(lib_dir, 0o700)
+                kc_dst = lib_dir / "Keychains"
+                if not kc_dst.exists() and not kc_dst.is_symlink():
+                    os.symlink(kc_src, kc_dst)
         return zc_resolved
 
 
@@ -197,13 +205,19 @@ def prepare_muse_launch(
     """Готовит `(cmd, env, cwd)` для `Run`/`ServeRun` с учётом Zero-Canon."""
     env = dict(os.environ if base_env is None else base_env)
     env.setdefault("PATH", DEFAULT_PATH)
+    env.setdefault("MUSE_NO_AUTO_UPDATE", "1")
     env.pop("META_API_KEY", None)
     active = ctx if ctx is not None else _ACTIVE_ZC.get()
     if active is None or not active.enabled:
         return list(cmd), env, workdir
+    orig_home = Path(env.get("HOME") or str(Path.home()))
+    muse_bin = env.get("MUSE_BIN") or env.get("MUSE_BIN_PATH") or str(orig_home / ".local" / "bin" / "muse")
     zc_cwd = active.zc_cwd
     ensure_private_dir(zc_cwd, 0o700)
     env = sanitize_zero_canon_env(env, active.zc_home)
+    env["MUSE_BIN"] = muse_bin
+    env["MUSE_BIN_PATH"] = muse_bin
+    env["MUSE_NO_AUTO_UPDATE"] = "1"
     env["BRIDGE_ZERO_CANON"] = "1"
     new_cmd = apply_muse_preset_empty(cmd)
     for idx, token in enumerate(new_cmd[:-1]):

@@ -167,7 +167,15 @@ class MuseMspDriver(StdioProtocolDriver):
         model_id = str(ctx.get("model_id") or ctx.get("model") or self._config.get("model_id") or self._config.get("model") or "muse-wonder-1.0")
         approval_mode = str(ctx.get("approval_mode") or self._config.get("approval_mode") or "denyUnmatched")
         req_id = self._allocate_id()
-        payload = build_session_start_msg(self._ensure_session_id(turn_context, True), model_id, approval_mode, uuid7(), req_id)
+        is_zero_canon = str(ctx.get("review_profile") or "").strip().lower() == "zero-canon"
+        payload = build_session_start_msg(
+            self._ensure_session_id(turn_context, True),
+            model_id,
+            approval_mode,
+            uuid7(),
+            req_id,
+            clear_developer_prompt=is_zero_canon,
+        )
         return self._send_and_wait_ack(handle, payload, lambda p: p.get("id") == req_id, timeout_s)
 
     def encode_turn(self, prompt: str, turn_context: Mapping[str, Any] | None = None) -> bytes:

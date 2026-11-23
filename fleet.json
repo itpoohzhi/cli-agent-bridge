@@ -436,7 +436,7 @@
       "max_concurrent": 64,
       "wrapper": "~/.config/muse-launch/muse-cli.sh",
       "technical_ref": {
-        "version": "1.4.23",
+        "version": "1.4.25-R9361.1",
         "binary_sha256": "ffb95b823e2a71f49ce98f9ddcb7cd7c731b77615aae9f5f253819c69453079f",
         "binary_path": "~/.local/bin/muse"
       },
