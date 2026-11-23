@@ -5,11 +5,14 @@ from __future__ import annotations
 import hashlib
 import math
 import os
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from typing import Any
 
+from core.adaptive_admission import OutcomeKind
 from core.chat_key import resolve_chat_key
 from core.session_continuity import session_key_for
+
+from .state_hygiene_policy import DisconnectOutcome, OrphanConfig, OrphanFsm
 
 SRC_HEADER_SUBAGENT_ID = "x-subagent-id"
 _TRUTHY = frozenset({"1", "true", "yes", "on"})
@@ -150,6 +153,21 @@ def health_queue_fields(slots: Any) -> dict[str, int]:
     }
 
 
+_DEFAULT_ORPHAN_FSM = OrphanFsm()
+
+
+def decide_disconnect_outcome(
+    tools_count: int,
+    ttfc_received: bool,
+    active_orphans: int = 0,
+    fast_enabled: bool = False,
+    orphan_max: int = 5,
+) -> DisconnectOutcome:
+    """Return DisconnectOutcome enum for a disconnect."""
+    fsm = _DEFAULT_ORPHAN_FSM if orphan_max == 5 else OrphanFsm(OrphanConfig(orphan_max=orphan_max))
+    return fsm.decide_disconnect(ttfc_received, tools_count, active_orphans, fast_enabled)
+
+
 def should_detach_job_orphan(
     tools_count: int,
     ttfc_received: bool,
@@ -158,31 +176,31 @@ def should_detach_job_orphan(
     orphan_max: int = 5,
 ) -> bool:
     """Return True when a disconnect should detach as an orphan."""
-    from .state_hygiene_policy import DisconnectOutcome, OrphanConfig, OrphanFsm
-
-    outcome = OrphanFsm(
-        OrphanConfig(orphan_max=orphan_max)
-    ).decide_disconnect(
-        ttfc_received, tools_count, active_orphans, fast_enabled
+    return (
+        decide_disconnect_outcome(
+            tools_count,
+            ttfc_received,
+            active_orphans=active_orphans,
+            fast_enabled=fast_enabled,
+            orphan_max=orphan_max,
+        )
+        is DisconnectOutcome.DETACH_ORPHAN
     )
-    return outcome is DisconnectOutcome.DETACH_ORPHAN
 
 
-def evaluate_disconnect_action(
-    tools_count: int,
-    ttfc_received: bool,
-    active_orphans: int = 0,
-    fast_enabled: bool = False,
-    orphan_max: int = 5,
-) -> str:
-    """Return 'detach' or 'cancel_sync' for a disconnect."""
-    if should_detach_job_orphan(
-        tools_count,
-        ttfc_received,
-        active_orphans,
-        fast_enabled,
-        orphan_max,
-    ):
-        return "detach"
-    return "cancel_sync"
+_OUTCOME_MAP: dict[str, OutcomeKind] = {
+    "done": OutcomeKind.OK,
+    "capacity_exhausted": OutcomeKind.CAPACITY_EXHAUSTED,
+    "client_gone": OutcomeKind.CANCELLED,
+}
+
+
+def release_admission_for_state(
+    release_fn: Callable[..., object], ticket_id: int, out: Mapping[str, object]
+) -> None:
+    """Release an adaptive admission ticket from a terminal state mapping."""
+    st = str(out.get("state") or "")
+    raw_ttfc = out.get("ttfc_ms")
+    ttfc = float(raw_ttfc) if isinstance(raw_ttfc, (int, float)) else None
+    release_fn(ticket_id, outcome=_OUTCOME_MAP.get(st, OutcomeKind.ERROR), ttfc_ms=ttfc)
 

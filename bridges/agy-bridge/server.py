@@ -147,26 +147,17 @@ from agy_runtime.hygiene_runtime import HygieneRuntime, ManagedSqliteRoPool  # n
 from core.adaptive_admission import AdmissionKey, OutcomeKind  # noqa: E402
 
 _HYGIENE_RT: HygieneRuntime | None = None
+_HYGIENE_LOCK = threading.Lock()
 
 
 def _hygiene_rt() -> HygieneRuntime:
     global _HYGIENE_RT
-    if _HYGIENE_RT is None:
-        _HYGIENE_RT = HygieneRuntime(config_path=DYNAMIC_CONFIG_PATH)
-    return _HYGIENE_RT
-
-
-_OUTCOME_MAP: dict[str, OutcomeKind] = {
-    "done": OutcomeKind.OK,
-    "capacity_exhausted": OutcomeKind.CAPACITY_EXHAUSTED,
-    "client_gone": OutcomeKind.CANCELLED,
-}
-
-
-def _release_admission_out(ticket_id: int, out: dict[str, object], start_ts: float) -> None:
-    st = str(out.get("state") or "")
-    outcome = _OUTCOME_MAP.get(st, OutcomeKind.ERROR)
-    _hygiene_rt().release(ticket_id, outcome=outcome, ttfc_ms=(time.monotonic() - start_ts) * 1000.0)
+    if (rt := _HYGIENE_RT) is not None:
+        return rt
+    with _HYGIENE_LOCK:
+        if _HYGIENE_RT is None:
+            _HYGIENE_RT = HygieneRuntime(config_path=DYNAMIC_CONFIG_PATH)
+        return _HYGIENE_RT
 
 
 from agy_runtime import history_compaction_adapter as _hca  # noqa: E402
@@ -1872,15 +1863,18 @@ def _file_sha256(path: object) -> str:
         ck = f"{resolved}:{key}"
         if (hit := rt.sha_cache_get(ck)) is not None:
             return hit
-        digest = hashlib.sha256()
-        with open(resolved, "rb") as handle:
-            for chunk in iter(lambda: handle.read(SHA_CHUNK_BYTES), b""):
-                digest.update(chunk)
-        if identity() != key:
-            return ""
-        hexdigest = digest.hexdigest()
-        rt.sha_cache_put(ck, hexdigest)
-        return hexdigest
+        with _sha_compute_lock:
+            if (hit := rt.sha_cache_get(ck)) is not None:
+                return hit
+            digest = hashlib.sha256()
+            with open(resolved, "rb") as handle:
+                for chunk in iter(lambda: handle.read(SHA_CHUNK_BYTES), b""):
+                    digest.update(chunk)
+            if identity() != key:
+                return ""
+            hexdigest = digest.hexdigest()
+            rt.sha_cache_put(ck, hexdigest)
+            return hexdigest
     except OSError:
         return ""
 
@@ -3019,7 +3013,6 @@ def _session_claim(sess_key: tuple[str, ...], turn_id: str = "") -> str:
     now = time.time()
     evicted = False
     try:
-        _hygiene_rt().session_claim(str(sess_key))
         with _session_store_lock:
             entry = _session_store.get(sess_key)
             if entry is None:
@@ -3037,6 +3030,7 @@ def _session_claim(sess_key: tuple[str, ...], turn_id: str = "") -> str:
             _in_flight_cids.add(cid)
             if turn_id:
                 _active_cid_owners[cid] = turn_id
+            _hygiene_rt().session_claim(str(sess_key))
             return cid
     finally:
         if evicted:
@@ -3052,19 +3046,18 @@ def _session_expired(entry: dict[str, Any], now: float) -> bool:
 
 
 def _session_invalidate(sess_key: tuple, cid: str) -> None:
-    _hygiene_rt().session_invalidate(str(sess_key))
     removed = False
     with _session_store_lock:
         entry = _session_store.get(sess_key)
         if entry is not None and entry["cid"] == cid:
             _session_store.pop(sess_key, None)
+            _hygiene_rt().session_invalidate(str(sess_key))
             removed = True
     if removed:
         _persist_sessions()
 
 
 def _session_commit(sess_key: tuple[str, ...], cid: str) -> None:
-    _hygiene_rt().session_commit(str(sess_key), cid)
     if not _session_key_valid(sess_key):
         return
     now = time.time()
@@ -3075,6 +3068,7 @@ def _session_commit(sess_key: tuple[str, ...], cid: str) -> None:
             entry["turns"] += 1
         else:
             _session_store[sess_key] = {"cid": cid, "last_used": now, "created": now, "turns": 1}
+        _hygiene_rt().session_commit(str(sess_key), cid)
     _persist_sessions()
 
 
@@ -3292,15 +3286,22 @@ _supervisor = ProcessSupervisor(
 )
 _group_alive = _supervisor.group_alive
 _kill_group = _supervisor.kill_group
+def _lifecycle_cleanup() -> None:
+    try:
+        _supervisor.kill_all(
+            [p for p in _active.copy().values() if p.returncode is None]
+        )
+    finally:
+        with _HYGIENE_LOCK:
+            rt = _HYGIENE_RT
+        if rt is not None:
+            rt.shutdown_cleanup()
+
+
 _LIFECYCLE = SubbridgeLifecycle(
     hooks=SubbridgeHooks(
         procs_fn=lambda: list(_active.copy().values()),
-        cleanup_fn=lambda: (
-            _supervisor.kill_all(
-                [p for p in _active.copy().values() if p.returncode is None]
-            ),
-            _hygiene_rt().shutdown_cleanup(),
-        ),
+        cleanup_fn=_lifecycle_cleanup,
         log_fn=_log,
     ),
     workspace=WORKSPACE,
@@ -3318,7 +3319,10 @@ def _reset_sqlite_guards_for_tests() -> None:
     global _sqlite_divergence_count, _sqlite_drain_deadline_count
     global _sqlite_open_connections, _sqlite_max_open_connections, _rng
     global _cfg_snapshot, _cfg_key, _cfg_checked_at, _image_flag_cache, _image_fallback_flag_cache
-    _HYGIENE_RT = None
+    with _HYGIENE_LOCK:
+        if _HYGIENE_RT is not None:
+            _HYGIENE_RT.shutdown_cleanup()
+        _HYGIENE_RT = None
     with _cfg_lock:
         _cfg_snapshot = _COLD_FLAGS
         _cfg_key = None
@@ -5118,6 +5122,9 @@ class _Job:
     orphan: bool = False
     running: bool = True
     cancel: Callable[[], None] | None = None
+    tools_count: int = 0
+    ttfc_received: bool = False
+    pgid: int = 0
 
 
 class JobRegistry:
@@ -5235,7 +5242,6 @@ class JobRegistry:
             else:
                 job.events.append((kind, payload))
                 job.size_bytes += size
-                setattr(job, "ttfc_received", True)
                 self.condition.notify_all()
                 return True
         if cancel is not None:
@@ -5274,20 +5280,17 @@ class JobRegistry:
 
     def detach(self, job: _Job, *, allow_orphan: bool = True) -> None:
         cancel = None
+        fast = _hygiene_rt().snapshot_flags(DYNAMIC_CONFIG_PATH).fast_client_gone_enabled
         with self.condition:
             job.readers = max(0, job.readers - 1)
             if job.readers or job.result is not None or job.orphan:
                 return
-            flags = _hygiene_rt().snapshot_flags(DYNAMIC_CONFIG_PATH)
             orphan_ok = (
                 slot_and_session.should_detach_job_orphan(
-                    int(getattr(job, "tools_count", 0) or 0),
-                    bool(getattr(job, "ttfc_received", False)),
-                    active_orphans=self.orphans,
-                    fast_enabled=flags.fast_client_gone_enabled,
-                    orphan_max=self.orphan_max,
+                    job.tools_count, job.ttfc_received,
+                    active_orphans=self.orphans, fast_enabled=fast, orphan_max=self.orphan_max,
                 )
-                if flags.fast_client_gone_enabled
+                if fast
                 else (allow_orphan and self.orphans < self.orphan_max)
             )
             if allow_orphan and orphan_ok:
@@ -6868,7 +6871,7 @@ class Handler(BaseHTTPRequestHandler):
     def _start_job_producer(self, ctx: dict, job: _Job) -> None:
         """Зафиксировать контекст попытки до отделения producer от подписчика."""
         registry = _JOB_REGISTRY
-        setattr(job, "tools_count", int(ctx.get("tools_count") or 0))
+        job.tools_count = int(ctx.get("tools_count") or 0)
         worker = copy.copy(self)
         worker._registry_job = job
         worker_ctx = dict(ctx)
@@ -6927,6 +6930,8 @@ class Handler(BaseHTTPRequestHandler):
                     }[kind]
                     if callback is not None and not callback(payload):
                         return {"state": "client_gone", "text": "", "rc": 1}
+                    if kind in ("text", "tool_trace", "reasoning"):
+                        job.ttfc_received = True
                     offset += 1
                     last_delivery = time.monotonic()
                 if out is not None:
@@ -6937,7 +6942,7 @@ class Handler(BaseHTTPRequestHandler):
                     last_delivery = time.monotonic()
         finally:
             if job.result is None:
-                _hygiene_rt().handle_disconnect(int(getattr(job, "pgid", 0) or 0), bool(getattr(job, "ttfc_received", False)), int(getattr(job, "tools_count", 0) or 0))
+                _hygiene_rt().handle_disconnect(job.pgid, job.ttfc_received, job.tools_count)
             registry.detach(job, allow_orphan=allow_orphan)
 
     def _run_once_impl(
@@ -7008,16 +7013,9 @@ class Handler(BaseHTTPRequestHandler):
                         else _image_gate(cast(str, model), cast(str, effort))
                     )
                     if gate is not None:
-                        self._log_reject(
-                            gate.code, cast(str, model), cast(int, ctx["model_len"])
-                        )
+                        self._log_reject(gate.code, cast(str, model), cast(int, ctx["model_len"]))
                         rejected = _terminal_state("image_reject", gate.code)
-                        self._log_done(
-                            cast(str, ctx["model"]),
-                            rejected,
-                            t_enter,
-                            cast(str, ctx["tag"]),
-                        )
+                        self._log_done(cast(str, ctx["model"]), rejected, t_enter, cast(str, ctx["tag"]))
                         return rejected
                     # Реестр активных каталогов ПЕРЕД mkdir: sweep не тронет живой ход.
                     with _active_lock:
@@ -7026,18 +7024,10 @@ class Handler(BaseHTTPRequestHandler):
                     try:
                         _stage_images(img_dir, images)
                     except ImageSpoolError as exc:
-                        _log(
-                            "image_spool_error model=%s err=%s"
-                            % (_safe_log_value(cast(str, model)), exc)
-                        )
+                        _log("image_spool_error model=%s err=%s" % (_safe_log_value(cast(str, model)), exc))
                         if not universal:
                             failed = _terminal_state("image_spool_error", str(exc))
-                            self._log_done(
-                                cast(str, ctx["model"]),
-                                failed,
-                                t_enter,
-                                cast(str, ctx["tag"]),
-                            )
+                            self._log_done(cast(str, ctx["model"]), failed, t_enter, cast(str, ctx["tag"]))
                             return failed
                         _downgrade_to_text_in_run_once(
                             typed_ctx, "spool", "image_spool_error", 1, img_dir
@@ -7105,7 +7095,7 @@ class Handler(BaseHTTPRequestHandler):
                     break
                 job = getattr(self, "_registry_job", None)
                 if job is not None:
-                    setattr(job, "pgid", int(getattr(run.proc, "pid", 0) or 0))
+                    job.pgid = int(getattr(run.proc, "pid", 0) or 0)
                     _JOB_REGISTRY.bind_cancel(job, lambda: _kill_group(run.proc))
                 stop_hook = ctx.get("tool_stop")
                 try:
@@ -7273,7 +7263,9 @@ class Handler(BaseHTTPRequestHandler):
                     and bool(emitted()),
                 )
             _slots.release()
-            _release_admission_out(adm_dec.ticket_id, cast("dict[str, object]", out), t0)
+            slot_and_session.release_admission_for_state(
+                _hygiene_rt().release, adm_dec.ticket_id, cast("dict[str, object]", out)
+            )
         self._log_done(
             cast(str, ctx["model"]),
             cast("dict[str, object]", out),

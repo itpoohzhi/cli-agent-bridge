@@ -228,6 +228,8 @@ def _make_job(server: ModuleType, *, tools_count: int, ttfc_received: bool) -> o
     setattr(job, "readers", 1)
     setattr(job, "result", None)
     setattr(job, "orphan", False)
+    setattr(job, "events", [])
+    setattr(job, "size_bytes", 0)
     setattr(job, "cancelled", threading.Event())
     setattr(job, "cancel", lambda: cancelled.append("cancelled"))
     setattr(job, "tools_count", tools_count)
@@ -268,3 +270,24 @@ def test_admission_shed_returns_overloaded_503(monkeypatch: pytest.MonkeyPatch) 
     err_body = cast("dict[str, object]", cast(Callable[..., object], getattr(handler_cls, "_error_body"))(out))
     assert err_body["code"] == 503
     assert err_body["type"] == "overloaded"
+
+
+def test_session_invalidate_respects_cid_fence_and_publish_preserves_ttfc(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    server = _load()
+    fake = FakeRT(flags=FakeFlags(bounded_state_enabled=True, fast_client_gone_enabled=True))
+    _install(server, monkeypatch, fake)
+    commit = _fn(server, "_session_commit")
+    invalidate = _fn(server, "_session_invalidate")
+    key = ("m", "s", "t", "cid-fence")
+    _ = commit(key, "cid-right")
+    _ = invalidate(key, "cid-wrong")
+    assert not any(kind == "invalidate" for kind, _ in fake.calls)
+    _ = invalidate(key, "cid-right")
+    assert any(kind == "invalidate" for kind, _ in fake.calls)
+    reg = cast(Callable[[], object], getattr(server, "JobRegistry"))()
+    job = _make_job(server, tools_count=2, ttfc_received=False)
+    _ = cast(Callable[..., object], getattr(reg, "publish"))(job, "text", "hi")
+    assert getattr(job, "ttfc_received") is False
+

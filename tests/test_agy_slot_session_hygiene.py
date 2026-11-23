@@ -1,5 +1,7 @@
 """Tests for slot/session orphan hygiene helpers."""
 
+from __future__ import annotations
+
 import sys
 from pathlib import Path
 
@@ -11,88 +13,47 @@ if str(_BRIDGE_ROOT) not in sys.path:
 
 from agy_runtime.slot_and_session import (  # noqa: E402
     allow_job_orphan,
-    evaluate_disconnect_action,
+    decide_disconnect_outcome,
     should_detach_job_orphan,
 )
+from agy_runtime.state_hygiene_policy import DisconnectOutcome  # noqa: E402
 
 
 def test_off_mode_parity_detaches() -> None:
     """Off mode keeps legacy detach for tool requests."""
+    assert should_detach_job_orphan(tools_count=2, ttfc_received=False, fast_enabled=False) is True
     assert (
-        should_detach_job_orphan(
-            tools_count=2,
-            ttfc_received=False,
-            fast_enabled=False,
-        )
-        is True
-    )
-    assert (
-        evaluate_disconnect_action(
-            tools_count=2,
-            ttfc_received=False,
-            fast_enabled=False,
-        )
-        == "detach"
+        decide_disconnect_outcome(tools_count=2, ttfc_received=False, fast_enabled=False)
+        is DisconnectOutcome.DETACH_ORPHAN
     )
 
 
 def test_pre_ttfc_disconnect_cancels_sync() -> None:
     """Fast mode before TTFC cancels synchronously."""
+    assert should_detach_job_orphan(tools_count=3, ttfc_received=False, fast_enabled=True) is False
     assert (
-        should_detach_job_orphan(
-            tools_count=3,
-            ttfc_received=False,
-            fast_enabled=True,
-        )
-        is False
-    )
-    assert (
-        evaluate_disconnect_action(
-            tools_count=3,
-            ttfc_received=False,
-            fast_enabled=True,
-        )
-        == "cancel_sync"
+        decide_disconnect_outcome(tools_count=3, ttfc_received=False, fast_enabled=True)
+        is DisconnectOutcome.CANCEL_SYNC_RELEASE_AFTER_KILL
     )
 
 
 def test_post_ttfc_disconnect_respects_orphan_max() -> None:
     """Post-TTFC detach is bounded by the orphan maximum."""
     assert (
-        should_detach_job_orphan(
-            tools_count=2,
-            ttfc_received=True,
-            active_orphans=4,
-            fast_enabled=True,
-        )
+        should_detach_job_orphan(tools_count=2, ttfc_received=True, active_orphans=4, fast_enabled=True)
         is True
     )
     assert (
-        evaluate_disconnect_action(
-            tools_count=2,
-            ttfc_received=True,
-            active_orphans=4,
-            fast_enabled=True,
-        )
-        == "detach"
+        decide_disconnect_outcome(tools_count=2, ttfc_received=True, active_orphans=4, fast_enabled=True)
+        is DisconnectOutcome.DETACH_ORPHAN
     )
     assert (
-        should_detach_job_orphan(
-            tools_count=2,
-            ttfc_received=True,
-            active_orphans=5,
-            fast_enabled=True,
-        )
+        should_detach_job_orphan(tools_count=2, ttfc_received=True, active_orphans=5, fast_enabled=True)
         is False
     )
     assert (
-        evaluate_disconnect_action(
-            tools_count=2,
-            ttfc_received=True,
-            active_orphans=5,
-            fast_enabled=True,
-        )
-        == "cancel_sync"
+        decide_disconnect_outcome(tools_count=2, ttfc_received=True, active_orphans=5, fast_enabled=True)
+        is DisconnectOutcome.CANCEL_SYNC_RELEASE_AFTER_KILL
     )
 
 
