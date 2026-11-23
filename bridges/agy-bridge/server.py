@@ -6203,19 +6203,15 @@ class Run:
                     final_text = str(result.get("response") or "")
                     if str(result.get("status") or "").upper() == "ERROR":
                         self._note_capacity_line(str(result.get("error") or ""))
-                    self.q.put(
-                        (
-                            "result",
-                            {
-                                "conversation_id": result.get("conversation_id") or "", "status": str(result.get("status") or ""),
-                                "error": str(result.get("error") or ""), "duration_s": result.get("duration_seconds"),
-                                "num_turns": result.get("num_turns"), "usage": result.get("usage") or {},
-                                "upstream_status_code": result.get("upstream_status_code"), "upstream_headers": result.get("upstream_headers"),
-                                "upstream_not_started": result.get("upstream_not_started") is True,
-                                "fail_stage": result.get("fail_stage") if isinstance(result.get("fail_stage"), str) else "",
-                            },
-                        )
-                    )
+                    up_status, up_headers = extract_upstream_error_meta(result)
+                    self.q.put(("result", {
+                        "conversation_id": result.get("conversation_id") or "", "status": str(result.get("status") or ""),
+                        "error": str(result.get("error") or ""), "duration_s": result.get("duration_seconds"),
+                        "num_turns": result.get("num_turns"), "usage": result.get("usage") or {},
+                        "upstream_status_code": up_status, "upstream_headers": up_headers,
+                        "upstream_not_started": result.get("upstream_not_started") is True,
+                        "fail_stage": result.get("fail_stage") if isinstance(result.get("fail_stage"), str) else "",
+                    }))
             rc: int | None
             try:
                 rc = self.proc.wait(timeout=PROC_EXIT_WAIT_S)

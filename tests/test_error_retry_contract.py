@@ -248,3 +248,15 @@ def test_status_only_429_and_quota_429_have_distinct_failover_contracts() -> Non
     assert run(quota, True, ("a", "a")) == ["first"]
     assert run(quota, True, ("", "b")) == ["first"]
     assert run(quota, True, ("a", "b")) == ["first", "second"]
+
+
+def test_bare_secret_literals_redacted_without_stop_iteration() -> None:
+    raw = (
+        "upstream failed sk-proj1234567890 ghp_abcdef1234567890 "
+        "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.sig12345678"
+    )
+    msg = classify_upstream_error(raw).message
+    assert "sk-proj1234567890" not in msg
+    assert "ghp_abcdef1234567890" not in msg
+    assert "eyJhbGciOiJIUzI1NiJ9" not in msg
+    assert msg.count("[REDACTED]") == 3

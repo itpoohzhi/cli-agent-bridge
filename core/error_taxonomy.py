@@ -205,7 +205,7 @@ def _redact_secret(match: re.Match[str]) -> str:
         return f'{match.group(1)}{match.group(2)}{match.group(3) or ""}[REDACTED]{match.group(2)}'
     if match.group(5):
         return f'{match.group(5)}{match.group(6)}[REDACTED]{match.group(6)}'
-    return next(group for group in (match.group(4), match.group(7)) if group) + "[REDACTED]"
+    return next((group for group in (match.group(4), match.group(7)) if group), "") + "[REDACTED]"
 
 
 # Short aliases are useful to transports while retaining descriptive public names.
