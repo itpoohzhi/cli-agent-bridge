@@ -6609,7 +6609,7 @@ class Handler(BaseHTTPRequestHandler):
             return out
 
         while True:
-            if all((not isinstance(turn_complete, type(None)), run.q.empty())):
+            if turn_complete is not None and run.q.empty():
                 dec = resolve_tool_turn_stop(
                     turn_complete,
                     proc_exited=not isinstance(run.proc.poll(), type(None)),
@@ -6621,7 +6621,7 @@ class Handler(BaseHTTPRequestHandler):
             now = time.monotonic()
             ext = policy is not None and _new_flag("extended_timeout_enabled")
             if ext:
-                cap = policy.effective_max_timeout_s
+                cap = min(policy.effective_max_timeout_s, float(getattr(self, "_attempt_budget_s", None) or policy.effective_max_timeout_s)) if getattr(self, "_defer_done_log", False) else policy.effective_max_timeout_s
                 if now - run.started >= cap:
                     return finish("timeout", 124, f"proxy timeout after {cap:g}s", cap)
                 last_progress = max(
@@ -6818,11 +6818,11 @@ class Handler(BaseHTTPRequestHandler):
         """Одна строка done на каждом выходе _run_once (O-EXIT)."""
         conversation = str(out.get("conversation_id") or "-")[:8]
         out_bytes = len(str(out.get("text") or "").encode())
-        _log(
+        None if getattr(self, "_defer_done_log", False) and "had_progress" not in out else _log(
             f"done model={model} rc={out.get('rc')} state={out.get('state')} "
             f"conversation={conversation} "
             f"turns={out.get('num_turns')} tool_events={out.get('tool_events')} "
-            f"out_bytes={out_bytes} "
+            f"out_bytes={out_bytes} had_progress={out.get('had_progress')} "
             f"wall_s={time.monotonic() - t0:.1f}"
             f"{_usage_log_fields(out.get('usage_resolved'))} "
             f"err={_err_summary(out.get('err'))!r} {tag}"
@@ -6841,6 +6841,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def _run_once(self, ctx: dict, *callbacks, **named_callbacks) -> dict:
         """Сохранить legacy-вызов, делегируя владение job отдельному координатору."""
+        self._defer_done_log, self._attempt_budget_s = bool(named_callbacks.pop("defer_done_log", False)), ctx.get("attempt_budget_s")
         return self._run_registered_attempt(ctx, self._run_once_callbacks(*callbacks, **named_callbacks))
 
     def _run_registered_attempt(self, ctx: dict, callbacks: tuple) -> dict:
@@ -6946,7 +6947,6 @@ class Handler(BaseHTTPRequestHandler):
         effort = ctx["effort"]
         tag = ctx["tag"]
         t_enter = time.monotonic()
-        # Бюджет запроса считается от входа HTTP-запроса, до ожидания admission.
         raw_req_start = ctx.get("t_req_start")
         t_req_start = (
             float(raw_req_start) if isinstance(raw_req_start, (int, float)) else t_enter
@@ -7013,8 +7013,6 @@ class Handler(BaseHTTPRequestHandler):
                     images = []
                     img_dir = None
                 else:
-                    # Флаг и proof могли смениться, пока ход ждал слот: повторная
-                    # проверка до mkdir и spawn (universal — только флаг, выше).
                     gate = (
                         None
                         if universal

@@ -1,7 +1,9 @@
 # fmt: off
+# ruff: noqa: E501
 """Оркестрация SSE: публикация границ хода, безопасный replay и единый финал."""
 # pyright: reportAny=false, reportExplicitAny=false, reportPrivateUsage=false
 from __future__ import annotations
+import inspect
 import json
 import threading
 from typing import Any, Callable, final
@@ -12,6 +14,7 @@ from core.agy_capacity_guard import CAPACITY_REASON
 from core.usage_wire import positive_wire_usage
 from core.tool_channel_fsm import normalize_staged_fragments
 from core.tool_turn_settle_policy import SettleDecision, resolve_tool_turn_stop
+from core.stream_activity_policy import SlidingActivityWindow, build_final_outcome
 from core.turn_usage_fsm import should_emit_wire_usage
 from core.stream_resilience_policy import can_safely_replay_turn, is_present, is_uncommitted_step
 from core.stream_resilience_runtime import MidstreamReplayOrchestrator
@@ -26,6 +29,13 @@ def invoke_at_attempt[T](index: int, invoke: Callable[[], T]) -> T:
         return invoke()
     finally:
         _attempt_scope.index = previous_index
+def _defers_done_log(callback: Any) -> bool:
+    try:
+        parameters = inspect.signature(callback).parameters
+    except (TypeError, ValueError):
+        return False
+    return "defer_done_log" in parameters or any(
+        p.kind is inspect.Parameter.VAR_KEYWORD for p in parameters.values())
 @final
 class _SseBodyRunner:
     def __init__(self, session: SseStreamSession) -> None:
@@ -37,9 +47,17 @@ class _SseBodyRunner:
         self.buffering = False
         self.deadline = float("inf")
         self.cid = str(next(filter(None, (session.ctx.get("conversation_id"),)), ""))
-        self.last_out: dict[str, Any] = {}
+        self._last_out: dict[str, Any] = {}
+        self._activity_window: SlidingActivityWindow | None = None
+        self._attempt_started_at = 0.0
         self.stop: Any = None
+    def _note_progress(self, kind: str, payload: object) -> None:
+        window = self._activity_window
+        if is_present(window):
+            _ = window.record_signal(kind, payload, self.time.monotonic())
+            self.deadline = window.current_deadline()
     def stage(self, value: str, channel: str = "content") -> bool:
+        self._note_progress(channel, json.loads(value) if channel == "tool_calls" else value)
         ok = False
         if not self.cancelled():
             self.s.buffer.stage_fragment(value, channel)
@@ -54,8 +72,10 @@ class _SseBodyRunner:
     def keepalive(self) -> bool:
         return self._deliver(self.s.keepalive)
     def text(self, value: str) -> bool:
+        self._note_progress("content", value)
         return self._deliver(self.s.stream_text, value)
     def reasoning(self, value: str) -> bool:
+        self._note_progress("reasoning", value)
         return self._deliver(self.s.stream_reasoning, value)
     def _deliver(self, callback: Any, *args: Any) -> bool:
         ok = False
@@ -103,12 +123,17 @@ class _SseBodyRunner:
     def attempt(self, index: int, budget: float) -> dict[str, Any]:
         s, ctx, prev_stop = self.s, self.s.ctx, self.stop
         ctx["attempt_index"] = index
+        self._activity_window, self._attempt_started_at = None, self.time.monotonic()
         if self.buffering:
             s.buffer.rollback_uncommitted()
             self.prepare_buffer()
             ctx.update(conversation_id=self.cid, attempt_budget_s=budget, attempt_index=index)
             if s.config.flag_enabled("midstream_retry_enabled"):
-                self.deadline = self.time.monotonic() + budget
+                if s.config.flag_enabled("sliding_activity_window_enabled"):
+                    self._activity_window = self.replay.arm_attempt(budget)
+                    self.deadline = self._activity_window.current_deadline()
+                else:
+                    self.deadline = self._attempt_started_at + budget
         self.stop = stop = ctx.get("tool_stop")
         if self.buffering:
             ctx["tool_stop"] = self.tool_stop
@@ -120,9 +145,9 @@ class _SseBodyRunner:
                 _ = ctx.pop("tool_stop", None)
             else:
                 ctx["tool_stop"] = stop
-        if all((self.expired(), not self.cancelled())):
+        if all((not is_present(self._activity_window), self.expired(), not self.cancelled())):
             out.update(state="timeout", rc=124, err="retry_budget_exhausted", timeout_limit_s=budget)
-        self.deadline, self.last_out = float("inf"), out
+        self.deadline, self._last_out = float("inf"), out
         if self.buffering:
             self.reconcile_trace(out)
         return out
@@ -130,12 +155,23 @@ class _SseBodyRunner:
         s, ready = self.s, threading.Event()
         watcher = threading.Thread(target=s.coordinator.await_headers_or_flush, args=(ready,), daemon=True, name="agy-precommit")
         watcher.start()
+        deferred = is_present(self._activity_window) and _defers_done_log(s.handler._run_once)
         try:
-            out = s.handler._run_once(s.ctx, self.text, self.trace, self.reasoning, self.keepalive)
+            named = dict(defer_done_log=True) if deferred else {}
+            out = s.handler._run_once(s.ctx, self.text, self.trace, self.reasoning, self.keepalive, **named)
         finally:
             ready.set()
             watcher.join()
+        if is_present(self._activity_window):
+            snapshot = self._activity_window.mark_completed(self.time.monotonic())
+            final = build_final_outcome(out, snapshot, req_id=str(s.ctx.get("tag", "")), cid=self.cid)
+            out = dict(out, **final)
+        self._log_final(out, deferred)
         return out
+    def _log_final(self, out: dict[str, Any], deferred: bool) -> None:
+        log = getattr(self.s.handler, "_log_done", None)
+        if deferred and callable(log):
+            log(str(self.s.ctx.get("model", "")), out, self._attempt_started_at, str(self.s.ctx.get("tag", "")))
     def reconcile_trace(self, out: dict[str, Any]) -> None:
         ledger = self.s.ledger
         cid = str(next(filter(None, (out.get("conversation_id"),)), self.cid))
@@ -190,7 +226,7 @@ class _SseBodyRunner:
             ctx["finalize_timeout"] = lambda _out: None
             out = dict(self.replay.run_with_resilience(self.attempt, s.ledger, s.keepalive, self.cancelled))
             if all((dict(cancelled=True).get(str(out.get("state")), False), not self.cancelled())):
-                out = ( self.last_out if self.last_out
+                out = ( self._last_out if self._last_out
                     else dict(state="pump_error", rc=1, err="retry cancelled") )
             success = out.get("state") == "done"
             if all((success, out.get("rc") == 0)):

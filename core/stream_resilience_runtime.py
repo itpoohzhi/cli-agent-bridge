@@ -13,6 +13,7 @@ from typing import Protocol, Self, cast, final
 
 import core.route_health_policy as routes
 import core.runtime_env as cfg
+import core.stream_activity_policy as activity
 import core.stream_resilience_policy as policy
 from core.passthrough_sliding_window import SlidingDeadline
 
@@ -49,6 +50,8 @@ class StreamResilienceConfig:
     ledger_max_entities: int = 512
     readonly_tools: frozenset[str] = frozenset()
     mutating_tools: frozenset[str] = policy.DEFAULT_MUTATING_TOOLS
+    sliding_activity_window_enabled: bool = False
+    sliding_idle_timeout_s: float = 300.0
     @classmethod
     def from_env(cls, environ: Mapping[str, str] | None = None) -> Self:
         env = environ if policy.is_present(environ) else os.environ
@@ -110,28 +113,48 @@ def sleep_with_keepalive( delay_s: float, emit_keepalive: Callable[[], object],
 @final
 class MidstreamReplayOrchestrator:
     def __init__( self, config: StreamResilienceConfig,
-        window: SlidingDeadline | None = None,
+        window: SlidingDeadline | activity.SlidingActivityWindow | None = None,
         clock: Callable[[], float] = time.monotonic,
         sleeper: Callable[[float], object] = time.sleep, ) -> None:
-        self.config, self.window = config, window
+        self.config, self._window = config, window
         self.clock, self.sleeper = clock, sleeper
         self.start_s, self.buffer = clock(), policy.UncommittedTurnBuffer()
     def attempt_budget_s( self, attempt_index: int, elapsed_s: float | None = None
     ) -> float:
         c = self.config
-        budget = routes.RetryBudgetConfig( c.retry_total_budget_s, c.retry_reserve_s,
-            c.retry_min_attempt_s, c.max_retries + 1, )
-        return policy.effective_attempt_budget_s( budget, attempt_index,
-            elapsed_s if policy.is_present(elapsed_s) else self.clock() - self.start_s,
-            c.first_event_timeout_s, c.backoff_cap_s, )
+        elapsed = ( elapsed_s if policy.is_present(elapsed_s)
+            else self.clock() - self.start_s )
+        return activity.compute_sliding_attempt_budget_s(activity.SlidingBudgetInput(
+            c.retry_total_budget_s, c.retry_reserve_s, elapsed,
+            c.flag_enabled("sliding_activity_window_enabled"), c.max_retries + 1,
+            attempt_index, c.first_event_timeout_s, c.backoff_cap_s, ))
+    def arm_attempt(self, budget: float) -> activity.SlidingActivityWindow:
+        c = self.config
+        window = activity.SlidingActivityWindow( self.clock(), c.first_event_timeout_s,
+            c.sliding_idle_timeout_s, budget, )
+        self._window = window
+        return window
+    def deadline_s(self) -> float:
+        window = self._window
+        if isinstance(window, activity.SlidingActivityWindow):
+            return window.current_deadline()
+        return window.deadline_s if policy.is_present(window) else float("inf")
+    def had_progress(self) -> bool:
+        window = self._window
+        if isinstance(window, activity.SlidingActivityWindow):
+            return window.check_expired(self.clock()).had_progress
+        return bool(window and window.state and window.state.saw_useful_chunk)
     def backoff_s(self, retry_index: int) -> float:
         c = self.config
         base = c.backoff_base_s * 2.0 ** min(max(0, retry_index), c.max_retries)
         return min( c.backoff_cap_s, base
             * random.uniform(1 - c.backoff_jitter_ratio, 1 + c.backoff_jitter_ratio), )
     def record_upstream_activity(self, is_useful_chunk: bool) -> None:
-        if policy.is_present(self.window):
-            self.window.advance(self.clock(), is_useful_chunk)
+        window = self._window
+        if isinstance(window, SlidingDeadline):
+            window.advance(self.clock(), is_useful_chunk)
+        elif policy.is_present(window) and is_useful_chunk:
+            _ = window.record_signal("content", "progress", self.clock())
     def run_with_resilience( self, run_attempt: Callable[[int, float], policy.Record],
         ledger: policy.MidstreamStepLedger, emit_keepalive: Callable[[], object],
         cancelled: Callable[[], bool] = lambda: False, ) -> policy.Record:

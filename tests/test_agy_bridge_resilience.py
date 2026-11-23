@@ -202,6 +202,7 @@ def _fake_run(
         controller=controller,
         proc=SimpleNamespace(pid=424242),
         got_event=True,
+        tag="test",
         started=clock(),
         err_box=[],
     )
@@ -1696,10 +1697,8 @@ class FinalDrainTests(unittest.TestCase):
 
             def one_run() -> None:
                 sent: list[tuple[int, object]] = []
-
                 def send(code: int, payload: object) -> None:
                     sent.append((code, payload))
-
                 with _Sock() as sock:
                     handler = cast(object, _make_handler(sock))
                     setattr(handler, "_send", send)
@@ -1937,10 +1936,8 @@ class SessionIsolationTests(unittest.TestCase):
             results: list[tuple[int, dict[str, object]]] = []
             try:
                 _ = http_bridge.post(_agentic_body("первый агентный ход"))
-
                 def slow_request() -> None:
                     results.append(http_bridge.post(_agentic_body("долгий ход", True)))
-
                 worker = threading.Thread(target=slow_request)
                 worker.start()
                 deadline = time.monotonic() + 10
@@ -2244,10 +2241,8 @@ class BreakerAndBudgetTests(unittest.TestCase):
             self.assertEqual(_bval("_retry_tenths"), 30)
             pauses: list[float] = []
             for u in (0.0, 0.5, 1.0):
-
                 def rng(value: float = u) -> float:
                     return value
-
                 pauses.append(_float(_bfn("_retry_pause_s")(1, rng)))
             self.assertEqual(pauses, [0.0, 1.0, 2.0])
             # hot -> cold fallback тоже стоит 10 десятых; пустой бюджет повтор не даёт
@@ -2647,7 +2642,6 @@ class ExitLogAndHealthTests(unittest.TestCase):
             with _Sock() as sock:
                 handler = cast(object, _make_handler(sock))
                 setattr(handler, "client_address", ("127.0.0.1", 1))
-
                 def call() -> object:
                     return _ofn(handler, "_run_once")(
                         ctx if ctx is not None else _ctx(),
@@ -2656,7 +2650,6 @@ class ExitLogAndHealthTests(unittest.TestCase):
                         _text_sink,
                         None,
                     )
-
                 return _done_lines(call)
 
     def test_ao06_single_done_line_on_every_exit_branch(self) -> None:
@@ -2704,12 +2697,10 @@ class ExitLogAndHealthTests(unittest.TestCase):
             with _Sock() as sock:
                 handler = cast(object, _make_handler(sock))
                 setattr(handler, "client_address", ("127.0.0.1", 1))
-
                 def call() -> object:
                     return _ofn(handler, "_run_once")(
                         _ctx(), _text_sink, _tool_sink, _text_sink, None
                     )
-
                 lines = _done_lines(call)
             self.assertEqual(len(lines), 1, lines)
             self.assertIn("state=launcher_unavailable", lines[0])
@@ -2991,12 +2982,10 @@ class ReadOnlyAndAnchorTests(unittest.TestCase):
                 }
             }
             try:
-
                 def first() -> None:
                     body = _agentic_body("долгий")
                     body.update(explicit)
                     holders.append(http_bridge.post(body))
-
                 worker = threading.Thread(target=first)
                 worker.start()
                 deadline = time.monotonic() + 10
@@ -3115,7 +3104,6 @@ class KillSwitchTests2(unittest.TestCase):
         for poll_s in (0.5, 2.0):
             for kind in ("false", "delete", "broken"):
                 with self.subTest(poll_s=poll_s, kind=kind), _Fixture() as fx:
-
                     def flip(how: str = kind, fixture: _Fixture = fx) -> None:
                         if how == "false":
                             fixture.set_flag(False)
@@ -3125,7 +3113,6 @@ class KillSwitchTests2(unittest.TestCase):
                             _ = fixture.config.write_text(
                                 "{not json" + " " * 5, encoding="utf-8"
                             )
-
                     off_after = self._flip_and_wait(fx, flip, poll_s)
                     self.assertLessEqual(off_after, 1.30)
 
@@ -3337,12 +3324,10 @@ class ExecuteDrainRetryTests(unittest.TestCase):
                     _StubRun.count.clear()
                     reasoning_out: dict[str, object] = dict(out)
                     reasoning_out["rc"] = 1
-
                     def fake_execute(
                         _self: object, _run: object, *_a: object
                     ) -> dict[str, object]:
                         return dict(reasoning_out)
-
                     with (
                         mock.patch.object(_bval("Handler"), "_execute", fake_execute),
                         mock.patch.object(_bridge(), "Run", _StubRun),
@@ -4958,7 +4943,6 @@ class SilentTimeoutPolicyTests(unittest.TestCase):
                     _clean_flags(fx)
                     fx.set_env(_FLAG_ENV["extended_timeout_enabled"], "1")
                     clock = _FakeClock()
-
                     def script(
                         tick: int,
                         now: float,
@@ -4968,7 +4952,6 @@ class SilentTimeoutPolicyTests(unittest.TestCase):
                         if tick == at:
                             _stamp(run, now, transcript=True)
                         return None
-
                     run = _ext_run(clock, script, got_event=False)
                     out = self._exec(fx, clock, run)
                     self.assertNotEqual(out["state"], "first_token_timeout")
@@ -5708,7 +5691,6 @@ class SilentGracefulTimeoutTests(unittest.TestCase):
                         with _Fixture() as fx:
                             self._flags(fx, graceful)
                             sent: list[tuple[int, dict[str, object]]] = []
-
                             def run_once(
                                 _ctx: object,
                                 on_t: Any,
@@ -5719,7 +5701,6 @@ class SilentGracefulTimeoutTests(unittest.TestCase):
                                 out = _timeout_out(state)
                                 _scenario(kind, on_t, on_tool, on_r, out)
                                 return out
-
                             with _Sock() as sock:
                                 handler = cast(object, _make_handler(sock))
                                 setattr(handler, "_run_once", run_once)
@@ -5939,20 +5920,16 @@ class SilentGracefulTimeoutTests(unittest.TestCase):
                     )
                     clock = _FakeClock()
                     drains: list[float] = []
-
                     def script(
                         tick: int, now: float, run: SimpleNamespace
                     ) -> object | None:
                         _stamp(run, now)
                         return None
-
                     run = _ext_run(clock, script)
                     run.content_streaming = True
-
                     def terminal_drain(budget_s: float) -> list[tuple[str, object]]:
                         drains.append(budget_s)
                         return [("text", "хвост"), ("reasoning", "мысль")]
-
                     run.terminal_drain = terminal_drain
                     out = _dict(cast(object, _execute_with_clock(clock, run)))
                     self.assertEqual(out["state"], "timeout")
@@ -6081,7 +6058,6 @@ class SilentCouncilCycle2Tests(unittest.TestCase):
         _clean_flags(fx)
         fx.set_env(_FLAG_ENV["graceful_timeout_on_partial"], "1")
         fx.set_env(_FLAG_ENV["emit_tool_trace"], "1")
-
     # -- RW-001: окно финальной записи не отравляет keep-alive соединение -----------------
 
     def test_silent_rw001_sse_window_reset_restores_timeout_and_deadline(self) -> None:
@@ -6159,14 +6135,12 @@ class SilentCouncilCycle2Tests(unittest.TestCase):
             with self.subTest(use_hook=use_hook), _Fixture() as fx:
                 self._flags(fx)
                 sent: list[tuple[int, dict[str, object]]] = []
-
                 def run_once(ctx: Any, *_a: object) -> object:
                     out = _timeout_out("timeout")
                     out["text"] = "часть"
                     if use_hook:
                         ctx["finalize_timeout"](out)
                     return out
-
                 with _Sock() as sock:
                     sock.settimeout(9.0)
                     handler = _make_handler(sock)
@@ -6208,7 +6182,6 @@ class SilentCouncilCycle2Tests(unittest.TestCase):
                     handler._send = lambda c, _p: order.append("send:%d" % c)
                     handler._serve_json(_ctx(stream=False))
         self.assertEqual(order, ["send:200", "close"])
-
     # -- RW-002: потолок маркеров, двухфазный учёт, стабильный ordinal --------------------
 
     def test_silent_rw002_marker_cap_is_32_and_anonymous_events_are_capped(
@@ -6289,7 +6262,6 @@ class SilentCouncilCycle2Tests(unittest.TestCase):
         self.assertEqual(
             [e.get("call_id") for e in events], ["c-1", "c-1", "c-2", None]
         )
-
     # -- RW-003: расширенный allowlist ----------------------------------------------------
 
     def test_silent_rw003_extended_allowlist_and_mcp_names(self) -> None:
@@ -6316,7 +6288,6 @@ class SilentCouncilCycle2Tests(unittest.TestCase):
             "sk-SECRET-0123456789abcdef",
         ):
             self.assertEqual(safe(hostile), "tool", repr(hostile))
-
     # -- F-004: удержание расходящегося текста и отсутствие O(n^2) ------------------------
 
     def test_silent_f004_divergent_text_is_retained_and_capped(self) -> None:
@@ -6363,7 +6334,6 @@ class SilentCouncilCycle2Tests(unittest.TestCase):
         self.assertEqual(out["state"], "timeout")
         self.assertEqual(out["retained_divergent_text"], "расхождение")
         self.assertEqual(out["retained_planner_text"], "расхождение")
-
     # -- F-005: terminal_drain на нормальном done -----------------------------------------
 
     def test_silent_f005_done_drains_tail_before_reconcile(self) -> None:
@@ -6397,7 +6367,6 @@ class SilentCouncilCycle2Tests(unittest.TestCase):
         self.assertEqual(order, ["drain:0.5", "reconcile"])
         self.assertEqual(out["state"], "done")
         self.assertEqual(out["text"], "хвост итог")
-
     # -- F-007: устаревший читатель не затирает более свежий снимок -----------------------
 
     def test_silent_f007_stale_reader_does_not_overwrite_newer_snapshot(self) -> None:
@@ -7063,7 +7032,6 @@ class ImageValidationTests(unittest.TestCase):
                 def spy(*_a: object, **_k: object) -> bool:
                     calls.append(name)
                     return False
-
                 return spy
 
             msgs: list[dict[str, object]] = [
@@ -7163,14 +7131,11 @@ class ImageValidationTests(unittest.TestCase):
 
             class _ProbeHash:
                 chunks: list[bytes]
-
                 def __init__(self) -> None:
                     self.chunks = []
-
                 def update(self, data: bytes) -> None:
                     held.append(bool(_ofn(_bval("_sha_cache_lock"), "locked")()))
                     self.chunks.append(data)
-
                 def hexdigest(self) -> str:
                     return hashlib.sha256(b"".join(self.chunks)).hexdigest()
 
@@ -7566,10 +7531,8 @@ class ImageLifecycleTests(unittest.TestCase):
             with self.subTest(path="exception"):
                 _SnapRun.attempts.clear()
                 ctx = _img_ctx(msgs)
-
                 def boom(_self: object, _run: object, *_a: object) -> dict[str, object]:
                     raise RuntimeError("boom")
-
                 with self.assertRaises(RuntimeError):
                     _ = _run_once_direct(ctx, boom)
                 self.assertEqual(len(_SnapRun.attempts), 1)
@@ -7578,10 +7541,8 @@ class ImageLifecycleTests(unittest.TestCase):
                 _SnapRun.attempts.clear()
                 ctx = _img_ctx(msgs)
                 unavailable = cast("type[Exception]", _bval("LauncherUnavailable"))
-
                 def missing() -> str:
                     raise unavailable("x")
-
                 with (
                     mock.patch.object(_bridge(), "_launcher", missing),
                     mock.patch.object(_bridge(), "Run", _SnapRun),
@@ -7704,7 +7665,6 @@ class ImageLifecycleTests(unittest.TestCase):
                 _ = stack.enter_context(
                     mock.patch.object(_bval("Handler"), "_execute", execute)
                 )
-
                 def run_a() -> None:
                     with _Sock() as sock:
                         handler = cast(object, _make_handler(sock))
@@ -7714,7 +7674,6 @@ class ImageLifecycleTests(unittest.TestCase):
                                 ctx_a, _text_sink, _tool_sink, _text_sink, None
                             )
                         )
-
                 thread = threading.Thread(target=run_a)
                 thread.start()
                 self.assertTrue(entered.wait(20))
@@ -9178,10 +9137,8 @@ class StepScopedUsageLedgerTests(unittest.TestCase):
 
             class _SpyLock:
                 held = False
-
                 def __enter__(self) -> None:
                     _SpyLock.held = True
-
                 def __exit__(self, *_exc: object) -> None:
                     _SpyLock.held = False
 
@@ -9192,7 +9149,6 @@ class StepScopedUsageLedgerTests(unittest.TestCase):
                     if _SpyLock.held:
                         violations.append(name)
                     return None
-
                 return guard
 
             setattr(tail, "_usage_lock", _SpyLock())
@@ -9245,7 +9201,7 @@ class StepScopedUsageLedgerTests(unittest.TestCase):
             )  # unknown, не сумма
             self.assertIn("saturated=1", text)
 
-    def test_step_scoped_usage_l2_ledger_memory_gate_4_mib_per_turn(self) -> None:
+    def test_step_scoped_usage_l2_ledger_memory_gate_6_mib_per_turn(self) -> None:
         cap = _int(_bval("USAGE_STEP_CAP"))
         with _Fixture() as fx:
             tail = _usage_tail()
@@ -9268,7 +9224,8 @@ class StepScopedUsageLedgerTests(unittest.TestCase):
             snap = _ofn(tail, "usage_snapshot")()
             self.assertEqual(_oval(snap, "observed_planner_steps"), cap)
             self.assertIs(_oval(snap, "completeness"), True)
-            self.assertLessEqual(retained, 4 * 1024 * 1024)
+            # CPython 3.13: 16k связанных index->(int, int, int) записей ≈5.5 MiB.
+            self.assertLessEqual(retained, 6 * 1024 * 1024)
 
     def test_step_scoped_usage_l2_single_monotonic_terminal_drain_deadline(
         self,
@@ -10834,7 +10791,6 @@ class UniversalImageFallbackTests(unittest.TestCase):
                     ctx = _uf_ctx(msgs, over=over)
                     self.assertIn("[attachments]", _str(ctx["full_prompt"]))
                     state = {"calls": 0}
-
                     def execute(
                         _self: object,
                         _run: object,
@@ -10849,7 +10805,6 @@ class UniversalImageFallbackTests(unittest.TestCase):
                             return _scripted_out("agy_error")
                         cid = _CID_B if _variant in ("hot_commit", "explicit") else ""
                         return _scripted_out("done", conversation_id=cid)
-
                     out = _uf_run_once(ctx, execute)
                     self.assertEqual(out["state"], "done")
                     self.assertEqual(len(_UfRun.calls), 2)
@@ -11359,10 +11314,8 @@ class UniversalImageFallbackTests(unittest.TestCase):
                 _uf_reset_runs()
                 ctx = _uf_ctx(msgs)
                 unavailable = cast("type[Exception]", _bval("LauncherUnavailable"))
-
                 def missing() -> str:
                     raise unavailable("x")
-
                 with (
                     mock.patch.object(_bridge(), "_launcher", missing),
                     mock.patch.object(_bridge(), "Run", _UfRun),
@@ -11520,11 +11473,9 @@ class UniversalImageFallbackTests(unittest.TestCase):
                 env.scen_uf([{}], fail_attached=True)
                 fds_before = _open_fds()
                 results: dict[str, int] = {}
-
                 def worker(model: str) -> None:
                     msgs = _uf_msgs(_uf_part("image/png"), text="параллельно " + model)
                     results[model] = bridge.post(_img_body(msgs, model=model))[0]
-
                 with _UfLog() as log:
                     threads = [
                         threading.Thread(target=worker, args=(m,))
@@ -13067,11 +13018,9 @@ class SessionFailClosedTests(unittest.TestCase):
                     captured: list[dict[str, object]] = []
                     handler_cls = _bval("Handler")
                     serve_json = _ofn(handler_cls, "_serve_json")
-
                     def capture(handler: object, ctx: dict[str, object]) -> None:
                         captured.append(dict(ctx))
                         _ = serve_json(handler, ctx)
-
                     with (
                         mock.patch.object(handler_cls, "_serve_json", capture),
                         mock.patch.object(_bridge(), "_session_claim") as claim,
@@ -13123,11 +13072,9 @@ class SessionFailClosedTests(unittest.TestCase):
                     captured: list[dict[str, object]] = []
                     handler_cls = _bval("Handler")
                     serve_json = _ofn(handler_cls, "_serve_json")
-
                     def capture(handler: object, ctx: dict[str, object]) -> None:
                         captured.append(dict(ctx))
                         _ = serve_json(handler, ctx)
-
                     bridge = _HttpBridge()
                     try:
                         if expected:
@@ -13171,11 +13118,9 @@ class SessionFailClosedTests(unittest.TestCase):
                     captured: list[dict[str, object]] = []
                     handler_cls = _bval("Handler")
                     serve_json = _ofn(handler_cls, "_serve_json")
-
                     def capture(handler: object, ctx: dict[str, object]) -> None:
                         captured.append(dict(ctx))
                         _ = serve_json(handler, ctx)
-
                     with (
                         mock.patch.object(handler_cls, "_serve_json", capture),
                         mock.patch.object(_bridge(), "_log") as log,
@@ -13220,11 +13165,9 @@ class SessionFailClosedTests(unittest.TestCase):
                 captured: list[dict[str, object]] = []
                 handler_cls = _bval("Handler")
                 serve_json = _ofn(handler_cls, "_serve_json")
-
                 def capture(handler: object, ctx: dict[str, object]) -> None:
                     captured.append(dict(ctx))
                     _ = serve_json(handler, ctx)
-
                 try:
                     self.assertEqual(bridge.post(_agentic_body("первый ход"))[0], 200)
                     body = _agentic_body("битый CID", True)
@@ -13509,11 +13452,9 @@ class SessionFailClosedTests(unittest.TestCase):
                 _ = fx.write_scenario([], spawns=[_quick(_CID), _quick(_CID_B)])
                 captured: list[dict[str, object]] = []
                 handler_cls = _bval("Handler")
-
                 def capture(handler: object, ctx: dict[str, object]) -> None:
                     captured.append(dict(ctx))
                     _ = _ofn(handler, "_send")(200, {})
-
                 bridge = _HttpBridge()
                 try:
                     with (
@@ -14558,13 +14499,11 @@ class DialogueStreamResilienceTests(unittest.TestCase):
                 ),
             ):
                 handler = self._handler()
-
                 def run(ctx: dict, _text: Any, tool: Any, *_callbacks: Any) -> dict:
                     self.assertTrue(tool({"name": "read_file", "step_index": 1}))
                     self.assertTrue(ctx["tool_activity"])
                     self.assertIs(ctx["stream_committed"], trace)
                     return self._out(tool_events=1)
-
                 handler._run_once = run
                 handler._serve_sse(_ctx())
                 wire = handler.wfile.getvalue()
@@ -14726,7 +14665,7 @@ def _nsl_stream_frames() -> list[bytes]:
         _nsl_chunk({"tool_calls": [call]}),
         _nsl_chunk({"tool_calls": [{"index": 0, "function": {"arguments": ',"Prompt":"x"}'}}]}),
         _nsl_chunk({}, "tool_calls"),
-        _nsl_frame({"id": "chatcmpl-nsl", "choices": [], "usage": {"total_tokens": 5}}),
+        _nsl_frame({"id": "chatcmpl-nsl", "choices": [], "usage": {"prompt_tokens": 2, "completion_tokens": 3, "total_tokens": 5}}),
         b"data: [DONE]\n\n",
     ]
 
@@ -14775,7 +14714,6 @@ class _NslClock:
 
 class TestNonstreamLivenessResilience(unittest.TestCase):
     """VER-005: core-уровень non-stream агрегации и окон живости без agy-моста."""
-
     # -- (a) изоляция слоя и инвариант _scan --------------------------------------------
     def test_new_core_modules_do_not_import_server_or_adapters(self) -> None:
         for name in _NSL_NEW_MODULES:
@@ -14824,7 +14762,6 @@ class TestNonstreamLivenessResilience(unittest.TestCase):
         self.assertEqual(_offer(arb, "transcript", 2, short_text), short_text)
         self.assertEqual(_offer(arb, "transcript", 2, "[статус: дочитывание]"), "дочитывание]")
         self.assertEqual(_oval(arb, "divergences"), 0)
-
     # -- (b) fault-matrix агрегатора ----------------------------------------------------
     def _aggregate(self, events: Any) -> bytes:
         return aggregate_events(events, None, 1 << 20)
@@ -14837,7 +14774,7 @@ class TestNonstreamLivenessResilience(unittest.TestCase):
         self.assertEqual(message["reasoning_content"], "Думаю над шагом.")
         self.assertEqual(message["tool_calls"][0]["function"]["arguments"], '{"Role":"Coder","Prompt":"x"}')
         self.assertEqual(body["choices"][0]["finish_reason"], "tool_calls")
-        self.assertEqual(body["usage"], {"total_tokens": 5})
+        self.assertEqual(body["usage"]["total_tokens"], 5)
 
     def test_truncation_at_every_event_position_never_yields_partial_200(self) -> None:
         frames = _nsl_stream_frames()
@@ -14873,7 +14810,6 @@ class TestNonstreamLivenessResilience(unittest.TestCase):
                     def gen(limit: int = cut, kind: Any = exc_type) -> Any:
                         yield from events[:limit]
                         raise kind(b"") if kind is _nsl_http_client.IncompleteRead else kind()
-
                     with self.assertRaises(NonstreamError) as ctx:
                         self._aggregate(gen())
                     self.assertEqual(ctx.exception.status, expected)
@@ -14919,7 +14855,6 @@ class TestNonstreamLivenessResilience(unittest.TestCase):
         with self.assertRaises(NonstreamError) as ctx:
             small.encode()
         self.assertEqual(ctx.exception.status, 502)
-
     # -- (c) chunk-boundary invariance --------------------------------------------------
     def test_classifier_and_aggregate_are_invariant_to_one_to_seven_byte_slicing(self) -> None:
         wire = b"".join(_nsl_stream_frames())
@@ -14958,7 +14893,6 @@ class TestNonstreamLivenessResilience(unittest.TestCase):
             with self.subTest(key=key):
                 kind, keys = classify_sse_data(json.dumps({"choices": [{"delta": {key: value}}]}))
                 self.assertEqual((kind, set(keys)), (SIGNAL_S, {key}))
-
     # -- (d) graceful-timeout / safety cap ----------------------------------------------
     def _window(self, clock: _NslClock, **spec: Any) -> LivenessWindow:
         params: dict[str, Any] = {"first_timeout_s": 5.0, "idle_timeout_s": 10.0, "safety_cap_s": 100.0}
@@ -15066,7 +15000,72 @@ def test_prepare_agy_home_synchronizes_antigravity_credentials(tmp_path):
          mock.patch.object(bridge, "CONV_DIR", fake_conv), \
          mock.patch.object(bridge, "_AGY_HOME_INITIALIZED", False), \
          mock.patch.object(bridge, "_ensure_symlink", lambda src, dst: None):
-        res = bridge._prepare_agy_home()
+        bridge._prepare_agy_home()
         clean_cli = fake_clean / ".gemini" / "antigravity-cli"
         assert (clean_cli / "antigravity-oauth-token").read_text(encoding="utf-8") == "token-123"
         assert (clean_cli / "antigravity-account.json").read_text(encoding="utf-8") == '{"email":"test@example.com"}'
+
+
+def test_w2b_run_once_defer_done_log_and_legacy_default() -> None:
+    for deferred in (False, True):
+        with _Fixture(), mock.patch.object(srv, "Run", _StubRun), mock.patch.object(
+            srv, "_launcher", _fake_launcher_path
+        ), mock.patch.object(srv, "_slots"):
+            handler = srv.Handler.__new__(srv.Handler)
+            handler._acquire_slot = lambda _keepalive: ""
+            handler._execute = lambda *_args: _scripted_out("done")
+            logs: list[str] = []
+            named = {"defer_done_log": True} if deferred else {}
+            with mock.patch.object(srv, "_log", logs.append):
+                out = handler._run_once(
+                    _ctx(), _text_sink, _tool_sink, _text_sink, None, **named
+                )
+            assert out["state"] == "done"
+            assert sum("done model=" in line for line in logs) == (not deferred)
+
+
+def test_w2b_runner_final_log_extended_graceful_and_fail_closed(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    from tests.test_stream_activity_window import _config, _runner
+
+    monkeypatch.setenv("BRIDGE_DYNAMIC_CONFIG_PATH", str(tmp_path / "dynamic.json"))
+    manual = _FakeClock()
+    clock = SimpleNamespace(monotonic=manual, sleep=lambda _seconds: None)
+    runner, _old_handler, _old_logs = _runner(monkeypatch, _config(monkeypatch), clock)
+    handler = srv.Handler.__new__(srv.Handler)
+    handler._acquire_slot = lambda _keepalive: ""
+    caps: list[float] = []
+
+    class _Run(_StubRun):
+        def __init__(self, *_args: object, **kwargs: object) -> None:
+            self.policy = kwargs["policy"]
+
+    def execute(run: Any, *_args: object, **_kwargs: object) -> dict[str, object]:
+        fake = _ext_run(manual, lambda _tick, now, active: _stamp(active, now))
+        fake.policy = run.policy
+        handler._job_client_gone = lambda: False
+        fake_time = SimpleNamespace(monotonic=manual, sleep=clock.sleep)
+        with mock.patch.object(srv, "time", fake_time):
+            srv.Handler._execute(handler, fake, _text_sink, _tool_sink, _text_sink, None)
+        caps.append(manual())
+        return _scripted_out("done", text="")
+
+    handler._execute = execute
+    runner.s.handler = handler
+    runner.s.ctx = _ctx(stream=True)
+    logs: list[str] = []
+    with _Fixture() as fx, mock.patch.object(srv, "Run", _Run), mock.patch.object(
+        srv, "_launcher", _fake_launcher_path
+    ), mock.patch.object(srv, "_slots"), mock.patch.object(srv, "_log", logs.append):
+        fx.set_env("AGY_EXTENDED_TIMEOUT_ENABLED", "1")
+        fx.set_env("AGY_GRACEFUL_TIMEOUT_ON_PARTIAL", "1")
+        out = runner.attempt(0, 300)
+    done = [line for line in logs if "done model=" in line]
+    assert caps == [1300]
+    assert (out["state"], out["rc"], out["text"]) == ("timeout", 124, "")
+    assert srv.Handler._error_body(out)["code"] == 504
+    assert len(done) == 1
+    for field in ("rc=124", "state=timeout", "out_bytes=0", "had_progress=False"):
+        assert field in done[0]
+    assert "err='retry_budget_exhausted'" in done[0]
