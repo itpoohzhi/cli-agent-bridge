@@ -1,5 +1,6 @@
 """Детерминированные кейсы `wave_4_tools` и инцидентов #1/#2/#3 для QA Product Gate."""
 
+# ruff: noqa: E501 -- строки legacy-кейсов 1..171 сохранены побайтово.
 from __future__ import annotations
 
 from collections.abc import Callable
@@ -169,6 +170,69 @@ def _check_incident_3(chunk_chars: int) -> dict[str, bool]:
     return {"incident_3_invalid_escape_x27_and_s": ok_x27 and ok_s}
 
 
+def _incident_4_active_stream() -> bool:
+    from core import stream_activity_policy as activity
+
+    window = activity.SlidingActivityWindow(0.0, 300.0, 300.0, 1014.5)
+    window.record_signal("reasoning", "thinking", 200.0)
+    window.record_signal("content", "answer", 400.0)
+    snapshot = window.mark_completed(450.0)
+    outcome = activity.render_final_outcome({"state": "done", "rc": 0}, snapshot)
+    actual = (snapshot.state, snapshot.elapsed_s, outcome["state"], outcome["rc"])
+    return actual == (activity.ActivityState.COMPLETED, 450.0, "done", 0)
+
+
+def _incident_4_silent_stream() -> bool:
+    from core import stream_activity_policy as activity
+
+    window = activity.SlidingActivityWindow(0.0, 300.0, 300.0, 1014.5)
+    for now in range(15, 301, 15):
+        window.record_signal("keepalive", None, float(now))
+        window.record_signal("content", "", float(now))
+    snapshot = window.check_expired(300.0)
+    outcome = activity.render_final_outcome({"state": "done", "rc": 0}, snapshot)
+    actual = (snapshot.state, snapshot.timeout_limit_s, *outcome.values())
+    expected = (activity.ActivityState.IDLE_EXPIRED, 300.0, "timeout", 124,
+                "retry_budget_exhausted", 300.0, False, 300.0, "", "")
+    return actual == expected
+
+
+def _incident_4_budgets() -> bool:
+    from dataclasses import replace
+
+    from core import stream_activity_policy as activity
+
+    legacy_input = activity.SlidingBudgetInput(
+        1020.0, 5.5, 0.0, False, 3, 0, 300.0, 8.0
+    )
+    legacy = activity.compute_sliding_attempt_budget_s(legacy_input)
+    sliding_input = replace(legacy_input, sliding_enabled=True)
+    sliding = activity.compute_sliding_attempt_budget_s(sliding_input)
+    return (legacy, sliding) == (338.166, 1014.5)
+
+
+def _incident_4_safety_cap() -> bool:
+    from core import stream_activity_policy as activity
+
+    window = activity.SlidingActivityWindow(0.0, 300.0, 300.0, 1014.5)
+    for now in range(200, 1001, 200):
+        window.record_signal("content", "progress", float(now))
+    snapshot = window.check_expired(1014.5)
+    outcome = activity.render_final_outcome({"state": "done", "rc": 0}, snapshot)
+    actual = (snapshot.state, outcome["state"], outcome["rc"], outcome["had_progress"])
+    expected = (activity.ActivityState.CAP_EXPIRED, "timeout", 124, True)
+    return actual == expected
+
+
+def _check_incident_4_agy_timeout_338s() -> dict[str, bool]:
+    return {
+        "incident_4_sliding_outlives_338s": _incident_4_active_stream(),
+        "incident_4_silent_first_event_fail_fast": _incident_4_silent_stream(),
+        "incident_4_legacy_kill_switch_338s": _incident_4_budgets(),
+        "incident_4_safety_cap_bounded": _incident_4_safety_cap(),
+    }
+
+
 def run_wave_tools_incidents(bridge_fn: Callable[[], Any], chunk_chars: int) -> dict[str, bool]:
     """Полный набор проверок wave_4_tools (legacy + инциденты #1/#2/#3)."""
     _ = bridge_fn()
@@ -176,4 +240,5 @@ def run_wave_tools_incidents(bridge_fn: Callable[[], Any], chunk_chars: int) -> 
     checks.update(_check_incident_1(chunk_chars))
     checks.update(_check_incident_2(chunk_chars))
     checks.update(_check_incident_3(chunk_chars))
+    checks.update(_check_incident_4_agy_timeout_338s())
     return checks
