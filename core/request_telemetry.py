@@ -1,9 +1,7 @@
 """Универсальная телеметрия запросов моста: DuckDB (fallback sqlite3), неблокирующая очередь.
 
-Хранит только скаляры: промпты, тела, карты заголовков и env не сохраняются, секреты
-редактируются в фоновом writer до записи в БД. Агент-агностично: знает про backend_id, а не про агентов.
-Стор ленивый: импорт модуля и конструктор не открывают БД и не запускают поток, это делает первое обращение
-при включённом флаге BRIDGE_TELEMETRY_ENABLED (GigaRC > env > false), который проверяется на каждом запросе.
+Хранит только скаляры (без промптов, тел, заголовков и env); секреты редактируются в writer до записи в БД.
+Стор ленивый: БД и поток открываются при первом обращении с BRIDGE_TELEMETRY_ENABLED (GigaRC > env > false).
 """
 
 from __future__ import annotations
@@ -23,6 +21,7 @@ from core.telemetry_flow import build_architecture_flow
 from core.telemetry_query import TelemetryReader
 from core.telemetry_sql import (
     COLUMNS,
+    MIGRATION_COLUMNS,
     NAMES,
     SCHEMA,
     Quantile,
@@ -69,10 +68,18 @@ class RequestTelemetryStore(TelemetryReader):
         self._open_lock, self._stop = threading.Lock(), threading.Event()
         limit = as_int(self._c["max_field_len"])
         self._limits = (limit, scan_bound(limit, as_int(self._c["redact_scan_factor"]), as_int(self._c["redact_scan_min"])))
-        self._last_prune = 0.0
+        self._last_prune, self._opened = 0.0, False
         self._thread: threading.Thread | None = None
-        self._opened = False
         self._force_sqlite, self._autostart = force_sqlite, autostart
+        self._usage_log = self._init_usage_log(cfg)
+
+    def _init_usage_log(self, cfg: Mapping[str, Any]) -> Any:
+        """Ленивое подключение ротационного usage-лога (core/usage_log.py из W1-C); сбой -> None (Fail-Open)."""
+        try:
+            from core.usage_log import create_usage_log_writer  # type: ignore[import-not-found]  # pyright: ignore[reportMissingImports]
+            return create_usage_log_writer(cfg)
+        except Exception:  # noqa: BLE001 - до W1-C модуля нет, лог опционален и не должен ронять стор
+            return None
 
     @property
     def enabled(self) -> bool:
@@ -114,8 +121,19 @@ class RequestTelemetryStore(TelemetryReader):
             con = None
         return (con, "duckdb", base) if con is not None else _sqlite(base)
 
+    def _migrate_schema(self, con: Any, engine: str) -> None:
+        """Идемпотентно добавить миграционные колонки в конец legacy-таблицы (29 -> 31) в обоих движках."""
+        if engine == "duckdb":
+            for name, typ in MIGRATION_COLUMNS:
+                con.execute(f"ALTER TABLE bridge_requests ADD COLUMN IF NOT EXISTS {name} {typ}")
+            return
+        present = {row[1] for row in con.execute("PRAGMA table_info(bridge_requests)").fetchall()}
+        for name, typ in MIGRATION_COLUMNS:
+            if name not in present:
+                con.execute(f"ALTER TABLE bridge_requests ADD COLUMN {name} {typ}")
+
     def _open(self, force_sqlite: bool) -> None:
-        """Открыть стор (DuckDB либо sqlite3); любой сбой не роняет мост, стор остаётся disabled."""
+        """Открыть стор (DuckDB либо sqlite3) и идемпотентно мигрировать схему; сбой не роняет мост."""
         base = os.path.expanduser(self.db_path)
         folder = first_truthy(os.path.dirname(base), ".")
         created = not os.path.isdir(folder)
@@ -125,6 +143,7 @@ class RequestTelemetryStore(TelemetryReader):
                 os.chmod(folder, 0o700)
             con, self.engine, self.db_path = self._connect(base, force_sqlite)
             con.execute(f"CREATE TABLE IF NOT EXISTS bridge_requests ({SCHEMA})")
+            self._migrate_schema(con, self.engine)
             for statement in _INDEX_SQL.get(self.engine, ()):
                 con.execute(statement)
             os.chmod(self.db_path, 0o600)
@@ -189,7 +208,25 @@ class RequestTelemetryStore(TelemetryReader):
         except Exception:  # noqa: BLE001
             self._bump("dropped_events", len(batch))
             return 0
+        self._write_usage_log(batch)
         return len(batch)
+
+    def _write_usage_log(self, batch: list[tuple]) -> None:
+        """Пачка санитизированных строк -> ротационный usage-лог; сбой JSONL не ломает запись в БД (Fail-Open)."""
+        if self._usage_log is not None:
+            try:
+                self._usage_log.write_rows(batch, NAMES)
+            except Exception:  # noqa: BLE001 - ошибка лога никогда не роняет writer
+                pass
+
+    def usage_log_status(self) -> dict[str, Any]:
+        """Снапшот ротационного usage-лога (путь, ротации, ошибки) или признак «лог отключён»."""
+        if self._usage_log is None:
+            return {"enabled": False}
+        try:
+            return dict(self._usage_log.status_snapshot())
+        except Exception:  # noqa: BLE001 - статус лога не должен ронять мост
+            return {"enabled": False}
 
     def flush(self, max_batches: int | None = None) -> int:
         """Записать очередь пачками batch_size; max_batches ограничивает число пачек (None — до пустой очереди)."""
@@ -246,10 +283,16 @@ class RequestTelemetryStore(TelemetryReader):
             join(timeout=5.0)
 
     def close(self) -> None:
-        """Идемпотентно: остановить writer, дописать очередь, закрыть соединение."""
+        """Идемпотентно: остановить writer, дописать очередь, закрыть usage-лог и соединение."""
         self._stop.set()
         self._join_writer()
         self._guarded_flush()
+        if self._usage_log is not None:
+            try:
+                self._usage_log.close()
+            except Exception:  # noqa: BLE001 - сбой закрытия usage-лога не должен ронять close()
+                pass
+            self._usage_log = None
         with self._db_lock:
             self._ready = False
             close_quietly(self._con)

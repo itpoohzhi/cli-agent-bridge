@@ -9,7 +9,8 @@ from collections.abc import Mapping
 from typing import Any
 
 from core import defaults as D
-from core.telemetry_util import first, present
+from core.telemetry_util import present
+from core.usage_fields import normalize_usage_fields
 
 _USAGE_KEY = re.compile(r'"usage"\s*:\s*')
 _DECODER = json.JSONDecoder()
@@ -28,13 +29,9 @@ def _details(raw: Mapping[str, Any]) -> Mapping[str, Any]:
 
 
 def normalize_usage(raw: Mapping[str, Any]) -> dict[str, Any]:
-    """Поля usage апстрима -> ключи CLI-веток (_telemetry_usage): input/output/cache_read; нет значения -> None."""
-    return {
-        "input_tokens": first(raw.get("input_tokens"), raw.get("prompt_tokens")),
-        "output_tokens": first(raw.get("output_tokens"), raw.get("completion_tokens")),
-        "cache_read_tokens": first(
-            raw.get("cache_read_input_tokens"), raw.get("cached_tokens"), _details(raw).get("cached_tokens")),
-    }
+    """Поля usage апстрима -> ключи CLI-веток (_telemetry_usage) + reasoning_tokens; usage_present отфильтрован."""
+    fields = normalize_usage_fields(raw)
+    return {key: value for key, value in fields.items() if key != "usage_present"}
 
 
 def _objects(tail: bytes) -> list[Mapping[str, Any]]:
