@@ -114,7 +114,6 @@ def _parse_num(
 
 
 def load_sqlite_ro_pool_config(env: Mapping[str, str]) -> SqliteRoPoolConfig:
-    """Собирает конфиг из явного окружения (без прямого `os.environ`)."""
     d, p = SqliteRoPoolConfig(), _parse_num
     return SqliteRoPoolConfig(
         enabled=_parse_bool(env, FLAG_SQLITE_RO_POOL, d.enabled),
@@ -128,20 +127,16 @@ def load_sqlite_ro_pool_config(env: Mapping[str, str]) -> SqliteRoPoolConfig:
 
 
 def _ro_uri(path: Path) -> str:
-    """URI только на чтение; `immutable=0` — WAL не обходится, файл не создаётся."""
     text = str(path).replace("%", "%25").replace("?", "%3f").replace("#", "%23")
     return f"file:{text}?mode=ro&immutable=0"
 
 
 def _is_retryable(exc: sqlite3.OperationalError) -> bool:
-    """Ретраибельны только блокировки (`locked`/`busy`), не прочие сбои открытия."""
     return any(m in str(exc).lower() for m in ("locked", "busy"))
 
 
 @final
 class SqliteRoPool:
-    """Thread-local RO-соединения на каждый db-path; единственный владелец состояния."""
-
     def __init__(
         self,
         config: SqliteRoPoolConfig,
@@ -242,7 +237,8 @@ class SqliteRoPool:
         on_conn: Callable[[sqlite3.Connection | None], None] | None = None,
     ) -> _T:
         """Выполняет RO-коллбэк на thread-local соединении с ограниченным retry."""
-        path, key, attempt = Path(db_path), str(db_path), 0
+        path = Path(db_path).resolve()
+        key, attempt = str(path), 0
         while True:
             try:
                 conn = self._get_conn(key, path)
@@ -269,7 +265,6 @@ class SqliteRoPool:
     def query_rows(
         self, db_path: str | Path, sql: str, params: tuple[object, ...] = ()
     ) -> list[tuple[object, ...]]:
-        """Выполняет RO-запрос; блокировки ретраятся ограниченно."""
         return self.run_ro(
             db_path,
             lambda c: cast(
@@ -278,13 +273,11 @@ class SqliteRoPool:
         )
 
     def release_thread(self) -> None:
-        """Закрывает и освобождает RO-соединения текущего потока."""
         st: _ThreadState | None = getattr(self._local, "state", None)
         if st is not None:
             _cleanup_thread(self._guard, self._all_conns, st.conns, st.locks)
 
     def snapshot_metrics(self) -> dict[str, int]:
-        """Возвращает НОВЫЙ dict метрик; внутренние реестры наружу не отдаются."""
         with self._guard:
             return {
                 **self._metrics,
@@ -293,7 +286,6 @@ class SqliteRoPool:
             }
 
     def close_all(self) -> None:
-        """Закрывает все соединения и очищает реестры; повторный вызов безопасен."""
         with self._guard:
             conns = list(self._all_conns)
             self._all_conns.clear()

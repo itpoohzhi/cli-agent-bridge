@@ -275,3 +275,17 @@ def test_short_lived_threads_cleanup_and_run_ro(tmp_path: Path) -> None:
         assert pool.snapshot_metrics()["tracked_dbs"] == 0
     finally:
         pool.close_all()
+
+
+def test_path_aliases_share_single_canonical_lock_and_conn(tmp_path: Path) -> None:
+    db = make_db(tmp_path / "canon.db", rows=2)
+    alias = f"{db.parent}/./{db.name}"
+    pool = make_pool(SqliteRoPoolConfig(enabled=True))
+    try:
+        assert pool.query_rows(db, "SELECT count(*) FROM items") == [(2,)]
+        assert pool.query_rows(str(db), "SELECT count(*) FROM items") == [(2,)]
+        assert pool.query_rows(alias, "SELECT count(*) FROM items") == [(2,)]
+        m = pool.snapshot_metrics()
+        assert m["tracked_dbs"] == 1 and m["opens"] == 1 and m["reuses"] == 2
+    finally:
+        pool.close_all()
