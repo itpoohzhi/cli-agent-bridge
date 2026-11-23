@@ -264,10 +264,14 @@ def test_short_lived_threads_cleanup_and_run_ro(tmp_path: Path) -> None:
             thread.join(timeout=10.0)
         gc.collect()
         assert pool.snapshot_metrics()["active_conns"] == 0
+        assert pool.snapshot_metrics()["tracked_dbs"] == 0
         assert bound.count(True) == 10 and bound.count(False) == 10
         assert pool.query_rows(db, "SELECT count(*) FROM items") == [(4,)]
         assert pool.snapshot_metrics()["active_conns"] == 1
+        assert pool.snapshot_metrics()["tracked_dbs"] == 1
         pool.release_thread()
+        gc.collect()
         assert pool.snapshot_metrics()["active_conns"] == 0
+        assert pool.snapshot_metrics()["tracked_dbs"] == 0
     finally:
         pool.close_all()

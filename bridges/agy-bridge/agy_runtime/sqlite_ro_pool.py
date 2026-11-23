@@ -11,16 +11,22 @@ import weakref
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Final, TypeVar, cast
+from typing import Final, TypeVar, cast, final
 
 _Num = TypeVar("_Num", int, float)
 _T = TypeVar("_T")
 _ConnMap = dict[str, sqlite3.Connection]
 
 
+class _LockBox:
+    def __init__(self) -> None:
+        self.lock: threading.Lock = threading.Lock()
+
+
 class _ThreadState:
     def __init__(self) -> None:
         self.conns: _ConnMap = {}
+        self.locks: dict[str, _LockBox] = {}
 
 
 def _close_quietly(conn: sqlite3.Connection) -> None:
@@ -30,11 +36,15 @@ def _close_quietly(conn: sqlite3.Connection) -> None:
         pass
 
 
-def _cleanup_thread_conns(
-    guard: threading.Lock, all_conns: set[sqlite3.Connection], conns: _ConnMap
+def _cleanup_thread(
+    guard: threading.Lock,
+    all_conns: set[sqlite3.Connection],
+    conns: _ConnMap,
+    locks: dict[str, _LockBox],
 ) -> None:
     items = list(conns.values())
     conns.clear()
+    locks.clear()
     with guard:
         all_conns.difference_update(items)
     for conn in items:
@@ -63,20 +73,25 @@ class SqliteRoPoolConfig:
 
     def validate(self) -> None:
         """Fail-closed: конечность и диапазоны всех эксплуатационных окон."""
-        floats = ("open_timeout_s", "base_backoff_s", "max_backoff_s", "jitter_ratio")
         if min(self.busy_timeout_ms, self.max_retries) < 0:
             raise ValueError("busy_timeout_ms/max_retries must be >= 0")
-        for name in floats:
+        for name in (
+            "open_timeout_s",
+            "base_backoff_s",
+            "max_backoff_s",
+            "jitter_ratio",
+        ):
             value = cast("float", getattr(self, name))
             bad = not math.isfinite(value) or value < 0.0
-            bad = bad or (name == "open_timeout_s" and value == 0.0)
-            bad = bad or (name == "jitter_ratio" and value > 1.0)
-            if bad:
+            if (
+                bad
+                or (name == "open_timeout_s" and value == 0.0)
+                or (name == "jitter_ratio" and value > 1.0)
+            ):
                 raise ValueError(f"{name} out of range, got {value!r}")
 
 
 def _parse_bool(env: Mapping[str, str], key: str, default: bool) -> bool:
-    """Строгий bool из окружения: неизвестное значение — `ValueError`."""
     raw = env.get(key)
     if raw is None:
         return default
@@ -89,7 +104,6 @@ def _parse_bool(env: Mapping[str, str], key: str, default: bool) -> bool:
 def _parse_num(
     env: Mapping[str, str], key: str, conv: Callable[[str], _Num], default: _Num
 ) -> _Num:
-    """Число из окружения; нечисло — `ValueError`, диапазон проверяет `validate`."""
     raw = env.get(key)
     if raw is None:
         return default
@@ -124,6 +138,7 @@ def _is_retryable(exc: sqlite3.OperationalError) -> bool:
     return any(m in str(exc).lower() for m in ("locked", "busy"))
 
 
+@final
 class SqliteRoPool:
     """Thread-local RO-соединения на каждый db-path; единственный владелец состояния."""
 
@@ -135,23 +150,24 @@ class SqliteRoPool:
         rng: random.Random | Callable[[], float] | None = None,
     ) -> None:
         config.validate()
-        self._config: SqliteRoPoolConfig = config
+        self._config = config
         self._sleep: Callable[[float], None] = sleep_fn or time.sleep
         self._rng: random.Random | Callable[[], float] = rng or random.Random()
-        self._guard: threading.Lock = threading.Lock()
-        self._locks: dict[str, threading.Lock] = {}
-        self._local: threading.local = threading.local()
+        self._guard = threading.Lock()
+        self._locks: weakref.WeakValueDictionary[str, _LockBox] = (
+            weakref.WeakValueDictionary()
+        )
+        self._local = threading.local()
         self._all_conns: set[sqlite3.Connection] = set()
-        keys = ("opens", "reuses", "retries", "failures")
-        self._metrics: dict[str, int] = dict.fromkeys(keys, 0)
+        self._metrics = dict.fromkeys(("opens", "reuses", "retries", "failures"), 0)
 
     def _unit(self) -> float:
-        rng = self._rng
-        raw = rng.random() if isinstance(rng, random.Random) else rng()
+        raw = (
+            self._rng.random() if isinstance(self._rng, random.Random) else self._rng()
+        )
         return min(1.0, max(0.0, raw)) if math.isfinite(raw) else 0.0
 
     def _backoff_s(self, attempt: int) -> float:
-        """Экспоненциальный backoff с потолком и jitter; `attempt` — номер ретрая от 0."""
         cfg = self._config
         capped = min(cfg.max_backoff_s, math.ldexp(cfg.base_backoff_s, attempt))
         return capped * (1.0 + cfg.jitter_ratio * self._unit())
@@ -160,34 +176,26 @@ class SqliteRoPool:
         with self._guard:
             self._metrics[key] = self._metrics.get(key, 0) + 1
 
-    def _local_map(self) -> _ConnMap:
+    def _thread_state(self) -> _ThreadState:
         state: _ThreadState | None = getattr(self._local, "state", None)
         if state is None:
             state = _ThreadState()
-            _ = weakref.finalize(
-                state, _cleanup_thread_conns, self._guard, self._all_conns, state.conns
-            )
+            args = (self._guard, self._all_conns, state.conns, state.locks)
+            _ = weakref.finalize(state, _cleanup_thread, *args)
             setattr(self._local, "state", state)
-        return state.conns
+        return state
 
-    def _db_lock(self, key: str) -> threading.Lock:
+    def _db_lock(self, key: str) -> _LockBox:
         with self._guard:
-            lock = self._locks.get(key)
-            if lock is None:
-                if len(self._locks) >= 512:
-                    stale = [k for k, lk in self._locks.items() if not lk.locked()]
-                    for k in stale[: len(stale) // 2 + 1]:
-                        _ = self._locks.pop(k, None)
-                lock = threading.Lock()
-                self._locks[key] = lock
-            return lock
+            if (box := self._locks.get(key)) is None:
+                box = _LockBox()
+                self._locks[key] = box
+            return box
 
     def _open(self, path: Path) -> sqlite3.Connection:
+        t = self._config.open_timeout_s
         conn = sqlite3.connect(
-            _ro_uri(path),
-            uri=True,
-            timeout=self._config.open_timeout_s,
-            check_same_thread=False,
+            _ro_uri(path), uri=True, timeout=t, check_same_thread=False
         )
         try:
             _ = conn.execute(
@@ -200,26 +208,28 @@ class SqliteRoPool:
         return conn
 
     def _get_conn(self, key: str, path: Path) -> sqlite3.Connection:
-        local = self._local_map()
-        existing = local.get(key)
-        if existing is not None:
+        st = self._thread_state()
+        if (existing := st.conns.get(key)) is not None:
             with self._guard:
                 tracked = existing in self._all_conns
             if tracked:
                 self._bump("reuses")
                 return existing
-            _ = local.pop(key, None)
-        with self._db_lock(key):
+            _ = st.conns.pop(key, None)
+            _ = st.locks.pop(key, None)
+        box = self._db_lock(key)
+        with box.lock:
             conn = self._open(path)
             with self._guard:
                 self._all_conns.add(conn)
-                self._metrics["opens"] = self._metrics.get("opens", 0) + 1
-            local[key] = conn
+                self._metrics["opens"] += 1
+            st.conns[key], st.locks[key] = conn, box
             return conn
 
     def _evict(self, key: str) -> None:
-        conn = self._local_map().pop(key, None)
-        if conn is not None:
+        st = self._thread_state()
+        _ = st.locks.pop(key, None)
+        if (conn := st.conns.pop(key, None)) is not None:
             with self._guard:
                 self._all_conns.discard(conn)
             _close_quietly(conn)
@@ -232,9 +242,7 @@ class SqliteRoPool:
         on_conn: Callable[[sqlite3.Connection | None], None] | None = None,
     ) -> _T:
         """Выполняет RO-коллбэк на thread-local соединении с ограниченным retry."""
-        path = Path(db_path)
-        key = str(path)
-        attempt = 0
+        path, key, attempt = Path(db_path), str(db_path), 0
         while True:
             try:
                 conn = self._get_conn(key, path)
@@ -261,7 +269,7 @@ class SqliteRoPool:
     def query_rows(
         self, db_path: str | Path, sql: str, params: tuple[object, ...] = ()
     ) -> list[tuple[object, ...]]:
-        """Выполняет RO-запрос thread-local соединением; блокировки ретраятся ограниченно."""
+        """Выполняет RO-запрос; блокировки ретраятся ограниченно."""
         return self.run_ro(
             db_path,
             lambda c: cast(
@@ -271,17 +279,18 @@ class SqliteRoPool:
 
     def release_thread(self) -> None:
         """Закрывает и освобождает RO-соединения текущего потока."""
-        state: _ThreadState | None = getattr(self._local, "state", None)
-        if state is not None:
-            _cleanup_thread_conns(self._guard, self._all_conns, state.conns)
+        st: _ThreadState | None = getattr(self._local, "state", None)
+        if st is not None:
+            _cleanup_thread(self._guard, self._all_conns, st.conns, st.locks)
 
     def snapshot_metrics(self) -> dict[str, int]:
         """Возвращает НОВЫЙ dict метрик; внутренние реестры наружу не отдаются."""
         with self._guard:
-            snap = dict(self._metrics)
-            snap["tracked_dbs"] = len(self._locks)
-            snap["active_conns"] = len(self._all_conns)
-            return snap
+            return {
+                **self._metrics,
+                "tracked_dbs": len(self._locks),
+                "active_conns": len(self._all_conns),
+            }
 
     def close_all(self) -> None:
         """Закрывает все соединения и очищает реестры; повторный вызов безопасен."""
@@ -289,8 +298,9 @@ class SqliteRoPool:
             conns = list(self._all_conns)
             self._all_conns.clear()
             self._locks.clear()
-        state: _ThreadState | None = getattr(self._local, "state", None)
-        if state is not None:
-            state.conns.clear()
+        st: _ThreadState | None = getattr(self._local, "state", None)
+        if st is not None:
+            st.conns.clear()
+            st.locks.clear()
         for conn in conns:
             _close_quietly(conn)

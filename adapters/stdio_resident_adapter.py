@@ -28,7 +28,6 @@ from core.stdio_resident.codex_attestation_wire import (
 from core.stdio_resident.config import StdioPoolConfig
 from core.stdio_resident.process_pool import ResidentProcessPool
 from core.stdio_resident.protocol_driver import StdioProtocolDriver
-from core.stdio_resident.rpc_drivers import create_protocol_driver
 from core.stdio_resident.session_manager import StdioSessionManager
 from core.stdio_resident.turn_stream import AssembledStreamDelta, TurnStreamAssembler
 from core.stdio_resident.types import SlotAffinityKey
@@ -121,14 +120,15 @@ class StdioResidentAdapter(BackendAdapter):
         super().__init__(actual_id, actual_config, catalog_source or _empty_catalog, host)
         self._has_catalog_source: bool = catalog_source is not None
         self._options: dict[str, Any] = self._extract_options(actual_config)
-        from adapters.stdio_drivers import infer_protocol
+        from adapters.stdio_drivers import infer_protocol, resolve_pool_and_driver
 
         self._protocol: str = infer_protocol(actual_id, actual_config, self._options)
-        self._config: StdioPoolConfig = StdioPoolConfig.from_env()
-        self._pool: ResidentProcessPool = ResidentProcessPool(self._config)
-        self._driver: StdioProtocolDriver = create_protocol_driver(
-            self._protocol, config=actual_config
+        self._config: StdioPoolConfig
+        self._driver: StdioProtocolDriver
+        self._config, self._driver = resolve_pool_and_driver(
+            self._protocol, driver_config=actual_config
         )
+        self._pool: ResidentProcessPool = ResidentProcessPool(self._config)
         self._session_manager: StdioSessionManager = StdioSessionManager(
             self._pool, self._driver
         )

@@ -51,10 +51,6 @@ class AgyStreamJsonDriver(StreamJsonDriver):
     def config(self) -> AgyResidentConfig:
         return self._config
 
-    def should_recycle_after_turns(self, turns_completed: int) -> bool:
-        """Достигнут ли лимит `max_turns` для переработки резидентного слота."""
-        return turns_completed >= self._config.max_turns
-
     @override
     def build_argv(self, base_argv: list[str], options: _Map) -> list[str]:
         argv = list(base_argv)

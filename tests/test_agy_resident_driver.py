@@ -71,11 +71,10 @@ def test_env_overrides_idle_precedence_and_fail_closed() -> None:
         "AGY_RESIDENT_IDLE_TIMEOUT_S": "42.5",
         "AGY_RESIDENT_TTL_S": "90",
         "AGY_RESIDENT_MAX_RSS_MB": "256",
-        "AGY_RESIDENT_MAX_TURNS": "7",
         "AGY_RESIDENT_LEASE_WAIT_S": "2.5",
     }
     cfg = load_agy_resident_config(env, ladder_idle_s=600.0)
-    assert cfg == AgyResidentConfig(True, 3, 42.5, 90.0, 256, 7, 2.5)
+    assert cfg == AgyResidentConfig(True, 3, 42.5, 90.0, 256, 2.5)
     assert build_agy_pool_config(cfg).max_slots == 3
     assert build_agy_pool_config(cfg).turn_idle_timeout_s == 42.5
     for bad in (
@@ -84,25 +83,28 @@ def test_env_overrides_idle_precedence_and_fail_closed() -> None:
         {"AGY_RESIDENT_IDLE_TIMEOUT_S": "nan"},
         {"AGY_RESIDENT_MAX_SLOTS": "0"},
         {"AGY_RESIDENT_MAX_RSS_MB": "32"},
-        {"AGY_RESIDENT_MAX_TURNS": "0"},
         {"AGY_RESIDENT_IDLE_TIMEOUT_S": "5000", "AGY_RESIDENT_TTL_S": "60"},
     ):
         with pytest.raises(ValueError):
             _ = load_agy_resident_config(bad)
-    drv = AgyStreamJsonDriver(cfg)
-    assert not drv.should_recycle_after_turns(6) and drv.should_recycle_after_turns(7)
 
 
-def test_runtime_registry_and_infer_protocol_wiring() -> None:
+def test_runtime_registry_blast_radius_and_adapter_wiring(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     from adapters.stdio_drivers import infer_protocol
-    from core.stdio_resident.rpc_drivers import create_protocol_driver
+    from adapters.stdio_resident_adapter import StdioResidentAdapter
 
-    assert infer_protocol("agy", {}, {}, environ={}) == "stream-json"
-    assert (
-        infer_protocol("agy", {}, {}, environ={FLAG_AGY_RESIDENT: "true"})
-        == "agy-stream-json"
-    )
-    assert isinstance(create_protocol_driver("agy-stream-json"), AgyStreamJsonDriver)
+    bad_off = {"AGY_RESIDENT_MAX_SLOTS": "0", "AGY_RESIDENT_TTL_S": "0"}
+    assert infer_protocol("claude", {}, {}, environ=bad_off) == "stream-json"
+    assert infer_protocol("agy", {}, {}, environ=bad_off) == "stream-json"
+    assert infer_protocol("agy", {}, {}, environ={FLAG_AGY_RESIDENT: "true"}) == "agy-stream-json"
+    monkeypatch.setenv(FLAG_AGY_RESIDENT, "true")
+    monkeypatch.setenv("AGY_RESIDENT_MAX_SLOTS", "3")
+    monkeypatch.setenv("AGY_RESIDENT_IDLE_TIMEOUT_S", "450")
+    adapter = StdioResidentAdapter("agy", {})
+    assert isinstance(adapter._driver, AgyStreamJsonDriver)
+    assert adapter._config.max_slots == 3 and adapter._config.turn_idle_timeout_s == 450.0
 
 
 def test_config_is_frozen() -> None:

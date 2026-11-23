@@ -12,13 +12,20 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, cast
 
-from adapters.stdio_drivers.agy_driver import (
-    AgyStreamJsonDriver,
+from adapters.stdio_drivers.agy_config import (
+    build_agy_pool_config,
+    is_agy_resident_enabled,
     load_agy_resident_config,
 )
+from adapters.stdio_drivers.agy_driver import AgyStreamJsonDriver
 from adapters.stdio_drivers.muse_driver import MuseMspDriver
 from adapters.stdio_drivers.opencode_driver import OpenCodeAcpDriver
-from core.stdio_resident.rpc_drivers import register_protocol_driver
+from core.stdio_resident.config import StdioPoolConfig
+from core.stdio_resident.protocol_driver import StdioProtocolDriver
+from core.stdio_resident.rpc_drivers import (
+    create_protocol_driver,
+    register_protocol_driver,
+)
 from core.stdio_resident.types import SlotAffinityKey
 from core.subbridge_zero_canon import (
     STDIO_RESIDENT_CLAUDE_CODEX_PROTOCOL_FLAG,
@@ -44,6 +51,7 @@ __all__ = [
     "is_resident_enabled",
     "resolve_chat_key",
     "resolve_owner_hash",
+    "resolve_pool_and_driver",
     "validate_cwd",
 ]
 
@@ -178,14 +186,14 @@ def _infer_protocol_from_id(
     *,
     codex_v2: bool,
     native_cc: bool,
-    agy_on: bool = False,
+    env: Mapping[str, str],
 ) -> str | None:
     if actual_id == "muse":
         return "msp-v1"
     if actual_id in ("opencode", "opencode-resident"):
         return "opencode-acp"
     lower_id = actual_id.lower()
-    if agy_on and lower_id in _AGY_IDS:
+    if lower_id in _AGY_IDS and is_agy_resident_enabled(env):
         return "agy-stream-json"
     if codex_v2 and lower_id in _CODEX_V2_IDS:
         return "codex-app-server-v2"
@@ -201,7 +209,7 @@ def _infer_protocol_from_wrapper(
     *,
     codex_v2: bool,
     native_cc: bool,
-    agy_on: bool = False,
+    env: Mapping[str, str],
 ) -> str:
     if not wrapper_path:
         return "stream-json"
@@ -211,7 +219,7 @@ def _infer_protocol_from_wrapper(
     if "opencode" in name:
         return "opencode-acp"
     base = name.split(".")[0]
-    if agy_on and (base in _AGY_IDS or name.startswith("agy-cli")):
+    if (base in _AGY_IDS or name.startswith("agy-cli")) and is_agy_resident_enabled(env):
         return "agy-stream-json"
     if codex_v2 and name.split()[0].split(".")[0] in _CODEX_V2_IDS:
         return "codex-app-server-v2"
@@ -236,7 +244,6 @@ def infer_protocol(
     native_cc = is_claude_codex_resident_protocol_enabled(
         environ, config_path=config_path
     )
-    agy_on = load_agy_resident_config(env).enabled
     explicit = options.get("protocol")
     if isinstance(explicit, str) and explicit.strip():
         clean = explicit.strip()
@@ -244,7 +251,7 @@ def infer_protocol(
             return "codex-app-server" if native_cc else "stream-json"
         return clean
     by_id = _infer_protocol_from_id(
-        actual_id, codex_v2=codex_v2, native_cc=native_cc, agy_on=agy_on
+        actual_id, codex_v2=codex_v2, native_cc=native_cc, env=env
     )
     if by_id is not None:
         return by_id
@@ -252,7 +259,23 @@ def infer_protocol(
         _extract_wrapper_path(actual_config),
         codex_v2=codex_v2,
         native_cc=native_cc,
-        agy_on=agy_on,
+        env=env,
+    )
+
+
+def resolve_pool_and_driver(
+    protocol: str,
+    environ: Mapping[str, str] | None = None,
+    *,
+    driver_config: Mapping[str, Any] | None = None,
+) -> tuple[StdioPoolConfig, StdioProtocolDriver]:
+    """Создаёт `StdioPoolConfig` и драйвер; для `agy-stream-json` применяет `AgyResidentConfig`."""
+    env = os.environ if environ is None else environ
+    if protocol in ("agy-stream-json", "agy_stream_json"):
+        agy_cfg = load_agy_resident_config(env)
+        return build_agy_pool_config(agy_cfg), create_protocol_driver(protocol, config=agy_cfg)
+    return StdioPoolConfig.from_env(environ), create_protocol_driver(
+        protocol, config=driver_config
     )
 
 

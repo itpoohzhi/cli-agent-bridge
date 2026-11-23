@@ -15,6 +15,7 @@ __all__ = [
     "AgyResidentConfig",
     "build_agy_pool_config",
     "encode_json_bytes",
+    "is_agy_resident_enabled",
     "load_agy_resident_config",
 ]
 
@@ -61,7 +62,6 @@ class AgyResidentConfig:
     idle_timeout_s: float = 600.0
     ttl_s: float = 3600.0
     max_rss_mb: int = 1024
-    max_turns: int = 100
     lease_wait_timeout_s: float = 30.0
 
     def __post_init__(self) -> None:
@@ -69,8 +69,8 @@ class AgyResidentConfig:
 
     def validate(self) -> None:
         """Fail-closed: проверка всех числовых диапазонов на границе конфигурации."""
-        if self.max_slots < 1 or self.max_rss_mb < 64 or self.max_turns < 1:
-            raise ValueError("max_slots>=1, max_rss_mb>=64, max_turns>=1 required")
+        if self.max_slots < 1 or self.max_rss_mb < 64:
+            raise ValueError("max_slots>=1 and max_rss_mb>=64 required")
         for name, val in (
             ("idle_timeout_s", self.idle_timeout_s),
             ("ttl_s", self.ttl_s),
@@ -80,6 +80,14 @@ class AgyResidentConfig:
                 raise ValueError(f"{name} must be finite and > 0, got {val!r}")
         if self.ttl_s < self.idle_timeout_s:
             raise ValueError("ttl_s must be >= idle_timeout_s")
+
+
+def is_agy_resident_enabled(env: Mapping[str, str]) -> bool:
+    """Читает только kill-switch `AGY_RESIDENT_ENABLED` без парсинга прочих AGY_* переменных."""
+    raw = _raw(env, FLAG_AGY_RESIDENT)
+    if raw is None:
+        return False
+    return raw.lower() in _TRUE_VALUES
 
 
 def _raw(env: Mapping[str, str], key: str) -> str | None:
@@ -125,7 +133,6 @@ def load_agy_resident_config(
         ),
         ttl_s=p(env, "AGY_RESIDENT_TTL_S", float, d.ttl_s),
         max_rss_mb=p(env, "AGY_RESIDENT_MAX_RSS_MB", int, d.max_rss_mb),
-        max_turns=p(env, "AGY_RESIDENT_MAX_TURNS", int, d.max_turns),
         lease_wait_timeout_s=p(
             env, "AGY_RESIDENT_LEASE_WAIT_S", float, d.lease_wait_timeout_s
         ),
@@ -133,7 +140,7 @@ def load_agy_resident_config(
 
 
 def build_agy_pool_config(cfg: AgyResidentConfig) -> StdioPoolConfig:
-    """Маппинг в `StdioPoolConfig`; `max_turns` контролирует `should_recycle_after_turns`."""
+    """Маппинг всех полей `AgyResidentConfig` в `StdioPoolConfig` (рециркуляция: idle/ttl/rss)."""
     cfg.validate()
     return StdioPoolConfig(
         max_slots=cfg.max_slots,
