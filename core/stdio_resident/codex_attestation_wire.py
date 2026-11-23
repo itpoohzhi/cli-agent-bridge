@@ -8,6 +8,7 @@ from typing import Any, Final
 
 from core.codex_zero_canon_policy import CodexZeroCanonPolicyError
 from core.stdio_resident.codex_protocol_fsm import ProtocolPhase, ProtocolState
+from core.stdio_resident.sse_error_bridge import sanitize_log_text
 from core.stdio_resident.turn_error_sse import ResidentTurnError, build_turn_error, sanitize_error_message
 from core.subbridge_zero_canon import is_zero_canon_profile
 from core.zero_canon_attestation_http import (
@@ -244,18 +245,14 @@ class ZeroCanonSseHeaderGate:
         lease.record_failure(exc)
         if _is_attestation_error(exc):
             if log_fn is not None:
-                from core.stdio_resident.sse_error_bridge import _sanitize_log_text
-
-                safe_err = _sanitize_log_text(str(exc), extra_code=_ATTESTATION_CODE)
+                safe_err = sanitize_log_text(str(exc), extra_code=_ATTESTATION_CODE)
                 log_fn(f"sse_pre_stream_error status=502 code={_ATTESTATION_CODE} err={safe_err!r}")
             self._fail_closed(sanitize_error_message(exc))
             return True
         resp = exc.response if isinstance(exc, ResidentTurnError) else build_turn_error(exc, live_sent=0)
         status = resp.status if resp.status >= 400 else 502
         if log_fn is not None:
-            from core.stdio_resident.sse_error_bridge import _sanitize_log_text
-
-            safe_err = _sanitize_log_text(resp.message, extra_code=resp.code)
+            safe_err = sanitize_log_text(resp.message, extra_code=resp.code)
             log_fn(f"sse_pre_stream_error status={status} code={resp.code} err={safe_err!r}")
         self.failed_closed, self.handler._response_status = True, status
         self.handler._send(status, resp.body)

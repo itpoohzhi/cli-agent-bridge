@@ -10,7 +10,7 @@ import time
 import weakref
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, ClassVar, cast, override
+from typing import Any, ClassVar, Final, cast, override
 
 from core.stdio_resident.codex_protocol_fsm import (
     EffectKind, EventKind, ProtocolEffect, ProtocolEvent, ProtocolPhase, ProtocolState, transition,
@@ -275,6 +275,9 @@ class CodexAppServerDriver(StreamJsonDriver):
         return any(payload.get(k) is True or payload.get(k) in ("tool", "tool_call", "tool_calls", "tool_stop") for k in ("is_tool_stop", "tool_stop", "stop_reason", "status"))
 
 
+_HANDLE_STATE_ATTR: Final[str] = "_codex_v2_slot_state"
+
+
 @dataclass(slots=True)
 class _V2SlotState:
     state: ProtocolState
@@ -284,7 +287,20 @@ class _V2SlotState:
 
 
 class CodexAppServerV2Driver(StreamJsonDriver):
-    """Contract-first Codex app-server v2 driver executing pure codex_protocol_fsm effects."""
+    """Contract-first Codex app-server v2 driver executing pure codex_protocol_fsm effects.
+
+    Concurrency contract:
+    - Each turn runs on its request thread (`build_zero_canon_env` -> `run_handshake` ->
+      `prepare_turn` -> `encode_turn` -> `decode_line` -> `perform_turn_teardown` ->
+      attestation readers), using thread-local active state (`self._tls.ctx`).
+    - Persistent per-process FSM state is attached directly to the process `handle`
+      (`_codex_v2_slot_state`, or weakref-tracked if the handle uses `__slots__`), so
+      hot resident slots survive sequential reuse across different HTTP handler threads
+      (under `ResidentProcessPool` lease exclusivity) with zero `id()` aliasing or leak.
+    - `build_zero_canon_env` arms a one-shot `pending_zero_canon` marker consumed on the
+      next `run_handshake`, preventing Zero-Canon mode from leaking into subsequent
+      standard turns on the same worker thread.
+    """
 
     _capabilities: ClassVar[DriverCapabilities] = DriverCapabilities(
         protocol_name="codex-app-server-v2", supports_soft_cancel=True, supports_multi_turn=True
@@ -293,8 +309,7 @@ class CodexAppServerV2Driver(StreamJsonDriver):
     def __init__(self) -> None:
         self._tls: threading.local = threading.local()
         self._slot_lock: threading.Lock = threading.Lock()
-        self._slot_states: weakref.WeakKeyDictionary[object, _V2SlotState] = weakref.WeakKeyDictionary()
-        self._fallback_slots: dict[int, _V2SlotState] = {}
+        self._weak_slots: dict[int, tuple[weakref.ReferenceType[object], _V2SlotState]] = {}
 
     def _ctx(self) -> _V2SlotState:
         ctx = cast(_V2SlotState | None, getattr(self._tls, "ctx", None))
@@ -307,31 +322,55 @@ class CodexAppServerV2Driver(StreamJsonDriver):
         self._tls.ctx = slot
         if handle is None:
             return
+        try:
+            setattr(handle, _HANDLE_STATE_ATTR, slot)
+            return
+        except (AttributeError, TypeError):
+            pass
+        key = id(handle)
+
+        def _cleanup(_ref: object, k: int = key) -> None:
+            with self._slot_lock:
+                self._weak_slots.pop(k, None)
+
+        try:
+            ref = weakref.ref(handle, _cleanup)
+        except TypeError:
+            # Handle supports neither __dict__ nor __weakref__: keep turn-scoped TLS only.
+            return
         with self._slot_lock:
-            try:
-                self._slot_states[handle] = slot
-            except TypeError:
-                self._fallback_slots[id(handle)] = slot
+            self._weak_slots[key] = (ref, slot)
 
     def _lookup_handle_state(self, handle: Any) -> _V2SlotState | None:
         if handle is None:
             return None
+        direct = getattr(handle, _HANDLE_STATE_ATTR, None)
+        if isinstance(direct, _V2SlotState):
+            return direct
+        key = id(handle)
         with self._slot_lock:
-            try:
-                found = self._slot_states.get(handle)
-            except TypeError:
-                found = None
-            return found if found is not None else self._fallback_slots.get(id(handle))
+            pair = self._weak_slots.get(key)
+            if pair is None:
+                return None
+            ref, slot = pair
+            if ref() is handle:
+                return slot
+            self._weak_slots.pop(key, None)
+            return None
 
     def _release_handle_state(self, handle: Any) -> None:
         if handle is None:
             return
+        try:
+            if hasattr(handle, _HANDLE_STATE_ATTR):
+                delattr(handle, _HANDLE_STATE_ATTR)
+        except (AttributeError, TypeError):
+            pass
+        key = id(handle)
         with self._slot_lock:
-            try:
-                self._slot_states.pop(handle, None)
-            except TypeError:
-                pass
-            _ = self._fallback_slots.pop(id(handle), None)
+            pair = self._weak_slots.get(key)
+            if pair is not None and pair[0]() in (None, handle):
+                self._weak_slots.pop(key, None)
 
     @property
     def _state(self) -> ProtocolState:
@@ -405,6 +444,7 @@ class CodexAppServerV2Driver(StreamJsonDriver):
         return _build_codex_argv(base_argv, options)
 
     def build_zero_canon_env(self, base_env: Mapping[str, str], root: str) -> dict[str, str]:
+        self._tls.pending_zero_canon = True
         self._tls.ctx = _V2SlotState(state=ProtocolState(zero_canon=True), zero_canon=True)
         return prepare_codex_zero_canon_home(base_env, root)
 
@@ -417,13 +457,16 @@ class CodexAppServerV2Driver(StreamJsonDriver):
 
     @override
     def run_handshake(self, handle: Any, timeout_s: float = 10.0) -> bool:
-        zc = self._ctx().zero_canon
+        pending_zc = getattr(self._tls, "pending_zero_canon", None)
+        self._tls.pending_zero_canon = None
+        zc = bool(pending_zc) if pending_zc is not None else False
         slot = _V2SlotState(state=ProtocolState(zero_canon=zc), zero_canon=zc)
         self._bind_handle_state(handle, slot)
         try:
             self._send_effects(handle, self._apply(ProtocolEvent(EventKind.START_INITIALIZE)))
             return self._await_phase(handle, ProtocolPhase.INITIALIZED, timeout_s)
         except Exception:
+            self._release_handle_state(handle)
             return False
 
     @override
@@ -431,7 +474,11 @@ class CodexAppServerV2Driver(StreamJsonDriver):
         if (bound := self._lookup_handle_state(handle)) is not None:
             self._tls.ctx = bound
         ctx = _mapping(turn_context) or {}
-        zc = self._zero_canon or is_zero_canon_profile(str(ctx.get("review_profile") or ""))
+        profile_raw = ctx.get("review_profile")
+        if isinstance(profile_raw, str) and profile_raw.strip():
+            zc = is_zero_canon_profile(profile_raw)
+        else:
+            zc = self._zero_canon
         self._zero_canon = zc
         self._last_turn_state = None
         if self._state.phase is ProtocolPhase.IDLE:
@@ -526,4 +573,5 @@ class CodexAppServerV2Driver(StreamJsonDriver):
         _ = self.advance_epoch()
         if slot.zero_canon:
             self._release_handle_state(handle)
+        self._tls.pending_zero_canon = None
         return True

@@ -189,3 +189,81 @@ def test_pre_stream_error_logs_redacted_code_without_secret() -> None:
     assert sent and sent[0][0] == 502
     assert any("sse_pre_stream_error status=502 code=resident_protocol_failed" in line for line in logs)
     assert all(DUMMY_SECRET not in line for line in logs)
+
+
+def test_zero_canon_does_not_leak_into_subsequent_standard_turn_on_same_thread(tmp_path: Path) -> None:
+    """F-001/F-008 regression: Zero-Canon -> teardown -> standard turn on same worker thread stays standard."""
+    home = tmp_path / "home"
+    codex_dir = home / ".codex"
+    codex_dir.mkdir(parents=True)
+    (codex_dir / "auth.json").write_text('{"tokens": {}}', encoding="utf-8")
+    (codex_dir / "config.toml").write_text('model = "gpt-6.1-terra"\n', encoding="utf-8")
+
+    driver = CodexAppServerV2Driver()
+    # 1. Zero-Canon turn on this thread
+    zc_root = tmp_path / "zc-seq"
+    zc_root.mkdir()
+    _ = driver.build_zero_canon_env({"HOME": str(home), "CODEX_HOME": str(codex_dir)}, str(zc_root))
+    zc_handle = _ScriptedCodexHandle(11, barrier=None)
+    zc_ctx = {"model": "gpt-6.1-terra", "effort": "medium", "review_profile": "Zero-Canon", "cwd": str(zc_root)}
+    assert driver.run_handshake(zc_handle, timeout_s=5.0) is True
+    assert driver.protocol_state.zero_canon is True
+    assert driver.prepare_turn(zc_handle, zc_ctx, timeout_s=5.0) is True
+    zc_handle.write(driver.encode_turn("zc-prompt", zc_ctx))
+    while True:
+        line = zc_handle.read_stdout_line(timeout_s=5.0)
+        assert line is not None
+        chunk = driver.decode_line(line.line)
+        if driver.is_terminal(line.line, chunk):
+            assert driver.perform_turn_teardown(zc_handle, zc_ctx, timeout_s=2.0) is True
+            break
+
+    # 2. Subsequent standard turn on the EXACT SAME thread must NOT inherit zero_canon=True
+    std_handle = _ScriptedCodexHandle(12, barrier=None)
+    std_ctx = {"model": "gpt-6.1-sol", "effort": "high", "review_profile": "standard"}
+    assert driver.run_handshake(std_handle, timeout_s=5.0) is True
+    assert driver.protocol_state.zero_canon is False
+    assert driver.prepare_turn(std_handle, std_ctx, timeout_s=5.0) is True
+    assert driver.protocol_state.zero_canon is False
+    std_handle.write(driver.encode_turn("std-prompt", std_ctx))
+    while True:
+        line = std_handle.read_stdout_line(timeout_s=5.0)
+        assert line is not None
+        chunk = driver.decode_line(line.line)
+        if driver.is_terminal(line.line, chunk):
+            assert driver.perform_turn_teardown(std_handle, std_ctx, timeout_s=2.0) is True
+            break
+    # Standard resident handle state must still be retained on std_handle after teardown
+    assert driver._lookup_handle_state(std_handle) is not None
+    assert driver._lookup_handle_state(zc_handle) is None
+
+
+def test_slots_only_handle_weakref_cleanup_prevents_leak_and_id_aliasing() -> None:
+    """F-010 regression: __slots__ handle uses weakref cleanup, no stale id() leak after GC."""
+    import gc
+
+    class _SlottedHandle:
+        __slots__ = ("__weakref__", "_out", "pid", "generation")
+
+        def __init__(self) -> None:
+            self.pid = 9500
+            self.generation = 0
+            self._out: list[str] = []
+
+        def write(self, data: bytes) -> None:
+            msg = json.loads(data.decode("utf-8").strip())
+            if msg.get("method") == "initialize":
+                self._out.append(json.dumps({"jsonrpc": "2.0", "id": msg["id"], "result": {"userAgent": "codex/2"}}))
+
+        def read_stdout_line(self, timeout_s: float | None = None) -> TaggedLine | None:
+            _ = timeout_s
+            return TaggedLine(line=self._out.pop(0), generation=0, pid=self.pid, is_stderr=False) if self._out else None
+
+    driver = CodexAppServerV2Driver()
+    h: _SlottedHandle | None = _SlottedHandle()
+    assert driver.run_handshake(h, timeout_s=5.0) is True
+    assert driver._lookup_handle_state(h) is not None
+    assert len(driver._weak_slots) == 1
+    h = None
+    gc.collect()
+    assert len(driver._weak_slots) == 0
