@@ -218,13 +218,16 @@ def infer_protocol(
     config_path: Path | None = None,
 ) -> str:
     """Infer driver protocol from explicit options, backend id, or wrapper basename."""
-    explicit = options.get("protocol")
-    if isinstance(explicit, str) and explicit.strip():
-        return explicit.strip()
     codex_v2 = is_codex_app_server_v2_enabled(environ, config_path=config_path)
     native_cc = is_claude_codex_resident_protocol_enabled(
         environ, config_path=config_path
     )
+    explicit = options.get("protocol")
+    if isinstance(explicit, str) and explicit.strip():
+        clean = explicit.strip()
+        if clean == "codex-app-server-v2" and not codex_v2:
+            return "codex-app-server" if native_cc else "stream-json"
+        return clean
     by_id = _infer_protocol_from_id(actual_id, codex_v2=codex_v2, native_cc=native_cc)
     if by_id is not None:
         return by_id

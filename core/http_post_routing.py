@@ -13,9 +13,7 @@ from typing import Any
 from core.http_post_context import PostRequestContext
 from core.http_post_ingress import clean_transport_request
 from core.passthrough_autonomy import PassthroughOptions, prepare_passthrough_request, resolve_target_model
-from core.zero_canon_http import (
-    ZERO_CANON_HEADER_VALUE, ZeroCanonHttpError, filter_zero_canon_providers, parse_review_profile_headers,
-)
+from core.zero_canon_http import ZERO_CANON_HEADER_VALUE, ZeroCanonHttpError, filter_zero_canon_providers, parse_review_profile_headers
 
 
 @dataclass(slots=True)
@@ -61,10 +59,7 @@ def prepare_post_body(route: PostRoute) -> PreparedPostBody:
     return PreparedPostBody(raw, MappingProxyType(dict(clean)))
 
 
-def prepare_route_request(
-    request: dict[str, Any], selected_model: dict[str, Any], canonical_id: str,
-    alias_effort: str | None = None, effort_on: bool = True,
-) -> dict[str, Any]:
+def prepare_route_request(request: dict[str, Any], selected_model: dict[str, Any], canonical_id: str, alias_effort: str | None = None, effort_on: bool = True) -> dict[str, Any]:
     """Накладывает только выбранный маршрут на чистый исходный запрос.
 
     Явные параметры клиента сильнее route defaults. Повторный маршрут должен
@@ -74,10 +69,7 @@ def prepare_route_request(
     prepared = {**(params if isinstance(params, dict) else {}), **request}
     prepared.pop("transport_seed", None)
     prepared["model"] = resolve_target_model(selected_model, canonical_id)
-    options = PassthroughOptions(
-        alias_effort=alias_effort if request.get("reasoning_effort") is None else None,
-        effort_on=effort_on,
-    )
+    options = PassthroughOptions(alias_effort=alias_effort if request.get("reasoning_effort") is None else None, effort_on=effort_on)
     prepared, _ = prepare_passthrough_request(prepared, selected_model, canonical_id, options)
     return prepared
 
@@ -197,34 +189,48 @@ def _request_allowed(route: PostRoute, requested_id: str) -> bool:
 def _backend_configs(host: Any) -> dict[str, dict[str, Any]] | None:
     backends = getattr(host, "BACKENDS", None)
     items: Any = backends.adapters() if callable(getattr(backends, "adapters", None)) else (backends.values() if isinstance(backends, Mapping) else ())
-    return {aid: {"kind": getattr(a, "kind", ""), **cfg} for a in items if (aid := getattr(a, "id", None)) and isinstance((cfg := getattr(a, "config", None)), Mapping)} or None
+    return {aid: {**cfg, "kind": getattr(a, "kind", "")} for a in items if (aid := getattr(a, "id", None)) and isinstance((cfg := getattr(a, "config", None)), Mapping)} or None
 
 
 def _apply_filtered_routes(route: PostRoute, routing: dict[str, Any], kept: list[Any]) -> None:
+    # Preserve original disabled_backend; record Zero-Canon override under zero_canon_backend.
     first = kept[0].get("backend") if isinstance(kept[0], dict) else None
-    route.model["routing"] = {**routing, "routes": kept, "disabled_backend": first or routing.get("disabled_backend")}
+    route.model["routing"] = {**routing, "routes": kept, "zero_canon_backend": first}
     if first:
         route.model["backend"] = first
 
 
+def _selected_backend_in_provider_scope(route: PostRoute) -> bool:
+    if (pid := route.ingress.provider_id) is None:
+        return True
+    backends = getattr(route.host, "BACKENDS", None)
+    adapter = backends.get(route.model.get("backend")) if isinstance(backends, Mapping) else getattr(backends, "get", lambda _: None)(route.model.get("backend"))
+    owner = getattr(adapter, "owned_by", "") if adapter is not None else ""
+    if not owner:
+        return True
+    allowed = route.host.PROVIDER_SCOPES[pid]
+    if owner in ((allowed,) if isinstance(allowed, str) else allowed):
+        return True
+    route.handler._reply_error(400, f"Model '{route.raw_model}' is not available for provider '{pid}'", code="model_not_in_provider_scope")
+    return False
+
+
 def _zero_canon_route_allowed(route: PostRoute) -> bool:
+    cached = getattr(route.handler, "_review_profile", None)
     try:
-        profile = parse_review_profile_headers(getattr(route.handler, "headers", None))
+        profile = cached if cached is not None else parse_review_profile_headers(getattr(route.handler, "headers", None))
         if profile != ZERO_CANON_HEADER_VALUE:
             return True
         routing = route.model.get("routing")
         routes = routing.get("routes") if isinstance(routing, dict) else None
-        kept = filter_zero_canon_providers(
-            routes if isinstance(routes, list) else [route.model], profile,
-            provider_configs=_backend_configs(route.host), model_id=route.model_id,
-        )
+        kept = filter_zero_canon_providers(routes if isinstance(routes, list) else [route.model], profile, provider_configs=_backend_configs(route.host), model_id=route.model_id)
     except ZeroCanonHttpError as exc:
         return route.reject(exc.status_code, exc.code, str(exc))
     if not kept:
         return route.reject(503, "route_unavailable", "no Zero-Canon eligible provider is available")
     if isinstance(routing, dict) and isinstance(routes, list):
         _apply_filtered_routes(route, routing, kept)
-    return True
+    return _selected_backend_in_provider_scope(route)
 
 
 def _finalize_route_model(route: PostRoute) -> bool:

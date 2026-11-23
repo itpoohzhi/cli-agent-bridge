@@ -13,6 +13,7 @@ from core.message_history_sanitizer import sanitize_request_payload
 from core.passthrough_autonomy import strip_passthrough_request
 from core.passthrough_exchange import internal_trace_scope
 from core.zero_canon_http import (
+    ZERO_CANON_HEADER_VALUE,
     ZeroCanonHttpError,
     parse_review_profile_headers,
     parse_strict_review_profile,
@@ -184,6 +185,15 @@ def _serve_fallback_alias(context: PostRequestContext) -> bool:
     from core import fallback_http_hook
 
     handler = context.handler
+    if getattr(handler, "_review_profile", None) == ZERO_CANON_HEADER_VALUE:
+        if fallback_http_hook.is_alias_request(context.request):
+            handler._reject(
+                503,
+                "zero_canon_unsupported_by_driver",
+                "fallback alias is forbidden under Zero-Canon",
+            )
+            return True
+        return False
 
     def upstream(adapter: Any, request: dict[str, Any], sink: Any) -> None:
         adapter.handle(

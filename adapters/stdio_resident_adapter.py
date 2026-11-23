@@ -163,16 +163,16 @@ class StdioResidentAdapter(BackendAdapter):
         """Сообщает фасаду, разрешён ли resident-путь флагом."""
         if not self._config.enabled:
             return False
+        from adapters import stdio_drivers as drivers
+
         protocol = self._sync_protocol()
-        if protocol == "opencode-acp":
-            from adapters.stdio_drivers import is_opencode_resident_enabled
-
-            return is_opencode_resident_enabled()
-        if protocol == "msp-v1":
-            from adapters.stdio_drivers import is_resident_enabled
-
-            return is_resident_enabled()
-        return True
+        checks: dict[str, Callable[[], bool]] = {
+            "opencode-acp": drivers.is_opencode_resident_enabled,
+            "msp-v1": drivers.is_resident_enabled,
+            "codex-app-server-v2": drivers.is_codex_app_server_v2_enabled,
+        }
+        check = checks.get(protocol)
+        return check() if check is not None else True
 
     def execute_chat(
         self, request: dict[str, Any] | Any, **_kwargs: Any
