@@ -14,6 +14,7 @@ import pytest
 
 import core.stream_activity_policy as activity
 from core.passthrough_sliding_window import SlidingDeadline, init_sliding_stream
+from core.stream_resilience_policy import validate_cross_hop_timeouts
 from core.stream_resilience_runtime import (
     MidstreamReplayOrchestrator,
     StreamResilienceConfig,
@@ -263,3 +264,15 @@ def test_successful_output_at_exact_deadline_is_not_rewritten(monkeypatch):
     assert clock.now_s == 300.0
     assert (out["state"], out["rc"], out["text"]) == ("done", 0, "ok")
     assert logs == [out]
+
+
+def test_validate_cross_hop_accepts_unit_sliding_idle():
+    cfg = NS(
+        idle_timeout_s=100.0, passthrough_read_timeout_s=10.0,
+        first_event_timeout_s=0.5, cross_hop_margin_s=1.0,
+        midstream_retry_enabled=False, retry_total_budget_s=10.0,
+        retry_reserve_s=1.0, retry_min_attempt_s=1.0, backoff_cap_s=1.0,
+        max_retries=1, sliding_activity_window_enabled=True,
+        sliding_idle_timeout_s=1.0,
+    )
+    validate_cross_hop_timeouts(cfg, hop="passthrough")
