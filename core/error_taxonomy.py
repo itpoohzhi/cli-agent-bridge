@@ -24,8 +24,9 @@ _RETRY_AFTER_RE: Final[re.Pattern[str]] = re.compile(
     r"retry[ -]?after\s*[:=]?\s*(\d+(?:\.\d+)?)", re.IGNORECASE
 )
 _SECRET_RE: Final[re.Pattern[str]] = re.compile(
+    r"(authorization\s*[:=]\s*bearer\s+)[^\s,;]+|"
     r"(bearer\s+)[a-z0-9._~+/=-]+|"
-    r"(?:(api[_-]?key|token|authorization|secret|password)\s*[:=]\s*)([^\s,;]+)|"
+    r"((?:api[_-]?key|token|authorization|secret|password)\s*[:=]\s*)[^\s,;]+|"
     r"(?:sk-[a-z0-9_-]{8,}|ghp_[a-z0-9]{8,}|eyj[a-z0-9_-]+\.[a-z0-9_-]+\.[a-z0-9_-]+)",
     re.IGNORECASE,
 )
@@ -136,9 +137,14 @@ def error_response(error: ClassifiedError) -> tuple[int, dict[str, object], dict
     return error.http_status, {"error": error.error_body()}, error.response_headers()
 
 
-def upstream_error_body(error: object, request_id: object = "") -> dict[str, object]:
+def upstream_error_body(
+    error: object,
+    request_id: object = "",
+    status_code: int | None = None,
+    headers: Mapping[str, object] | None = None,
+) -> dict[str, object]:
     """Thin-facade shape carrying HTTP metadata outside the public body."""
-    classified = classify_upstream_error(error, request_id=request_id)
+    classified = classify_upstream_error(error, status_code, headers, request_id)
     body = classified.error_body()
     body.update(_status=classified.http_status, _headers=classified.response_headers())
     return body
@@ -177,7 +183,7 @@ def _sanitize_request_id(value: object) -> str:
 
 
 def _redact_secret(match: re.Match[str]) -> str:
-    prefix = match.group(1) or ""
+    prefix = (match.group(1) or match.group(2) or "")
     return prefix + "[REDACTED]"
 
 

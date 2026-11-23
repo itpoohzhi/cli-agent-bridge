@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -17,6 +19,13 @@ from core.replay_policy import (  # noqa: E402
     parse_retry_budget,
     quota_failover_eligibility,
 )
+from core.route_attempts import (  # noqa: E402
+    AttemptPhase,
+    RouteAttemptRunner,
+    RouteFailover,
+    RouteRefusal,
+)
+from core.route_health_policy import RetryBudgetConfig  # noqa: E402
 
 
 def test_quota_contract_preserves_phrase_and_headers_without_secret() -> None:
@@ -42,8 +51,8 @@ def test_quota_contract_preserves_phrase_and_headers_without_secret() -> None:
     ("facts", "expected"),
     [
         ((0, False, 0, "connect"), True),
-        ((0, False, 0, "send_headers"), True),
-        ((0, False, 0, "before_first_byte"), True),
+        ((0, False, 0, "send_headers"), False),
+        ((0, False, 0, "before_first_byte"), False),
         ((1, False, 0, "connect"), False),
         ((0, True, 0, "connect"), False),
         ((0, False, 1, "connect"), False),
@@ -81,6 +90,42 @@ def test_quota_failover_is_default_off_and_requires_distinct_group() -> None:
 
 
 @pytest.mark.parametrize(
+    ("opt_in", "groups", "expected"),
+    [(False, ("a", "b"), ["first"]), (True, ("a", "a"), ["first"]),
+     (True, ("a", "b"), ["first", "second"])],
+)
+def test_working_router_applies_quota_group_opt_in(
+    opt_in: bool, groups: tuple[str, str], expected: list[str]
+) -> None:
+    seen: list[str] = []
+    lease = SimpleNamespace(finish=lambda *_: None, close=lambda: None)
+
+    def execute(backend: str, attempt: Any) -> str:
+        seen.append(backend)
+        if backend == "first":
+            attempt.advance(AttemptPhase.SENDING)
+            attempt.advance(AttemptPhase.RESPONSE_HEADERS, 429)
+            raise RouteRefusal(429)
+        return "ok"
+
+    ports = SimpleNamespace(ready=lambda _: True, acquire=lambda *_: lease,
+        execute=execute, retry_token=lambda: True, cancelled=lambda: False)
+    failovers = {
+        name: RouteFailover(frozenset({429}), quota_group=group,
+            quota_failover_opt_in=opt_in if name == "first" else False)
+        for name, group in zip(("first", "second"), groups, strict=True)
+    }
+    runner = RouteAttemptRunner(("first", "second"), ports,
+        RetryBudgetConfig(), lambda: 0.0, failover_by_backend=failovers)
+    if len(expected) == 1:
+        with pytest.raises(RouteRefusal):
+            runner.run()
+    else:
+        assert runner.run() == "ok"
+    assert seen == expected
+
+
+@pytest.mark.parametrize(
     ("message", "subtype"),
     [
         ("PI_AI_ERROR: interrupted", "unspecified"),
@@ -100,8 +145,23 @@ def test_interrupted_is_terminal_with_causal_subtype(
 def test_transport_retry_requires_replay_proof() -> None:
     message = "socket premature EOF before response"
     assert not classify_upstream_error(message).retryable
-    proof = build_replay_proof(0, False, 0, "before_first_byte")
+    proof = build_replay_proof(0, False, 0, "before_first_byte", True)
     assert classify_upstream_error(message, replay_proof=proof).retryable
+
+
+def test_authorization_bearer_value_is_fully_redacted() -> None:
+    secret = "fake-secret-token"
+    result = classify_upstream_error(f"failure Authorization: Bearer {secret}")
+    assert result.message == "failure Authorization: Bearer [REDACTED]"
+    assert secret not in result.error_body()["message"]
+
+
+def test_structured_429_preserves_retry_after_without_quota_wording() -> None:
+    result = classify_upstream_error(
+        "request rejected", status_code=429, headers={"retry-after": "19"}
+    )
+    status, _, headers = error_response(result)
+    assert (status, headers["Retry-After"]) == (429, "19")
 
 
 def test_non_quota_error_keeps_legacy_agy_error_shape() -> None:

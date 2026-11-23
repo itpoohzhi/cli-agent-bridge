@@ -7,9 +7,7 @@ from dataclasses import dataclass, replace
 from typing import Final
 
 MAX_RETRIES: Final[int] = 2
-_PRECOMMIT_STAGES: Final[frozenset[str]] = frozenset(
-    {"connect", "send_headers", "before_first_byte"}
-)
+_PRECOMMIT_STAGES: Final[frozenset[str]] = frozenset({"connect"})
 
 
 @dataclass(frozen=True)
@@ -49,6 +47,7 @@ def build_replay_proof(
     response_started: bool,
     tool_calls_emitted: int,
     fail_stage: str,
+    upstream_not_started: bool = False,
 ) -> ReplayProof:
     """Permit replay only when all pre-commit facts are positively proven."""
     facts_valid = (
@@ -58,7 +57,7 @@ def build_replay_proof(
         and response_started is False
         and type(tool_calls_emitted) is int
         and tool_calls_emitted == 0
-        and fail_stage in _PRECOMMIT_STAGES
+        and (fail_stage in _PRECOMMIT_STAGES or upstream_not_started is True)
     )
     return ReplayProof(
         bytes_sent_to_client=bytes_sent_to_client,

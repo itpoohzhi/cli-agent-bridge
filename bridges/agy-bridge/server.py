@@ -168,7 +168,8 @@ def _hygiene_rt() -> HygieneRuntime:
 from agy_runtime import history_compaction_adapter as _hca  # noqa: E402
 from agy_runtime.history_compaction_domain import json_text_bytes as _json_text_bytes, middle_prune_text as _middle_prune_text  # noqa: E402
 from core.correlation_contract import extract_correlation, format_log_corr_suffix  # noqa: E402
-from core.error_taxonomy import blocks_pre_delivery_replay, upstream_error_body  # noqa: E402
+from core.error_taxonomy import classify_upstream_error, upstream_error_body  # noqa: E402
+from core.replay_policy import apply_budget_to_proof, build_replay_proof, calculate_retry_budget, parse_retry_budget_header  # noqa: E402
 from core.prompt_budget_policy import LazyPromptMaterializer, compute_prompt_budget, resolve_ctx_prompt  # noqa: E402
 from core.slot_acquire import SlotWaitOptions, acquire_slot_timed  # noqa: E402
 from core.tool_turn_settle_policy import (  # noqa: E402
@@ -3723,14 +3724,12 @@ def _breaker_report(probe_gen: int | None, selects_ok: int, failed: bool) -> Non
 
 
 def _retry_credit() -> None:
-    """Первичный запрос пополняет бюджет повторов (+0.2 токена, не выше ёмкости)."""
     global _retry_tenths
     with _sqlite_guard_lock:
         _retry_tenths = min(RETRY_CAPACITY_TENTHS, _retry_tenths + RETRY_CREDIT_TENTHS)
 
 
 def _retry_take() -> bool:
-    """Списать один повтор (1.0 токена); False — бюджет исчерпан."""
     global _retry_tenths
     with _sqlite_guard_lock:
         if _retry_tenths < RETRY_COST_TENTHS:
@@ -3739,8 +3738,14 @@ def _retry_take() -> bool:
         return True
 
 
+def _incident_retry_allowed(ctx: dict, out: dict, delivered: bool, total_s: float) -> bool:
+    proof = build_replay_proof(int(delivered), bool(out.get("response_started", delivered)),
+        int(bool(out.get("tool_calls"))), str(out.get("fail_stage") or ""), out.get("upstream_not_started") is True)
+    return classify_upstream_error(out.get("err"), replay_proof=apply_budget_to_proof(
+        proof, calculate_retry_budget(total_s, ctx.get("client_retry_budget")))).retryable
+
+
 def _retry_pause_s(attempt: int, rng: Callable[[], float] | None = None) -> float:
-    """Full Jitter: U(0, min(2.0, 2.0 * 2^(attempt-1))) через инъецируемый RNG."""
     cap = min(RETRY_PAUSE_CAP_S, RETRY_PAUSE_CAP_S * float(1 << max(0, attempt - 1)))
     source = rng if rng is not None else _rng
     return _TURN_RESILIENCE.pause_s(attempt, source() * cap, cap)
@@ -7081,8 +7086,6 @@ class Handler(BaseHTTPRequestHandler):
             universal = bool(typed_ctx.get("universal_fallback"))
             if images and img_dir is not None:
                 if universal and not _is_image_input_enabled():
-                    # Staging выключили, пока ход ждал слот: media не отправляем,
-                    # ход идёт текстом (без mkdir и --add-dir).
                     _downgrade_to_text_in_run_once(
                         typed_ctx, "post_slot", "flag_disabled", 1, img_dir
                     )
@@ -7099,7 +7102,6 @@ class Handler(BaseHTTPRequestHandler):
                         rejected = _terminal_state("image_reject", gate.code)
                         self._log_done(cast(str, ctx["model"]), rejected, t_enter, cast(str, ctx["tag"]))
                         return rejected
-                    # Реестр активных каталогов ПЕРЕД mkdir: sweep не тронет живой ход.
                     with _active_lock:
                         _active_img_dirs.add(str(img_dir))
                     img_registered = True
@@ -7118,11 +7120,17 @@ class Handler(BaseHTTPRequestHandler):
                         img_dir = None
                         img_registered = False
             _retry_credit()
+            client_budget = calculate_retry_budget(T_REQ_BUDGET_S, ctx.get("client_retry_budget"))
             for attempt in (1, 2):
                 cancelled = (
                     self._registry_job is not None and self._registry_job.cancelled.is_set()
                 )
                 policy = None if cancelled else _build_timeout_policy(t_req_start)
+                if policy is None and client_budget.allow_retry and client_budget.attempt_s:
+                    policy = _TimeoutPolicy(t_req_start, min(IDLE_TIMEOUT_S, client_budget.attempt_s),
+                                            T_REQ_BUDGET_S, client_budget.attempt_s)
+                elif policy is not None and client_budget.allow_retry and client_budget.attempt_s:
+                    policy.effective_max_timeout_s = min(policy.effective_max_timeout_s, client_budget.attempt_s)
                 allowed, reason = should_allow_retry_attempt(
                     attempt=attempt, cancelled=cancelled, can_start=policy is None or policy.can_start
                 )
@@ -7207,8 +7215,6 @@ class Handler(BaseHTTPRequestHandler):
                         "agy_error",
                         "pump_error",
                     ):
-                        # Graceful-финал пишется ДО зачистки процесса: kill/reap не
-                        # съедает окно финальной записи. Внутренний state/rc не меняются.
                         try:
                             finalize(out)
                         except Exception as exc:  # noqa: BLE001
@@ -7220,10 +7226,7 @@ class Handler(BaseHTTPRequestHandler):
                 if out["state"] == "done":
                     break
                 if out["state"] == "capacity_exhausted":
-                    # Повтор бессмысленен: upstream без ёмкости.
                     break
-                # Выдача клиенту: текст, tool_calls или уже отданное в поток мышление.
-                # JSON-режим мышление клиенту ещё не отдавал — там повтор безопасен.
                 typed_out = cast("dict[str, object]", out)
                 delivered_reasoning = bool(
                     typed_out.get("delivered_reasoning")
@@ -7243,9 +7246,6 @@ class Handler(BaseHTTPRequestHandler):
                     and out["state"] not in ("done", "client_gone")
                     and not delivered
                 ):
-                    # Реальная image-попытка упала без выдачи: один text-only повтор
-                    # ДО обеих legacy-веток (hot continue и transient). Один токен
-                    # бюджета, если есть; иначе — разовый резерв деградации запроса.
                     _downgrade_to_text_in_run_once(
                         typed_ctx,
                         "runtime",
@@ -7265,7 +7265,7 @@ class Handler(BaseHTTPRequestHandler):
                     and AGY_BRIDGE_ENABLE_TRANSIENT_502_RECOVERY
                     and out["state"] in ("agy_error", "pump_error")
                     and not delivered
-                    and not blocks_pre_delivery_replay(out.get("err"))
+                    and _incident_retry_allowed(ctx, out, delivered, T_REQ_BUDGET_S)
                     and _is_transient_upstream_error(out.get("err"))
                 ):
                     if attempt == 2 or not _TURN_RESILIENCE.take(ctx, out, _retry_take, _log):
@@ -7280,8 +7280,6 @@ class Handler(BaseHTTPRequestHandler):
                     time.sleep(_retry_pause_s(attempt))
                     continue
                 if ctx.get("hot_resumed") and out["state"] != "client_gone":
-                    # Горячая сессия сломалась: больше её не используем, а повтор
-                    # идёт холодным вызовом с полной историей.
                     _TURN_RESILIENCE.invalidate(ctx, out, _session_invalidate, _log)
                     _cid_release(
                         str(ctx["conversation_id"]), str(ctx.get("turn_id") or "")
@@ -7293,7 +7291,7 @@ class Handler(BaseHTTPRequestHandler):
                         out["state"] == "agy_error"
                         and not delivered
                         and not _is_cli_rejection_outcome(out)
-                        and not blocks_pre_delivery_replay(out.get("err"))
+                        and _incident_retry_allowed(ctx, out, delivered, T_REQ_BUDGET_S)
                     ):
                         if not _retry_take():
                             _log(f"retry-budget-exhausted state={out['state']} {tag}")
@@ -7303,12 +7301,11 @@ class Handler(BaseHTTPRequestHandler):
                             f"cold fallback {tag}"
                         )
                         continue
-                # Транзиентный сбой до выдачи клиенту — один невидимый повтор.
                 transient = (
                     out["state"] in ("agy_error", "pump_error", "done")
                     and not delivered
                     and not _is_cli_rejection_outcome(out)
-                    and not blocks_pre_delivery_replay(out.get("err"))
+                    and _incident_retry_allowed(ctx, out, delivered, T_REQ_BUDGET_S)
                 )
                 if not transient or attempt == 2:
                     break
@@ -7453,7 +7450,10 @@ class Handler(BaseHTTPRequestHandler):
         if st == "capacity_exhausted":
             return capacity_error_body(detail=out.get("err"))
         if st == "agy_error":
-            return upstream_error_body(out.get("err"), out.get("request_id"))
+            status = out.get("upstream_status_code", out.get("status_code"))
+            headers = out.get("upstream_headers", out.get("headers"))
+            return upstream_error_body(out.get("err"), out.get("request_id"),
+                status if type(status) is int else None, headers if isinstance(headers, Mapping) else None)
         if resilience is None:
             resilience = _new_flag("AGY_BRIDGE_STREAM_RESILIENCE_ENABLED", True)
         has_payload = bool(out.get("text"))
@@ -7961,6 +7961,7 @@ class Handler(BaseHTTPRequestHandler):
                 "registry_owned_cid": owned_cid,
                 "t_req_start": t_req_start,
                 "req_id": req_id,
+                "client_retry_budget": parse_retry_budget_header(self.headers),
                 "step_job_id": str(
                     self.headers.get("X-Idempotency-Key")
                     or req.get("step_job_id")

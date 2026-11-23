@@ -50,9 +50,16 @@ def classify_with_proof(message: str, proof: ReplayProof) -> ClassifiedError:
     return classify_upstream_error(message, replay_proof=proof)
 
 
-def test_transport_before_first_byte_retries_once() -> None:
+def test_transport_before_first_byte_is_uncertain_and_does_not_retry() -> None:
     transport = StubTransport(["connection reset before first byte", "ok"])
     proof = build_replay_proof(0, False, 0, "before_first_byte")
+    assert run_incident(transport, proof, classify_with_proof) is not None
+    assert transport.calls == 1
+
+
+def test_confirmed_failure_before_execution_retries_once() -> None:
+    transport = StubTransport(["connection reset before first byte", "ok"])
+    proof = build_replay_proof(0, False, 0, "before_first_byte", True)
     assert run_incident(transport, proof, classify_with_proof) is None
     assert transport.calls == 2
 
