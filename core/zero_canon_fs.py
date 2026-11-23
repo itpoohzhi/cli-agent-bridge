@@ -123,30 +123,61 @@ def write_atomic_text_0600(dst: Path, text: str) -> None:
 
 
 def replace_atomic_0600(dst: Path, data: bytes) -> None:
-    """Атомарно создаёт или обновляет обычный файл `dst` (`0o600`), fail-closed при symlink/каталоге."""
-    if dst.is_symlink():
-        raise OSError(errno.ELOOP, "Refusing symlink destination", os.fspath(dst))
-    if dst.is_dir():
-        raise IsADirectoryError(errno.EISDIR, "Refusing directory destination", os.fspath(dst))
-    tmp = dst.parent / f".tmp_{dst.name}_{uuid.uuid4().hex}"
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
-    fd = os.open(os.fspath(tmp), flags, 0o600)
+    """Атомарно создаёт или обновляет файл `dst` (`0o600`) через `dir_fd` (`O_DIRECTORY|O_NOFOLLOW`) и `os.replace`.
+
+    Отклоняет symlink-родитель (`O_NOFOLLOW`) и предварительно существующий symlink/каталог (`ELOOP`/`EISDIR`).
+    На POSIX `renameat(2)` не разыменовывает симлинк-назначение (запись в цель симлинка исключена), но не
+    обещает race-free `ELOOP` при внешней подмене `dst` в окне между `lstat` и `os.replace` (для строгого
+    fail-closed создания в одноразовых каталогах используется `write_atomic_0600`).
+    """
+    parent = dst.parent
+    name = dst.name
+    dir_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    dir_fd = os.open(os.fspath(parent), dir_flags)
+    tmp_name = f".tmp_{name}_{uuid.uuid4().hex}"
+    fd = -1
+    tmp_created = False
     try:
+        try:
+            st = os.lstat(name, dir_fd=dir_fd)
+        except FileNotFoundError:
+            st = None
+        if st is not None:
+            if stat.S_ISLNK(st.st_mode):
+                raise OSError(errno.ELOOP, "Refusing symlink destination", os.fspath(dst))
+            if stat.S_ISDIR(st.st_mode):
+                raise IsADirectoryError(errno.EISDIR, "Refusing directory destination", os.fspath(dst))
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(tmp_name, flags, 0o600, dir_fd=dir_fd)
+        tmp_created = True
         os.fchmod(fd, 0o600)
         with os.fdopen(fd, "wb") as handle:
             fd = -1
             _ = handle.write(data)
-        if dst.is_symlink():
-            raise OSError(errno.ELOOP, "Refusing symlink destination", os.fspath(dst))
-        os.replace(os.fspath(tmp), os.fspath(dst))
+        try:
+            st2 = os.lstat(name, dir_fd=dir_fd)
+        except FileNotFoundError:
+            st2 = None
+        if st2 is not None:
+            if stat.S_ISLNK(st2.st_mode):
+                raise OSError(errno.ELOOP, "Refusing symlink destination", os.fspath(dst))
+            if stat.S_ISDIR(st2.st_mode):
+                raise IsADirectoryError(errno.EISDIR, "Refusing directory destination", os.fspath(dst))
+        os.replace(tmp_name, name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+        tmp_created = False
     finally:
         if fd >= 0:
             os.close(fd)
-        tmp.unlink(missing_ok=True)
+        if tmp_created:
+            try:
+                os.unlink(tmp_name, dir_fd=dir_fd)
+            except FileNotFoundError:
+                pass
+        os.close(dir_fd)
 
 
 def replace_atomic_text_0600(dst: Path, text: str) -> None:
-    """Атомарно создаёт или обновляет UTF-8 файл `dst` (`0o600`), fail-closed при symlink/каталоге."""
+    """Атомарно создаёт или обновляет UTF-8 файл `dst` (`0o600`) через `replace_atomic_0600`."""
     replace_atomic_0600(dst, text.encode("utf-8"))
 
 
