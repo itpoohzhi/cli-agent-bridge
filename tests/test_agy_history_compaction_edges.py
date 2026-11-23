@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 import sys
-from dataclasses import FrozenInstanceError, replace
+from dataclasses import FrozenInstanceError, fields, replace
 from pathlib import Path
 
 import pytest
@@ -16,9 +16,11 @@ sys.path.append(str(_ROOT / "bridges/agy-bridge"))
 from agy_runtime.history_compaction_adapter import (  # noqa: E402
     CompactionAdapterRequest,
     RawBlock,
+    _build_config,
     render_or_compact_blocks,
 )
 from agy_runtime.history_compaction_domain import (  # noqa: E402
+    DEFAULT_INPUT_GUARD_BYTES,
     DEFAULT_MIDDLE_PRUNED_MARKER,
     CompactionConfig,
     PromptBlock,
@@ -29,13 +31,6 @@ from agy_runtime.history_compaction_domain import (  # noqa: E402
 
 _CANARY = "CANARY_FACT_ALPHA_7391"
 _LIMIT = 16384
-
-
-@pytest.fixture(autouse=True)
-def _isolate_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    suffixes = "DIGEST_RATIO|MIN_DIGEST_BYTES|MAX_DIGEST_BYTES|TAIL_MIN_GROUPS"
-    for suffix in (suffixes + "|INPUT_GUARD_BYTES").split("|"):
-        monkeypatch.delenv(f"AGY_HISTORY_COMPACTION_{suffix}", raising=False)
 
 
 def _block(index: int, role: str, body: str) -> PromptBlock:
@@ -277,3 +272,27 @@ def test_tail_tool_pair_stays_atomic_when_budget_tight() -> None:
     assert "PAIR_TAIL_END" in result.prompt
     assert result.kept_count == 4
     assert result.digested_count == 1
+
+
+def test_adapter_defaults_are_domain_ssot(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    by_name = {f.name: f for f in fields(CompactionAdapterRequest)}
+    assert by_name["input_guard_bytes"].default == DEFAULT_INPUT_GUARD_BYTES
+    logs: list[str] = []
+    cfg_path = tmp_path / "dynamic_config.json"
+    req = _base_req(list(_pb_history()), True, logs, cfg_path)
+    built = _build_config(req)
+    reference = CompactionConfig(
+        limit_bytes=built.limit_bytes,
+        middle_pruned_marker=req.middle_pruned_marker,
+        separator=req.separator,
+    )
+    assert built == reference
+    baseline = render_or_compact_blocks(req)
+    for suffix in ("DIGEST_RATIO", "MIN_DIGEST_BYTES", "MAX_DIGEST_BYTES"):
+        monkeypatch.setenv(f"AGY_HISTORY_COMPACTION_{suffix}", "1")
+    monkeypatch.setenv("AGY_HISTORY_COMPACTION_TAIL_MIN_GROUPS", "9")
+    monkeypatch.setenv("AGY_HISTORY_COMPACTION_INPUT_GUARD_BYTES", "1")
+    cfg_path.write_text('{"history_compaction_digest_ratio": 1}', encoding="utf-8")
+    assert render_or_compact_blocks(req) == baseline

@@ -19,6 +19,7 @@ DEFAULT_MIDDLE_PRUNED_MARKER = (
     " контекста agy ...]\n"
 )
 _TOOL_REF_RE = re.compile(r"\[tool (?:call|result) ([^\]]+)\]")
+DEFAULT_INPUT_GUARD_BYTES = 4 * 1024 * 1024
 
 
 def json_text_bytes(text: str) -> int:
@@ -79,7 +80,7 @@ class PromptBlock:
 
 @dataclass(frozen=True, slots=True)
 class CompactionConfig:
-    """Бюджет и политики компакции; все параметры задаются адаптером."""
+    """Бюджет и политики компакции; дефолты здесь — единственный SSOT."""
 
     limit_bytes: int
     digest_ratio: float = 0.20
@@ -127,17 +128,18 @@ def _group_blocks(blocks: Sequence[PromptBlock]) -> tuple[tuple[PromptBlock, ...
 
 
 def _anchor_group_count(groups: Sequence[tuple[PromptBlock, ...]]) -> int:
-    """Число начальных групп якорной головы: system + первый user."""
-    count = 0
-    for group in groups:
+    """Группы якоря: все до первого user включительно, иначе ведущие system."""
+    leading = 0
+    in_leading = True
+    for idx, group in enumerate(groups):
         roles = [block.role for block in group]
-        if roles == ["system"]:
-            count += 1
-            continue
         if "user" in roles:
-            return count + 1
-        break
-    return count
+            return idx + 1
+        if in_leading and roles == ["system"]:
+            leading += 1
+        else:
+            in_leading = False
+    return leading
 
 
 def _flatten(groups: Sequence[tuple[PromptBlock, ...]]) -> tuple[PromptBlock, ...]:

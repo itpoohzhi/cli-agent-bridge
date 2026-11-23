@@ -3,8 +3,8 @@
 Единственная точка входа ``render_or_compact_blocks``: при выключенном
 флаге дословно делегирует legacy-обрезке, при включённом — доменной
 компакции с fallback на legacy при превышении входного гарда, ошибке или
-выходе за лимит. Параметры читаются через ``long_session_config``
-(env > dynamic_config.json > дефолт), без хардкода капов сверх дефолтов.
+выходе за лимит. Внешняя настройка одна — флаг включения (в ``server.py``);
+все дефолты компакции заданы ровно один раз в домене (SSOT).
 """
 
 from __future__ import annotations
@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from agy_runtime.history_compaction_domain import (
+    DEFAULT_INPUT_GUARD_BYTES,
     DEFAULT_MIDDLE_PRUNED_MARKER,
     CompactionConfig,
     CompactionResult,
@@ -22,7 +23,6 @@ from agy_runtime.history_compaction_domain import (
     compact_prompt_blocks,
     json_text_bytes,
 )
-from agy_runtime.long_session_config import read_float_setting, read_int_setting
 
 RawBlock = PromptBlock | tuple[int, str, str] | tuple[str, str]
 LegacyPrune = Callable[[Sequence[RawBlock], str, int], str]
@@ -38,19 +38,11 @@ class CompactionAdapterRequest:
     enabled: bool
     legacy_prune: LegacyPrune
     log_fn: Callable[[str], None] | None = None
-    config_path: Path | None = None
+    config_path: Path | None = None  # compat-поле вызова server; не читается
     size_fn: Callable[[str], int] | None = None
     middle_pruned_marker: str = DEFAULT_MIDDLE_PRUNED_MARKER
     separator: str = "\n\n"
-
-
-@dataclass(frozen=True, slots=True)
-class _AdapterSettings:
-    digest_ratio: float
-    min_digest_bytes: int
-    max_digest_bytes: int
-    tail_min_groups: int
-    input_guard_bytes: int
+    input_guard_bytes: int = DEFAULT_INPUT_GUARD_BYTES
 
 
 @dataclass(frozen=True, slots=True)
@@ -62,47 +54,6 @@ class _LogRecord:
     digested: int
     dropped: int
     reason: str = ""
-
-
-def _load_settings(config_path: Path | None) -> _AdapterSettings:
-    """Параметры компакции из long_session_config с безопасными дефолтами."""
-    return _AdapterSettings(
-        digest_ratio=read_float_setting(
-            "history_compaction_digest_ratio",
-            "AGY_HISTORY_COMPACTION_DIGEST_RATIO",
-            0.20,
-            (0.0, 1.0),
-            config_path=config_path,
-        ),
-        min_digest_bytes=read_int_setting(
-            "history_compaction_min_digest_bytes",
-            "AGY_HISTORY_COMPACTION_MIN_DIGEST_BYTES",
-            1024,
-            (0, 1048576),
-            config_path=config_path,
-        ),
-        max_digest_bytes=read_int_setting(
-            "history_compaction_max_digest_bytes",
-            "AGY_HISTORY_COMPACTION_MAX_DIGEST_BYTES",
-            16384,
-            (0, 1048576),
-            config_path=config_path,
-        ),
-        tail_min_groups=read_int_setting(
-            "history_compaction_tail_min_groups",
-            "AGY_HISTORY_COMPACTION_TAIL_MIN_GROUPS",
-            1,
-            (0, 10000),
-            config_path=config_path,
-        ),
-        input_guard_bytes=read_int_setting(
-            "history_compaction_input_guard_bytes",
-            "AGY_HISTORY_COMPACTION_INPUT_GUARD_BYTES",
-            4194304,
-            (0, 268435456),
-            config_path=config_path,
-        ),
-    )
 
 
 def _to_prompt_block(item: RawBlock, pos: int) -> PromptBlock:
@@ -183,10 +134,12 @@ def _run_legacy(
     return result
 
 
-def _build_config(
-    request: CompactionAdapterRequest, settings: _AdapterSettings
-) -> CompactionConfig:
-    """Доменный лимит из фактического limit_bytes минус обёртка и хвост."""
+def _build_config(request: CompactionAdapterRequest) -> CompactionConfig:
+    """Доменный лимит из фактического limit_bytes минус обёртка и хвост.
+
+    Остальные параметры не задаются: действуют дефолты ``CompactionConfig``
+    из домена — единственный источник истины (SSOT, RW-002).
+    """
     overhead = (
         max(request.size_fn("") - json_text_bytes(""), 0) if request.size_fn else 0
     )
@@ -198,10 +151,6 @@ def _build_config(
     effective = max(request.limit_bytes - overhead - tail_cost, 0)
     return CompactionConfig(
         limit_bytes=effective,
-        digest_ratio=settings.digest_ratio,
-        min_digest_bytes=settings.min_digest_bytes,
-        max_digest_bytes=settings.max_digest_bytes,
-        tail_min_groups=settings.tail_min_groups,
         middle_pruned_marker=request.middle_pruned_marker,
         separator=request.separator,
     )
@@ -223,11 +172,9 @@ def _over_limit(request: CompactionAdapterRequest, prompt: str) -> bool:
 
 
 def _try_compact(
-    request: CompactionAdapterRequest,
-    blocks: tuple[PromptBlock, ...],
-    settings: _AdapterSettings,
+    request: CompactionAdapterRequest, blocks: tuple[PromptBlock, ...]
 ) -> tuple[str, CompactionResult]:
-    result = compact_prompt_blocks(blocks, _build_config(request, settings))
+    result = compact_prompt_blocks(blocks, _build_config(request))
     return _with_tail(result.prompt, request), result
 
 
@@ -237,11 +184,10 @@ def _compact_or_fallback(request: CompactionAdapterRequest) -> str:
         blocks = _to_prompt_blocks(request.blocks)
     except Exception:
         return _run_legacy(request, (), "fallback", "compact_error")
-    settings = _load_settings(request.config_path)
-    if _input_bytes(blocks, request) > settings.input_guard_bytes:
+    if _input_bytes(blocks, request) > request.input_guard_bytes:
         return _run_legacy(request, blocks, "fallback", "input_guard")
     try:
-        prompt, result = _try_compact(request, blocks, settings)
+        prompt, result = _try_compact(request, blocks)
     except Exception:
         return _run_legacy(request, blocks, "fallback", "compact_error")
     if _over_limit(request, prompt):

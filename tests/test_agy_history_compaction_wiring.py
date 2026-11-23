@@ -1,11 +1,4 @@
-"""W3: adversarial QA и телеметрия wiring компакции истории (VER-004/008).
-
-Структурированный лог адаптера (mode/prompt_bytes/limit/prompt_prefix_sha256/
-digested/dropped) без утечки текста истории, fallback на legacy при ошибке
-домена и превышении input guard, краевые истории через
-``server._messages_to_prompt`` и флаг AD-005 (кодовый дефолт, dynamic_config,
-приоритет env).
-"""
+"""W3: adversarial QA и телеметрия wiring компакции истории (VER-004/008)."""
 
 from __future__ import annotations
 
@@ -37,7 +30,6 @@ _CODENAME = "LARCH-7391"
 _SECRET = "SECRET_FRAGMENT_9911"
 _LIMIT = 98304
 _FLAG_ENV = "AGY_HISTORY_COMPACTION_ENABLED"
-_GUARD_ENV = "AGY_HISTORY_COMPACTION_INPUT_GUARD_BYTES"
 _LINE_RE = re.compile(
     r"mode=(?P<mode>\w+) prompt_bytes=(?P<bytes>\d+) limit=(?P<limit>\d+) "
     r"prompt_prefix_sha256=(?P<sha>[0-9a-f]{64}) digested=(?P<dig>\d+) "
@@ -68,7 +60,6 @@ def _isolate(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[Path]:
     monkeypatch.setenv("AGY_BRIDGE_MAX_PROMPT_BYTES_CAP", str(_LIMIT))
     monkeypatch.setenv("AGY_TRUNCATION_NOTICE_ENABLED", "false")
     monkeypatch.delenv(_FLAG_ENV, raising=False)
-    monkeypatch.delenv(_GUARD_ENV, raising=False)
     monkeypatch.setenv("BRIDGE_DYNAMIC_CONFIG_PATH", str(cfg))
     monkeypatch.setattr(srv, "DYNAMIC_CONFIG_PATH", cfg)
     monkeypatch.setattr(srv, "AGY_BRIDGE_ENABLE_HEAD_PRUNING", True)
@@ -105,7 +96,11 @@ def _blocks(turns: int, secret: str = "") -> list[tuple[int, str, str]]:
 
 
 def _render(
-    blocks: list[tuple[int, str, str]], enabled: bool, logs: list[str], cfg: Path
+    blocks: list[tuple[int, str, str]],
+    enabled: bool,
+    logs: list[str],
+    cfg: Path,
+    guard: int = _adapter.DEFAULT_INPUT_GUARD_BYTES,
 ) -> str:
     req = CompactionAdapterRequest(
         blocks=blocks,
@@ -116,6 +111,7 @@ def _render(
         log_fn=logs.append,
         config_path=cfg,
         size_fn=srv._ndjson_bytes,
+        input_guard_bytes=guard,
     )
     return render_or_compact_blocks(req)
 
@@ -197,18 +193,18 @@ def test_telemetry_no_leak_across_modes(
     logs: list[str] = []
     _render(_blocks(32, _SECRET), False, logs, _isolate)
     _render(_blocks(32, _SECRET), True, logs, _isolate)
-    monkeypatch.setenv(_GUARD_ENV, "1024")
-    _render(_blocks(32, _SECRET), True, logs, _isolate)
+    monkeypatch.setenv("AGY_HISTORY_COMPACTION_INPUT_GUARD_BYTES", "999999999")
+    _render(_blocks(32, _SECRET), True, logs, _isolate, guard=1024)
     for mode in ("legacy", "compact", "fallback"):
         _assert_fields(logs, mode)
 
 
-def test_fallback_on_input_guard_exceeded_via_env(
+def test_fallback_on_input_guard_exceeded_via_request(
     _isolate: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv(_GUARD_ENV, "1024")
+    monkeypatch.setenv("AGY_HISTORY_COMPACTION_INPUT_GUARD_BYTES", "999999999")
     logs: list[str] = []
-    prompt = _render(_blocks(32, _SECRET), True, logs, _isolate)
+    prompt = _render(_blocks(32, _SECRET), True, logs, _isolate, guard=1024)
     assert prompt == _legacy(_blocks(32, _SECRET))
     assert srv._ndjson_bytes(prompt) <= _LIMIT
     _assert_fields(logs, "fallback")
@@ -258,14 +254,16 @@ def test_edge_single_giant_block(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_edge_only_tool_blocks(monkeypatch: pytest.MonkeyPatch) -> None:
-    msgs: list[dict[str, object]] = []
-    for i in range(20):
-        content = f"payload-{i} " + "z" * 8000
-        msg = {"role": "tool", "tool_call_id": f"call_x{i}", "content": content}
-        msgs.append(msg)
+    msgs: list[dict[str, object]] = [
+        {
+            "role": "tool",
+            "tool_call_id": f"call_x{i}",
+            "content": f"p-{i} " + "z" * 8000,
+        }
+        for i in range(20)
+    ]
     prompt = _prompt(monkeypatch, msgs)
-    assert srv._ndjson_bytes(prompt) <= _LIMIT
-    assert "call_x19" in prompt
+    assert srv._ndjson_bytes(prompt) <= _LIMIT and "call_x19" in prompt
 
 
 def test_edge_cold_replay_35_turns(monkeypatch: pytest.MonkeyPatch) -> None:

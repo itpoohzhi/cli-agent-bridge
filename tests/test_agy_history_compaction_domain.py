@@ -24,6 +24,7 @@ from agy_runtime.history_compaction_domain import (  # noqa: E402
     DEFAULT_MIDDLE_PRUNED_MARKER,
     CompactionConfig,
     PromptBlock,
+    anchor_prefix_sha256,
     compact_prompt_blocks,
     json_text_bytes,
     middle_prune_text,
@@ -79,6 +80,41 @@ def test_canary_first_user_preserved_over_32_turns() -> None:
     assert "What is the project codename?" in result.prompt
     assert result.digested_count > 0
     assert result.dropped_count == 0
+
+
+_CANARY_LINE2 = "CANARY_LINE_TWO_7391 survives verbatim only in anchor"
+
+
+def _delayed_user_blocks(turns: int) -> list[PromptBlock]:
+    blocks = [
+        _block(0, "system", "You are a test assistant."),
+        _block(1, "assistant", "[tool call boot_0] warm_up()"),
+        _block(2, "tool", "[tool result boot_0] ready"),
+        _block(3, "user", f"Remember:\n{_CANARY} is {_CODENAME}\n{_CANARY_LINE2}"),
+    ]
+    for turn in range(turns):
+        blocks.extend(_tool_turn(4 + turn * 3, turn))
+    blocks.append(_block(4 + turns * 3, "user", "What is the project codename?"))
+    return blocks
+
+
+def test_anchor_includes_delayed_first_user_canary() -> None:
+    result = compact_prompt_blocks(_delayed_user_blocks(32), _cfg())
+    assert result.prompt_bytes <= _LIMIT
+    assert _CANARY in result.prompt
+    assert _CANARY_LINE2 in result.prompt
+    assert "What is the project codename?" in result.prompt
+
+
+def test_anchor_hash_includes_delayed_first_user_group() -> None:
+    base = _delayed_user_blocks(8)
+    grown = _delayed_user_blocks(32)
+    assert anchor_prefix_sha256(base, "\n\n") == anchor_prefix_sha256(grown, "\n\n")
+    changed = [*base[:3], _block(3, "user", "Remember:\nother\nchanged"), *base[4:]]
+    assert anchor_prefix_sha256(changed, "\n\n") != anchor_prefix_sha256(base, "\n\n")
+    short = compact_prompt_blocks(base, _cfg())
+    long = compact_prompt_blocks(grown, _cfg())
+    assert short.prompt_prefix_sha256 == long.prompt_prefix_sha256
 
 
 def test_tool_pair_never_split() -> None:
@@ -253,3 +289,9 @@ def test_domain_purity_ast() -> None:
     assert "server" not in imported
     assert "long_session_config" not in imported
     assert not _mutable_globals(tree)
+
+
+def test_anchor_without_user_stops_at_first_non_system() -> None:
+    s0 = _block(0, "system", "S0")
+    seq = [s0, _block(1, "tool", "T1"), _block(2, "system", "S2")]
+    assert anchor_prefix_sha256(seq, "\n\n") == anchor_prefix_sha256([s0], "\n\n")
