@@ -13,7 +13,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any
 
-from core.runtime_env import env_first
+from core.runtime_env import env_bool, env_first
 from core.stdio_resident.turn_error_sse import (
     DONE_FRAME,
     ResidentTurnError,
@@ -33,6 +33,24 @@ DEFAULT_CLAUDE_BRIDGE_URL = "http://127.0.0.1:9881/v1"
 CLAUDE_PROTOCOLS = frozenset({"claude-stream-json", "claude_stream_json"})
 CLAUDE_BACKEND_IDS = frozenset({"claude", "claude-p", "claude_p"})
 KIND_RESIDENT, KIND_BRIDGE, KIND_EPHEMERAL = "resident", "bridge", "ephemeral"
+WARM_MSP_STDIO_FLAG = "MUSE_WARM_MSP_STDIO_ENABLED"
+SOCKET_HANDSHAKE_UNSUPPORTED = "MUSE_SOCKET_HANDSHAKE_UNSUPPORTED"
+MUSE_TRANSPORT_EXEC, MUSE_TRANSPORT_WARM, MUSE_TRANSPORT_LEGACY = "exec", "warm_stdio", "legacy"
+
+
+def decide_muse_transport(
+    probe_error_code: str | None = None,
+    *,
+    output_schema: bool = False,
+    environ: Mapping[str, str] | None = None,
+) -> str:
+    """Транспорт Muse (VER-009): `output_schema` — только `exec`, никогда MSP; сокет с ошибкой пробы
+    (включая `MUSE_SOCKET_HANDSHAKE_UNSUPPORTED`) недоступен — при флаге warm stdio, иначе legacy.
+    """
+    if output_schema:
+        return MUSE_TRANSPORT_EXEC
+    env = os.environ if environ is None else environ
+    return MUSE_TRANSPORT_WARM if env_bool(env, (WARM_MSP_STDIO_FLAG,), False) else MUSE_TRANSPORT_LEGACY
 
 
 @dataclass(frozen=True, slots=True)
