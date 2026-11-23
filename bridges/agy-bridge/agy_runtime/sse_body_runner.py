@@ -272,7 +272,7 @@ class _SseBodyRunner:
         presend = all(((is_present(err)), not s.ctx["stream_committed"], any((s.resilience, s.ctx.get("step_job_id")))))
         if presend:
             clean = {k: redact_diagnostic_text(v) if isinstance(v, str) else v for k, v in err.items()}
-            code = int(err.get("code") or 502) if any((s.ctx.get("step_job_id"), err.get("type") in (CAPACITY_REASON, "overloaded"))) else 502
+            code = 503 if err.get("type") == "overloaded" else (int(err.get("code") or 502) if any((s.ctx.get("step_job_id"), err.get("type") == CAPACITY_REASON)) else 502)
             extra = retry_after_headers(out, err)
             s.handler._send(code, {"error": clean}, extra) if extra else s.handler._send(code, {"error": clean})
             s.handler.close_connection = True

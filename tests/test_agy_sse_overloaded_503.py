@@ -174,6 +174,23 @@ def test_sse_precommit_agy_error_stays_502_without_retry_after() -> None:
     assert extra is None
 
 
+@pytest.mark.parametrize("bad_code", [None, 0, 502])
+def test_sse_precommit_overloaded_forces_503_even_without_code_or_with_502(
+    bad_code: int | None,
+) -> None:
+    handler = _RecordingSseHandler()
+    err_dict: dict[str, Any] = {"message": "busy", "type": "overloaded"}
+    if bad_code is not None:
+        err_dict["code"] = bad_code
+    handler._error_body = lambda _out, _res: dict(err_dict)  # type: ignore[method-assign]
+    runner = _make_runner(handler)
+    runner.finish({"state": "overloaded", "rc": 1, "err": "busy", "retry_after_s": 1.0})
+    assert len(handler.sent) == 1
+    code, _, extra = handler.sent[0]
+    assert code == 503
+    assert extra == {"Retry-After": "1"}
+
+
 @pytest.mark.parametrize(
     ("raw_retry", "expected"),
     [
