@@ -102,13 +102,22 @@ def test_canary_config_valid_boundaries() -> None:
 def test_rollback_plan_returns_expected_commands() -> None:
     """rollback_plan возвращает персистентный launchctl-откат, рестарт и верификацию."""
     cmds = rollback_plan()
+    expected_verify = (
+        "for pid in $(pgrep -f '[b]ridges/agy-bridge/server.py'); do "
+        'ps eww "$pid" | tr \' \' \'\\n\' | grep -q \'^AGY_RESIDENT_ENABLED=false\' '
+        '|| echo "ROLLBACK_VERIFY_FAILED pid=$pid"; done'
+    )
     assert LAUNCHD_SERVICE_LABEL == "gui/$(id -u)/com.user.dsh-hub"
     assert len(cmds) == 3
     assert cmds[0] == "launchctl setenv AGY_RESIDENT_ENABLED false"
     assert cmds[1] == f"launchctl kickstart -k {LAUNCHD_SERVICE_LABEL}"
-    assert "ps eww" in cmds[2]
-    assert "AGY_RESIDENT_ENABLED=false" in cmds[2]
-    assert "ROLLBACK_VERIFY_FAILED" in cmds[2]
+    assert cmds[2] == expected_verify
+    assert "'[b]ridges/agy-bridge/server.py'" in cmds[2]
+    assert "for pid in $(pgrep -f '[b]ridges/agy-bridge/server.py'); do" in cmds[2]
+    assert 'ps eww "$pid"' in cmds[2]
+    assert "'^AGY_RESIDENT_ENABLED=false'" in cmds[2]
+    assert 'echo "ROLLBACK_VERIFY_FAILED pid=$pid"' in cmds[2]
+    assert "ps eww $(" not in cmds[2]
 
 
 def test_canary_stop_reasons_boundaries_and_fail_closed_defaults() -> None:

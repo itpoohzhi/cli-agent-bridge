@@ -30,7 +30,12 @@ class PoolClosedError(Exception):
 
 @dataclass
 class _SlotEntry:
-    """Mutable state owned by one process-pool slot."""
+    """Mutable state owned by one process-pool slot.
+
+    Attributes:
+        rss_evict_pending: Помечает арендованный слот на обязательный teardown
+            при следующем успешном release() после превышения max_rss_bytes.
+    """
 
     slot_id: str
     affinity_key: SlotAffinityKey
@@ -40,6 +45,7 @@ class _SlotEntry:
     lease_id: str | None = None
     is_ephemeral: bool = False
     dead: bool = False
+    rss_evict_pending: bool = False
     lock: threading.RLock = field(default_factory=threading.RLock)
 
 
@@ -115,6 +121,13 @@ class ResidentProcessPool:
                     _ = self._transition(entry, end_ev)
                     self._cv.notify_all()
                 return
+            if entry.rss_evict_pending:
+                _ = self._transition(entry, SlotEvent.Shutdown)
+                try:
+                    self._finish_teardown(entry, self._config.cancel_grace_s)
+                finally:
+                    self._cv.notify_all()
+                return
             effects = self._transition(entry, SlotEvent.TurnTerminal)
             if SlotEffect.AdvanceGeneration in effects:
                 _ = entry.handle.advance_generation()
@@ -180,9 +193,13 @@ class ResidentProcessPool:
         if already_empty:
             await asyncio.to_thread(self._join_maintenance, thread, grace_s)
             return
-        err: StdioProcessTerminated | None = None
         try:
-            err = self._terminate_entries(idle_entries, min(grace_s, self._config.cancel_grace_s))
+            if idle_entries:
+                await asyncio.to_thread(
+                    self._terminate_victims,
+                    idle_entries,
+                    min(grace_s, self._config.cancel_grace_s),
+                )
             while time.monotonic() < deadline:
                 with self._cv:
                     if not any(e.lease_id is not None for e in self._slots.values()):
@@ -191,12 +208,10 @@ class ResidentProcessPool:
             final_thread, remaining_entries = self._collect_all_for_shutdown()
             if final_thread is not None:
                 thread = final_thread
-            close_err = self._terminate_entries(remaining_entries, grace_s)
-            err = err or close_err
+            if remaining_entries:
+                await asyncio.to_thread(self._terminate_victims, remaining_entries, grace_s)
         finally:
             await asyncio.to_thread(self._join_maintenance, thread, grace_s)
-        if err is not None:
-            raise err
 
     def _collect_all_for_shutdown(self) -> tuple[threading.Thread | None, list[_SlotEntry]]:
         """Пометить пул закрытым под _cv и забрать поток обслуживания и все слоты."""
@@ -219,11 +234,10 @@ class ResidentProcessPool:
         grace_s = max(0.0, self._config.shutdown_timeout_s if timeout_s is None else timeout_s)
         thread, entries = self._collect_all_for_shutdown()
         try:
-            err = self._terminate_entries(entries, grace_s)
+            if entries:
+                self._terminate_victims(entries, grace_s)
         finally:
             self._join_maintenance(thread, grace_s)
-        if err is not None:
-            raise err
 
     def _maintenance_loop(self) -> None:
         """Фоновый цикл обслуживания: шаг reap_interval_s, устойчив к ошибкам прохода."""
@@ -264,11 +278,7 @@ class ResidentProcessPool:
                 or (now - self._last_rss_check_mono) >= self._config.rss_check_interval_s
             ):
                 for entry in self._slots.values():
-                    if (
-                        not entry.dead
-                        and entry.state is SlotState.READY
-                        and entry.lease_id is None
-                    ):
+                    if not entry.dead:
                         pgid = self._entry_pgid(entry)
                         if pgid > 0:
                             rss_targets.append((entry.slot_id, entry.handle, pgid))
@@ -276,7 +286,7 @@ class ResidentProcessPool:
                     self._last_rss_check_mono = now
 
         if idle_victims:
-            self._terminate_victims(idle_victims, "idle")
+            self._terminate_victims(idle_victims, self._config.cancel_grace_s, reason="idle")
 
         if not rss_targets:
             return
@@ -298,36 +308,73 @@ class ResidentProcessPool:
                 return
             for slot_id, expected_handle in over_limit:
                 entry = self._slots.get(slot_id)
-                if (
-                    entry is None
-                    or entry.dead
-                    or entry.state is not SlotState.READY
-                    or entry.lease_id is not None
-                    or entry.handle is not expected_handle
-                ):
+                if entry is None or entry.dead or entry.handle is not expected_handle:
                     continue
-                _ = self._transition(entry, SlotEvent.Shutdown)
-                _ = self._slots.pop(slot_id, None)
-                rss_victims.append(entry)
+                if entry.state is SlotState.READY and entry.lease_id is None:
+                    _ = self._transition(entry, SlotEvent.Shutdown)
+                    _ = self._slots.pop(slot_id, None)
+                    rss_victims.append(entry)
+                elif entry.lease_id is not None:
+                    entry.rss_evict_pending = True
             if rss_victims:
                 self._cv.notify_all()
 
         if rss_victims:
-            self._terminate_victims(rss_victims, "rss-exceeded")
+            self._terminate_victims(
+                rss_victims, self._config.cancel_grace_s, reason="rss-exceeded"
+            )
 
-    def _terminate_victims(self, victims: list[_SlotEntry], reason: str) -> None:
-        """Завершить выведенные из _slots слоты вне блокировки _cv."""
-        for entry in victims:
+    def _terminate_victims(
+        self,
+        entries: list[_SlotEntry],
+        grace_s: float,
+        reason: str = "evict",
+    ) -> None:
+        """Вывести слоты из _slots под _cv, завершить вне _cv и вернуть в карантин при ошибке."""
+        if not entries:
+            return
+        with self._cv:
+            changed = False
+            for entry in entries:
+                if self._slots.get(entry.slot_id) is entry:
+                    entry.lease_id = None
+                    _ = self._transition(entry, SlotEvent.Shutdown)
+                    _ = self._slots.pop(entry.slot_id, None)
+                    changed = True
+            if changed:
+                self._cv.notify_all()
+
+        failed_entries: list[_SlotEntry] = []
+        for entry in entries:
             try:
-                self._terminate(entry, self._config.cancel_grace_s)
+                self._terminate(entry, grace_s)
             except Exception:
                 _LOGGER.exception("failed to close %s slot %s", reason, entry.slot_id)
+                failed_entries.append(entry)
+                continue
+            if not getattr(entry.handle, "_pgid_dead", True):
+                failed_entries.append(entry)
+
+        if failed_entries:
+            with self._cv:
+                for entry in failed_entries:
+                    entry.lease_id = None
+                    entry.dead = True
+                    self._slots[entry.slot_id] = entry
+                self._cv.notify_all()
 
     @staticmethod
     def _join_maintenance(thread: threading.Thread | None, timeout_s: float) -> None:
         """Дождаться завершения потока обслуживания без удержания _cv."""
         if thread is not None and thread is not threading.current_thread() and thread.is_alive():
-            thread.join(timeout=max(0.0, timeout_s))
+            clamped_timeout = max(0.0, timeout_s)
+            thread.join(timeout=clamped_timeout)
+            if thread.is_alive():
+                _LOGGER.warning(
+                    "maintenance thread %s join timeout after %.3fs; still alive",
+                    thread.name,
+                    clamped_timeout,
+                )
 
     @staticmethod
     def _entry_pgid(entry: _SlotEntry) -> int:
@@ -426,24 +473,17 @@ class ResidentProcessPool:
 
     def _finish_teardown(self, entry: _SlotEntry, grace_s: float) -> None:
         entry.lease_id = None
+        terminated = False
         try:
             self._terminate(entry, grace_s)
+            terminated = True
+        except Exception:
+            _LOGGER.exception("failed to terminate slot %s", entry.slot_id)
         finally:
-            if getattr(entry.handle, "_pgid_dead", True):
+            if terminated and getattr(entry.handle, "_pgid_dead", True):
                 _ = self._slots.pop(entry.slot_id, None)
             else:
                 entry.dead = True
-
-    def _terminate_entries(
-        self, entries: list[_SlotEntry], grace_s: float
-    ) -> StdioProcessTerminated | None:
-        err: StdioProcessTerminated | None = None
-        for entry in entries:
-            try:
-                self._terminate(entry, grace_s)
-            except StdioProcessTerminated as exc:
-                err = err or exc
-        return err
 
     @staticmethod
     def _transition(entry: _SlotEntry, event: SlotEvent) -> list[SlotEffect]:

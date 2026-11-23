@@ -4,6 +4,7 @@ from __future__ import annotations  # noqa: E402
 
 import asyncio  # noqa: E402
 import importlib.util  # noqa: E402
+import logging  # noqa: E402
 import os  # noqa: E402
 import sqlite3  # noqa: E402
 import sys  # noqa: E402
@@ -672,3 +673,178 @@ def test_drain_and_shutdown_closed_with_slot_and_already_closed_empty(
         assert not closed_thread.is_alive()
     finally:
         closed_empty.shutdown()
+
+
+def test_leased_slot_rss_exceeded_marks_pending_and_tears_down_on_release(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """S1: арендованный слот с RSS > потолка помечается и разбирается в release()."""
+    now = [100.0]
+    monkeypatch.setattr(pool_mod, "time", _FakeTimeProxy(now))
+    handle = _FakeHandle(pid=8181, pgid=8181, created_at_mono=100.0)
+    monkeypatch.setattr(
+        pool_mod.ResidentProcessHandle,
+        "spawn",
+        staticmethod(lambda *args, **kwargs: handle),
+    )
+    rss_calls: list[int] = []
+
+    def _high_rss(pgid: int) -> int:
+        rss_calls.append(pgid)
+        return 100 * 1024 * 1024
+
+    monkeypatch.setattr(pool_mod, "get_pgid_rss_bytes", _high_rss)
+    pool = ResidentProcessPool(
+        StdioPoolConfig(
+            enabled=True,
+            max_rss_bytes=50 * 1024 * 1024,
+            rss_check_interval_s=0.01,
+            reap_interval_s=0.01,
+            idle_timeout_s=300.0,
+            shutdown_timeout_s=0.5,
+        )
+    )
+    try:
+        entry = pool.acquire(_key("owner-leased-rss"), lambda: ["echo"], cwd=".")
+        _wait_until(lambda: entry.rss_evict_pending is True, timeout_s=0.25)
+        assert len(rss_calls) >= 1
+        assert entry.slot_id in pool._slots
+        assert entry.lease_id is not None
+        assert handle.terminated_calls == []
+        assert handle.is_alive() is True
+
+        pool.release(entry.slot_id)
+        assert entry.slot_id not in pool._slots
+        assert len(handle.terminated_calls) == 1
+        assert handle.is_alive() is False
+    finally:
+        pool.shutdown()
+
+
+def test_terminate_victims_exception_keeps_slot_quarantined(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """S2: ошибка _terminate оставляет слот карантинным в _slots для _reap_quarantined_slots."""
+    handle = _FakeHandle(pid=8282, pgid=8282, created_at_mono=real_time.monotonic())
+    monkeypatch.setattr(
+        pool_mod.ResidentProcessHandle,
+        "spawn",
+        staticmethod(lambda *args, **kwargs: handle),
+    )
+    monkeypatch.setattr(pool_mod, "get_pgid_rss_bytes", lambda _pgid: 100 * 1024 * 1024)
+    pgid_alive = [True]
+    monkeypatch.setattr(pool_mod, "is_pgid_alive", lambda _pgid: pgid_alive[0])
+
+    def _failing_terminate(_entry: pool_mod._SlotEntry, _grace_s: float) -> None:
+        raise RuntimeError("terminate failed")
+
+    pool = ResidentProcessPool(
+        StdioPoolConfig(
+            enabled=True,
+            max_rss_bytes=50 * 1024 * 1024,
+            rss_check_interval_s=0.01,
+            reap_interval_s=0.01,
+            idle_timeout_s=300.0,
+            shutdown_timeout_s=0.5,
+        )
+    )
+    monkeypatch.setattr(pool, "_terminate", _failing_terminate)
+    try:
+        with caplog.at_level(logging.ERROR, logger=pool_mod.__name__):
+            entry = pool.acquire(_key("owner-quarantine-err"), lambda: ["echo"], cwd=".")
+            pool.release(entry.slot_id)
+            _wait_until(lambda: entry.dead is True, timeout_s=0.25)
+        assert entry.slot_id in pool._slots
+        assert entry.lease_id is None
+        assert any(record.levelno == logging.ERROR for record in caplog.records)
+
+        pgid_alive[0] = False
+        _wait_until(lambda: entry.slot_id not in pool._slots, timeout_s=0.25)
+    finally:
+        pgid_alive[0] = False
+        pool.shutdown()
+
+
+def test_drain_and_shutdown_uses_to_thread_for_terminations(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """S3: все синхронные терминации и join в drain_and_shutdown идут через asyncio.to_thread."""
+    handles = [
+        _FakeHandle(pid=8381, pgid=8381, created_at_mono=real_time.monotonic()),
+        _FakeHandle(pid=8382, pgid=8382, created_at_mono=real_time.monotonic()),
+    ]
+    spawn_iter = iter(handles)
+    monkeypatch.setattr(
+        pool_mod.ResidentProcessHandle,
+        "spawn",
+        staticmethod(lambda *args, **kwargs: next(spawn_iter)),
+    )
+    monkeypatch.setattr(pool_mod, "get_pgid_rss_bytes", lambda _pgid: 1024)
+
+    to_thread_calls: list[object] = []
+
+    async def _spy_to_thread(fn: Callable[..., object], *args: object, **kwargs: object) -> object:
+        to_thread_calls.append(fn)
+        return fn(*args, **kwargs)
+
+    monkeypatch.setattr(pool_mod.asyncio, "to_thread", _spy_to_thread)
+    pool = ResidentProcessPool(
+        StdioPoolConfig(
+            enabled=True,
+            max_slots=4,
+            reap_interval_s=0.05,
+            cancel_grace_s=0.1,
+            shutdown_timeout_s=0.1,
+        )
+    )
+    try:
+        ready_entry = pool.acquire(_key("owner-drain-ready"), lambda: ["echo"], cwd=".")
+        pool.release(ready_entry.slot_id)
+        _leased_entry = pool.acquire(_key("owner-drain-leased"), lambda: ["echo"], cwd=".")
+
+        asyncio.run(pool.drain_and_shutdown(timeout_s=0.05))
+        terminate_calls = [fn for fn in to_thread_calls if fn == pool._terminate_victims]
+        join_calls = [fn for fn in to_thread_calls if fn == pool._join_maintenance]
+        assert len(terminate_calls) == 2
+        assert len(join_calls) == 1
+        assert len(handles[0].terminated_calls) == 1
+        assert len(handles[1].terminated_calls) == 1
+        assert len(pool._slots) == 0
+    finally:
+        pool.shutdown()
+
+
+def test_join_maintenance_logs_warning_on_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """S4: при таймауте join живой поток обслуживания логируется через warning."""
+    entered = threading.Event()
+    release_step = threading.Event()
+
+    def _blocking_step() -> None:
+        entered.set()
+        release_step.wait(timeout=0.25)
+
+    pool = ResidentProcessPool(
+        StdioPoolConfig(enabled=True, reap_interval_s=0.005, shutdown_timeout_s=0.25)
+    )
+    monkeypatch.setattr(pool, "_maintenance_step", _blocking_step)
+    try:
+        assert pool.start_maintenance() is True
+        assert entered.wait(timeout=0.25)
+        thread = pool._maint_thread
+        assert thread is not None
+        with caplog.at_level(logging.WARNING, logger=pool_mod.__name__):
+            pool.shutdown(timeout_s=0.0)
+        assert any(
+            record.levelno == logging.WARNING
+            and thread.name in record.getMessage()
+            and "timeout" in record.getMessage().lower()
+            for record in caplog.records
+        )
+    finally:
+        release_step.set()
+        if pool._maint_thread is not None:
+            pool._maint_thread.join(timeout=0.25)

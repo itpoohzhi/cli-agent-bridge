@@ -88,7 +88,11 @@ def rollback_plan() -> list[str]:
     return [
         "launchctl setenv AGY_RESIDENT_ENABLED false",
         f"launchctl kickstart -k {LAUNCHD_SERVICE_LABEL}",
-        "sh -c 'ps eww $(pgrep -f \"bridges/agy-bridge/server.py\") | tr \" \" \"\\n\" | grep -q \"AGY_RESIDENT_ENABLED=false\" || echo ROLLBACK_VERIFY_FAILED'",
+        (
+            "for pid in $(pgrep -f '[b]ridges/agy-bridge/server.py'); do "
+            'ps eww "$pid" | tr \' \' \'\\n\' | grep -q \'^AGY_RESIDENT_ENABLED=false\' '
+            '|| echo "ROLLBACK_VERIFY_FAILED pid=$pid"; done'
+        ),
     ]
 
 
