@@ -123,7 +123,8 @@ class CatalogGuardTests(unittest.TestCase):
     def test_missing_allowlist_keeps_full_catalog_and_warns_once(self) -> None:
         self._allowlist(None)
         ids = [item["id"] for item in self._catalog()["data"]]
-        self.assertEqual(set(ids), set(self.srv.FLEET["order"]) | {self.srv.MODEL_ID})
+        expected = {m for m in self.srv.FLEET["order"] if not m.startswith("claude-")} | {self.srv.MODEL_ID}
+        self.assertEqual(set(ids), expected)
         self.assertEqual(ids[0], self.srv.MODEL_ID)
         self.assertEqual(len(self.logs), 1)
         self.assertIn("allowlist", self.logs[0])
@@ -131,7 +132,8 @@ class CatalogGuardTests(unittest.TestCase):
     def test_empty_allowlist_keeps_full_catalog_and_warns_once(self) -> None:
         self._allowlist("# только комментарий\n\n")
         ids = [item["id"] for item in self._catalog()["data"]]
-        self.assertEqual(set(ids), set(self.srv.FLEET["order"]) | {self.srv.MODEL_ID})
+        expected = {m for m in self.srv.FLEET["order"] if not m.startswith("claude-")} | {self.srv.MODEL_ID}
+        self.assertEqual(set(ids), expected)
         self.assertEqual(len(self.logs), 1)
 
     def test_default_path_is_real_home_when_env_unset(self) -> None:
