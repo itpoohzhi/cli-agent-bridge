@@ -7,7 +7,7 @@ import threading
 from typing import Any, Callable, final
 from agy_runtime import activity_runtime
 from agy_runtime.midstream_resilience import AgyToolTraceCollector, _owner_time
-from agy_runtime.sse_stream_helpers import SseStreamSession
+from agy_runtime.sse_stream_helpers import SseStreamSession, retry_after_headers
 from core.route_health_policy import redact_diagnostic_text
 from core.agy_capacity_guard import CAPACITY_REASON
 from core.usage_wire import positive_wire_usage
@@ -272,10 +272,9 @@ class _SseBodyRunner:
         presend = all(((is_present(err)), not s.ctx["stream_committed"], any((s.resilience, s.ctx.get("step_job_id")))))
         if presend:
             clean = {k: redact_diagnostic_text(v) if isinstance(v, str) else v for k, v in err.items()}
-            code = 502
-            if any((s.ctx.get("step_job_id"), err.get("type") == CAPACITY_REASON)):
-                code = int(err.get("code") if err.get("code") else 502)
-            s.handler._send(code, {"error": clean})
+            code = 503 if err.get("type") == "overloaded" else (int(err.get("code") or 502) if any((s.ctx.get("step_job_id"), err.get("type") == CAPACITY_REASON)) else 502)
+            extra = retry_after_headers(out, err)
+            s.handler._send(code, {"error": clean}, extra) if extra else s.handler._send(code, {"error": clean})
             s.handler.close_connection = True
         elif s.commit():
             ok = (self.finish_success(out, reason) if (not is_present(err)) else s.emit(s.error_chunk(err, self.error_usage(out))))
