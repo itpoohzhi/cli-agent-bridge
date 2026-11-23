@@ -148,3 +148,41 @@ def health_queue_fields(slots: Any) -> dict[str, int]:
         "queued": int(getattr(slots, "waiters_count", 0)),
         "slots_active": int(getattr(slots, "active_count", 0)),
     }
+
+
+def should_detach_job_orphan(
+    tools_count: int,
+    ttfc_received: bool,
+    active_orphans: int = 0,
+    fast_enabled: bool = False,
+    orphan_max: int = 5,
+) -> bool:
+    """Return True when a disconnect should detach as an orphan."""
+    from .state_hygiene_policy import DisconnectOutcome, OrphanConfig, OrphanFsm
+
+    outcome = OrphanFsm(
+        OrphanConfig(orphan_max=orphan_max)
+    ).decide_disconnect(
+        ttfc_received, tools_count, active_orphans, fast_enabled
+    )
+    return outcome is DisconnectOutcome.DETACH_ORPHAN
+
+
+def evaluate_disconnect_action(
+    tools_count: int,
+    ttfc_received: bool,
+    active_orphans: int = 0,
+    fast_enabled: bool = False,
+    orphan_max: int = 5,
+) -> str:
+    """Return 'detach' or 'cancel_sync' for a disconnect."""
+    if should_detach_job_orphan(
+        tools_count,
+        ttfc_received,
+        active_orphans,
+        fast_enabled,
+        orphan_max,
+    ):
+        return "detach"
+    return "cancel_sync"
+
