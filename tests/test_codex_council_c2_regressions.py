@@ -90,21 +90,23 @@ def _isolate_v2_flag(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, value: str
     monkeypatch.setenv("BRIDGE_CODEX_APP_SERVER_V2_ENABLED", value)
 
 
+def _assert_scope_400(handler: _FakeHandler) -> None:
+    assert handler.replies and handler.replies[0][0][0] == 400
+    assert handler.replies[0][1].get("code") == "model_not_in_provider_scope"
+
+
+def _zc_model_cfg(*targets: str) -> dict[str, Any]:
+    routes = [{"backend": "openai-key-3", "base_url": "http://127.0.0.1:9000/sg-openai/v1"}]
+    routes.extend({"backend": t, "base_url": f"http://127.0.0.1:{9001 + i}/v1"} for i, t in enumerate(targets))
+    return {"backend": "openai-key-3", "routing": {"disabled_backend": "openai-key-3", "routes": routes}}
+
+
 def test_f001_zero_canon_route_switch_enforces_provider_scope(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """F-001: Switching from dropped route 0 to out-of-scope route 1 must return 400."""
     _isolate_v2_flag(monkeypatch, tmp_path, "1")
-    model_cfg = {
-        "backend": "openai-key-3",
-        "routing": {
-            "disabled_backend": "openai-key-3",
-            "routes": [
-                {"backend": "openai-key-3", "base_url": "http://127.0.0.1:9000/sg-openai/v1"},
-                {"backend": "other-zc", "base_url": "http://127.0.0.1:9001/v1"},
-            ],
-        },
-    }
+    model_cfg = _zc_model_cfg("other-zc")
     bad_adapters = [
         _FakeAdapter("openai-key-3", kind="passthrough", owned_by="openai", config={}),
         _FakeAdapter("other-zc", kind="stdio_resident", owned_by="other-owner", config={}),
@@ -115,8 +117,7 @@ def test_f001_zero_canon_route_switch_enforces_provider_scope(
         _ctx(host_bad, handler_bad, {"model": "gpt-6.1-sol"}, provider_id="openai")
     )
     assert res_bad is None
-    assert handler_bad.replies and handler_bad.replies[0][0][0] == 400
-    assert handler_bad.replies[0][1].get("code") == "model_not_in_provider_scope"
+    _assert_scope_400(handler_bad)
 
     ok_adapters = [
         _FakeAdapter("openai-key-3", kind="passthrough", owned_by="openai", config={}),
@@ -245,3 +246,54 @@ def test_f004_authoritative_kind_and_f015_cached_review_profile(
     std_handler = _FakeHandler(headers={"X-Review-Profile": "Zero_Canon"})
     std_handler._review_profile = "standard"
     assert http_post_routing.resolve_post_route(_ctx(host, std_handler, {"model": "gpt-6.1-sol"})) is not None
+
+
+def test_f008_missing_backend_fails_closed(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """F-001 + F-008: Missing selected Zero-Canon backend in BACKENDS returns 400 fail-closed."""
+    _isolate_v2_flag(monkeypatch, tmp_path, "1")
+    host = _make_host({"gpt-6.1-sol": _zc_model_cfg("ghost-zc")}, [_FakeAdapter("openai-key-3", kind="passthrough", owned_by="openai", config={})])
+    handler = _FakeHandler(headers={"X-Review-Profile": "Zero-Canon"})
+    assert http_post_routing.resolve_post_route(_ctx(host, handler, {"model": "gpt-6.1-sol"}, provider_id="openai")) is None
+    _assert_scope_400(handler)
+
+
+def test_f008_empty_or_absent_owned_by_fails_closed(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """F-001 + F-008 + F-010: Empty or absent owned_by returns 400 fail-closed (including adapters()-only lookup)."""
+    _isolate_v2_flag(monkeypatch, tmp_path, "1")
+    base = _FakeAdapter("openai-key-3", kind="passthrough", owned_by="openai", config={})
+    empty_owner = _FakeAdapter("empty-zc", kind="stdio_resident", owned_by="", config={})
+    host_empty = _make_host({"gpt-6.1-sol": _zc_model_cfg("empty-zc")}, [base, empty_owner])
+    h_empty = _FakeHandler(headers={"X-Review-Profile": "Zero-Canon"})
+    assert http_post_routing.resolve_post_route(_ctx(host_empty, h_empty, {"model": "gpt-6.1-sol"}, provider_id="openai")) is None
+    _assert_scope_400(h_empty)
+
+    no_owner = SimpleNamespace(id="no-owner-zc", kind="stdio_resident", config={})
+    host_absent = _make_host({"gpt-6.1-sol": _zc_model_cfg("no-owner-zc")}, [base])
+    host_absent.BACKENDS = SimpleNamespace(adapters=lambda: [base, no_owner])
+    h_absent = _FakeHandler(headers={"X-Review-Profile": "Zero-Canon"})
+    assert http_post_routing.resolve_post_route(_ctx(host_absent, h_absent, {"model": "gpt-6.1-sol"}, provider_id="openai")) is None
+    _assert_scope_400(h_absent)
+
+
+def test_f009_unknown_provider_id_fails_closed_without_keyerror() -> None:
+    """F-009: Unknown provider_id absent from PROVIDER_SCOPES returns 400 without KeyError."""
+    host = _make_host({"gpt-6.1-sol": {"backend": "codex"}}, [_FakeAdapter("codex", kind="stdio_resident", owned_by="openai", config={})])
+    handler = _FakeHandler(headers={"X-Review-Profile": "Zero-Canon"})
+    ctx = _ctx(host, handler, {"model": "gpt-6.1-sol"}, provider_id="unknown-provider")
+    route = http_post_routing.PostRoute(ctx, {"model": "gpt-6.1-sol"}, "gpt-6.1-sol", "gpt-6.1-sol", 11, model={"backend": "codex"})
+    assert http_post_routing._selected_backend_in_provider_scope(route) is False
+    _assert_scope_400(handler)
+
+
+def test_f007_secondary_kept_route_out_of_scope_fails_closed(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """F-007: Out-of-scope secondary eligible route kept[1] returns 400 even when kept[0] is in-scope."""
+    _isolate_v2_flag(monkeypatch, tmp_path, "1")
+    adapters = [
+        _FakeAdapter("openai-key-3", kind="passthrough", owned_by="openai", config={}),
+        _FakeAdapter("good-zc", kind="stdio_resident", owned_by="openai", config={}),
+        _FakeAdapter("leak-zc", kind="stdio_resident", owned_by="other-owner", config={}),
+    ]
+    host = _make_host({"gpt-6.1-sol": _zc_model_cfg("good-zc", "leak-zc")}, adapters)
+    handler = _FakeHandler(headers={"X-Review-Profile": "Zero-Canon"})
+    assert http_post_routing.resolve_post_route(_ctx(host, handler, {"model": "gpt-6.1-sol"}, provider_id="openai")) is None
+    _assert_scope_400(handler)

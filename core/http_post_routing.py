@@ -60,11 +60,7 @@ def prepare_post_body(route: PostRoute) -> PreparedPostBody:
 
 
 def prepare_route_request(request: dict[str, Any], selected_model: dict[str, Any], canonical_id: str, alias_effort: str | None = None, effort_on: bool = True) -> dict[str, Any]:
-    """Накладывает только выбранный маршрут на чистый исходный запрос.
-
-    Явные параметры клиента сильнее route defaults. Повторный маршрут должен
-    получить тот же исходный request, а не результат предыдущей подготовки.
-    """
+    """Накладывает выбранный маршрут на чистый исходный запрос (клиент сильнее defaults)."""
     params = selected_model.get("params")
     prepared = {**(params if isinstance(params, dict) else {}), **request}
     prepared.pop("transport_seed", None)
@@ -147,24 +143,20 @@ def selected_route_allowed(route: PostRoute) -> bool:
 
 
 def _identify(context: PostRequestContext) -> PostRoute | None:
-    host: Any = context.host
-    handler: Any = context.handler
-    request = context.request
+    host, handler, request = context.host, context.handler, context.request
     raw_model = request.get("model")
     model_len = len(raw_model) if isinstance(raw_model, str) else 0
     if raw_model is not None and not isinstance(raw_model, str):
         handler._reject(400, "model_not_allowed", "model must be a string from the catalogue", "unknown", model_len)
         return None
     model_id = (raw_model or "").strip() or host.MODEL_ID
-    key = (handler.headers.get("X-Idempotency-Key") or "").strip()
-    if key:
+    if key := (handler.headers.get("X-Idempotency-Key") or "").strip():
         request["step_job_id"] = key
     return PostRoute(context, request, model_id, raw_model, model_len)
 
 
 def _resolve_alias(route: PostRoute, models: dict[str, Any]) -> None:
-    alias = route.host._resolve_model_alias(route.model_id, models)
-    route.alias = alias
+    route.alias = alias = route.host._resolve_model_alias(route.model_id, models)
     if alias is None:
         return
     route.model_id = alias[0] if isinstance(alias, (tuple, list)) else alias
@@ -173,9 +165,7 @@ def _resolve_alias(route: PostRoute, models: dict[str, Any]) -> None:
 
 def _effort_type_allowed(route: PostRoute) -> bool:
     value = route.request.get("reasoning_effort")
-    if value is None or isinstance(value, str):
-        return True
-    return route.reject(400, "unsupported_reasoning_effort", "reasoning_effort must be a string")
+    return True if value is None or isinstance(value, str) else route.reject(400, "unsupported_reasoning_effort", "reasoning_effort must be a string")
 
 
 def _request_allowed(route: PostRoute, requested_id: str) -> bool:
@@ -200,17 +190,29 @@ def _apply_filtered_routes(route: PostRoute, routing: dict[str, Any], kept: list
         route.model["backend"] = first
 
 
-def _selected_backend_in_provider_scope(route: PostRoute) -> bool:
+def _lookup_backend(backends: Any, backend_id: Any) -> Any:
+    if not backend_id:
+        return None
+    if isinstance(backends, Mapping) or callable(getattr(backends, "get", None)):
+        return backends.get(backend_id)
+    adapters = backends.adapters() if callable(getattr(backends, "adapters", None)) else ()
+    return next((a for a in adapters if getattr(a, "id", None) == backend_id), None)
+
+
+def _selected_backend_in_provider_scope(route: PostRoute, kept: list[Any] | None = None) -> bool:
     if (pid := route.ingress.provider_id) is None:
         return True
-    backends = getattr(route.host, "BACKENDS", None)
-    adapter = backends.get(route.model.get("backend")) if isinstance(backends, Mapping) else getattr(backends, "get", lambda _: None)(route.model.get("backend"))
-    owner = getattr(adapter, "owned_by", "") if adapter is not None else ""
-    if not owner:
-        return True
-    allowed = route.host.PROVIDER_SCOPES[pid]
-    if owner in ((allowed,) if isinstance(allowed, str) else allowed):
-        return True
+    scopes = getattr(route.host, "PROVIDER_SCOPES", None)
+    allowed = scopes.get(pid) if isinstance(scopes, Mapping) else None
+    if allowed is not None:
+        allowed_owners = (allowed,) if isinstance(allowed, str) else tuple(allowed)
+        backends = getattr(route.host, "BACKENDS", None)
+        for item in kept or (route.model,):
+            adapter = _lookup_backend(backends, item.get("backend") if isinstance(item, dict) else None)
+            if not (owner := getattr(adapter, "owned_by", "")) or owner not in allowed_owners:
+                break
+        else:
+            return True
     route.handler._reply_error(400, f"Model '{route.raw_model}' is not available for provider '{pid}'", code="model_not_in_provider_scope")
     return False
 
@@ -230,7 +232,7 @@ def _zero_canon_route_allowed(route: PostRoute) -> bool:
         return route.reject(503, "route_unavailable", "no Zero-Canon eligible provider is available")
     if isinstance(routing, dict) and isinstance(routes, list):
         _apply_filtered_routes(route, routing, kept)
-    return _selected_backend_in_provider_scope(route)
+    return _selected_backend_in_provider_scope(route, kept)
 
 
 def _finalize_route_model(route: PostRoute) -> bool:
