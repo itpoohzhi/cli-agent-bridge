@@ -1,13 +1,14 @@
-# Провайдер opencode-go: локальный шлюз :10830/go (deepseek-v4.1-flash) через универсальный мост :9882 (kind passthrough).
-# transport.bridge компилирует backends.opencode-go в fleet.json; ключ, заголовки и per-request заголовки берутся из transport.direct.http.
+# Провайдер opencode-go: единственная активная подписка OpenCode Go через :10830/go (deepseek-v4.1-flash, kind passthrough).
+# Единая точка правды для ключа — текущий активный аккаунт OpenCode Go (~/.config/opencode/opencode-go.key через opencode.json).
 manifest_version: 1
 provider_id: opencode-go
 kind: passthrough
-enabled: false
+enabled: true
 required: false
 priority: 10
-routing: {weight: 0}
+routing: {weight: 40}
 owned_by: opencode-go
+failover: {statuses: [402, 403], error_types: [permission_error, credit_exhausted, payment_required], message_markers: [credit, subscription, 'usage limit', 'go usage', payment], pool: opencode-go, pool_label: 'OpenCode Go'}
 transport:
   bridge: {base_url: 'http://127.0.0.1:10830/go/v1'}
   direct:

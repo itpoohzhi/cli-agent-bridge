@@ -1,12 +1,12 @@
 # NeuralWatt Standard (deepseek-v4.1-flash, non-flex) через локальный model-georouter :10830/neuralwatt -> AI-group :10820.
-# Первичный маршрут 100% (priority 5, weight 100) для deepseek-v4.1-flash; failover -> opencode-go-sub1 (11) -> opencode-go-sub2 (12) -> deepseek-direct (20).
+# Первичный маршрут 60% (priority 5, weight 60) для deepseek-v4.1-flash; 40% — единый opencode-go (priority 10, weight 40); резерв failover -> deepseek-direct (20).
 manifest_version: 1
 provider_id: neuralwatt
 kind: passthrough
 enabled: true
 required: false
 priority: 5
-routing: {weight: 100}
+routing: {weight: 60}
 owned_by: neuralwatt
 failover: {statuses: [402, 403, 429, 503], error_types: [permission_error, credit_exhausted, payment_required, rate_limit_error], message_markers: [credit, quota, payment, insufficient], pool: neuralwatt, pool_label: 'NeuralWatt'}
 transport:
@@ -20,11 +20,12 @@ allow_base_url:
 limits: {max_concurrent: 2, quota_group: neuralwatt, timeout_s: 300}
 discovery:
   method: static
-  static: [deepseek-v4.1-flash]
+  static: [deepseek-v4.1-flash, glm-5.3-flash]
 family_rule:
   type: exact_map
   exact_map:
     deepseek-v4.1-flash: DeepSeek
+    glm-5.3-flash: Z.ai
 models_overrides:
   deepseek-v4.1-flash:
     name: DeepSeek V4.1 Flash (NeuralWatt)
@@ -36,6 +37,14 @@ models_overrides:
     images: {cli_registry: explicit_supported, status: unverified, method: null, proof: null}
     # Роли deepseek-v4.1-flash (ARL/Brief-review/Coordinator/Explorer) ограничены <=112640 Б (<200K токенов) для безопасного failover на opencode-go.
     policy_lines: [108, 121, 127, 133, 136]
+  glm-5.3-flash:
+    name: GLM 5.3 Flash (NeuralWatt)
+    efforts: [low, high, max]
+    default_effort: high
+    context_window: 1000000
+    max_tokens: 131072
+    input: [text]
+    images: {cli_registry: implicit_supported, status: unverified, method: null, proof: null}
 params:
   effort_field: reasoning_effort
   effort_map:
