@@ -340,7 +340,6 @@
           "backend": "agy",
           "name": "Gemini 3.8 Flash (AGY bridge)"
         },
-        "gpt-6.1-sol": null,
         "claude-opus-5-5": {
           "efforts": [
             "high"

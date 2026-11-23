@@ -20,6 +20,11 @@ from core.backend_adapter import (
     TurnContext,
     TurnResult,
 )
+from core.stdio_resident.codex_attestation_wire import (
+    record_v2_turn_completion,
+    should_wire_v2_zero_canon,
+    wrap_v2_sse_writer,
+)
 from core.stdio_resident.config import StdioPoolConfig
 from core.stdio_resident.process_pool import ResidentProcessPool
 from core.stdio_resident.protocol_driver import StdioProtocolDriver
@@ -39,6 +44,10 @@ _PROTOCOLS = (
     "stream-json", "stream-jsonrpc", "acp", "msp-v1", "opencode-acp",
     "claude-stream-json", "codex-app-server", "codex-app-server-v2",
 )
+_ADAPTER_OPTION_KEYS = frozenset({
+    "protocol", "cli_argv", "argv", "cli_args", "sandbox_flags",
+    "output_format", "output_format_flag", "output_format_args", "step_dedup",
+})
 
 
 def _empty_catalog() -> Mapping[str, Any]:
@@ -120,26 +129,45 @@ class StdioResidentAdapter(BackendAdapter):
         self._session_manager: StdioSessionManager = StdioSessionManager(
             self._pool, self._driver
         )
-        raw_argv = (
-            cli_argv
-            if cli_argv is not None
-            else self._options.get(
-                "cli_argv",
-                self._options.get(
-                    "argv", actual_config.get("cli_argv", actual_config.get("wrapper"))
-                ),
-            )
-        )
+        raw_argv = self._resolve_raw_argv(cli_argv, self._options, actual_config)
         self._cli_argv: list[str] = self._parse_argv(raw_argv)
 
     @staticmethod
     def _extract_options(config: Mapping[str, Any]) -> dict[str, Any]:
+        transport = _as_mapping(config.get("transport"))
+        tr_bridge = _as_mapping(transport.get("bridge")) if transport is not None else None
         bridge = _as_mapping(config.get("bridge"))
-        bridge_opts = _as_mapping(bridge.get("options")) if bridge is not None else None
-        if bridge_opts is not None:
-            return dict(bridge_opts)
-        opts = _as_mapping(config.get("options"))
-        return dict(opts) if opts is not None else dict(config)
+        for container in (tr_bridge, bridge, config):
+            if container is not None:
+                opts = _as_mapping(container.get("options"))
+                if opts is not None:
+                    return dict(opts)
+        return {k: v for k, v in config.items() if k in _ADAPTER_OPTION_KEYS}
+
+    @staticmethod
+    def _resolve_raw_argv(
+        cli_argv: list[str] | tuple[str, ...] | str | None,
+        options: Mapping[str, Any],
+        config: Mapping[str, Any],
+    ) -> object:
+        if cli_argv is not None:
+            return cli_argv
+        transport = _as_mapping(config.get("transport"))
+        tr_bridge = _as_mapping(transport.get("bridge")) if transport is not None else None
+        bridge = _as_mapping(config.get("bridge"))
+        sources = (
+            (options, ("cli_argv", "argv")),
+            (config, ("cli_argv", "wrapper")),
+            (tr_bridge, ("cli_argv", "wrapper")),
+            (bridge, ("cli_argv", "wrapper")),
+        )
+        for src, keys in sources:
+            if src is None:
+                continue
+            for key in keys:
+                if (val := src.get(key)) is not None:
+                    return val
+        return None
 
     @staticmethod
     def _parse_argv(value: object) -> list[str]:
@@ -277,7 +305,8 @@ class StdioResidentAdapter(BackendAdapter):
     @override
     def execute_turn(self, ctx: TurnContext, sse_writer: StreamSink | None) -> TurnResult:
         protocol = self._sync_protocol()
-        raw_headers = getattr(getattr(ctx, "handler", None), "headers", None)
+        handler = getattr(ctx, "handler", None)
+        raw_headers = getattr(handler, "headers", None)
         profile = review_profile_from_headers(raw_headers)
         request: dict[str, Any] = {
             "chat_key": ctx.turn_id or ctx.rid or "default",
@@ -291,9 +320,19 @@ class StdioResidentAdapter(BackendAdapter):
             "turn_context": {"model": ctx.model, "effort": ctx.effort, "review_profile": profile},
         }
         hdr_map = dict(raw_headers.items()) if hasattr(raw_headers, "items") else None
-        text, reasoning = execute_routed_turn(
-            self.execute_chat, protocol, request, sse_writer, headers=hdr_map
+        wire_zc = should_wire_v2_zero_canon(protocol, profile, handler)
+        writer = (
+            wrap_v2_sse_writer(sse_writer, self._driver, handler, ctx.model, ctx.effort)
+            if wire_zc
+            else sse_writer
         )
+        text, reasoning = execute_routed_turn(
+            self.execute_chat, protocol, request, writer, headers=hdr_map
+        )
+        if wire_zc:
+            record_v2_turn_completion(
+                self._driver, handler, model=ctx.model, effort=ctx.effort, has_sse=sse_writer is not None
+            )
         return TurnResult(text=text, reasoning=reasoning)
 
     @override

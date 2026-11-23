@@ -28,15 +28,28 @@ def _encode_frame(payload: Mapping[str, object]) -> bytes:
     return (json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")
 
 
+def _has_flag(argv: list[str], flag: str) -> bool:
+    return any(item == flag or item.startswith(f"{flag}=") for item in argv)
+
+
+def _append_cli_args(argv: list[str], raw_args: object) -> None:
+    if not isinstance(raw_args, list | tuple):
+        return
+    for raw in raw_args:
+        arg = str(raw)
+        if arg and arg not in argv:
+            argv.append(arg)
+
+
 def _build_codex_argv(base_argv: list[str], options: Mapping[str, Any]) -> list[str]:
     argv = list(base_argv) if "app-server" in base_argv else [*base_argv, "app-server"]
+    _append_cli_args(argv, options.get("cli_args"))
     for name, value in options.items():
-        if value is None or value is False:
+        if not isinstance(name, str) or not name.startswith("--"):
             continue
-        flag = name if name.startswith("--") else f"--{name.replace('_', '-')}"
-        if any(item == flag or item.startswith(f"{flag}=") for item in argv):
+        if value is None or value is False or _has_flag(argv, name):
             continue
-        argv.append(flag)
+        argv.append(name)
         if value is not True:
             argv.append(str(value))
     return argv
@@ -268,12 +281,17 @@ class CodexAppServerV2Driver(StreamJsonDriver):
 
     def __init__(self) -> None:
         self._state: ProtocolState = ProtocolState()
+        self._last_turn_state: ProtocolState | None = None
         self._zero_canon: bool = False
         self._last_effects: tuple[ProtocolEffect, ...] = ()
 
     @property
     def protocol_state(self) -> ProtocolState:
         return self._state
+
+    @property
+    def last_turn_state(self) -> ProtocolState | None:
+        return self._last_turn_state
 
     def _apply(self, event: ProtocolEvent) -> tuple[ProtocolEffect, ...]:
         self._state, effects = transition(self._state, event)
@@ -320,6 +338,7 @@ class CodexAppServerV2Driver(StreamJsonDriver):
     @override
     def run_handshake(self, handle: Any, timeout_s: float = 10.0) -> bool:
         self._state = ProtocolState(zero_canon=self._zero_canon)
+        self._last_turn_state = None
         try:
             self._send_effects(handle, self._apply(ProtocolEvent(EventKind.START_INITIALIZE)))
             return self._await_phase(handle, ProtocolPhase.INITIALIZED, timeout_s)
@@ -331,6 +350,7 @@ class CodexAppServerV2Driver(StreamJsonDriver):
         ctx = _mapping(turn_context) or {}
         zc = self._zero_canon or is_zero_canon_profile(str(ctx.get("review_profile") or ""))
         self._zero_canon = zc
+        self._last_turn_state = None
         if self._state.phase is ProtocolPhase.IDLE:
             return False
         if not zc and self._state.thread_id is not None and not ctx.get("new_thread"):
@@ -348,6 +368,7 @@ class CodexAppServerV2Driver(StreamJsonDriver):
     def encode_turn(self, prompt: str, turn_context: Mapping[str, Any] | None = None) -> bytes:
         if self._state.thread_id is None:
             raise ValueError("codex_v2_missing_server_thread_id")
+        self._last_turn_state = None
         ctx = dict(turn_context or {})
         zc = self._zero_canon or is_zero_canon_profile(str(ctx.get("review_profile") or ""))
         effects = self._apply(ProtocolEvent(EventKind.START_TURN, _build_turn_params(prompt, ctx, zc)))
@@ -417,5 +438,6 @@ class CodexAppServerV2Driver(StreamJsonDriver):
     @override
     def perform_turn_teardown(self, handle: Any, turn_context: Any, timeout_s: float = 2.0) -> bool:
         _ = (handle, turn_context, timeout_s)
+        self._last_turn_state = self._state
         _ = self.advance_epoch()
         return True

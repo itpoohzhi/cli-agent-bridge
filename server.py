@@ -199,6 +199,8 @@ from core.liveness_signals import (  # noqa: E402
 )
 from core.runtime_env import DynamicFlagSource, allow_hub_client_response_header, flag_enabled  # noqa: E402
 from core import zero_canon_http as _zc_http  # noqa: E402
+from core.stdio_resident import codex_attestation_wire as _zc_wire  # noqa: E402
+from core.stdio_resident.turn_error_sse import ResidentTurnError  # noqa: E402
 from core.turn_dispatch import ToolSchemaScope, dispatch_turn  # noqa: E402
 from core.request_telemetry import RequestTelemetryStore  # noqa: E402
 from core.telemetry_hooks import (  # noqa: E402
@@ -7268,7 +7270,12 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
 
     def _serve_json_body(self, ctx: dict[str, Any]) -> None:
         lease = self._current_lease()
-        out = self._dispatch(ctx, None)
+        try:
+            out = self._dispatch(ctx, None)
+        except ResidentTurnError as exc:
+            lease.record_failure(exc)
+            self._send(exc.status, exc.response.body)
+            return
         if out.get("state") == "client_gone":
             lease.record_discard("client_disconnected")
             return
@@ -7395,22 +7402,19 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
         managed_turn: ManagedTurn | None = ctx.get("managed_turn") or getattr(
             self, "_active_managed_turn", None
         )
-        try:
-            self._response_status = 200
-            if not getattr(self, "_headers_already_sent", False):
-                self._headers_already_sent = True
-                self.send_response(200)
-                self.send_header("Content-Type", "text/event-stream")
-                self.send_header("Cache-Control", "no-cache")
-                self.send_header("X-Accel-Buffering", "no")
-                _zc_http.emit_turn_headers(self, managed_turn, _trace_headers(self._trace), (ctxres.PRUNED_HEADER, self._context_pruned), attestation=(ctx.get("zero_canon_admission") or getattr(self, "_zero_canon_admission", None), "admitted"))
-            self.close_connection = True
-        except (BrokenPipeError, ConnectionResetError, OSError):
+        defer_zc = _zc_wire.should_defer_zero_canon_sse_headers(self, ctx)
+
+        def _on_hdr_drop() -> None:
             _log("client gone before headers")
             self._telemetry_gone()
             lease.record_discard("client_disconnected")
             if managed_turn is not None and ctx.get("detach_on_disconnect"):
                 TURN_MANAGER.mark_detached(managed_turn.turn_id)
+
+        def ensure_headers(emit_role: Callable[[], bool] | None = None) -> bool:
+            return _zc_wire.ensure_deferred_sse_headers(self, lambda: _zc_wire.emit_sse_response_headers(self, ctx, managed_turn, _trace_headers(self._trace), (ctxres.PRUNED_HEADER, self._context_pruned)), _on_hdr_drop, emit_role)
+
+        if not defer_zc and not ensure_headers():
             return
 
         if ctx.get("attached_existing") and managed_turn is not None:
@@ -7482,6 +7486,8 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
                 return write_keepalive()
 
         def write_keepalive() -> bool:
+            if defer_zc and not getattr(self, "_headers_already_sent", False):
+                return True
             # RW-201/RW-009: та же защита, что у sse_writer ниже — запись ограничена
             # LIVE_WRITE_TIMEOUT_S, а не таймаутом соединения (300с), иначе клиент,
             # который просто не читает, держит T/L все 300с на одном keepalive.
@@ -7511,14 +7517,17 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
             prev_timeout = self.connection.gettimeout()
             try:
                 self.connection.settimeout(LIVE_WRITE_TIMEOUT_S)
-                for piece in _text_slices(text) if text else [text]:
-                    if not emit(chunk({field: piece})):
-                        ok = False
-                        break
-                    self._telemetry_note(chunk=True)
-                    live_sent[0] += len(piece.encode("utf-8"))
-                    if kind == "reasoning":
-                        reasoning_live_chars += len(piece)
+                if defer_zc and not ensure_headers(lambda: emit(chunk({"role": "assistant", "content": ""}))):
+                    ok = False
+                else:
+                    for piece in _text_slices(text) if text else [text]:
+                        if not emit(chunk({field: piece})):
+                            ok = False
+                            break
+                        self._telemetry_note(chunk=True)
+                        live_sent[0] += len(piece.encode("utf-8"))
+                        if kind == "reasoning":
+                            reasoning_live_chars += len(piece)
             finally:
                 self.connection.settimeout(prev_timeout)
             if not ok:
@@ -7527,7 +7536,7 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
                 self._client_write_dead = True
             return ok
 
-        if not emit(chunk({"role": "assistant", "content": ""})):
+        if not defer_zc and not emit(chunk({"role": "assistant", "content": ""})):
             # Пустой стартовый кадр успехом не считается; обрыв клиента нейтрален.
             lease.record_discard("client_disconnected")
             if managed_turn is not None and ctx.get("detach_on_disconnect"):
@@ -7546,6 +7555,8 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
         except Exception as exc:  # noqa: BLE001 - RW-211: клиенту нужен конверт, а не сырой сбой
             from core.stdio_resident.sse_error_bridge import SseErrorContext, handle_sse_stream_exception
             if handle_sse_stream_exception(exc, live_sent[0], SseErrorContext(self, lease, emit, stream_error_frame, _log)):
+                return
+            if defer_zc and _zc_wire.send_pre_stream_sse_error(self, lease, exc):
                 return
             raise
         if self._client_write_dead:
@@ -7570,11 +7581,13 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
         self._record_turn_outcome(lease, out, backend_err, model_id=cli_canon_id)
         err = backend_err or self._reserve_delivery(out)
         self._telemetry_error(err)
+        if defer_zc and not _zc_wire.finalize_deferred_sse_headers(self, err, lambda: ensure_headers(lambda: emit(chunk({"role": "assistant", "content": ""})))):
+            return
         if err is None:
             # Доставка — отдельный этап: T/L уже свободны, checkpoint записан; обрыв клиента
             # здесь ни на что, кроме самого ответа, не влияет. У droid content/reasoning уже ушли
             # живьём из _execute (sse_writer выше): здесь остаются только tool_call-кадры.
-            live_backend = out.get("backend_kind") == "droid"
+            live_backend = out.get("backend_kind") in ("droid", "stdio_resident")
             reasoning_to_skip = reasoning_live_chars
             for kind, value in out.get("events") or []:
                 if kind in ("content", "reasoning"):
