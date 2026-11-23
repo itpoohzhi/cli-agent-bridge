@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from core.runtime_env import env_first
+from core.runtime_env import env_bool, env_first
 from core.stdio_resident.turn_error_sse import (
     DONE_FRAME,
     ResidentTurnError,
@@ -28,6 +28,7 @@ from core.subbridge_zero_canon import (
     ZERO_CANON_PROFILE,
     is_zero_canon_profile,
 )
+from core.timeout_ladder import FLAG_TIMEOUT_LADDER, TimeoutLadderConfig, load_timeout_ladder_config
 from core.zero_canon_fs import read_gigarc_bool, resolve_hub_dynamic_config
 
 CLAUDE_BRIDGE_URL_ENV = "HUB_ZERO_CANON_CLAUDE_BRIDGE_URL"
@@ -149,6 +150,24 @@ def _validate_loopback_bridge_url(base_url: str) -> str:
     return base_url.rstrip("/")
 
 
+def _resolve_proxy_timeout_s(
+    timeout_s: float | None, environ: Mapping[str, str] | None = None
+) -> float:
+    if timeout_s is not None:
+        return timeout_s
+    env = os.environ if environ is None else environ
+    raw = env.get("HUB_ZERO_CANON_PROXY_TIMEOUT_S")
+    if raw is not None and raw.strip():
+        return float(raw)
+    try:
+        ladder = load_timeout_ladder_config(env)
+    except ValueError:
+        if env_bool(env, (FLAG_TIMEOUT_LADDER,), False):
+            raise
+        ladder = TimeoutLadderConfig()
+    return ladder.effective_first_event_s if ladder.enabled else 180.0
+
+
 def proxy_zero_canon_bridge_turn(
     base_url: str,
     model: str,
@@ -158,11 +177,7 @@ def proxy_zero_canon_bridge_turn(
     timeout_s: float | None = None,
 ) -> tuple[str, str]:
     """Перенаправляет Zero-Canon Claude-ход на локальный loopback claude-p-bridge (`:9881`)."""
-    effective_timeout = (
-        timeout_s
-        if timeout_s is not None
-        else float(os.environ.get("HUB_ZERO_CANON_PROXY_TIMEOUT_S", "180.0"))
-    )
+    effective_timeout = _resolve_proxy_timeout_s(timeout_s)
     url = _validate_loopback_bridge_url(base_url) + "/chat/completions"
     body = json.dumps(
         {"model": model, "messages": [{"role": "user", "content": prompt}], "stream": False},

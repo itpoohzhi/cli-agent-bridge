@@ -29,6 +29,7 @@ _SAFE_LOG_CODES: Final[frozenset[str]] = frozenset(
         "unsupported_model_effort",
         "output_limit_exceeded",
         _GENERIC_TURN_ERROR_CODE,
+        "slot_lease_timeout",
         "turn_timeout",
         "rate_limit_exceeded",
     )

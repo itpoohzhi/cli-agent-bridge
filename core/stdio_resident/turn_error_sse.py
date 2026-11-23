@@ -15,6 +15,7 @@ from core.codex_zero_canon_policy import (
 )
 from core.log_redaction import redact_log_text
 from core.runtime_env import positive_int
+from core.stdio_resident.process_pool import SlotLeaseTimeoutError
 
 DONE_FRAME: Final[str] = "data: [DONE]\n\n"
 DEFAULT_ERROR_MAX_CHARS: Final[int] = 500
@@ -52,6 +53,7 @@ _SAFE_ERROR_CODES: Final[frozenset[str]] = frozenset(
         "unsupported_model_effort",
         "output_limit_exceeded",
         "resident_turn_failed",
+        "slot_lease_timeout",
         "turn_timeout",
         "rate_limit_exceeded",
     )
@@ -90,6 +92,8 @@ def _classify_typed_error(error: BaseException) -> tuple[int, str, str] | None:
     if isinstance(error, ResidentTurnError):
         resp = error.response
         return resp.status, resp.error_type, resp.code
+    if isinstance(error, SlotLeaseTimeoutError):
+        return 503, "service_unavailable", "slot_lease_timeout"
     if isinstance(error, CodexZeroCanonPolicyError):
         return (
             error.http_status,
@@ -139,6 +143,8 @@ def _classify_message_text(lower: str) -> tuple[int, str, str]:
         return 502, "policy_error", ERR_TOOL_EVENT_FORBIDDEN
     if "output_limit_exceeded" in lower:
         return 502, "resource_limit_error", "output_limit_exceeded"
+    if "slot_lease_timeout" in lower or "waiting for a resident process slot" in lower:
+        return 503, "service_unavailable", "slot_lease_timeout"
     if "no available accounts" in lower or "credential_unavailable" in lower:
         return 503, "service_unavailable", "credential_unavailable"
     if _has_marker(lower, _RATE_LIMIT_MARKERS):
