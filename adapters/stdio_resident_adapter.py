@@ -181,12 +181,14 @@ class StdioResidentAdapter(BackendAdapter):
         return []
 
     def _sync_protocol(self) -> str:
-        from adapters.stdio_drivers import infer_protocol
+        from adapters.stdio_drivers import infer_protocol, resolve_pool_and_driver
 
         resolved = infer_protocol(self.id, self.config, self._options)
         if resolved != self._protocol:
             self._protocol = resolved
-            self._driver = create_protocol_driver(resolved)
+            _, self._driver = resolve_pool_and_driver(
+                resolved, driver_config=self.config
+            )
             self._session_manager = StdioSessionManager(self._pool, self._driver)
         return self._protocol
 
@@ -201,6 +203,7 @@ class StdioResidentAdapter(BackendAdapter):
             "opencode-acp": drivers.is_opencode_resident_enabled,
             "msp-v1": drivers.is_resident_enabled,
             "codex-app-server-v2": drivers.is_codex_app_server_v2_enabled,
+            "agy-stream-json": lambda: drivers.is_agy_resident_enabled(os.environ),
         }
         check = checks.get(protocol)
         return check() if check is not None else True

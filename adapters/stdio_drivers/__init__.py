@@ -45,6 +45,7 @@ __all__ = [
     "OpenCodeAcpDriver",
     "build_affinity_key",
     "infer_protocol",
+    "is_agy_resident_enabled",
     "is_claude_codex_resident_protocol_enabled",
     "is_codex_app_server_v2_enabled",
     "is_opencode_resident_enabled",
