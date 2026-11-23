@@ -2,7 +2,6 @@ from __future__ import annotations  # noqa: E402
 
 """Тесты канареечного конфига AGY_RESIDENT_ENABLED, отката и стоп-причин."""
 
-import importlib  # noqa: E402
 import math  # noqa: E402
 import sys  # noqa: E402
 from dataclasses import FrozenInstanceError  # noqa: E402
@@ -371,20 +370,29 @@ def test_check_rss_metric_returns_none_and_checks_bounds() -> None:
 
 
 def test_agy_config_fallback_import_adds_bridge_dir_to_sys_path() -> None:
-    """Fallback-импорт agy_config добавляет _BRIDGE_DIR в sys.path и импортирует конфиг."""
+    """Fallback-импорт agy_config добавляет _BRIDGE_DIR в sys.path и импортирует конфиг.
+
+    Исполняет исходник модуля в изолированном namespace (без importlib.reload),
+    чтобы не подменять объект модуля в sys.modules и не ломать identity классов
+    для других тестов.
+    """
     orig_sys_path = list(sys.path)
     saved_agy_modules = {
         name: mod
         for name, mod in sys.modules.items()
         if name == "agy_runtime" or name.startswith("agy_runtime.")
     }
+    source = Path(agy_config_mod.__file__).read_text(encoding="utf-8")
     try:
         for name in saved_agy_modules:
             sys.modules.pop(name, None)
         sys.path[:] = [p for p in orig_sys_path if "bridges/agy-bridge" not in p]
-
-        reloaded = importlib.reload(agy_config_mod)
-        assert reloaded.AgyResidentCanaryConfig is not None
+        namespace: dict[str, object] = {
+            "__name__": "adapters.stdio_drivers.agy_config",
+            "__file__": str(agy_config_mod.__file__),
+        }
+        exec(compile(source, str(agy_config_mod.__file__), "exec"), namespace)
+        assert namespace.get("AgyResidentCanaryConfig") is not None
         assert any("bridges/agy-bridge" in p for p in sys.path)
     finally:
         sys.path[:] = orig_sys_path
@@ -392,4 +400,3 @@ def test_agy_config_fallback_import_adds_bridge_dir_to_sys_path() -> None:
             if name == "agy_runtime" or name.startswith("agy_runtime."):
                 sys.modules.pop(name, None)
         sys.modules.update(saved_agy_modules)
-        importlib.reload(agy_config_mod)
