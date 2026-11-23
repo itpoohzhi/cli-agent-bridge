@@ -30,6 +30,8 @@ class TurnStreamAssembler:
         self._saw_tool_calls: bool = False
         self._has_emitted_content: bool = False
         self._last_char: str = ""
+        self._last_was_delta: bool = False
+        self._last_item_id: str = ""
 
     def process_chunk(self, chunk: DecodedChunk) -> AssembledStreamDelta:
         """Assemble one normalized chunk into a response delta."""
@@ -59,8 +61,15 @@ class TurnStreamAssembler:
                 is_delta = isinstance(raw, dict) and raw.get("method") in {
                     "item/delta", "item.delta", "run.output.delta",
                 }
+                params = raw.get("params") if isinstance(raw, dict) and isinstance(raw.get("params"), dict) else {}
+                cur_item_id = str(params.get("itemId") or "")
+                same_delta_stream = (
+                    is_delta
+                    and self._last_was_delta
+                    and (not cur_item_id or cur_item_id == self._last_item_id)
+                )
                 if (
-                    not is_delta
+                    not same_delta_stream
                     and self._has_emitted_content
                     and self._last_char
                     and self._last_char not in ("\n", " ")
@@ -69,5 +78,7 @@ class TurnStreamAssembler:
                 delta.content = content
                 self._has_emitted_content = True
                 self._last_char = content[-1] if content else self._last_char
+                self._last_was_delta = is_delta
+                self._last_item_id = cur_item_id if is_delta else ""
 
         return delta

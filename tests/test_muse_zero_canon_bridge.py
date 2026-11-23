@@ -165,11 +165,57 @@ def test_muse_driver_default_serve_args_include_preset_empty_and_dedup_item_comp
 
 
 def test_server_sse_suppresses_replay_for_live_stdio_resident() -> None:
-    src = (Path(__file__).resolve().parents[1] / "server.py").read_text(encoding="utf-8")
-    assert 'out.get("backend_kind") == "stdio_resident" and live_sent[0] > 0' in src
+    import server
+
+    class _Lease:
+        def record_discard(self, *_a: Any, **_kw: Any) -> None:
+            pass
+
+    def _run_sse(live_delta: str | None) -> list[str]:
+        frames: list[str] = []
+        handler = object.__new__(server.Handler)
+        handler._headers_already_sent = True
+        handler._trace = None
+        handler._context_pruned = ""
+        handler._active_managed_turn = None
+        handler._current_lease = lambda: _Lease()
+        handler._emit = lambda frame: frames.append(frame) or True
+        handler._error_body = lambda _out: None
+        handler._record_turn_outcome = lambda *_a, **_kw: None
+        handler._reserve_delivery = lambda _out: None
+        handler._telemetry_error = lambda *_a, **_kw: None
+        handler._telemetry_note = lambda **_kw: None
+        handler._telemetry_usage = lambda *_a, **_kw: None
+        handler.connection = type("_Conn", (), {"gettimeout": lambda self: 10.0, "settimeout": lambda self, _t: None})()
+
+        def _fake_dispatch(_ctx: Any, _ka: Any, sse_writer: Any) -> dict[str, Any]:
+            if live_delta is not None:
+                sse_writer("content", live_delta)
+            return {
+                "state": "done",
+                "backend_kind": "stdio_resident",
+                "text": "PONG",
+                "events": [("content", "PONG")],
+                "usage": {},
+                "tool_calls": [],
+            }
+
+        handler._dispatch = _fake_dispatch
+        handler._serve_sse_body({"model": "muse-ember-1.0"})
+        contents: list[str] = []
+        for frame in frames:
+            if frame.startswith("data: ") and not frame.startswith("data: [DONE]"):
+                obj = json.loads(frame[6:])
+                c = obj.get("choices", [{}])[0].get("delta", {}).get("content")
+                if c:
+                    contents.append(c)
+        return contents
+
+    assert _run_sse("PONG") == ["PONG"]
+    assert _run_sse(None) == ["PONG"]
 
 
-def test_turn_stream_assembler_preserves_token_deltas_without_double_newlines() -> None:
+def test_turn_stream_assembler_preserves_token_deltas_and_item_boundaries() -> None:
     from core.stdio_resident.turn_stream import TurnStreamAssembler
     drv = MuseMspDriver({})
     asm = TurnStreamAssembler()
@@ -177,9 +223,12 @@ def test_turn_stream_assembler_preserves_token_deltas_without_double_newlines() 
         json.dumps({"jsonrpc": "2.0", "method": "item/delta", "params": {"sessionId": "s2", "itemId": "i1", "field": "text", "delta": "PANEL-N"}}),
         json.dumps({"jsonrpc": "2.0", "method": "item/delta", "params": {"sessionId": "s2", "itemId": "i1", "field": "text", "delta": "ONCE: 123"}}),
         json.dumps({"jsonrpc": "2.0", "method": "item/completed", "params": {"sessionId": "s2", "item": {"itemId": "i1", "kind": "agentMessage", "text": "PANEL-NONCE: 123"}}}),
+        json.dumps({"jsonrpc": "2.0", "method": "item/delta", "params": {"sessionId": "s2", "itemId": "i2", "field": "text", "delta": "Second item."}}),
+        json.dumps({"jsonrpc": "2.0", "method": "item/completed", "params": {"sessionId": "s2", "item": {"itemId": "i3", "kind": "agentMessage", "text": "Block three."}}}),
+        json.dumps({"jsonrpc": "2.0", "method": "item/delta", "params": {"sessionId": "s2", "itemId": "i4", "field": "text", "delta": "After block."}}),
     ]
     out = "".join(asm.process_chunk(c).content for l in lines if (c := drv.decode_line(l)) is not None)
-    assert out == "PANEL-NONCE: 123"
+    assert out == "PANEL-NONCE: 123\n\nSecond item.\n\nBlock three.\n\nAfter block."
 
 
 def test_subbridge_prepare_muse_launch_sets_muse_bin(tmp_path: Path) -> None:
