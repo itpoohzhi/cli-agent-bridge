@@ -4901,6 +4901,43 @@ class _TranscriptTail(InterruptionTailState):
                     _sqlite_close(conn)
         return result
 
+    def _get_wal_wait_polls(self) -> int:
+        """Вернуть число холодных ожиданий WAL без модификации __init__ трекера."""
+        attr = "_wal_wait_polls"
+        val = getattr(self, attr, None)
+        if isinstance(val, int) and not isinstance(val, bool):
+            return val
+        fallback = cast(
+            "dict[int, int] | None",
+            getattr(type(self), "_wal_wait_polls_fallback", None),
+        )
+        if isinstance(fallback, dict):
+            return fallback.get(id(self), 0)
+        return 0
+
+    def _set_wal_wait_polls(self, count: int) -> None:
+        """Обновить счётчик холодных ожиданий WAL с fallback на случай __slots__."""
+        attr = "_wal_wait_polls"
+        try:
+            setattr(self, attr, count)
+        except AttributeError:
+            fb_attr = "_wal_wait_polls_fallback"
+            fallback = cast("dict[int, int] | None", getattr(type(self), fb_attr, None))
+            if not isinstance(fallback, dict):
+                fallback = {}
+                setattr(type(self), fb_attr, fallback)
+            if count <= 0:
+                _ = fallback.pop(id(self), None)
+            else:
+                fallback[id(self)] = count
+
+    def _resolve_wal_wait(self) -> None:
+        """Зафиксировать выход из холодного ожидания WAL при первом успешном SELECT."""
+        waited = self._get_wal_wait_polls()
+        if waited > 0:
+            self._set_wal_wait_polls(0)
+            _log(f"sqlite-wal-resolved cid={self._cid8()} waited_polls={waited}")
+
     def _on_sqlite_error(self, exc: sqlite3.Error) -> None:
         message = str(exc).lower()
         if "interrupted" in message and (self._interrupted or self.stop_event.is_set()):
@@ -4909,7 +4946,6 @@ class _TranscriptTail(InterruptionTailState):
         schema = operational and (
             "no such table" in message or "no such column" in message
         )
-        cold = False
         if schema:
             self.failed = True
             _log(f"sqlite-schema-mismatch cid={self._cid8()}")
@@ -4917,16 +4953,20 @@ class _TranscriptTail(InterruptionTailState):
         elif operational:
             # cold-open: базы или её -wal ещё нет либо ошибка до первого успешного SELECT.
             wal = Path(str(self._db_path) + "-wal")
-            cold = self.selects_ok == 0 or not wal.exists()
-            if not cold:
-                self.failed = True
+            if self.selects_ok == 0 or not wal.exists():
+                waited = self._get_wal_wait_polls()
+                self._set_wal_wait_polls(waited + 1)
+                if waited == 0:
+                    _log(f"sqlite-wal-wait cid={self._cid8()} err={type(exc).__name__}")
+                return
+            self.failed = True
         elif isinstance(exc, sqlite3.DatabaseError):
             self.failed = True
             self._sqlite_off("db_error")
         if not self._open_fail_logged:
             self._open_fail_logged = True
             _log(
-                f"sqlite-open-fail cid={self._cid8()} err={type(exc).__name__} cold={1 if cold else 0}"
+                f"sqlite-open-fail cid={self._cid8()} err={type(exc).__name__} cold=0"
             )
 
     def _select_rows(self, conn: sqlite3.Connection) -> tuple[int, int]:
@@ -4941,6 +4981,7 @@ class _TranscriptTail(InterruptionTailState):
                 batch = cast("list[tuple[object, ...]]", cur.fetchmany(1))
                 if not batch:
                     self.selects_ok += 1
+                    self._resolve_wal_wait()
                     break
                 row = batch[0]
                 idx, status, blob_len, payload = row[0], row[1], row[2], row[3]
