@@ -446,7 +446,11 @@ def test_handle_cold_wal_wait_and_resolve_counter(
     assert len(logs) == log_count
 
     wal_path.write_text("", encoding="utf-8")
+    tracker.selects_ok = 0
+    tracker.failed = False
+    tracker._open_fail_logged = False
     non_cold_exc = sqlite3.OperationalError("disk I/O error")
+    # whitelist-miss при selects_ok == 0: реальная ошибка, не ожидание (return False, не None)
     assert tracker._handle_cold_wal_wait(non_cold_exc) is False
     assert tracker._on_sqlite_error(non_cold_exc) is None
     assert tracker.failed is True
@@ -454,6 +458,8 @@ def test_handle_cold_wal_wait_and_resolve_counter(
 
     # после первого успешного SELECT окно холодного ожидания закрыто:
     # даже whitelisted-ошибка больше не классифицируется как ожидание
+    tracker.selects_ok = 1
+    tracker.failed = False
     assert tracker._handle_cold_wal_wait(cold_exc) is False
     assert tracker._get_wal_wait_polls() == 0
 
