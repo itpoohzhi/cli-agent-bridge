@@ -12,6 +12,11 @@ from core.http_post_context import PostHandler, PostHost, PostRequestContext
 from core.message_history_sanitizer import sanitize_request_payload
 from core.passthrough_autonomy import strip_passthrough_request
 from core.passthrough_exchange import internal_trace_scope
+from core.zero_canon_http import (
+    ZeroCanonHttpError,
+    parse_review_profile_headers,
+    parse_strict_review_profile,
+)
 
 
 def clean_transport_request(
@@ -201,6 +206,20 @@ def _serve_fallback_alias(context: PostRequestContext) -> bool:
         )
 
 
+def _validate_review_profile(context: PostRequestContext) -> bool:
+    """Строго валидирует X-Review-Profile до выбора провайдера и роутинга."""
+    handler = context.handler
+    try:
+        profile = parse_strict_review_profile(
+            parse_review_profile_headers(getattr(handler, "headers", None)),
+        )
+    except ZeroCanonHttpError as exc:
+        handler._reject(exc.status_code, exc.code, str(exc))
+        return False
+    setattr(handler, "_review_profile", profile)
+    return True
+
+
 def _resolve_chat_path(context: PostRequestContext) -> bool:
     handler, host = context.handler, context.host
     # (7) путь.
@@ -217,6 +236,8 @@ def _resolve_chat_path(context: PostRequestContext) -> bool:
         handler.path = "/v1/chat/completions"
     if context.path not in ("/v1/chat/completions", "/chat/completions"):
         context.send_error(404, "not_found", f"not found: {context.path}")
+        return False
+    if not _validate_review_profile(context):
         return False
     return not _serve_fallback_alias(context)
 

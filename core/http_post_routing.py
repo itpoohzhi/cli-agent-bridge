@@ -13,6 +13,9 @@ from typing import Any
 from core.http_post_context import PostRequestContext
 from core.http_post_ingress import clean_transport_request
 from core.passthrough_autonomy import PassthroughOptions, prepare_passthrough_request, resolve_target_model
+from core.zero_canon_http import (
+    ZERO_CANON_HEADER_VALUE, ZeroCanonHttpError, filter_zero_canon_providers, parse_review_profile_headers,
+)
 
 
 @dataclass(slots=True)
@@ -80,32 +83,21 @@ def prepare_route_request(
 
 
 def _notes_allow(route: PostRoute, model_id: str) -> bool:
-    if route.handler.headers.get("X-Bypass-Model-Filter") == "1":
+    if route.handler.headers.get("X-Bypass-Model-Filter") == "1" or not route.host._MODEL_NOTES_FILTER.is_blocked(model_id):
         return True
-    if not route.host._MODEL_NOTES_FILTER.is_blocked(model_id):
-        return True
-    route.handler._send(503, {"error": {
-        "message": "Model temporarily blocked by operational limits",
-        "type": "model_limit_blocked", "code": 503,
-    }})
+    route.handler._send(503, {"error": {"message": "Model temporarily blocked by operational limits", "type": "model_limit_blocked", "code": 503}})
     return False
 
 
 def _internal_allowed(route: PostRoute, requested_id: str) -> bool:
     host, handler = route.host, route.handler
-    if not any(
-        value in host.INTERNAL_MODEL_IDS
-        for value in (route.raw_model, requested_id, route.model_id)
-    ):
+    if not any(v in host.INTERNAL_MODEL_IDS for v in (route.raw_model, requested_id, route.model_id)):
         return True
-    key = getattr(host, "_INTERNAL_SERVICE_KEY", None) or os.environ.get(
-        "INTERNAL_SERVICE_KEY", "",
-    )
+    key = getattr(host, "_INTERNAL_SERVICE_KEY", None) or os.environ.get("INTERNAL_SERVICE_KEY", "")
     supplied = handler.headers.get("X-Internal-Service-Key", "")
     if key and hmac.compare_digest(supplied.encode("utf-8"), key.encode("utf-8")):
         return True
-    handler._reject(403, "internal_model_forbidden",
-                    "Model reserved for internal review", "unknown", route.model_len)
+    handler._reject(403, "internal_model_forbidden", "Model reserved for internal review", "unknown", route.model_len)
     return False
 
 
@@ -114,14 +106,8 @@ def _penalty_allowed(route: PostRoute, requested_id: str) -> bool:
     if not stat["is_penalized"]:
         return True
     retry_after = max(1, math.ceil(stat["remaining_cooldown"]))
-    route.handler._send(503, {"error": {
-        "message": (
-            f"Model '{requested_id}' is temporarily "
-            f"penalized due to start failures. Cooldown active for {retry_after}s."
-        ),
-        "type": "model_penalized", "code": 503,
-        "penalized_until": int(stat["penalized_until"]),
-    }}, extra_headers={"Retry-After": str(retry_after)})
+    msg = f"Model '{requested_id}' is temporarily penalized due to start failures. Cooldown active for {retry_after}s."
+    route.handler._send(503, {"error": {"message": msg, "type": "model_penalized", "code": 503, "penalized_until": int(stat["penalized_until"])}}, extra_headers={"Retry-After": str(retry_after)})
     return False
 
 
@@ -134,24 +120,16 @@ def _provider_allowed(route: PostRoute) -> bool:
     lookup_id = route.model_id
     if lookup_id not in published:
         alias = host._resolve_model_alias(lookup_id, published)
-        if alias is not None:
-            lookup_id = alias[0] if isinstance(alias, (tuple, list)) else alias
-        else:
-            route.handler._reject(404, "model_not_found",
-                                  "model is not in the catalogue", "unknown", route.model_len)
+        if alias is None:
+            route.handler._reject(404, "model_not_found", "model is not in the catalogue", "unknown", route.model_len)
             return False
+        lookup_id = alias[0] if isinstance(alias, (tuple, list)) else alias
     adapter, model = published[lookup_id]
-    owner = getattr(adapter, "owned_by", "") if adapter is not None else (
-        getattr(model, "owned_by", "")
-        or (model.get("owned_by", "") if isinstance(model, dict) else "")
-    )
+    owner = getattr(adapter, "owned_by", "") if adapter is not None else (getattr(model, "owned_by", "") or (model.get("owned_by", "") if isinstance(model, dict) else ""))
     allowed = host.PROVIDER_SCOPES[provider_id]
     if owner in ((allowed,) if isinstance(allowed, str) else allowed):
         return True
-    route.handler._reply_error(
-        400, f"Model '{route.raw_model}' is not available for provider '{provider_id}'",
-        code="model_not_in_provider_scope",
-    )
+    route.handler._reply_error(400, f"Model '{route.raw_model}' is not available for provider '{provider_id}'", code="model_not_in_provider_scope")
     return False
 
 
@@ -159,14 +137,9 @@ def selected_route_allowed(route: PostRoute) -> bool:
     """Сохраняет post-selection deny и проверку отложенной авторизации."""
     handler, host = route.handler, route.host
     if str(route.model.get("backend") or "").strip().lower() == "droid":
-        trace = getattr(handler, "_trace", None) or host._resolve_trace(
-            dict(handler.headers.items()), route.request,
-        )
-        if host.denied_subagent(
-            "DROID", str(handler.headers.get("X-Subagent-Id") or ""), trace.subagent_id,
-        ):
-            return route.reject(403, "droid_forbidden_for_role",
-                                "droid route is forbidden for this subagent role")
+        trace = getattr(handler, "_trace", None) or host._resolve_trace(dict(handler.headers.items()), route.request)
+        if host.denied_subagent("DROID", str(handler.headers.get("X-Subagent-Id") or ""), trace.subagent_id):
+            return route.reject(403, "droid_forbidden_for_role", "droid route is forbidden for this subagent role")
     denial = host._quarantine_denial(route.model_id, handler.headers.get("X-Subagent-Id"))
     if denial is not None:
         handler._log_reject(denial.reason, route.model_id, route.model_len)
@@ -175,9 +148,7 @@ def selected_route_allowed(route: PostRoute) -> bool:
         return False
     if route.ingress.deferred_passthrough_auth:
         selected = host.BACKENDS.get(route.model["backend"])
-        if not isinstance(selected, host.PassthroughAdapter) or not (
-            selected.validate_client_token(host._extract_auth_token(handler))
-        ):
+        if not isinstance(selected, host.PassthroughAdapter) or not selected.validate_client_token(host._extract_auth_token(handler)):
             route.ingress.send_error(401, "auth_error", "unauthorized")
             return False
     return True
@@ -190,8 +161,7 @@ def _identify(context: PostRequestContext) -> PostRoute | None:
     raw_model = request.get("model")
     model_len = len(raw_model) if isinstance(raw_model, str) else 0
     if raw_model is not None and not isinstance(raw_model, str):
-        handler._reject(400, "model_not_allowed",
-                        "model must be a string from the catalogue", "unknown", model_len)
+        handler._reject(400, "model_not_allowed", "model must be a string from the catalogue", "unknown", model_len)
         return None
     model_id = (raw_model or "").strip() or host.MODEL_ID
     key = (handler.headers.get("X-Idempotency-Key") or "").strip()
@@ -218,12 +188,55 @@ def _effort_type_allowed(route: PostRoute) -> bool:
 
 def _request_allowed(route: PostRoute, requested_id: str) -> bool:
     return all(check() for check in (
-        lambda: _internal_allowed(route, requested_id),
-        lambda: _penalty_allowed(route, requested_id),
-        lambda: _provider_allowed(route),
-        lambda: requested_id == route.model_id or _notes_allow(route, route.model_id),
+        lambda: _internal_allowed(route, requested_id), lambda: _penalty_allowed(route, requested_id),
+        lambda: _provider_allowed(route), lambda: requested_id == route.model_id or _notes_allow(route, route.model_id),
         lambda: _effort_type_allowed(route),
     ))
+
+
+def _backend_configs(host: Any) -> dict[str, dict[str, Any]] | None:
+    backends = getattr(host, "BACKENDS", None)
+    items: Any = backends.adapters() if callable(getattr(backends, "adapters", None)) else (backends.values() if isinstance(backends, Mapping) else ())
+    return {aid: {"kind": getattr(a, "kind", ""), **cfg} for a in items if (aid := getattr(a, "id", None)) and isinstance((cfg := getattr(a, "config", None)), Mapping)} or None
+
+
+def _apply_filtered_routes(route: PostRoute, routing: dict[str, Any], kept: list[Any]) -> None:
+    first = kept[0].get("backend") if isinstance(kept[0], dict) else None
+    route.model["routing"] = {**routing, "routes": kept, "disabled_backend": first or routing.get("disabled_backend")}
+    if first:
+        route.model["backend"] = first
+
+
+def _zero_canon_route_allowed(route: PostRoute) -> bool:
+    try:
+        profile = parse_review_profile_headers(getattr(route.handler, "headers", None))
+        if profile != ZERO_CANON_HEADER_VALUE:
+            return True
+        routing = route.model.get("routing")
+        routes = routing.get("routes") if isinstance(routing, dict) else None
+        kept = filter_zero_canon_providers(
+            routes if isinstance(routes, list) else [route.model], profile,
+            provider_configs=_backend_configs(route.host), model_id=route.model_id,
+        )
+    except ZeroCanonHttpError as exc:
+        return route.reject(exc.status_code, exc.code, str(exc))
+    if not kept:
+        return route.reject(503, "route_unavailable", "no Zero-Canon eligible provider is available")
+    if isinstance(routing, dict) and isinstance(routes, list):
+        _apply_filtered_routes(route, routing, kept)
+    return True
+
+
+def _finalize_route_model(route: PostRoute) -> bool:
+    routing = route.model.get("routing")
+    if isinstance(routing, dict):
+        backend, legacy, disabled = route.model.get("backend"), routing.get("legacy_backend"), routing.get("disabled_backend")
+        if legacy not in (None, backend) and (disabled is None or backend != disabled):
+            route.model.pop("routing", None)
+            routing = None
+    if isinstance(routing, dict) and not route.host.flag_enabled("BRIDGE_TRANSPORT_ROUTING_ENABLED") and routing.get("disabled_backend"):
+        route.model["backend"] = routing["disabled_backend"]
+    return _zero_canon_route_allowed(route)
 
 
 def resolve_post_route(context: PostRequestContext) -> PostRoute | None:
@@ -238,31 +251,16 @@ def resolve_post_route(context: PostRequestContext) -> PostRoute | None:
         return None
     route.handler._telemetry_meta(model=route.model_id)
     if route.model_id not in models:
-        route.handler._reject(404, "model_not_found",
-                              "model is not in the catalogue", "unknown", route.model_len)
+        route.handler._reject(404, "model_not_found", "model is not in the catalogue", "unknown", route.model_len)
         return None
     route.model = dict(models[route.model_id])
-    routing = route.model.get("routing")
-    if isinstance(routing, dict):
-        backend = route.model.get("backend")
-        legacy = routing.get("legacy_backend")
-        disabled = routing.get("disabled_backend")
-        if legacy not in (None, backend) and (disabled is None or backend != disabled):
-            route.model.pop("routing", None)
-            routing = None
-    if isinstance(routing, dict) and not host.flag_enabled("BRIDGE_TRANSPORT_ROUTING_ENABLED"):
-        disabled_backend = routing.get("disabled_backend")
-        if disabled_backend:
-            route.model["backend"] = disabled_backend
-    return route
+    return route if _finalize_route_model(route) else None
 
 
 def log_route(route: PostRoute, mode: str) -> None:
     """Сохраняет прежнюю запись выбранного пути в существующем host logger."""
     alias = route.model_id + "-" + route.alias[1] if route.alias else "-"
-    route.host._log(
-        f"chat route={mode} model={route.model_id} alias={alias} {route.handler._trace_log_fields()}"
-    )
+    route.host._log(f"chat route={mode} model={route.model_id} alias={alias} {route.handler._trace_log_fields()}")
 
 
 def native_effort(route: PostRoute) -> tuple[str, str] | None:
@@ -275,13 +273,9 @@ def native_effort(route: PostRoute) -> tuple[str, str] | None:
     if not isinstance(value, str):
         route.reject(400, "unsupported_reasoning_effort", "reasoning_effort must be a string")
         return None
-    effort, clamped = route.host.clamp_effort_downward(
-        value.strip(), route.model["efforts"], route.model["default_effort"],
-    )
+    effort, clamped = route.host.clamp_effort_downward(value.strip(), route.model["efforts"], route.model["default_effort"])
     if clamped:
-        route.host._log(route.host.describe_clamp(
-            "reasoning_effort", value.strip(), effort, route.model_id, route.host._LOG_EFFORT_MAX,
-        ))
+        route.host._log(route.host.describe_clamp("reasoning_effort", value.strip(), effort, route.model_id, route.host._LOG_EFFORT_MAX))
     return effort, source
 
 
@@ -290,11 +284,8 @@ def native_autonomy(route: PostRoute) -> tuple[Any, str] | None:
     host = route.host
     try:
         if str(route.model.get("backend") or "").strip().lower() == "droid":
-            decision = host.resolve_autonomy_decision(
-                route.request.get("autonomy"), "DROID",
-                subagent_id=str(route.handler.headers.get("X-Subagent-Id") or "") or None,
-                require_subagent=True,
-            )
+            sub = str(route.handler.headers.get("X-Subagent-Id") or "") or None
+            decision = host.resolve_autonomy_decision(route.request.get("autonomy"), "DROID", subagent_id=sub, require_subagent=True)
             return decision.value, decision.source
         host.validate_autonomy_request(route.request.get("autonomy"))
     except host.AutonomyViolation as error:
