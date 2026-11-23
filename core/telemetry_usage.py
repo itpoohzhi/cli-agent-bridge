@@ -57,3 +57,30 @@ def extract_usage(tail: bytes) -> dict[str, Any] | None:
     for usage in _objects(tail):
         merged.update(present(normalize_usage(usage)))
     return merged or None
+
+
+def _snapshot_field(snapshot: Any, name: str) -> Any:
+    """Поле снимка квоты Muse: из mapping по ключу, из объекта по атрибуту; нет поля — None."""
+    if isinstance(snapshot, Mapping):
+        return snapshot.get(name)
+    return getattr(snapshot, name, None)
+
+
+def build_telemetry_usage(snapshot: Any = None, *, enabled: bool = False) -> dict[str, Any]:
+    """Плоский блок телеметрии квоты Muse (REQ-002, флаг вызывает `MUSE_USAGE_ROUTER_ENABLED`).
+
+    При `enabled=False` снимок не раскрывается: только `{"enabled": False, "status": "disabled"}`.
+    При `enabled=True` поля берутся из снимка как есть; отсутствующий статус — `unknown` (Fail-Open).
+    """
+    if not enabled:
+        return {"enabled": False, "status": "disabled"}
+    return {
+        "enabled": True,
+        "status": _snapshot_field(snapshot, "status") or "unknown",
+        "tier": _snapshot_field(snapshot, "tier"),
+        "window_used_percent": _snapshot_field(snapshot, "window_used_percent"),
+        "weekly_used_percent": _snapshot_field(snapshot, "weekly_used_percent"),
+        "reset_at": _snapshot_field(snapshot, "reset_at"),
+        "as_of_ms": _snapshot_field(snapshot, "as_of_ms"),
+        "source": _snapshot_field(snapshot, "source"),
+    }
