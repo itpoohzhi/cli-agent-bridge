@@ -3740,8 +3740,10 @@ def _retry_take() -> bool:
 
 def _incident_retry_allowed(ctx: dict, out: dict, delivered: bool, total_s: float) -> bool:
     status, headers = extract_upstream_error_meta(out)
-    proof = build_replay_proof(int(delivered), bool(out.get("response_started", delivered)), int(bool(out.get("tool_calls"))),
-                               str(out.get("fail_stage") or ""), out.get("upstream_not_started") is True)
+    tc = out.get("tool_calls")
+    tc_n = len(tc) if isinstance(tc, (list, tuple)) else tc
+    proof = build_replay_proof(1 if delivered else 0, out.get("response_started"), tc_n,
+                               out.get("fail_stage"), out.get("upstream_not_started"))
     bounded = apply_budget_to_proof(proof, calculate_retry_budget(total_s, ctx.get("client_retry_budget")))
     return classify_upstream_error(out.get("err"), status_code=status, headers=headers, replay_proof=bounded).retryable
 
@@ -6596,8 +6598,8 @@ class Handler(BaseHTTPRequestHandler):
                 "result": result_ev, "state": name, "err": err,
                 "conversation_id": conversation_id,
                 "duration_s": result_ev.get("duration_s"), "num_turns": result_ev.get("num_turns"),
-                "tool_events": tool_events,
-                "tool_calls": [],
+                "tool_events": tool_events, "tool_calls": [],
+                "response_started": bool(pieces or reasoning_pieces or tool_events),
             }
             status, headers = extract_upstream_error_meta(result_ev)
             out.update(upstream_status_code=status, upstream_headers=headers)

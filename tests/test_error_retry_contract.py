@@ -260,3 +260,52 @@ def test_bare_secret_literals_redacted_without_stop_iteration() -> None:
     assert "ghp_abcdef1234567890" not in msg
     assert "eyJhbGciOiJIUzI1NiJ9" not in msg
     assert msg.count("[REDACTED]") == 3
+
+
+def test_quoted_secrets_with_escaped_and_nested_quotes_and_spaces() -> None:
+    raw = (
+        '{"password": "a\'b", "secret": "ab\\"cd"} '
+        'password="my secret phrase" authorization="Basic dXNlcjpwYXNz"'
+    )
+    msg = classify_upstream_error(raw).message
+    for leak in ("a'b", 'ab\\"cd', "my secret phrase", "dXNlcjpwYXNz"):
+        assert leak not in msg
+    assert "Basic [REDACTED]" in msg
+    assert msg.count("[REDACTED]") == 4
+
+
+def test_quota_body_with_non_429_status_still_enforces_opt_in() -> None:
+    lease = SimpleNamespace(handle=object(), finish=lambda *_: None, close=lambda: None)
+    quota_body = b'{"error":{"type":"resource_exhausted","message":"quota exceeded"}}'
+
+    def run(opt_in: bool, groups: tuple[str, str]) -> list[str]:
+        seen: list[str] = []
+
+        def execute(backend: str, attempt: Any) -> str:
+            seen.append(backend)
+            if backend == "first":
+                attempt.advance(AttemptPhase.SENDING)
+                attempt.advance(AttemptPhase.RESPONSE_HEADERS, 503)
+                raise RouteRefusal(503, response_body=quota_body)
+            return "ok"
+
+        ports = SimpleNamespace(
+            ready=lambda _: True, acquire=lambda *_: lease,
+            execute=execute, retry_token=lambda: True, cancelled=lambda: False,
+        )
+        failovers = {
+            name: RouteFailover(frozenset({503}), quota_group=group,
+                                quota_failover_opt_in=opt_in if name == "first" else False)
+            for name, group in zip(("first", "second"), groups, strict=True)
+        }
+        runner = RouteAttemptRunner(("first", "second"), ports, RetryBudgetConfig(),
+                                    lambda: 0.0, failover_by_backend=failovers)
+        try:
+            runner.run()
+        except RouteRefusal:
+            pass
+        return seen
+
+    assert run(False, ("a", "b")) == ["first"]
+    assert run(True, ("a", "a")) == ["first"]
+    assert run(True, ("a", "b")) == ["first", "second"]

@@ -463,7 +463,7 @@ class RouteAttemptRunner:
             return False, None
         return self._execute(backend, lease)
     def _quota_candidate_allowed(self, source: str, candidate: str) -> bool:
-        if not isinstance(self._last_error, RouteRefusal) or self._last_error.status_code != 429:
+        if not isinstance(self._last_error, RouteRefusal):
             return True
         kind, message = parse_upstream_error(self._last_error.response_body)
         if classify_upstream_error(f"{kind} {message}").category != "QUOTA": return True  # noqa: E701
