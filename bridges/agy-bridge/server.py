@@ -115,6 +115,10 @@ _BRIDGE_DIR = str(Path(__file__).resolve().parent)
 if _BRIDGE_DIR not in sys.path:
     sys.path.insert(0, _BRIDGE_DIR)
 
+import anthropic_runtime as _ant_rt  # noqa: E402
+
+_ANTHROPIC_PROBE = _ant_rt.AgyAnthropicProbe()
+
 from agy_runtime.process_supervisor import (  # noqa: E402 # pyright: ignore[reportImplicitRelativeImport]
     ProcessSupervisor,
     ProcessSupervisorConfig,
@@ -1670,57 +1674,24 @@ ALLOWED_MODELS_ENV = "AGY_ALLOWED_MODELS_FILE"
 
 
 def _allowed_models_file() -> str:
-    """Путь к allowlist лончера: env AGY_ALLOWED_MODELS_FILE, иначе файл реального HOME.
-
-    Единственный источник пути: им пользуются и окружение `agy` (`_launch_env`),
-    и фильтр каталога `/v1/models`, поэтому каталог не расходится с guard лончера.
-    """
     return os.environ.get(ALLOWED_MODELS_ENV) or str(
         HOME / ".config" / "agy-launch" / "allowed-models.txt"
     )
 
 
 def _read_allowed_models() -> frozenset[str]:
-    """Разобрать allowlist так же, как лончер: без CR, пробелов, пустых строк и `#`.
-
-    Нет файла, он нечитаем или пуст -> пустое множество (фильтр отключается).
-    """
-    try:
-        text = Path(_allowed_models_file()).read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError):
-        return frozenset()
-    lines = (line.strip() for line in text.splitlines())
-    return frozenset(line for line in lines if line and not line.startswith("#"))
+    return _ant_rt.read_allowed_models(_allowed_models_file())
 
 
 def _model_in_allowlist(model_id: str, allowed: frozenset[str]) -> bool:
-    """Каталог отдаёт только id, которые лончер примет дословно.
-
-    Лончер сверяет запрошенный id с allowlist дословно (иначе rc=64
-    «generation guard» -> HTTP 502). Расширять каталог по базовой форме
-    (`-high`/`-medium`/`-low`) нельзя: такой id лончер отклонит, и вызывающая
-    сторона снова получит ответ другой модели при формальном успехе.
-    """
     return model_id in allowed
 
 
 def _catalog_model_order() -> list[str]:
-    """Порядок каталога: MODEL_ID первым, затем FLEET["order"]; только разрешённые.
-
-    Нет allowlist или он пуст -> прежний состав без фильтрации и одна строка в лог.
-    """
-    order = [MODEL_ID] + [mid for mid in FLEET["order"] if mid != MODEL_ID]
-    allowed = _read_allowed_models()
-    if not allowed:
-        _log(
-            f"models catalog: allowlist {_allowed_models_file()} missing or empty,"
-            " generation-guard filter disabled"
-        )
-        return order
-    return [mid for mid in order if _model_in_allowlist(mid, allowed)]
+    return _ant_rt.catalog_model_order(MODEL_ID, FLEET["order"], _allowed_models_file(), _log)
 
 
-def _launch_env(zero_canon: bool = False, req_id: str = "") -> dict:
+def _launch_env(zero_canon: bool = False, req_id: str = "", extra_env: Mapping[str, str] | None = None) -> dict:
     """Окружение для `agy`. Ключ моста потомку не передаётся.
 
     HOME указывает на изолированный <clean-home> (Zero-Canon); браузер для
@@ -1765,6 +1736,8 @@ def _launch_env(zero_canon: bool = False, req_id: str = "") -> dict:
     env["BROWSER"] = "/usr/bin/false"
     if req_id:
         env["AGY_REQUEST_ID"] = req_id
+    if extra_env:
+        env.update(extra_env)
     return _lsc.apply_direct_mode_policy(env, config_path=DYNAMIC_CONFIG_PATH)
 
 
@@ -5575,6 +5548,7 @@ class Run:
         mode: str = "agent",
         zero_canon: bool = False,
         req_id: str = "",
+        extra_env: Mapping[str, str] | None = None,
     ):
         launcher = _launcher()
         WORKSPACE.mkdir(parents=True, exist_ok=True)
@@ -5630,7 +5604,7 @@ class Run:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 start_new_session=True,
-                env=_launch_env(zero_canon=zero_canon, req_id=req_id),
+                env=_launch_env(zero_canon=zero_canon, req_id=req_id, extra_env=extra_env),
             )
         except BaseException:
             _cid_release(self.run_cid, self.turn_id)
@@ -7185,6 +7159,7 @@ class Handler(BaseHTTPRequestHandler):
                         **({"mode": ctx["agy_mode"]} if "agy_mode" in ctx else {}),
                         **({"zero_canon": True} if ctx.get("zero_canon") else {}),
                         req_id=str(ctx.get("req_id") or ""),
+                        extra_env=ctx.get("extra_env"),
                     )
                     self._metric_run = run
                 except LauncherUnavailable:
@@ -7565,6 +7540,7 @@ class Handler(BaseHTTPRequestHandler):
         if path in ("/v1/models", "/models"):
             data = []
             order = _catalog_model_order()
+            order = _ant_rt.filter_anthropic_catalog_order(order, _ANTHROPIC_PROBE)
             image_flags: list[bool] = []
             fallback_info, effective = _image_fallback_view()
             for mid in order:
@@ -7705,20 +7681,38 @@ class Handler(BaseHTTPRequestHandler):
                     model_len,
                 )
                 return
-            model = FLEET["models"][model_id]
-            decision = resolve_request_effort(
-                req.get("reasoning_effort"), model, EFFORT_LEVELS
+            ar = _ant_rt.resolve_anthropic_turn(
+                model_id, req.get("reasoning_effort"), _ANTHROPIC_PROBE
             )
-            if decision.error:
-                self._reject(
-                    400,
-                    "unsupported_reasoning_effort",
-                    decision.error,
-                    model_id,
-                    model_len,
+            extra_env: dict[str, str] = {}
+            if not ar.bypass:
+                if not ar.available:
+                    self._reject(
+                        ar.http_status, ar.error_type, ar.reason, model_id, model_len
+                    )
+                    return
+                model = FLEET["models"].get(ar.upstream_model)
+                if model is None:
+                    self._reject(503, "model_unavailable", "resolved upstream model missing from fleet catalogue", model_id, model_len)
+                    return
+                model_id = cast(str, ar.upstream_model)
+                effort, effort_source = "off", "anthropic_effortless"
+                extra_env = ar.extra_env
+            else:
+                model = FLEET["models"][model_id]
+                decision = resolve_request_effort(
+                    req.get("reasoning_effort"), model, EFFORT_LEVELS
                 )
-                return
-            effort, effort_source = decision.effort, decision.source
+                if decision.error:
+                    self._reject(
+                        400,
+                        "unsupported_reasoning_effort",
+                        decision.error,
+                        model_id,
+                        model_len,
+                    )
+                    return
+                effort, effort_source = decision.effort, decision.source
             if "reasoning" in req and req.get("reasoning") is not None:
                 self._reject(
                     400,
@@ -7999,6 +7993,7 @@ class Handler(BaseHTTPRequestHandler):
                 "model_len": model_len,
                 "effort": effort,
                 "effort_source": effort_source,
+                "extra_env": extra_env,
                 "prompt": prompt,
                 "cwd": cwd,
                 "tools_count": tools_count,

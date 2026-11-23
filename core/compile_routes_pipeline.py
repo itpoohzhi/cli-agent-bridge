@@ -137,35 +137,51 @@ def _history_max(options: records.CompileOptions) -> int:
         return 20
 
 
-def _weighted_source(enabled: list[Candidate]) -> Candidate | None:
+def _weighted_source(
+    enabled: list[Candidate], model_id: str | None = None
+) -> Candidate | None:
     """Выбирает владельца независимо от сериализации singleton routing."""
-    if enabled and any(provider_routing(p).weight is not None for p, _ in enabled):
-        return min(enabled, key=lambda item: route_owner_key(provider_route(item[0])))
+    if enabled and any(
+        provider_routing(p, model_id).weight is not None for p, _ in enabled
+    ):
+        return min(
+            enabled,
+            key=lambda item: route_owner_key(provider_route(item[0], model_id)),
+        )
     return None
 
 
 def _select(
     providers: list[Candidate],
+    model_id: str | None = None,
 ) -> tuple[records.ManifestLike, Candidate | None, RoutingDocument | None]:
-    bridged = [item for item in providers if item[0].transport.bridge is not None]
+    bridged = sorted(
+        (item for item in providers if item[0].transport.bridge is not None),
+        key=lambda item: (
+            provider_route(item[0], model_id)["priority"],
+            item[0].provider_id,
+        ),
+    )
     primary = next((p for p, _ in providers if p.enabled), providers[0][0])
     enabled = [item for item in bridged if item[0].enabled]
     fleet_source = next(iter(enabled), next(iter(bridged), None))
-    weighted = _weighted_source(enabled)
+    weighted = _weighted_source(enabled, model_id)
     routing = None
     if weighted is not None:
         fleet_source = weighted
         primary = fleet_source[0]
         if len(enabled) > 1:
             routing = compile_model_routing(
-                [provider for provider, _ in enabled], bridged[0][0].provider_id
+                [provider for provider, _ in enabled],
+                bridged[0][0].provider_id,
+                model_id=model_id,
             )
     return primary, fleet_source, routing
 
 
 def _compile_model(state: CompileState, model_id: str, history_max: int) -> None:
     providers = state.candidates[model_id]
-    owner, fleet_source, routing = _select(providers)
+    owner, fleet_source, routing = _select(providers, model_id)
     proof = records.model_proof(
         owner, model_id, state.fingerprints[owner.provider_id], state.options
     )

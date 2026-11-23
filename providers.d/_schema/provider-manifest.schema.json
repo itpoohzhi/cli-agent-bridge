@@ -220,6 +220,8 @@
           "resident": {"type": "boolean"},
           "pool_size": {"type": "integer", "minimum": 1},
           "alias_of": {"type": "string"},
+          "route_weight": {"type": "integer", "minimum": 0, "maximum": 10000},
+          "route_priority": {"type": "integer", "minimum": 0},
           "quorum_eligible": {"type": "boolean", "description": "Игнорируется: значение вычисляет только компилятор (QT-3)."}
         }
       }

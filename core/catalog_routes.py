@@ -169,13 +169,68 @@ class RouteProvider(Protocol):
     def routing(self) -> RoutingWeight: ...
 
 
-def provider_routing(provider: RouteProvider) -> RoutingConfig:
+def _model_override_fields(
+    provider: RouteProvider, model_id: str | None
+) -> dict[str, object]:
+    if not model_id:
+        return {}
+    overrides = getattr(provider, "models_overrides", None)
+    if not overrides:
+        return {}
+    from collections.abc import Mapping as _Mapping
+    import fnmatch as _fnmatch
+
+    if isinstance(overrides, _Mapping):
+        entry = overrides.get(model_id)
+        if entry is None:
+            return {}
+        fields = getattr(entry, "fields", None)
+        if isinstance(fields, _Mapping):
+            return dict(fields)
+        return dict(entry) if isinstance(entry, _Mapping) else {}
+    merged: dict[str, object] = {}
+    for rule in overrides:
+        matcher = getattr(rule, "matches", None)
+        if callable(matcher):
+            matched = bool(matcher(model_id))
+        else:
+            pattern = getattr(rule, "pattern", None) or getattr(
+                rule, "model_id", None
+            )
+            matched = pattern == model_id or (
+                isinstance(pattern, str) and _fnmatch.fnmatchcase(model_id, pattern)
+            )
+        if matched:
+            fields = getattr(rule, "fields", None)
+            if isinstance(fields, _Mapping):
+                merged.update(fields)
+    return merged
+
+
+def provider_routing(
+    provider: RouteProvider, model_id: str | None = None
+) -> RoutingConfig:
     """Поддерживает старый DTO без routing, но не маскирует плохой вес."""
+    fields = _model_override_fields(provider, model_id)
+    if "route_weight" in fields:
+        return RoutingConfig(fields["route_weight"])  # type: ignore[arg-type]
     declared: RoutingWeight = getattr(provider, "routing", RoutingConfig())
     return RoutingConfig(declared.weight)
 
 
-def provider_route(provider: RouteProvider) -> RouteRecord:
+def _provider_priority(
+    provider: RouteProvider, model_id: str | None = None
+) -> int:
+    fields = _model_override_fields(provider, model_id)
+    raw = fields.get("route_priority")
+    if raw is not None:
+        return int(raw)  # type: ignore[call-overload]
+    return provider.priority
+
+
+def provider_route(
+    provider: RouteProvider, model_id: str | None = None
+) -> RouteRecord:
     """Сохраняет backend как идентификатор credential/transport слота.
 
     Разные слоты одной модели остаются разными backend; секретные значения
@@ -185,14 +240,16 @@ def provider_route(provider: RouteProvider) -> RouteRecord:
         {
             "route_id": provider.provider_id,
             "backend": provider.provider_id,
-            "weight": provider_routing(provider).effective_weight,
-            "priority": provider.priority,
+            "weight": provider_routing(provider, model_id).effective_weight,
+            "priority": _provider_priority(provider, model_id),
         }
     )
 
 
 def compile_model_routing(
-    providers: Iterable[RouteProvider], legacy_backend: str
+    providers: Iterable[RouteProvider],
+    legacy_backend: str,
+    model_id: str | None = None,
 ) -> RoutingDocument:
     """Компилирует owner и route-set, сохраняя старый owner для kill-switch.
 
@@ -204,7 +261,7 @@ def compile_model_routing(
         for provider in providers
         if provider.enabled and provider.transport.bridge is not None
     )
-    routes = parse_routes([provider_route(provider) for provider in eligible])
+    routes = parse_routes([provider_route(provider, model_id) for provider in eligible])
     if not routes:
         raise ValueError("routing_routes_empty")
     owner = min(routes, key=route_owner_key)["backend"]
@@ -213,7 +270,8 @@ def compile_model_routing(
     return RoutingDocument(
         algorithm=ROUTING_ALGORITHM,
         enabled=any(
-            provider_routing(provider).weight is not None for provider in eligible
+            provider_routing(provider, model_id).weight is not None
+            for provider in eligible
         ),
         catalog_hash=routes_catalog_hash(routes),
         legacy_backend=owner,
