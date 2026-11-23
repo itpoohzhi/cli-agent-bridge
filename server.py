@@ -198,6 +198,7 @@ from core.liveness_signals import (  # noqa: E402
     passthrough_window as passthrough_window,
 )
 from core.runtime_env import DynamicFlagSource, allow_hub_client_response_header, flag_enabled  # noqa: E402
+from core import zero_canon_http as _zc_http  # noqa: E402
 from core.turn_dispatch import ToolSchemaScope, dispatch_turn  # noqa: E402
 from core.request_telemetry import RequestTelemetryStore  # noqa: E402
 from core.telemetry_hooks import (  # noqa: E402
@@ -1925,11 +1926,7 @@ class _HandlerSink(ResponseSink):
             return
         try:
             self._handler.send_response(int(status))
-            for key, value in headers:
-                if allow_hub_client_response_header(key, self._DROP | self._extra_names, self._handler, _LOOPBACK_PEERS):
-                    self._handler.send_header(key, value)
-            for key, value in self._extra_headers:
-                self._handler.send_header(key, value)
+            _zc_http.emit_passthrough_headers(self._handler, headers, self._DROP | self._extra_names, self._extra_headers, lambda k, b: allow_hub_client_response_header(k, b, self._handler, _LOOPBACK_PEERS))
             if not any(key.lower() == "content-length" for key, _ in headers):
                 self._handler.close_connection = (
                     True  # тело без длины (SSE) — конец по закрытию
@@ -7347,14 +7344,7 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(total))
-        active_turn = getattr(self, "_active_managed_turn", None)
-        if active_turn is not None:
-            self.send_header("X-Turn-Id", active_turn.turn_id)
-        for key, value in _trace_headers(self._trace):
-            self.send_header(key, value)
-        if self._context_pruned:
-            self.send_header(ctxres.PRUNED_HEADER, self._context_pruned)
-        self.end_headers()
+        _zc_http.emit_turn_headers(self, getattr(self, "_active_managed_turn", None), _trace_headers(self._trace), (ctxres.PRUNED_HEADER, self._context_pruned), attestation=(None if out.get("tool_calls") else (out.get("zero_canon_completion") or getattr(self, "_zero_canon_completion", None)), "completed"))
         for index, value in enumerate(values):
             self.wfile.write(segments[index] + b'"')
             for piece in _text_slices(value):
@@ -7413,13 +7403,7 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
                 self.send_header("Content-Type", "text/event-stream")
                 self.send_header("Cache-Control", "no-cache")
                 self.send_header("X-Accel-Buffering", "no")
-                if managed_turn is not None:
-                    self.send_header("X-Turn-Id", managed_turn.turn_id)
-                for key, value in _trace_headers(self._trace):
-                    self.send_header(key, value)
-                if self._context_pruned:
-                    self.send_header(ctxres.PRUNED_HEADER, self._context_pruned)
-                self.end_headers()
+                _zc_http.emit_turn_headers(self, managed_turn, _trace_headers(self._trace), (ctxres.PRUNED_HEADER, self._context_pruned), attestation=(ctx.get("zero_canon_admission") or getattr(self, "_zero_canon_admission", None), "admitted"))
             self.close_connection = True
         except (BrokenPipeError, ConnectionResetError, OSError):
             _log("client gone before headers")
