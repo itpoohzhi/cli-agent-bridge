@@ -159,11 +159,23 @@ def read_allowed_models(path: str) -> frozenset[str]:
     return frozenset(line for line in lines if line and not line.startswith("#"))
 
 
+def _allow_catalog_model(
+    model_id: str,
+    allowed: frozenset[str],
+    allow_claude: bool,
+) -> bool:
+    if model_id.startswith("claude-"):
+        return allow_claude and canonicalize_claude_model(model_id) is not None
+    return not allowed or model_id in allowed
+
+
 def catalog_model_order(
     default_model: str,
     fleet_order: Sequence[str],
     allowed_path: str,
     log_fn: Callable[[str], None],
+    *,
+    env: Mapping[str, str] | None = None,
 ) -> list[str]:
     order = [default_model] + [mid for mid in fleet_order if mid != default_model]
     allowed = read_allowed_models(allowed_path)
@@ -172,5 +184,5 @@ def catalog_model_order(
             f"models catalog: allowlist {allowed_path} missing or empty, "
             + "generation-guard filter disabled"
         )
-        return order
-    return [mid for mid in order if mid in allowed]
+    allow_claude = is_bridge_anthropic_enabled(env)
+    return [mid for mid in order if _allow_catalog_model(mid, allowed, allow_claude)]
