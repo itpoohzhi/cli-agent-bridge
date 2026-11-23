@@ -299,7 +299,7 @@ def test_prepare_zc_home_repeated_calls_overwrite_settings_and_auth_and_reject_s
     assert parsed["theme"] == "light"
     assert parsed["mcpServers"] == {}
 
-    # Fail-closed against symlink or directory at destination
+    # Reject pre-existing symlink, directory, or symlinked parent directory
     sym_target = tmp_path / "outside.txt"
     sym_target.write_text("keep", encoding="utf-8")
     sym = zc_cli / "sym-test.json"
@@ -312,4 +312,12 @@ def test_prepare_zc_home_repeated_calls_overwrite_settings_and_auth_and_reject_s
     dir_dst.mkdir()
     with pytest.raises(IsADirectoryError):
         zfs.replace_atomic_0600(dir_dst, b"overwrite")
+
+    real_parent = tmp_path / "outside-dir"
+    real_parent.mkdir()
+    sym_parent = zc_cli / "sym-parent"
+    sym_parent.symlink_to(real_parent)
+    with pytest.raises(OSError):
+        zfs.replace_atomic_0600(sym_parent / "file.json", b"overwrite")
+    assert not (real_parent / "file.json").exists()
 
