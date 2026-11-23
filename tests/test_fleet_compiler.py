@@ -170,8 +170,8 @@ def test_compile_is_byte_deterministic() -> None:
     assert fc.canonical_json(first.sidecar) == fc.canonical_json(second.sidecar)
     standard = (json.dumps(first.fleet, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
     assert render_fleet_json(first.fleet) == standard
-    assert len(standard.splitlines()) <= 1160  # Отдельные AGY/Droid Gemini + tools + блоки routing + слоты OpenCode Go sub1/sub2 с декларативным failover (F-003/F-004).
-    assert len(render_fleet_json(first.sidecar).splitlines()) <= 850
+    assert len(standard.splitlines()) <= 1600  # Включая NeuralWatt Standard/Flex (glm-5.3-flex, glm-5.3-flash, mimo-v2.6-pro-flex) и единый opencode-go.
+    assert len(render_fleet_json(first.sidecar).splitlines()) <= 1100
 
 
 def test_input_order_does_not_change_output() -> None:
