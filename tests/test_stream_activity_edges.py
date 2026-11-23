@@ -214,3 +214,51 @@ def test_execute_loop_default_defer_false_uses_extended_cap(monkeypatch):
         )
     assert clock.now_s == 400.0
     assert (out["state"], out["rc"]) == ("done", 0)
+
+
+def test_stage_tool_calls_tolerates_partial_json_and_ignores_empty_list(monkeypatch):
+    clock = FakeClock()
+    runner, _handler, _logs = _runner(monkeypatch, _config(monkeypatch), clock)
+    runner.s.commit = lambda: True
+    runner._activity_window = runner.replay.arm_attempt(300.0)
+    fragment = '{"partial": '
+    assert runner.stage(fragment, "tool_calls") is True
+    assert runner._activity_window.check_expired(clock.now_s).had_progress is True
+    assert runner.s.buffer.commit_fragments() == (("tool_calls", fragment),)
+    runner._activity_window = runner.replay.arm_attempt(300.0)
+    assert runner.stage("[]", "tool_calls") is True
+    assert runner._activity_window.check_expired(clock.now_s).had_progress is False
+
+
+def test_invoke_deferred_logs_redacted_error_exactly_once(monkeypatch):
+    clock = FakeClock()
+    runner, handler, logs = _runner(monkeypatch, _config(monkeypatch), clock)
+    runner._activity_window = runner.replay.arm_attempt(300.0)
+
+    def once(_ctx, *_args, defer_done_log=False, **_named):
+        assert defer_done_log is True
+        raise RuntimeError("boom sk-secret-123")
+
+    handler._run_once = once
+    with pytest.raises(RuntimeError, match="boom"):
+        runner._invoke()
+    assert len(logs) == 1
+    assert (logs[0]["state"], logs[0]["rc"]) == ("error", 1)
+    assert "sk-secret-123" not in repr(logs)
+    assert "<redacted>" in logs[0]["err"]
+
+
+def test_successful_output_at_exact_deadline_is_not_rewritten(monkeypatch):
+    clock = FakeClock()
+    runner, handler, logs = _runner(monkeypatch, _config(monkeypatch), clock)
+
+    def once(_ctx, *callbacks, **_named):
+        callbacks[0]("progress")
+        clock.advance(runner.deadline - clock.now_s)
+        return {"state": "done", "rc": 0, "text": "ok"}
+
+    handler._run_once = once
+    out = runner.attempt(0, runner.replay.attempt_budget_s(0))
+    assert clock.now_s == 300.0
+    assert (out["state"], out["rc"], out["text"]) == ("done", 0, "ok")
+    assert logs == [out]

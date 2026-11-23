@@ -5,7 +5,7 @@ from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from decimal import ROUND_FLOOR, Decimal
 from enum import Enum
-from typing import final
+from typing import TypeGuard, final
 
 import core.route_health_policy as routes
 
@@ -61,8 +61,12 @@ def _require(ok: bool, msg: str) -> None:
         raise ValueError(msg)
 
 
-def _is_finite_number(item: int | float) -> bool:
-    return type(item) in (int, float) and math.isfinite(item)
+def _is_finite_number(item: object) -> TypeGuard[int | float]:
+    return (
+        isinstance(item, (int, float))
+        and not isinstance(item, bool)
+        and math.isfinite(item)
+    )
 
 
 def is_useful_delta(kind: str, payload: object) -> bool:
@@ -167,8 +171,15 @@ class SlidingActivityWindow:
             )
         return self._snapshot(now)
 
-    def mark_completed(self, now: float) -> ActivitySnapshot:
-        snapshot = self.check_expired(now)
+    def mark_completed(
+        self, now: float, *, succeeded: bool = False
+    ) -> ActivitySnapshot:
+        boundary = (
+            succeeded
+            and self._state not in _EXPIRED
+            and now <= self.current_deadline()
+        )
+        snapshot = self._snapshot(now) if boundary else self.check_expired(now)
         if snapshot.state not in _EXPIRED:
             self._state = ActivityState.COMPLETED
             snapshot = self._snapshot(now)
@@ -229,11 +240,10 @@ def _final_outcome(raw_out: Mapping[str, object], snapshot: ActivitySnapshot, *,
         return _expired_outcome(raw_out, snapshot, req_id=req_id, cid=cid)
     raw_rc = raw_out.get("rc", 0)
     raw_limit = raw_out.get("timeout_limit_s", snapshot.timeout_limit_s)
-    valid_limit = type(raw_limit) in (int, float) and math.isfinite(raw_limit)
-    limit = raw_limit if valid_limit else 0.0
+    limit = raw_limit if _is_finite_number(raw_limit) else 0.0
     return FinalStreamOutcome(
         state=str(raw_out.get("state", "")),
-        rc=raw_rc if type(raw_rc) is int else 0,
+        rc=raw_rc if isinstance(raw_rc, int) and not isinstance(raw_rc, bool) else 0,
         err=routes.redact_diagnostic_text(str(raw_out.get("err", ""))),
         timeout_limit_s=max(0.0, float(limit)),
         had_progress=bool(raw_out.get("had_progress", snapshot.had_progress)),

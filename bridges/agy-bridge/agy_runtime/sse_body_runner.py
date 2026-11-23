@@ -34,8 +34,7 @@ def _defers_done_log(callback: Any) -> bool:
         parameters = inspect.signature(callback).parameters
     except (TypeError, ValueError):
         return False
-    return "defer_done_log" in parameters or any(
-        p.kind is inspect.Parameter.VAR_KEYWORD for p in parameters.values())
+    return "defer_done_log" in parameters or any(p.kind is inspect.Parameter.VAR_KEYWORD for p in parameters.values())
 @final
 class _SseBodyRunner:
     def __init__(self, session: SseStreamSession) -> None:
@@ -57,7 +56,11 @@ class _SseBodyRunner:
             _ = window.record_signal(kind, payload, self.time.monotonic())
             self.deadline = window.current_deadline()
     def stage(self, value: str, channel: str = "content") -> bool:
-        self._note_progress(channel, json.loads(value) if channel == "tool_calls" else value)
+        try:
+            payload = json.loads(value) if channel == "tool_calls" else value
+        except (ValueError, TypeError):
+            payload = value.strip()
+        self._note_progress(channel, payload)
         ok = False
         if not self.cancelled():
             self.s.buffer.stage_fragment(value, channel)
@@ -157,15 +160,18 @@ class _SseBodyRunner:
         watcher.start()
         deferred = is_present(self._activity_window) and _defers_done_log(s.handler._run_once)
         try:
-            named = dict(defer_done_log=True) if deferred else {}
-            out = s.handler._run_once(s.ctx, self.text, self.trace, self.reasoning, self.keepalive, **named)
+            out = s.handler._run_once(s.ctx, self.text, self.trace, self.reasoning, self.keepalive, **(dict(defer_done_log=True) if deferred else {}))
+        except BaseException as exc:
+            err_out = dict(state="error", rc=1, err=str(exc))
+            if is_present(self._activity_window):
+                err_out = dict(err_out, **build_final_outcome(err_out, self._activity_window.mark_completed(self.time.monotonic()), req_id=str(s.ctx.get("tag", "")), cid=self.cid))
+            self._log_final(err_out, deferred)
+            raise
         finally:
             ready.set()
             watcher.join()
         if is_present(self._activity_window):
-            snapshot = self._activity_window.mark_completed(self.time.monotonic())
-            final = build_final_outcome(out, snapshot, req_id=str(s.ctx.get("tag", "")), cid=self.cid)
-            out = dict(out, **final)
+            out = dict(out, **build_final_outcome(out, self._activity_window.mark_completed(self.time.monotonic(), succeeded={("done", 0, True): True}.get((out.get("state"), out.get("rc"), any((out.get("text"), out.get("reasoning")))), False)), req_id=str(s.ctx.get("tag", "")), cid=self.cid))
         self._log_final(out, deferred)
         return out
     def _log_final(self, out: dict[str, Any], deferred: bool) -> None:
@@ -207,8 +213,7 @@ class _SseBodyRunner:
         return ok
     def run(self) -> None:
         s, ctx = self.s, self.s.ctx
-        self.buffering = any( ( s.config.flag_enabled("midstream_retry_enabled"),
-                s.config.flag_enabled("tool_rollback_enabled"), ) )
+        self.buffering = any((s.config.flag_enabled("midstream_retry_enabled"), s.config.flag_enabled("tool_rollback_enabled")))
         try:
             allowed = True
             if not any((s.resilience, ctx.get("step_job_id"))):
@@ -226,8 +231,7 @@ class _SseBodyRunner:
             ctx["finalize_timeout"] = lambda _out: None
             out = dict(self.replay.run_with_resilience(self.attempt, s.ledger, s.keepalive, self.cancelled))
             if all((dict(cancelled=True).get(str(out.get("state")), False), not self.cancelled())):
-                out = ( self._last_out if self._last_out
-                    else dict(state="pump_error", rc=1, err="retry cancelled") )
+                out = (self._last_out if self._last_out else dict(state="pump_error", rc=1, err="retry cancelled"))
             success = out.get("state") == "done"
             if all((success, out.get("rc") == 0)):
                 if not self.cancelled():
@@ -238,8 +242,7 @@ class _SseBodyRunner:
         else:
             out = self.attempt(0, s.config.first_event_timeout_s)
         if proceed:
-            if any( ( self.cancelled(),
-                    dict(client_gone=True).get(str(out.get("state")), False), ) ):
+            if any((self.cancelled(), dict(client_gone=True).get(str(out.get("state")), False))):
                 s.hooks[1]("client gone mid-stream, child killed")
             else:
                 ctx["finalize_timeout"] = s.finalize_stream
@@ -249,8 +252,7 @@ class _SseBodyRunner:
     def finish(self, out: dict[str, Any]) -> None:
         s = self.s
         err = s.handler._error_body(out, s.resilience)
-        reason = "stop"
-        proceed = True
+        reason, proceed = "stop", True
         if all(((not is_present(err)), (is_present(s.tool_turn)))):
             s.tool_turn.finish()
             proceed = not self.cancelled() and (s.tool_turn.ok or bool(s.tool_turn.error))
@@ -275,8 +277,7 @@ class _SseBodyRunner:
             s.handler._send(code, {"error": clean})
             s.handler.close_connection = True
         elif s.commit():
-            ok = ( self.finish_success(out, reason) if (not is_present(err))
-                else s.emit(s.error_chunk(err, self.error_usage(out))) )
+            ok = (self.finish_success(out, reason) if (not is_present(err)) else s.emit(s.error_chunk(err, self.error_usage(out))))
             if any((ok, not s.resilience)):
                 _ = s.emit("data: [DONE]\n\n")
     def error_usage(self, out: dict[str, Any]) -> dict[str, Any] | None:
