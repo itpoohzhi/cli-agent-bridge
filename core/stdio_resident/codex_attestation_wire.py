@@ -8,6 +8,7 @@ from typing import Any, Final
 
 from core.codex_zero_canon_policy import CodexZeroCanonPolicyError
 from core.stdio_resident.codex_protocol_fsm import ProtocolPhase, ProtocolState
+from core.stdio_resident.sse_error_bridge import sanitize_log_text
 from core.stdio_resident.turn_error_sse import ResidentTurnError, build_turn_error, sanitize_error_message
 from core.subbridge_zero_canon import is_zero_canon_profile
 from core.zero_canon_attestation_http import (
@@ -233,7 +234,9 @@ class ZeroCanonSseHeaderGate:
             return False
         return not self.defer_zc_headers or bool(getattr(self.handler, "_headers_already_sent", False))
 
-    def handle_pre_stream_error(self, exc: BaseException, lease: Any) -> bool:
+    def handle_pre_stream_error(
+        self, exc: BaseException, lease: Any, *, log_fn: Callable[[str], None] | None = None
+    ) -> bool:
         """Send pre-stream HTTP error JSON when deferred SSE headers were never flushed."""
         if not self.defer_zc_headers or self.failed_closed:
             return False
@@ -241,10 +244,16 @@ class ZeroCanonSseHeaderGate:
             return False
         lease.record_failure(exc)
         if _is_attestation_error(exc):
+            if log_fn is not None:
+                safe_err = sanitize_log_text(str(exc), extra_code=_ATTESTATION_CODE)
+                log_fn(f"sse_pre_stream_error status=502 code={_ATTESTATION_CODE} err={safe_err!r}")
             self._fail_closed(sanitize_error_message(exc))
             return True
         resp = exc.response if isinstance(exc, ResidentTurnError) else build_turn_error(exc, live_sent=0)
         status = resp.status if resp.status >= 400 else 502
+        if log_fn is not None:
+            safe_err = sanitize_log_text(resp.message, extra_code=resp.code)
+            log_fn(f"sse_pre_stream_error status={status} code={resp.code} err={safe_err!r}")
         self.failed_closed, self.handler._response_status = True, status
         self.handler._send(status, resp.body)
         return True

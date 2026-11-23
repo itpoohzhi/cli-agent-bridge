@@ -5,9 +5,12 @@
 from __future__ import annotations
 
 import json
+import threading
 import time
+import weakref
 from collections.abc import Mapping
-from typing import Any, ClassVar, cast, override
+from dataclasses import dataclass, replace
+from typing import Any, ClassVar, Final, cast, override
 
 from core.stdio_resident.codex_protocol_fsm import (
     EffectKind, EventKind, ProtocolEffect, ProtocolEvent, ProtocolPhase, ProtocolState, transition,
@@ -272,26 +275,150 @@ class CodexAppServerDriver(StreamJsonDriver):
         return any(payload.get(k) is True or payload.get(k) in ("tool", "tool_call", "tool_calls", "tool_stop") for k in ("is_tool_stop", "tool_stop", "stop_reason", "status"))
 
 
+_HANDLE_STATE_ATTR: Final[str] = "_codex_v2_slot_state"
+
+
+@dataclass(slots=True)
+class _V2SlotState:
+    """Per-process FSM state; `state.zero_canon` is the single source of truth for Zero-Canon mode."""
+
+    state: ProtocolState
+    last_turn_state: ProtocolState | None = None
+    last_effects: tuple[ProtocolEffect, ...] = ()
+    bound_handle: object | None = None
+
+
 class CodexAppServerV2Driver(StreamJsonDriver):
-    """Contract-first Codex app-server v2 driver executing pure codex_protocol_fsm effects."""
+    """Contract-first Codex app-server v2 driver executing pure codex_protocol_fsm effects.
+
+    Concurrency contract:
+    - `build_zero_canon_env` is pure (no TLS mutation); Zero-Canon mode has a single source
+      of truth in `ProtocolState.zero_canon`, set explicitly from `turn_context["review_profile"]`
+      in `prepare_turn` / `encode_turn`.
+    - Each turn runs synchronously on its request thread (`run_handshake` -> `prepare_turn` ->
+      `encode_turn` -> `decode_line` -> `perform_turn_teardown` -> attestation readers), bound
+      to its own `_V2SlotState` in `self._tls.ctx`.
+    - Persistent per-process FSM state is attached directly to the process `handle`
+      (`_codex_v2_slot_state`, or identity-checked weakref for `__slots__` handles), so hot
+      resident slots survive sequential cross-thread handoff under pool lease exclusivity with
+      zero `id()` aliasing or leak.
+    """
 
     _capabilities: ClassVar[DriverCapabilities] = DriverCapabilities(
         protocol_name="codex-app-server-v2", supports_soft_cancel=True, supports_multi_turn=True
     )
 
     def __init__(self) -> None:
-        self._state: ProtocolState = ProtocolState()
-        self._last_turn_state: ProtocolState | None = None
-        self._zero_canon: bool = False
-        self._last_effects: tuple[ProtocolEffect, ...] = ()
+        self._tls: threading.local = threading.local()
+        self._slot_lock: threading.Lock = threading.Lock()
+        self._weak_slots: dict[int, tuple[weakref.ReferenceType[object], _V2SlotState]] = {}
+
+    def _ctx(self) -> _V2SlotState:
+        ctx = cast(_V2SlotState | None, getattr(self._tls, "ctx", None))
+        if ctx is None:
+            ctx = _V2SlotState(state=ProtocolState())
+            self._tls.ctx = ctx
+        return ctx
+
+    def _bind_handle_state(self, handle: Any, slot: _V2SlotState) -> None:
+        slot.bound_handle = None
+        self._tls.ctx = slot
+        if handle is None:
+            return
+        try:
+            setattr(handle, _HANDLE_STATE_ATTR, slot)
+            return
+        except (AttributeError, TypeError):
+            pass
+        key = id(handle)
+
+        def _cleanup(dead_ref: weakref.ReferenceType[object], k: int = key) -> None:
+            with self._slot_lock:
+                cur = self._weak_slots.get(k)
+                if cur is not None and cur[0] is dead_ref:
+                    self._weak_slots.pop(k, None)
+
+        try:
+            ref = weakref.ref(handle, _cleanup)
+        except TypeError:
+            # Handle supports neither __dict__ nor __weakref__: hold object identity reference
+            # for the active turn (released in teardown), making CPython id() aliasing impossible.
+            slot.bound_handle = handle
+            return
+        with self._slot_lock:
+            self._weak_slots[key] = (ref, slot)
+
+    def _lookup_handle_state(self, handle: Any) -> _V2SlotState | None:
+        if handle is None:
+            return None
+        direct = getattr(handle, _HANDLE_STATE_ATTR, None)
+        if isinstance(direct, _V2SlotState):
+            return direct
+        key = id(handle)
+        with self._slot_lock:
+            pair = self._weak_slots.get(key)
+            if pair is None:
+                return None
+            ref, slot = pair
+            if ref() is handle:
+                return slot
+            self._weak_slots.pop(key, None)
+            return None
+
+    def _release_handle_state(self, handle: Any) -> None:
+        if handle is None:
+            return
+        try:
+            if hasattr(handle, _HANDLE_STATE_ATTR):
+                delattr(handle, _HANDLE_STATE_ATTR)
+        except (AttributeError, TypeError):
+            pass
+        key = id(handle)
+        with self._slot_lock:
+            pair = self._weak_slots.get(key)
+            if pair is not None and pair[0]() in (None, handle):
+                self._weak_slots.pop(key, None)
+
+    @property
+    def _state(self) -> ProtocolState:
+        return self._ctx().state
+
+    @_state.setter
+    def _state(self, value: ProtocolState) -> None:
+        self._ctx().state = value
+
+    @property
+    def _last_turn_state(self) -> ProtocolState | None:
+        return self._ctx().last_turn_state
+
+    @_last_turn_state.setter
+    def _last_turn_state(self, value: ProtocolState | None) -> None:
+        self._ctx().last_turn_state = value
+
+    @property
+    def _zero_canon(self) -> bool:
+        return self._ctx().state.zero_canon
+
+    @_zero_canon.setter
+    def _zero_canon(self, value: bool) -> None:
+        ctx = self._ctx()
+        ctx.state = replace(ctx.state, zero_canon=bool(value))
+
+    @property
+    def _last_effects(self) -> tuple[ProtocolEffect, ...]:
+        return self._ctx().last_effects
+
+    @_last_effects.setter
+    def _last_effects(self, value: tuple[ProtocolEffect, ...]) -> None:
+        self._ctx().last_effects = value
 
     @property
     def protocol_state(self) -> ProtocolState:
-        return self._state
+        return self._ctx().state
 
     @property
     def last_turn_state(self) -> ProtocolState | None:
-        return self._last_turn_state
+        return self._ctx().last_turn_state
 
     def _apply(self, event: ProtocolEvent) -> tuple[ProtocolEffect, ...]:
         self._state, effects = transition(self._state, event)
@@ -325,7 +452,6 @@ class CodexAppServerV2Driver(StreamJsonDriver):
         return _build_codex_argv(base_argv, options)
 
     def build_zero_canon_env(self, base_env: Mapping[str, str], root: str) -> dict[str, str]:
-        self._zero_canon = True
         return prepare_codex_zero_canon_home(base_env, root)
 
     def build_zero_canon_argv(self, argv: list[str], model: str = "", effort: str = "") -> list[str]:
@@ -337,23 +463,33 @@ class CodexAppServerV2Driver(StreamJsonDriver):
 
     @override
     def run_handshake(self, handle: Any, timeout_s: float = 10.0) -> bool:
-        self._state = ProtocolState(zero_canon=self._zero_canon)
-        self._last_turn_state = None
+        slot = _V2SlotState(state=ProtocolState(zero_canon=False))
+        self._bind_handle_state(handle, slot)
         try:
             self._send_effects(handle, self._apply(ProtocolEvent(EventKind.START_INITIALIZE)))
-            return self._await_phase(handle, ProtocolPhase.INITIALIZED, timeout_s)
+            ok = self._await_phase(handle, ProtocolPhase.INITIALIZED, timeout_s)
         except Exception:
-            return False
+            ok = False
+        if not ok:
+            self._release_handle_state(handle)
+            self._tls.ctx = None
+        return ok
 
     @override
     def prepare_turn(self, handle: Any, turn_context: Any, timeout_s: float = 5.0) -> bool:
+        if (bound := self._lookup_handle_state(handle)) is not None:
+            self._tls.ctx = bound
+        elif handle is not None:
+            cur = cast(_V2SlotState | None, getattr(self._tls, "ctx", None))
+            if cur is None or cur.bound_handle is not handle:
+                self._tls.ctx = _V2SlotState(state=ProtocolState())
         ctx = _mapping(turn_context) or {}
-        zc = self._zero_canon or is_zero_canon_profile(str(ctx.get("review_profile") or ""))
-        self._zero_canon = zc
+        profile_raw = ctx.get("review_profile")
+        zc = is_zero_canon_profile(profile_raw) if isinstance(profile_raw, str) and profile_raw.strip() else False
         self._last_turn_state = None
         if self._state.phase is ProtocolPhase.IDLE:
             return False
-        if not zc and self._state.thread_id is not None and not ctx.get("new_thread"):
+        if not zc and not self._state.zero_canon and self._state.thread_id is not None and not ctx.get("new_thread"):
             return True
         try:
             effects = self._apply(ProtocolEvent(EventKind.START_THREAD, _build_thread_params(ctx, zc)))
@@ -370,7 +506,12 @@ class CodexAppServerV2Driver(StreamJsonDriver):
             raise ValueError("codex_v2_missing_server_thread_id")
         self._last_turn_state = None
         ctx = dict(turn_context or {})
-        zc = self._zero_canon or is_zero_canon_profile(str(ctx.get("review_profile") or ""))
+        profile_raw = ctx.get("review_profile")
+        zc = (
+            is_zero_canon_profile(profile_raw)
+            if isinstance(profile_raw, str) and profile_raw.strip()
+            else self._state.zero_canon
+        )
         effects = self._apply(ProtocolEvent(EventKind.START_TURN, _build_turn_params(prompt, ctx, zc)))
         frame = _first_send_frame(effects)
         if frame is None or self._state.phase is ProtocolPhase.FAILED:
@@ -437,7 +578,17 @@ class CodexAppServerV2Driver(StreamJsonDriver):
 
     @override
     def perform_turn_teardown(self, handle: Any, turn_context: Any, timeout_s: float = 2.0) -> bool:
-        _ = (handle, turn_context, timeout_s)
-        self._last_turn_state = self._state
+        _ = (turn_context, timeout_s)
+        bound = self._lookup_handle_state(handle)
+        slot = bound if bound is not None else self._ctx()
+        self._tls.ctx = slot
+        slot.last_turn_state = slot.state
+        was_zero_canon = slot.state.zero_canon
         _ = self.advance_epoch()
+        if bound is None:
+            # Release strong reference held for bare non-weakref handles so GC can reclaim them
+            # and no future handle reusing the same address can match `bound_handle is handle`.
+            slot.bound_handle = None
+        if was_zero_canon:
+            self._release_handle_state(handle)
         return True

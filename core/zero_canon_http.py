@@ -6,7 +6,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final, TypeVar, cast
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 from core.codex_zero_canon_policy import CODEX_EFFORT_MATRIX
 from core.subbridge_zero_canon import (
@@ -57,6 +57,8 @@ _LEGACY_CONTRACTS: Final[tuple[str, ...]] = (
     "codex.app-server.v1@", "codex.app-server.legacy@", "codex.passthrough.", "openai.chat-completions.",
 )
 _LOOPBACK_HOSTS: Final[frozenset[str]] = frozenset({"127.0.0.1", "localhost", "::1"})
+_GEOROUTER_PORT: Final[int] = 10830
+_STATELESS_GEOROUTER_SEGMENTS: Final[frozenset[str]] = frozenset({"neuralwatt", "go"})
 _T = TypeVar("_T")
 
 
@@ -156,11 +158,27 @@ def _is_codex_meta(meta: _ProviderMeta) -> bool:
 
 
 def _url_allowed(url: str, trust_profile: str) -> bool:
-    if not url:
-        return trust_profile != EXTERNAL_TRUST_PROFILE
-    parsed = urlparse(url)
-    if "/sg-" in parsed.path.lower() or parsed.hostname not in _LOOPBACK_HOSTS or parsed.port == 2455:
+    if trust_profile == EXTERNAL_TRUST_PROFILE:
         return False
+    if not url:
+        return True
+    parsed = urlparse(url)
+    try:
+        port = parsed.port
+    except ValueError:
+        return False
+    if parsed.hostname not in _LOOPBACK_HOSTS or parsed.username is not None or parsed.password is not None:
+        return False
+    decoded = unquote(parsed.path)
+    if "/sg-" in decoded.lower() or port == 2455:
+        return False
+    first_seg = parsed.path.strip().strip("/").split("/", 1)[0].lower()
+    if (
+        parsed.scheme == "http" and port == _GEOROUTER_PORT and first_seg in _STATELESS_GEOROUTER_SEGMENTS
+        and not parsed.query and not parsed.fragment
+        and all(seg not in (".", "..") for seg in decoded.split("/"))
+    ):
+        return True
     return should_forward_review_profile(parsed.path, trust_profile)
 
 

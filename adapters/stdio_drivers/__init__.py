@@ -268,6 +268,32 @@ def infer_protocol(
     )
 
 
+def _align_codex_v2_pool_slots(
+    pool_cfg: StdioPoolConfig,
+    env: Mapping[str, str],
+    driver_config: Mapping[str, Any] | None,
+) -> StdioPoolConfig:
+    """Align Codex v2 ephemeral/hot slot caps with provider limits.max_concurrent unless env overrides."""
+    if not isinstance(driver_config, Mapping):
+        return pool_cfg
+    limits = driver_config.get("limits")
+    if not isinstance(limits, Mapping):
+        return pool_cfg
+    raw_mc = limits.get("max_concurrent")
+    if isinstance(raw_mc, bool) or not isinstance(raw_mc, int) or raw_mc < 2:
+        return pool_cfg
+    target = max(2, min(raw_mc, 64))
+    updates: dict[str, Any] = {}
+    if not (env.get("BRIDGE_STDIO_MAX_EPHEMERAL_SLOTS") or "").strip():
+        updates["max_ephemeral_slots"] = target
+    if not (env.get("BRIDGE_STDIO_MAX_SLOTS") or "").strip():
+        new_max = max(pool_cfg.max_slots, target)
+        updates["max_slots"] = new_max
+        if not (env.get("BRIDGE_STDIO_MAX_SLOTS_PER_PRINCIPAL") or "").strip():
+            updates["max_slots_per_principal"] = new_max
+    return dataclasses.replace(pool_cfg, **updates) if updates else pool_cfg
+
+
 def resolve_pool_and_driver(
     protocol: str,
     environ: Mapping[str, str] | None = None,
@@ -280,7 +306,10 @@ def resolve_pool_and_driver(
         agy_cfg = load_agy_resident_config(env)
         agy_cfg = apply_canary_limits(agy_cfg, load_agy_canary_config(env))
         return build_agy_pool_config(agy_cfg), create_protocol_driver(protocol, config=agy_cfg)
-    return StdioPoolConfig.from_env(environ), create_protocol_driver(
+    pool_cfg = StdioPoolConfig.from_env(environ)
+    if protocol in ("codex-app-server-v2", "codex_app_server_v2"):
+        pool_cfg = _align_codex_v2_pool_slots(pool_cfg, env, driver_config)
+    return pool_cfg, create_protocol_driver(
         protocol, config=driver_config
     )
 

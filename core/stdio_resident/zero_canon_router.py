@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from core.runtime_env import env_first
+from core.runtime_env import env_bool, env_first
 from core.stdio_resident.turn_error_sse import (
     DONE_FRAME,
     ResidentTurnError,
@@ -28,6 +28,7 @@ from core.subbridge_zero_canon import (
     ZERO_CANON_PROFILE,
     is_zero_canon_profile,
 )
+from core.timeout_ladder import FLAG_TIMEOUT_LADDER, TimeoutLadderConfig, load_timeout_ladder_config
 from core.zero_canon_fs import read_gigarc_bool, resolve_hub_dynamic_config
 
 CLAUDE_BRIDGE_URL_ENV = "HUB_ZERO_CANON_CLAUDE_BRIDGE_URL"
@@ -39,6 +40,24 @@ CODEX_PROTOCOLS = frozenset(
 )
 CODEX_BACKEND_IDS = frozenset({"codex", "codex-app-server", "codex-app-server-v2"})
 KIND_RESIDENT, KIND_BRIDGE, KIND_EPHEMERAL = "resident", "bridge", "ephemeral"
+WARM_MSP_STDIO_FLAG = "MUSE_WARM_MSP_STDIO_ENABLED"
+SOCKET_HANDSHAKE_UNSUPPORTED = "MUSE_SOCKET_HANDSHAKE_UNSUPPORTED"
+MUSE_TRANSPORT_EXEC, MUSE_TRANSPORT_WARM, MUSE_TRANSPORT_LEGACY = "exec", "warm_stdio", "legacy"
+
+
+def decide_muse_transport(
+    probe_error_code: str | None = None,
+    *,
+    output_schema: bool = False,
+    environ: Mapping[str, str] | None = None,
+) -> str:
+    """Транспорт Muse (VER-009): `output_schema` — только `exec`, никогда MSP; сокет с ошибкой пробы
+    (включая `MUSE_SOCKET_HANDSHAKE_UNSUPPORTED`) недоступен — при флаге warm stdio, иначе legacy.
+    """
+    if output_schema:
+        return MUSE_TRANSPORT_EXEC
+    env = os.environ if environ is None else environ
+    return MUSE_TRANSPORT_WARM if env_bool(env, (WARM_MSP_STDIO_FLAG,), False) else MUSE_TRANSPORT_LEGACY
 
 
 @dataclass(frozen=True, slots=True)
@@ -149,6 +168,24 @@ def _validate_loopback_bridge_url(base_url: str) -> str:
     return base_url.rstrip("/")
 
 
+def _resolve_proxy_timeout_s(
+    timeout_s: float | None, environ: Mapping[str, str] | None = None
+) -> float:
+    if timeout_s is not None:
+        return timeout_s
+    env = os.environ if environ is None else environ
+    raw = env.get("HUB_ZERO_CANON_PROXY_TIMEOUT_S")
+    if raw is not None and raw.strip():
+        return float(raw)
+    try:
+        ladder = load_timeout_ladder_config(env)
+    except ValueError:
+        if env_bool(env, (FLAG_TIMEOUT_LADDER,), False):
+            raise
+        ladder = TimeoutLadderConfig()
+    return ladder.effective_first_event_s if ladder.enabled else 180.0
+
+
 def proxy_zero_canon_bridge_turn(
     base_url: str,
     model: str,
@@ -158,11 +195,7 @@ def proxy_zero_canon_bridge_turn(
     timeout_s: float | None = None,
 ) -> tuple[str, str]:
     """Перенаправляет Zero-Canon Claude-ход на локальный loopback claude-p-bridge (`:9881`)."""
-    effective_timeout = (
-        timeout_s
-        if timeout_s is not None
-        else float(os.environ.get("HUB_ZERO_CANON_PROXY_TIMEOUT_S", "180.0"))
-    )
+    effective_timeout = _resolve_proxy_timeout_s(timeout_s)
     url = _validate_loopback_bridge_url(base_url) + "/chat/completions"
     body = json.dumps(
         {"model": model, "messages": [{"role": "user", "content": prompt}], "stream": False},

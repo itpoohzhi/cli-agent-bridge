@@ -29,6 +29,7 @@ _SAFE_LOG_CODES: Final[frozenset[str]] = frozenset(
         "unsupported_model_effort",
         "output_limit_exceeded",
         _GENERIC_TURN_ERROR_CODE,
+        "slot_lease_timeout",
         "turn_timeout",
         "rate_limit_exceeded",
     )
@@ -50,7 +51,7 @@ class SseErrorContext:
     log_fn: Callable[[str], None]
 
 
-def _sanitize_log_text(
+def sanitize_log_text(
     raw: str,
     *,
     extra_code: str = "",
@@ -65,6 +66,9 @@ def _sanitize_log_text(
         else max(1, max_chars)
     )
     return redacted[:limit]
+
+
+_sanitize_log_text = sanitize_log_text
 
 
 def _error_http_status(status: int) -> int:

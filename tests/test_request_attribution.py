@@ -229,6 +229,13 @@ def test_generated_request_id_format(monkeypatch):
     assert re.fullmatch(r"child:[0-9a-f]{12}", server._resolve_trace({}, {}).request_id)
 
 
+def test_colon_request_id_is_rejected_but_allowlisted_id_passes():
+    rejected = server._resolve_trace({"X-Request-Id": "bad:id"}, {})
+    assert rejected.request_id_source == "generated"
+    assert re.fullmatch(r"req_[0-9a-f]{12}", rejected.request_id)
+    assert server._resolve_trace({"X-Request-Id": "good-id_1.2"}, {}).request_id == "good-id_1.2"
+
+
 @pytest.mark.parametrize(
     "value", ["a\r\nX-Evil: 1", "a b", "ü", "x" * 65, "", 123, {"bad": True}, None]
 )

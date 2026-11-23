@@ -416,7 +416,7 @@ class RequestTrace:
 
 @functools.cache
 def _trace_pattern(max_len: int) -> re.Pattern[str]:
-    return re.compile(r"[A-Za-z0-9_.:@-]{1,%d}" % max_len)
+    return re.compile(r"[A-Za-z0-9_.-]{1,%d}" % max_len)
 
 
 def _sanitize_trace_id(value: object, max_len: int) -> str | None:
@@ -7273,6 +7273,12 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
         try:
             out = self._dispatch(ctx, None)
         except ResidentTurnError as exc:
+            from core.stdio_resident.sse_error_bridge import _sanitize_log_text
+
+            safe_err = _sanitize_log_text(exc.response.message, extra_code=exc.response.code)
+            _log(
+                f"json_resident_error status={exc.status} code={exc.response.code} err={safe_err!r}"
+            )
             lease.record_failure(exc)
             self._send(exc.status, exc.response.body)
             return
@@ -7539,7 +7545,7 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
             from core.stdio_resident.sse_error_bridge import SseErrorContext, handle_sse_stream_exception
             if handle_sse_stream_exception(exc, live_sent[0], SseErrorContext(self, lease, emit, stream_error_frame, _log)):
                 return
-            if gate.handle_pre_stream_error(exc, lease):
+            if gate.handle_pre_stream_error(exc, lease, log_fn=_log):
                 return
             raise
         if gate.failed_closed:
