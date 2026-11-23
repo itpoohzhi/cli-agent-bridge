@@ -181,6 +181,15 @@ def synthesize_required_bash_desc_enabled() -> bool:
     return _SYNTHESIZE_BASH_DESC_SOURCE.enabled(fallback=True)
 
 
+FLAG_STDIO_USAGE_CONTRACT = "BRIDGE_STDIO_USAGE_CONTRACT_ENABLED"
+_STDIO_USAGE_CONTRACT_SOURCE = DynamicFlagSource(FLAG_STDIO_USAGE_CONTRACT, default=True)
+
+
+def stdio_usage_contract_enabled() -> bool:
+    """Состояние kill-switch ``BRIDGE_STDIO_USAGE_CONTRACT_ENABLED`` (по умолчанию True)."""
+    return _STDIO_USAGE_CONTRACT_SOURCE.enabled(fallback=True)
+
+
 def allow_hub_client_response_header(
     name: str,
     blocked: frozenset[str],

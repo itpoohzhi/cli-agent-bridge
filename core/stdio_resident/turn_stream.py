@@ -14,6 +14,8 @@ from core.runtime_env import (
     read_config_snapshot,  # pyright: ignore[reportUnknownVariableType]
 )
 from core.stdio_resident.protocol_driver import DecodedChunk
+from core.turn_usage import TurnUsage
+from core.turn_usage_accumulator import UsageAccumulator
 
 DEFAULT_AGGREGATE_OUTPUT_BYTES: Final[int] = 16 * 1024 * 1024
 AGGREGATE_OUTPUT_BYTES_ENV_KEYS: Final[tuple[str, ...]] = (
@@ -62,6 +64,7 @@ class AssembledStreamDelta:
     )
     is_terminal: bool = False
     is_tool_stop: bool = False
+    usage: TurnUsage | None = None
 
 
 def _parse_positive_int(raw: object) -> int | None:
@@ -161,6 +164,7 @@ class TurnStreamAssembler:
         *,
         aggregate_output_bytes: int | None = None,
         step_separator: str = DEFAULT_STEP_SEPARATOR,
+        usage_enabled: bool = True,
     ) -> None:
         cap = (
             resolve_aggregate_output_bytes()
@@ -172,6 +176,8 @@ class TurnStreamAssembler:
         self._on_activity: Callable[[], None] | None = on_activity
         self._aggregate_output_bytes: int = cap
         self._step_separator: str = step_separator
+        self._usage_enabled: bool = usage_enabled
+        self._usage_accumulator: UsageAccumulator = UsageAccumulator()
         self._saw_tool_calls: bool = False
         self._has_emitted_content: bool = False
         self._pending_step_separator: str = ""
@@ -179,6 +185,11 @@ class TurnStreamAssembler:
         self._aggregate_bytes: int = 0
         self._last_was_delta: bool = False
         self._last_item_id: str = ""
+
+    @property
+    def current_usage(self) -> TurnUsage | None:
+        """Latest valid TurnUsage observed in this turn (None if disabled/absent)."""
+        return self._usage_accumulator.current if self._usage_enabled else None
 
     @property
     def aggregate_bytes(self) -> int:
@@ -210,9 +221,15 @@ class TurnStreamAssembler:
             if self._on_activity is not None:
                 self._on_activity()
 
+        if self._usage_enabled and chunk.usage is not None:
+            self._usage_accumulator.observe(chunk.usage)
+
         delta = AssembledStreamDelta(
             is_terminal=chunk.is_terminal,
             is_tool_stop=chunk.is_tool_stop,
+            usage=self._usage_accumulator.current
+            if (self._usage_enabled and chunk.is_terminal)
+            else None,
         )
         if chunk.tool_calls:
             self._saw_tool_calls = True

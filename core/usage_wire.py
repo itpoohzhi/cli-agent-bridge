@@ -7,7 +7,9 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Any, TypeGuard
+from typing import Any, TypeGuard, cast
+
+from core.turn_usage import TurnUsage, UsageScope, UsageUpdate, normalize_usage_update
 
 # Ключи cache-read токенов в usage апстримов (порядок = приоритет).
 CACHE_READ_KEYS: tuple[str, ...] = (
@@ -170,3 +172,48 @@ def positive_wire_usage(usage: object) -> dict | None:
     values: list[object] = [usage.get(k) for k in keys]  # pyright: ignore[reportUnknownMemberType]
     positive = any(isinstance(v, int) and not isinstance(v, bool) and v > 0 for v in values)
     return dict(usage) if positive else None  # pyright: ignore[reportUnknownArgumentType]
+
+
+def build_turn_wire_usage(usage: TurnUsage) -> dict[str, Any]:
+    """Serialize canonical TurnUsage to OpenAI wire `usage` dict (single SSOT)."""
+    wire: dict[str, Any] = {
+        "prompt_tokens": usage.prompt_tokens,
+        "completion_tokens": usage.completion_tokens,
+        "total_tokens": usage.total_tokens,
+    }
+    if usage.cache_read_tokens is not None:
+        wire["prompt_tokens_details"] = {"cached_tokens": usage.cache_read_tokens}
+    if usage.reasoning_tokens is not None:
+        wire["completion_tokens_details"] = {"reasoning_tokens": usage.reasoning_tokens}
+    return wire
+
+
+def _wire_nested(mapping: Mapping[str, Any], parent: str, child: str) -> Any:
+    sub = mapping.get(parent)
+    return sub.get(child) if isinstance(sub, Mapping) else None
+
+
+def turn_usage_from_wire(value: object, source: str) -> TurnUsage | None:
+    """Parse an OpenAI wire `usage` mapping into canonical TurnUsage (fail-closed)."""
+    if not isinstance(value, Mapping):
+        return None
+    mapping = cast(Mapping[str, Any], value)
+    cached = _wire_nested(mapping, "prompt_tokens_details", "cached_tokens")
+    if cached is None and "cached_tokens" in mapping:
+        cached = mapping.get("cached_tokens")
+    reasoning = _wire_nested(mapping, "completion_tokens_details", "reasoning_tokens")
+    if reasoning is None and "reasoning_tokens" in mapping:
+        reasoning = mapping.get("reasoning_tokens")
+    update = UsageUpdate(
+        input_tokens=mapping.get("prompt_tokens"),
+        output_tokens=mapping.get("completion_tokens"),
+        cache_read_tokens=cached,
+        cache_creation_tokens=None,
+        reasoning_tokens=reasoning,
+        reported_total_tokens=mapping.get("total_tokens"),
+        input_includes_cache=True,
+        output_includes_reasoning=True,
+        source=source,
+        scope=UsageScope.TURN_SNAPSHOT,
+    )
+    return normalize_usage_update(update).usage
