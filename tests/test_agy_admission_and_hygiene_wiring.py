@@ -21,7 +21,7 @@ except ImportError:
     from tests.resilience_wiring_support import load_server, use_config
 
 SERVER_PATH = Path(__file__).resolve().parents[1] / "bridges" / "agy-bridge" / "server.py"
-BASELINE_LOC = 8294
+BASELINE_LOC = 8402  # origin/dev HEAD 466e0ea9 before merging this branch
 ALL_ON: dict[str, object] = {
     "agy_adaptive_admission_enabled": True,
     "agy_fast_client_gone_enabled": True,
