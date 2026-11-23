@@ -143,6 +143,8 @@ from agy_runtime import (  # noqa: E402
     long_session_config as _lsc, midstream_resilience, slot_and_session,
     sse_body_runner, sse_stream_helpers, tool_turn_helpers, turn_usage_finalize as _u_fin, zero_canon_profile,
 )
+from agy_runtime import history_compaction_adapter as _hca  # noqa: E402
+from agy_runtime.history_compaction_domain import json_text_bytes as _json_text_bytes, middle_prune_text as _middle_prune_text  # noqa: E402
 from core.correlation_contract import extract_correlation, format_log_corr_suffix  # noqa: E402
 from core.prompt_budget_policy import LazyPromptMaterializer, compute_prompt_budget, resolve_ctx_prompt  # noqa: E402
 from core.slot_acquire import SlotWaitOptions, acquire_slot_timed  # noqa: E402
@@ -2472,6 +2474,12 @@ def _protocol_reserve_bytes(
     return max(_ndjson_bytes(wrapped) - _ndjson_bytes(probe), 0)
 
 
+def _prune_or_compact(blocks: list[tuple[int, str, str]], tail_block: str, limit: int) -> str:
+    """Фасад обрезки истории: legacy или компакция по флагу AD-005."""
+    req = _hca.CompactionAdapterRequest(blocks=blocks, tail_block=tail_block, limit_bytes=limit, enabled=_new_flag("history_compaction_enabled"), legacy_prune=_prune_prompt_blocks, log_fn=_log, config_path=DYNAMIC_CONFIG_PATH, size_fn=_ndjson_bytes)
+    return _hca.render_or_compact_blocks(req)
+
+
 def _messages_to_prompt(
     messages: list,
     images: list[dict[str, object]] | None = None,
@@ -2500,10 +2508,10 @@ def _messages_to_prompt(
     limit = _prompt_budget(reserve_bytes)
     if not AGY_BRIDGE_ENABLE_HEAD_PRUNING or _ndjson_bytes(text) <= limit:
         return text
-    pruned = _prune_prompt_blocks(blocks, tail_block, limit)
+    pruned = _prune_or_compact(blocks, tail_block, limit)
     if not _new_flag("truncation_notice_enabled"):
         return pruned
-    rp = partial(_prune_prompt_blocks, blocks, tail_block)
+    rp = partial(_prune_or_compact, blocks, tail_block)
     return with_truncation_notice(pruned, blocks, rp, _NOTICE_POLICY, limit)
 
 
@@ -2902,44 +2910,6 @@ def _cap_prompt_block(block: str, cap: int) -> str:
     pruned = _middle_prune_text(body, budget)
     # Пустое тело — только заголовок: без висячего перевода строки на границе блоков.
     return header + sep + pruned if pruned else header
-
-
-def _json_text_bytes(text: str) -> int:
-    """Байты UTF-8 строки после JSON-экранирования, без обрамляющих кавычек."""
-    return len(json.dumps(text, ensure_ascii=False).encode("utf-8")) - 2
-
-
-def _middle_prune_text(text: str, max_text_bytes: int) -> str:
-    """Вырезать середину `text` с MIDDLE_PRUNED_MARKER под экранированный бюджет.
-
-    Голова (командная директива) и хвост (аргументы) делятся поровну по символам;
-    результат — наибольший, чей JSON-экранированный размер <= `max_text_bytes`.
-    """
-    if _json_text_bytes(text) <= max_text_bytes:
-        return text
-    if _json_text_bytes(MIDDLE_PRUNED_MARKER) > max_text_bytes:
-        low, high = 0, len(text)
-        while low < high:
-            mid = (low + high + 1) // 2
-            if _json_text_bytes(text[:mid]) <= max_text_bytes:
-                low = mid
-            else:
-                high = mid - 1
-        return text[:low]
-
-    def build(keep: int) -> str:
-        head = (keep + 1) // 2
-        tail = keep // 2
-        return text[:head] + MIDDLE_PRUNED_MARKER + (text[-tail:] if tail else "")
-
-    low, high = 0, len(text) - 1
-    while low < high:
-        mid = (low + high + 1) // 2
-        if _json_text_bytes(build(mid)) <= max_text_bytes:
-            low = mid
-        else:
-            high = mid - 1
-    return build(low)
 
 
 def _ensure_prompt_fits_ndjson(prompt: str, max_bytes: int | None = None) -> str:
@@ -3463,6 +3433,7 @@ class _RuntimeFlags(NamedTuple):
     graceful_timeout_finish_reason: str = "stop"
     session_continuity_enabled: bool = False
     truncation_notice_enabled: bool = False
+    history_compaction_enabled: bool = False
 
 
 _NEW_FLAG_ENV = {
@@ -3478,6 +3449,7 @@ _NEW_FLAG_ENV = {
     "graceful_interruption_on_partial": "AGY_GRACEFUL_INTERRUPTION_ON_PARTIAL",
     "session_continuity_enabled": "AGY_SESSION_CONTINUITY_ENABLED",
     "truncation_notice_enabled": "AGY_TRUNCATION_NOTICE_ENABLED",
+    "history_compaction_enabled": "AGY_HISTORY_COMPACTION_ENABLED",
 }
 _ENV_TRUE = frozenset({"1", "true", "yes", "on"})
 _ENV_FALSE = frozenset({"0", "false", "no", "off"})
