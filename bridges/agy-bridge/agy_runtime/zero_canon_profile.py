@@ -20,8 +20,8 @@ from core.zero_canon_fs import (
     make_ephemeral_zc_cwd,
     read_gigarc_bool,
     remove_entry,
-    write_atomic_0600,
-    write_atomic_text_0600,
+    replace_atomic_0600,
+    replace_atomic_text_0600,
 )
 
 _DEFAULT_CFG: Final[Path] = Path(__file__).resolve().parent.parent / "dynamic_config.json"
@@ -82,9 +82,9 @@ def sync_agy_gemini_files(pairs: tuple[tuple[Path, Path], ...], signatures: dict
 
 def _write_atomic_0600(dst: Path, *, text: str | None = None, src: Path | None = None) -> None:
     if text is not None:
-        write_atomic_text_0600(dst, text)
+        replace_atomic_text_0600(dst, text)
     elif src is not None:
-        write_atomic_0600(dst, src.read_bytes())
+        replace_atomic_0600(dst, src.read_bytes())
 
 
 def _remove_entry(entry: Path) -> None:
