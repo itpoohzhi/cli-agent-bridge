@@ -32,7 +32,8 @@ from core.stdio_resident.rpc_drivers import register_protocol_driver
 _DEFAULT_SANDBOX_FLAGS: tuple[str, ...] = ("--sandbox",)
 _DEFAULT_CLI_ARGS: tuple[str, ...] = ("--stdio",)
 _MUSE_SERVE_ARGS: tuple[str, ...] = (
-    "serve", "--provider", "meta", "--disable-write", "--disable-shell", "--disable-request-user-input", "--no-session-log",
+    "serve", "--provider", "meta", "--preset", "empty",
+    "--disable-write", "--disable-shell", "--disable-request-user-input", "--no-session-log",
 )
 
 
@@ -48,6 +49,7 @@ class MuseMspDriver(StdioProtocolDriver):
         self._next_id: int = 1
         self._id_lock = threading.Lock()
         self._last_session_id: str | None = None
+        self._streamed_items: dict[str, set[str]] = {}
 
     @property
     def capabilities(self) -> DriverCapabilities:
@@ -187,8 +189,33 @@ class MuseMspDriver(StdioProtocolDriver):
         return build_turn_start_msg(self._ensure_session_id(ctx), str(ctx.get("effort") or self._config.get("effort") or "medium"), prompt, uuid7(), rid)
 
     def decode_line(self, raw_line: str) -> DecodedChunk | None:
-        """Decode one stdout NDJSON line, ignoring blank lines."""
-        return decode_msp_line(raw_line) if raw_line.strip() else None
+        """Decode one stdout NDJSON line, deduplicating item/completed after item/delta."""
+        if not raw_line.strip():
+            return None
+        chunk = decode_msp_line(raw_line)
+        raw = chunk.raw if isinstance(chunk.raw, Mapping) else {}
+        method = raw.get("method")
+        params = raw.get("params") if isinstance(raw.get("params"), Mapping) else {}
+        sid = str(params.get("sessionId") or "")
+        if method in {"item.delta", "item/delta"} and (chunk.text or chunk.reasoning):
+            if item_id := str(params.get("itemId") or ""):
+                with self._id_lock:
+                    self._streamed_items.setdefault(sid, set()).add(item_id)
+        elif method == "item/completed":
+            item = params.get("item") if isinstance(params.get("item"), Mapping) else {}
+            item_id = str(item.get("itemId") or "")
+            if item_id:
+                with self._id_lock:
+                    seen = self._streamed_items.get(sid)
+                    already_streamed = bool(seen and item_id in seen)
+                    if seen is not None:
+                        seen.discard(item_id)
+                if already_streamed:
+                    return MuseDecodedChunk(raw=chunk.raw)
+        if chunk.is_terminal and sid:
+            with self._id_lock:
+                self._streamed_items.pop(sid, None)
+        return chunk
 
     def is_terminal(self, raw_line: str, decoded: DecodedChunk | None) -> bool:
         """Return True if the line marks terminal turn completion or error."""

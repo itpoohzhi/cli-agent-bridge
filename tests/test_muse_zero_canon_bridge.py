@@ -133,6 +133,37 @@ def test_session_start_clears_developer_prompt_only_in_zero_canon() -> None:
         assert sent[-1]["params"]["config"] == {"developerPrompt": None}
 
 
+def test_muse_driver_default_serve_args_include_preset_empty_and_dedup_item_completed() -> None:
+    drv = MuseMspDriver({"technical_ref": {"binary_path": "/bin/muse", "binary_sha256": "abc"}})
+    args = drv._cli_args()
+    assert "--preset" in args and args[args.index("--preset") + 1] == "empty"
+    delta_line = json.dumps({
+        "jsonrpc": "2.0", "method": "item/delta",
+        "params": {"sessionId": "s1", "itemId": "i1", "field": "text", "delta": "PONG"},
+    })
+    completed_line = json.dumps({
+        "jsonrpc": "2.0", "method": "item/completed",
+        "params": {"sessionId": "s1", "item": {"itemId": "i1", "kind": "agentMessage", "text": "PONG"}},
+    })
+    completed_only_line = json.dumps({
+        "jsonrpc": "2.0", "method": "item/completed",
+        "params": {"sessionId": "s1", "item": {"itemId": "i2", "kind": "agentMessage", "text": "FALLBACK"}},
+    })
+    term_line = json.dumps({
+        "jsonrpc": "2.0", "method": "turn/completed",
+        "params": {"sessionId": "s1", "terminal": "completed"},
+    })
+    c1 = drv.decode_line(delta_line)
+    c2 = drv.decode_line(completed_line)
+    c3 = drv.decode_line(completed_only_line)
+    c4 = drv.decode_line(term_line)
+    assert c1 is not None and c1.text == "PONG"
+    assert c2 is not None and c2.text == ""
+    assert c3 is not None and c3.text == "FALLBACK"
+    assert c4 is not None and c4.is_terminal is True
+    assert "s1" not in drv._streamed_items
+
+
 def test_subbridge_prepare_muse_launch_sets_muse_bin(tmp_path: Path) -> None:
     import importlib.util
     import sys
