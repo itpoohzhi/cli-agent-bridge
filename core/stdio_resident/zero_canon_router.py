@@ -6,11 +6,13 @@ import json
 import os
 import shutil
 import tempfile
+import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from core.runtime_env import env_first
@@ -32,6 +34,10 @@ CLAUDE_BRIDGE_URL_ENV = "HUB_ZERO_CANON_CLAUDE_BRIDGE_URL"
 DEFAULT_CLAUDE_BRIDGE_URL = "http://127.0.0.1:9881/v1"
 CLAUDE_PROTOCOLS = frozenset({"claude-stream-json", "claude_stream_json"})
 CLAUDE_BACKEND_IDS = frozenset({"claude", "claude-p", "claude_p"})
+CODEX_PROTOCOLS = frozenset(
+    {"codex-app-server", "codex-app-server-v2", "codex_app_server", "codex_app_server_v2"}
+)
+CODEX_BACKEND_IDS = frozenset({"codex", "codex-app-server", "codex-app-server-v2"})
 KIND_RESIDENT, KIND_BRIDGE, KIND_EPHEMERAL = "resident", "bridge", "ephemeral"
 
 
@@ -51,11 +57,15 @@ def decide_zero_canon_route(
     *,
     backend_id: str = "",
 ) -> ZeroCanonRoute:
-    """Zero-Canon не смешивается с резидентным пулом; мост :9881 — только по GigaRC-флагу."""
+    """Zero-Canon никогда не использует KIND_RESIDENT; Codex всегда строго KIND_EPHEMERAL."""
     if not is_zero_canon_profile(review_profile):
         return ZeroCanonRoute(KIND_RESIDENT)
+    proto_norm = protocol.strip().lower()
+    backend_norm = backend_id.strip().lower()
+    if proto_norm in CODEX_PROTOCOLS or backend_norm in CODEX_BACKEND_IDS:
+        return ZeroCanonRoute(KIND_EPHEMERAL, is_ephemeral=True)
     env = os.environ if environ is None else environ
-    is_claude = protocol in CLAUDE_PROTOCOLS or backend_id.strip().lower() in CLAUDE_BACKEND_IDS
+    is_claude = proto_norm in CLAUDE_PROTOCOLS or backend_norm in CLAUDE_BACKEND_IDS
     cfg_path = resolve_hub_dynamic_config(env)
     if is_claude and read_gigarc_bool(HUB_ZERO_CANON_ROUTING_FLAG, cfg_path, environ=env, default=False):
         found = env_first(env, (CLAUDE_BRIDGE_URL_ENV,))
@@ -64,10 +74,10 @@ def decide_zero_canon_route(
 
 
 class ZeroCanonIsolation:
-    """Изолированный корень HOME на один ход; `active` — драйвер поддерживает Zero-Canon."""
+    """Изолированный корень HOME на один ход; `active` — строго KIND_EPHEMERAL без sharing со standard."""
 
     def __init__(self, driver: object, root: str | None) -> None:
-        self.root = root
+        self.root: str | None = root
         self.cwd: str | None = os.path.join(root, "cwd") if root is not None else None
         self._env: Callable[..., dict[str, str]] | None = getattr(driver, "build_zero_canon_env", None)
         self._argv: Callable[..., list[str]] | None = getattr(driver, "build_zero_canon_argv", None)
@@ -76,11 +86,23 @@ class ZeroCanonIsolation:
     def active(self) -> bool:
         return self.root is not None and callable(self._env)
 
+    @property
+    def route_kind(self) -> str:
+        return KIND_EPHEMERAL if self.active else KIND_RESIDENT
+
+    @property
+    def is_ephemeral(self) -> bool:
+        return self.active
+
     def env(self, base_env: Mapping[str, str]) -> dict[str, str] | None:
-        """Изолированное окружение процесса либо `None`, если изоляция неактивна."""
+        """Изолированное окружение процесса (с проверкой отсутствия standard HOME leak) либо `None`."""
         if not self.active or self._env is None or self.root is None:
             return None
-        return self._env(dict(base_env), self.root)
+        isolated = self._env(dict(base_env), self.root)
+        iso_home = str(isolated.get("HOME") or "")
+        if not iso_home or not Path(iso_home).resolve().is_relative_to(Path(self.root).resolve()):
+            raise RuntimeError("zero_canon_standard_home_leak")
+        return isolated
 
     def argv(self, argv: list[str], model: str, effort: str) -> list[str]:
         """Zero-Canon argv драйвера, если изоляция активна."""
@@ -102,11 +124,11 @@ def zero_canon_isolation(driver: Any, review_profile: str | None) -> Iterator[Ze
     if not callable(getattr(driver, "build_zero_canon_env", None)):
         raise RuntimeError(f"zero_canon_unsupported_by_driver:{type(driver).__name__}")
     root = tempfile.mkdtemp(prefix="zc-")
-    os.chmod(root, 0o700)
-    cwd_dir = os.path.join(root, "cwd")
-    os.makedirs(cwd_dir, mode=0o700, exist_ok=True)
-    os.chmod(cwd_dir, 0o700)
     try:
+        os.chmod(root, 0o700)
+        cwd_dir = os.path.join(root, "cwd")
+        os.makedirs(cwd_dir, mode=0o700, exist_ok=True)
+        os.chmod(cwd_dir, 0o700)
         yield ZeroCanonIsolation(driver, root)
     finally:
         shutil.rmtree(root, ignore_errors=True)
@@ -202,6 +224,8 @@ def _stream_routed_chunks(
         if thought:
             yield "reasoning_content", thought
         return
+    if is_zero_canon_profile(str(request.get("review_profile") or "")) and route.kind == KIND_RESIDENT:
+        raise RuntimeError("zero_canon_resident_route_forbidden")
     routed_req = {**request, "is_ephemeral": bool(request.get("is_ephemeral")) or route.is_ephemeral}
     for chunk in execute_chat(routed_req):
         delta = chunk["choices"][0]["delta"]

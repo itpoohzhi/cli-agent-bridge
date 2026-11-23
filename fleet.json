@@ -1080,6 +1080,7 @@
         "low",
         "medium",
         "high",
+        "xhigh",
         "max"
       ],
       "default_effort": "high",
@@ -1096,7 +1097,7 @@
         "disabled_backend": "codex",
         "routes": [
           {
-            "route_id": "codex",
+            "route_id": "codex-app-server-v2",
             "backend": "codex",
             "weight": 0,
             "priority": 10
@@ -1133,7 +1134,7 @@
         "disabled_backend": "codex",
         "routes": [
           {
-            "route_id": "codex",
+            "route_id": "codex-app-server-v2",
             "backend": "codex",
             "weight": 0,
             "priority": 10
