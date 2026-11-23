@@ -28,7 +28,7 @@ def _isolated_config(monkeypatch, tmp_path):
     monkeypatch.setenv("BRIDGE_STREAM_BACKOFF_JITTER_RATIO", "0")
 
 
-def _config(monkeypatch, *, sliding=True, buffering=True, midstream=True):
+def _config(monkeypatch, sliding=True, buffering=True, midstream=True):
     values = {
         "MIDSTREAM_RETRY_ENABLED": midstream,
         "TOOL_ROLLBACK_ENABLED": buffering and not midstream,
@@ -81,9 +81,10 @@ def _run(clock, script):
 
 
 def _wire_runner(monkeypatch, server, clock, run, modes):
-    buffering, midstream = modes
-    config = _config(monkeypatch, buffering=buffering, midstream=midstream)
+    buffering, midstream, sliding = (*modes, True)[:3]
+    config = _config(monkeypatch, sliding, buffering, midstream)
     runner, _old_handler, _logs = _runner(monkeypatch, config, clock)
+    runner.buffering = buffering
     handler = server.Handler.__new__(server.Handler)
     handler._job_client_gone = lambda: False
     handler._log_done = lambda *_args: None
@@ -134,7 +135,6 @@ def test_useful_deltas_drive_shared_attempt_runtime(
     runner, handler = _wire_runner(
         monkeypatch, server, clock, run, (buffering, midstream)
     )
-    runner.buffering = buffering
     run.got_event = True
     patches = _patch_clock(server, clock)
     with patches[0], patches[1]:
@@ -160,7 +160,6 @@ def test_idle_expires_in_execute_and_cancels_upstream(
     runner, _handler = _wire_runner(
         monkeypatch, server, clock, run, (buffering, midstream)
     )
-    runner.buffering = buffering
     run.got_event = True
     patches = _patch_clock(server, clock)
     with patches[0], patches[1]:
@@ -242,6 +241,24 @@ def test_single_writer_done_for_every_attempt(monkeypatch, outcome, sliding, buf
     expected = ("error", 1) if outcome == "exception" else (raw["state"], raw["rc"])
     assert f"rc={expected[1]} state={expected[0]}" in done[0]
     assert handler._defer_done_log is False
+
+
+@pytest.mark.parametrize("sliding,budget", [(True, 1014.5), (False, 300.0)])
+def test_non_buffering_body_uses_sliding_budget(monkeypatch, sliding, budget):
+    clock = FakeClock()
+    script = [(250, "reasoning", "a"), (500, "reasoning", "b"),
+              (750, "reasoning", "c"), (800, "done", (0, "", {}))]
+    run = _run(clock, script if sliding else [(0, "done", (0, "", {}))])
+    run.got_event = True
+    server = _load_server(monkeypatch)
+    runner, _ = _wire_runner(monkeypatch, server, clock, run, (False, False, sliding))
+    runner.s.finalize_stream = lambda out: out.update(graceful_done=True)
+    runner.replay.arm_attempt = arm = mock.Mock(wraps=runner.replay.arm_attempt)
+    with (patches := _patch_clock(server, clock))[0], patches[1]:
+        runner._run_body()
+    assert arm.call_args == (mock.call(budget) if sliding else None)
+    assert (runner._attempt_budget, clock.now_s) == (budget, 800 if sliding else 0)
+    assert (runner._last_out["state"], runner._last_out["rc"]) == ("done", 0)
 
 
 def _has_call(tree, attr):

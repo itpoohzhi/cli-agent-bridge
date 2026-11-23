@@ -241,7 +241,7 @@ class _SseBodyRunner:
                 s.buffer.rollback_uncommitted()
                 _ = out.pop("retained_events", None)
         else:
-            out = self.attempt(0, s.config.first_event_timeout_s)
+            out = self.attempt(0, self.replay.attempt_budget_s(0) if s.config.flag_enabled("sliding_activity_window_enabled") else s.config.first_event_timeout_s)
         if proceed:
             if any((self.cancelled(), dict(client_gone=True).get(str(out.get("state")), False))):
                 s.hooks[1]("client gone mid-stream, child killed")
