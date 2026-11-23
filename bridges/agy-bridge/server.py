@@ -148,6 +148,23 @@ from agy_runtime import (  # noqa: E402
     long_session_config as _lsc, midstream_resilience, slot_and_session, sqlite_ro_pool as _ro_pool,
     sse_body_runner, sse_stream_helpers, tool_turn_helpers, turn_usage_finalize as _u_fin, zero_canon_profile,
 )
+from agy_runtime.hygiene_runtime import HygieneRuntime, ManagedSqliteRoPool  # noqa: E402
+from core.adaptive_admission import AdmissionKey, OutcomeKind  # noqa: E402
+
+_HYGIENE_RT: HygieneRuntime | None = None
+_HYGIENE_LOCK = threading.Lock()
+
+
+def _hygiene_rt() -> HygieneRuntime:
+    global _HYGIENE_RT
+    if (rt := _HYGIENE_RT) is not None:
+        return rt
+    with _HYGIENE_LOCK:
+        if _HYGIENE_RT is None:
+            _HYGIENE_RT = HygieneRuntime(config_path=DYNAMIC_CONFIG_PATH)
+        return _HYGIENE_RT
+
+
 from agy_runtime import history_compaction_adapter as _hca  # noqa: E402
 from agy_runtime.history_compaction_domain import json_text_bytes as _json_text_bytes, middle_prune_text as _middle_prune_text  # noqa: E402
 from core.correlation_contract import extract_correlation, format_log_corr_suffix  # noqa: E402
@@ -1839,15 +1856,13 @@ def _file_sha256(path: object) -> str:
 
     try:
         key = identity()
-        with _sha_cache_lock:
-            cached = _sha_cache.get(resolved)
-        if cached is not None and cached[0] == key:
-            return cached[1]
+        rt = _hygiene_rt()
+        ck = f"{resolved}:{key}"
+        if (hit := rt.sha_cache_get(ck)) is not None:
+            return hit
         with _sha_compute_lock:
-            with _sha_cache_lock:
-                cached = _sha_cache.get(resolved)
-            if cached is not None and cached[0] == key:
-                return cached[1]
+            if (hit := rt.sha_cache_get(ck)) is not None:
+                return hit
             digest = hashlib.sha256()
             with open(resolved, "rb") as handle:
                 for chunk in iter(lambda: handle.read(SHA_CHUNK_BYTES), b""):
@@ -1855,8 +1870,7 @@ def _file_sha256(path: object) -> str:
             if identity() != key:
                 return ""
             hexdigest = digest.hexdigest()
-            with _sha_cache_lock:
-                _sha_cache[resolved] = (key, hexdigest)
+            rt.sha_cache_put(ck, hexdigest)
             return hexdigest
     except OSError:
         return ""
@@ -3013,6 +3027,7 @@ def _session_claim(sess_key: tuple[str, ...], turn_id: str = "") -> str:
             _in_flight_cids.add(cid)
             if turn_id:
                 _active_cid_owners[cid] = turn_id
+            _hygiene_rt().session_claim(str(sess_key))
             return cid
     finally:
         if evicted:
@@ -3033,6 +3048,7 @@ def _session_invalidate(sess_key: tuple, cid: str) -> None:
         entry = _session_store.get(sess_key)
         if entry is not None and entry["cid"] == cid:
             _session_store.pop(sess_key, None)
+            _hygiene_rt().session_invalidate(str(sess_key))
             removed = True
     if removed:
         _persist_sessions()
@@ -3048,12 +3064,8 @@ def _session_commit(sess_key: tuple[str, ...], cid: str) -> None:
             entry["last_used"] = now
             entry["turns"] += 1
         else:
-            _session_store[sess_key] = {
-                "cid": cid,
-                "last_used": now,
-                "created": now,
-                "turns": 1,
-            }
+            _session_store[sess_key] = {"cid": cid, "last_used": now, "created": now, "turns": 1}
+        _hygiene_rt().session_commit(str(sess_key), cid)
     _persist_sessions()
 
 
@@ -3271,12 +3283,22 @@ _supervisor = ProcessSupervisor(
 )
 _group_alive = _supervisor.group_alive
 _kill_group = _supervisor.kill_group
+def _lifecycle_cleanup() -> None:
+    try:
+        _supervisor.kill_all(
+            [p for p in _active.copy().values() if p.returncode is None]
+        )
+    finally:
+        with _HYGIENE_LOCK:
+            rt = _HYGIENE_RT
+        if rt is not None:
+            rt.shutdown_cleanup()
+
+
 _LIFECYCLE = SubbridgeLifecycle(
     hooks=SubbridgeHooks(
         procs_fn=lambda: list(_active.copy().values()),
-        cleanup_fn=lambda: _supervisor.kill_all(
-            [p for p in _active.copy().values() if p.returncode is None]
-        ),
+        cleanup_fn=_lifecycle_cleanup,
         log_fn=_log,
     ),
     workspace=WORKSPACE,
@@ -3288,12 +3310,16 @@ _LIFECYCLE = SubbridgeLifecycle(
 
 def _reset_sqlite_guards_for_tests() -> None:
     """Сбросить процессные глобалы guardrails (хелпер тестов)."""
-    global _breaker_state, _breaker_failures, _breaker_opened_at, _breaker_probe_gen
+    global _HYGIENE_RT, _breaker_state, _breaker_failures, _breaker_opened_at, _breaker_probe_gen
     global _breaker_active_probe_gen, _breaker_probe_started_at, _retry_tenths
     global _compat_ident, _compat_state, _flag_value, _flag_key, _flag_checked_at
     global _sqlite_divergence_count, _sqlite_drain_deadline_count
     global _sqlite_open_connections, _sqlite_max_open_connections, _rng
     global _cfg_snapshot, _cfg_key, _cfg_checked_at, _image_flag_cache, _image_fallback_flag_cache
+    with _HYGIENE_LOCK:
+        if _HYGIENE_RT is not None:
+            _HYGIENE_RT.shutdown_cleanup()
+        _HYGIENE_RT = None
     with _cfg_lock:
         _cfg_snapshot = _COLD_FLAGS
         _cfg_key = None
@@ -3975,9 +4001,12 @@ def _sqlite_ro_pool() -> _ro_pool.SqliteRoPool | None:
         return None
     if not config.enabled:
         return None
+    enabled = _hygiene_rt().snapshot_flags(DYNAMIC_CONFIG_PATH).sqlite_ro_hygiene_enabled
     with _sqlite_guard_lock:
         if _sqlite_ro_pool_cached is None or _sqlite_ro_pool_cached[0] != config:
-            _sqlite_ro_pool_cached = (config, _ro_pool.SqliteRoPool(config))
+            pool = ManagedSqliteRoPool(_ro_pool.SqliteRoPool(config), hygiene_enabled=enabled)
+            _sqlite_ro_pool_cached = (config, cast(_ro_pool.SqliteRoPool, pool))
+        cast(ManagedSqliteRoPool, _sqlite_ro_pool_cached[1]).set_enabled(enabled)
         return _sqlite_ro_pool_cached[1]
 
 
@@ -5141,6 +5170,9 @@ class _Job:
     orphan: bool = False
     running: bool = True
     cancel: Callable[[], None] | None = None
+    tools_count: int = 0
+    ttfc_received: bool = False
+    pgid: int = 0
 
 
 class JobRegistry:
@@ -5296,18 +5328,26 @@ class JobRegistry:
 
     def detach(self, job: _Job, *, allow_orphan: bool = True) -> None:
         cancel = None
+        fast = _hygiene_rt().snapshot_flags(DYNAMIC_CONFIG_PATH).fast_client_gone_enabled
         with self.condition:
             job.readers = max(0, job.readers - 1)
             if job.readers or job.result is not None or job.orphan:
                 return
-            if allow_orphan and self.orphans < self.orphan_max:
+            orphan_ok = (
+                slot_and_session.should_detach_job_orphan(
+                    job.tools_count, job.ttfc_received,
+                    active_orphans=self.orphans, fast_enabled=fast, orphan_max=self.orphan_max,
+                )
+                if fast
+                else (allow_orphan and self.orphans < self.orphan_max)
+            )
+            if allow_orphan and orphan_ok:
                 job.orphan = True
                 self.orphans += 1
             else:
                 job.cancelled.set()
                 cancel = job.cancel
                 self.condition.notify_all()
-        # close()/kill/reap — только вне mutex; producer освободит Bulkhead в finally.
         if cancel is not None:
             cancel()
 
@@ -6911,6 +6951,7 @@ class Handler(BaseHTTPRequestHandler):
     def _start_job_producer(self, ctx: dict, job: _Job) -> None:
         """Зафиксировать контекст попытки до отделения producer от подписчика."""
         registry = _JOB_REGISTRY
+        job.tools_count = int(ctx.get("tools_count") or 0)
         worker = copy.copy(self)
         worker._registry_job = job
         worker_ctx = dict(ctx)
@@ -6954,17 +6995,13 @@ class Handler(BaseHTTPRequestHandler):
         """Доставить события подписчику, сохраняя heartbeat и гарантированный detach."""
         on_text, on_tool_trace, on_reasoning, keepalive = callbacks
         registry, offset = _JOB_REGISTRY, 0
-        heartbeat = _env_float(
-            "BRIDGE_SSE_HEARTBEAT_INTERVAL_S", 12.0, 0.001, float("inf")
-        )
+        heartbeat = _env_float("BRIDGE_SSE_HEARTBEAT_INTERVAL_S", 12.0, 0.001, float("inf"))
         last_delivery = time.monotonic()
         try:
             while True:
                 if _client_gone(self.connection):
                     return {"state": "client_gone", "text": "", "rc": 1}
-                events, out = registry.read(
-                    job, offset, min(heartbeat, TRANSCRIPT_POLL_S)
-                )
+                events, out = registry.read(job, offset, min(heartbeat, TRANSCRIPT_POLL_S))
                 for kind, payload in events:
                     callback = {
                         "text": on_text,
@@ -6973,6 +7010,8 @@ class Handler(BaseHTTPRequestHandler):
                     }[kind]
                     if callback is not None and not callback(payload):
                         return {"state": "client_gone", "text": "", "rc": 1}
+                    if kind in ("text", "tool_trace", "reasoning"):
+                        job.ttfc_received = True
                     offset += 1
                     last_delivery = time.monotonic()
                 if out is not None:
@@ -6982,6 +7021,8 @@ class Handler(BaseHTTPRequestHandler):
                         return {"state": "client_gone", "text": "", "rc": 1}
                     last_delivery = time.monotonic()
         finally:
+            if job.result is None:
+                _hygiene_rt().handle_disconnect(job.pgid, job.ttfc_received, job.tools_count)
             registry.detach(job, allow_orphan=allow_orphan)
 
     def _run_once_impl(
@@ -7000,27 +7041,26 @@ class Handler(BaseHTTPRequestHandler):
             float(raw_req_start) if isinstance(raw_req_start, (int, float)) else t_enter
         )
         self._t_req_start = t_req_start
+        adm_dec = _hygiene_rt().acquire(
+            AdmissionKey(route="chat", backend="agy", model=str(model)),
+            config_path=DYNAMIC_CONFIG_PATH,
+        )
+        if not adm_dec.admitted:
+            self._log_reject("overloaded", model, ctx["model_len"])
+            shed = _terminal_state("overloaded", "adaptive admission shed")
+            self._log_done(cast(str, ctx["model"]), shed, t_enter, cast(str, ctx["tag"]))
+            return shed
         reason = self._acquire_slot(keepalive)
         if reason:
+            _hygiene_rt().release(
+                adm_dec.ticket_id,
+                outcome=OutcomeKind.CANCELLED if reason == "client_gone" else OutcomeKind.ERROR,
+            )
             _log(f"no slot ({reason}) model={model} {tag}")
             if reason == "queue_timeout":
                 self._log_reject("overloaded", model, ctx["model_len"])
-            early: dict[str, object] = {
-                "state": reason,
-                "rc": 1,
-                "text": "",
-                "usage": {},
-                "result": {},
-                "err": "",
-                "tool_calls": [],
-                "tool_events": 0,
-                "conversation_id": "",
-                "num_turns": None,
-                "duration_s": None,
-            }
-            self._log_done(
-                cast(str, ctx["model"]), early, t_enter, cast(str, ctx["tag"])
-            )
+            early = _terminal_state(reason)
+            self._log_done(cast(str, ctx["model"]), early, t_enter, cast(str, ctx["tag"]))
             return early
         t0 = time.monotonic()
         self._metric_run = None
@@ -7034,22 +7074,8 @@ class Handler(BaseHTTPRequestHandler):
                 _launcher()
             except LauncherUnavailable:
                 self._log_reject("launcher_unavailable", model, ctx["model_len"])
-                unavailable: dict[str, object] = {
-                    "state": "launcher_unavailable",
-                    "rc": 1,
-                    "text": "",
-                    "usage": {},
-                    "result": {},
-                    "err": "",
-                    "tool_calls": [],
-                    "tool_events": 0,
-                    "conversation_id": "",
-                    "num_turns": None,
-                    "duration_s": None,
-                }
-                self._log_done(
-                    cast(str, ctx["model"]), unavailable, t_enter, cast(str, ctx["tag"])
-                )
+                unavailable = _terminal_state("launcher_unavailable")
+                self._log_done(cast(str, ctx["model"]), unavailable, t_enter, cast(str, ctx["tag"]))
                 return unavailable
             universal = bool(typed_ctx.get("universal_fallback"))
             if images and img_dir is not None:
@@ -7068,16 +7094,9 @@ class Handler(BaseHTTPRequestHandler):
                         else _image_gate(cast(str, model), cast(str, effort))
                     )
                     if gate is not None:
-                        self._log_reject(
-                            gate.code, cast(str, model), cast(int, ctx["model_len"])
-                        )
+                        self._log_reject(gate.code, cast(str, model), cast(int, ctx["model_len"]))
                         rejected = _terminal_state("image_reject", gate.code)
-                        self._log_done(
-                            cast(str, ctx["model"]),
-                            rejected,
-                            t_enter,
-                            cast(str, ctx["tag"]),
-                        )
+                        self._log_done(cast(str, ctx["model"]), rejected, t_enter, cast(str, ctx["tag"]))
                         return rejected
                     # Реестр активных каталогов ПЕРЕД mkdir: sweep не тронет живой ход.
                     with _active_lock:
@@ -7086,18 +7105,10 @@ class Handler(BaseHTTPRequestHandler):
                     try:
                         _stage_images(img_dir, images)
                     except ImageSpoolError as exc:
-                        _log(
-                            "image_spool_error model=%s err=%s"
-                            % (_safe_log_value(cast(str, model)), exc)
-                        )
+                        _log("image_spool_error model=%s err=%s" % (_safe_log_value(cast(str, model)), exc))
                         if not universal:
                             failed = _terminal_state("image_spool_error", str(exc))
-                            self._log_done(
-                                cast(str, ctx["model"]),
-                                failed,
-                                t_enter,
-                                cast(str, ctx["tag"]),
-                            )
+                            self._log_done(cast(str, ctx["model"]), failed, t_enter, cast(str, ctx["tag"]))
                             return failed
                         _downgrade_to_text_in_run_once(
                             typed_ctx, "spool", "image_spool_error", 1, img_dir
@@ -7122,17 +7133,8 @@ class Handler(BaseHTTPRequestHandler):
                     _log(f"request-budget-exhausted attempt={attempt} {tag}")
                     if attempt == 1:
                         out = {
-                            "state": "timeout",
+                            **_terminal_state("timeout", "request budget exhausted before the first attempt"),
                             "rc": 124,
-                            "text": "",
-                            "usage": {},
-                            "result": {},
-                            "err": "request budget exhausted before the first attempt",
-                            "tool_calls": [],
-                            "tool_events": 0,
-                            "conversation_id": "",
-                            "num_turns": None,
-                            "duration_s": None,
                             "timeout_limit_s": policy.max_timeout_s,
                         }
                     break
@@ -7170,37 +7172,14 @@ class Handler(BaseHTTPRequestHandler):
                         model=model,
                         model_len=ctx["model_len"],
                     )
-                    out = {
-                        "state": "launcher_unavailable",
-                        "rc": 1,
-                        "text": "",
-                        "usage": {},
-                        "result": {},
-                        "err": "",
-                        "tool_calls": [],
-                        "tool_events": 0,
-                        "conversation_id": "",
-                        "num_turns": None,
-                        "duration_s": None,
-                    }
+                    out = _terminal_state("launcher_unavailable")
                     break
                 except OSError as exc:
-                    out = {
-                        "state": "pump_error",
-                        "rc": 1,
-                        "text": "",
-                        "usage": {},
-                        "result": {},
-                        "err": repr(exc),
-                        "tool_calls": [],
-                        "tool_events": 0,
-                        "conversation_id": "",
-                        "num_turns": None,
-                        "duration_s": None,
-                    }
+                    out = _terminal_state("pump_error", repr(exc))
                     break
                 job = getattr(self, "_registry_job", None)
                 if job is not None:
+                    job.pgid = int(getattr(run.proc, "pid", 0) or 0)
                     _JOB_REGISTRY.bind_cancel(job, lambda: _kill_group(run.proc))
                 stop_hook = ctx.get("tool_stop")
                 try:
@@ -7368,6 +7347,9 @@ class Handler(BaseHTTPRequestHandler):
                     and bool(emitted()),
                 )
             _slots.release()
+            slot_and_session.release_admission_for_state(
+                _hygiene_rt().release, adm_dec.ticket_id, cast("dict[str, object]", out)
+            )
         self._log_done(
             cast(str, ctx["model"]),
             cast("dict[str, object]", out),
@@ -7431,6 +7413,12 @@ class Handler(BaseHTTPRequestHandler):
                 f"{FIRST_TOKEN_TIMEOUT_S:g}s",
                 "type": "first_token_timeout",
                 "code": 504,
+            }
+        if st == "overloaded":
+            return {
+                "message": str(out.get("err") or "bridge busy: admission shed"),
+                "type": "overloaded",
+                "code": 503,
             }
         if st == "queue_timeout":
             return {
@@ -7513,6 +7501,7 @@ class Handler(BaseHTTPRequestHandler):
                     "enabled" if _is_image_input_enabled() else "disabled"
                 ),
                 "uptime_s": int(time.time() - _started),
+                "hygiene_health": _hygiene_rt().health_snapshot(DYNAMIC_CONFIG_PATH),
             }
             health.update(_sqlite_health_fields())
             health.update(_runtime_build_fields())
