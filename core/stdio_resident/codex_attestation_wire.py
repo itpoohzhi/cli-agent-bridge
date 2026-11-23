@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Mapping, MutableMapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Final
 
 from core.codex_zero_canon_policy import CodexZeroCanonPolicyError
 from core.stdio_resident.codex_protocol_fsm import ProtocolPhase, ProtocolState
-from core.stdio_resident.turn_error_sse import ResidentTurnError, build_turn_error
+from core.stdio_resident.turn_error_sse import ResidentTurnError, build_turn_error, sanitize_error_message
 from core.subbridge_zero_canon import is_zero_canon_profile
 from core.zero_canon_attestation_http import (
     KIND_EPHEMERAL,
@@ -21,6 +21,7 @@ from core.zero_canon_attestation_http import (
 
 StreamWriter = Callable[[str, str], bool]
 _CODEX_V2_PROTOCOL: Final[str] = "codex-app-server-v2"
+_ATTESTATION_CODE: Final[str] = "zero_canon_attestation_failed"
 _COMPLETED_ONLY: Final[frozenset[ProtocolPhase]] = frozenset({ProtocolPhase.COMPLETED})
 _ADMITTED_PHASES: Final[frozenset[ProtocolPhase]] = frozenset({ProtocolPhase.TURN_ACTIVE, ProtocolPhase.COMPLETED})
 
@@ -81,9 +82,7 @@ def wrap_v2_sse_writer(
         if not attached:
             proof = build_v2_admission_proof(driver, model=model, effort=effort)
             if proof is None:
-                raise ZeroCanonHttpError(
-                    "zero_canon_attestation_failed", "missing verified Zero-Canon admission proof", http_status=502
-                )
+                raise ZeroCanonHttpError(_ATTESTATION_CODE, "missing verified Zero-Canon admission proof", http_status=502)
             setattr(handler, "_zero_canon_admission", proof)
             attached = True
         return sse_writer(kind, text)
@@ -110,10 +109,19 @@ def should_defer_zero_canon_sse_headers(handler: object, ctx: Mapping[str, Any])
     return isinstance(profile, str) and is_zero_canon_profile(profile)
 
 
-def _clear_attestation_attrs(handler: Any) -> None:
+def _clear_attestation_attrs(handler: Any, ctx: Mapping[str, Any] | None = None) -> None:
     for attr in ("_zero_canon_admission", "_zero_canon_completion"):
         if hasattr(handler, attr):
             setattr(handler, attr, None)
+    if isinstance(ctx, MutableMapping):
+        ctx.pop("zero_canon_admission", None)
+        ctx.pop("zero_canon_completion", None)
+
+
+def _is_attestation_error(exc: BaseException) -> bool:
+    if isinstance(exc, ResidentTurnError) and exc.response.code == _ATTESTATION_CODE:
+        return True
+    return any(isinstance(e, ZeroCanonHttpError) and e.code == _ATTESTATION_CODE for e in (exc, exc.__cause__))
 
 
 def _error_status_from_mapping(err: Mapping[str, Any]) -> int:
@@ -138,20 +146,12 @@ class ZeroCanonSseHeaderGate:
 
     @classmethod
     def for_request(
-        cls,
-        handler: Any,
-        ctx: Mapping[str, Any],
-        trace_headers: Sequence[tuple[str, str]] = (),
-        pruned: tuple[str, str | None] = ("", None),
-        *,
-        initial_frame_fn: Callable[[], bool] | None = None,
+        cls, handler: Any, ctx: Mapping[str, Any], trace_headers: Sequence[tuple[str, str]] = (),
+        pruned: tuple[str, str | None] = ("", None), *, initial_frame_fn: Callable[[], bool] | None = None,
     ) -> ZeroCanonSseHeaderGate:
         """Create a request-scoped SSE header gate."""
         managed = ctx.get("managed_turn") or getattr(handler, "_active_managed_turn", None)
-        return cls(
-            handler, ctx, managed, trace_headers, pruned,
-            should_defer_zero_canon_sse_headers(handler, ctx), initial_frame_fn,
-        )
+        return cls(handler, ctx, managed, trace_headers, pruned, should_defer_zero_canon_sse_headers(handler, ctx), initial_frame_fn)
 
     def _optional_admission(self) -> tuple[Any, str] | None:
         adm = self.ctx.get("zero_canon_admission") or getattr(self.handler, "_zero_canon_admission", None)
@@ -175,11 +175,14 @@ class ZeroCanonSseHeaderGate:
         return proof, None
 
     def _fail_closed(self, detail: str) -> bool:
-        msg = detail if "zero_canon_attestation_failed" in detail else f"zero_canon_attestation_failed: {detail}"
-        self.failed_closed = True
-        self.handler._response_status, self.handler._headers_already_sent = 502, True
-        _clear_attestation_attrs(self.handler)
-        self.handler._send(502, {"error": {"message": msg, "type": "upstream_error", "code": "zero_canon_attestation_failed"}})
+        safe = sanitize_error_message(detail)
+        msg = safe if _ATTESTATION_CODE in safe else f"{_ATTESTATION_CODE}: {safe}"
+        self.failed_closed, self.handler._response_status = True, 502
+        _clear_attestation_attrs(self.handler, self.ctx)
+        try:
+            self.handler._send(502, {"error": {"message": msg, "type": "upstream_error", "code": _ATTESTATION_CODE}})
+        finally:
+            self.handler._headers_already_sent = True
         return False
 
     def _emit_sse_200(self, attestation: tuple[Any, str] | None) -> bool:
@@ -237,9 +240,12 @@ class ZeroCanonSseHeaderGate:
         if getattr(self.handler, "_headers_already_sent", False) or getattr(self.handler, "_client_write_dead", False):
             return False
         lease.record_failure(exc)
+        if _is_attestation_error(exc):
+            self._fail_closed(sanitize_error_message(exc))
+            return True
         resp = exc.response if isinstance(exc, ResidentTurnError) else build_turn_error(exc, live_sent=0)
         status = resp.status if resp.status >= 400 else 502
-        self.handler._response_status = status
+        self.failed_closed, self.handler._response_status = True, status
         self.handler._send(status, resp.body)
         return True
 
