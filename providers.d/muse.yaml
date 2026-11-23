@@ -12,11 +12,11 @@ transport:
     wrapper: ~/.config/muse-launch/muse-cli.sh
     proxy_port: 10820
 limits: {max_concurrent: 64, quota_group: meta-muse, pin_required: true, timeout_s: 600}
-# `binary_path` пинит бинарник/лаунчер `~/.local/bin/muse` (sha256 ниже); версия ниже — версия Muse Code (1.4.23), правки только владельцем.
+# `binary_path` пинит бинарник/лаунчер `~/.local/bin/muse` (sha256 ниже); версия ниже — версия Muse Code (1.4.25-R9361.1), правки только владельцем.
 fingerprint:
   binary_path: ~/.local/bin/muse
   binary_sha256: ffb95b823e2a71f49ce98f9ddcb7cd7c731b77615aae9f5f253819c69453079f
-  version: "1.4.23"
+  version: "1.4.25-R9361.1"
 discovery: {method: static}
 family_rule:
   type: exact_map

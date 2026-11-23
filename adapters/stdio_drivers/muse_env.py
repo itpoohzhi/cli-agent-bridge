@@ -8,6 +8,7 @@ import hashlib
 import hmac
 import json
 import os
+import sys
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -18,6 +19,7 @@ from core.zero_canon_fs import ensure_private_dir, remove_entry, write_atomic_06
 MUSE_ENV_ALLOWLIST: tuple[str, ...] = (
     "PATH", "HOME", "LANG", "LC_ALL", "TMPDIR", "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "MUSE_PROVIDER",
 )
+_OPTIONAL_MUSE_ENV_KEYS: tuple[str, ...] = ("MUSE_PROXY_PORT",)
 _REQUIRED_FINGERPRINT_FIELDS: tuple[str, ...] = ("wrapper_path", "wrapper_sha256", "binary_path", "binary_sha256")
 _MUSE_FORBIDDEN_NAMES: tuple[str, ...] = ("AGENTS.md", "CLAUDE.md", "hooks", "hooks.json", "plugins", "skills")
 
@@ -116,6 +118,14 @@ def prepare_muse_zero_canon_home(
     for base in (zc_home, *targets):
         for name in _MUSE_FORBIDDEN_NAMES:
             remove_entry(base / name)
+    if sys.platform == "darwin":
+        kc_src = src_home / "Library" / "Keychains"
+        if kc_src.is_dir():
+            lib_dir = zc_home / "Library"
+            ensure_private_dir(lib_dir, 0o700)
+            kc_dst = lib_dir / "Keychains"
+            if not kc_dst.exists() and not kc_dst.is_symlink():
+                os.symlink(kc_src, kc_dst)
     return zc_home.resolve()
 
 
@@ -149,7 +159,13 @@ def build_muse_env(
     _ = base_env
     trusted_env: Mapping[str, str] = os.environ if server_env is None else server_env
     env: dict[str, str] = {key: val for key in MUSE_ENV_ALLOWLIST if isinstance((val := trusted_env.get(key)), str)}
+    for key in _OPTIONAL_MUSE_ENV_KEYS:
+        if isinstance((val := trusted_env.get(key)), str):
+            env[key] = val
     env["MUSE_BIN_PATH"] = verified_binary_path
+    if verified_binary_path:
+        env["MUSE_BIN"] = verified_binary_path
+    env["MUSE_NO_AUTO_UPDATE"] = "1"
     if turn_sandbox:
         env["TMPDIR"] = turn_sandbox
     if zero_canon_home:

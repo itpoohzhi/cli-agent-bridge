@@ -7590,7 +7590,9 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
             # Доставка — отдельный этап: T/L уже свободны, checkpoint записан; обрыв клиента
             # здесь ни на что, кроме самого ответа, не влияет. У droid content/reasoning уже ушли
             # живьём из _execute (sse_writer выше): здесь остаются только tool_call-кадры.
-            live_backend = out.get("backend_kind") == "droid"
+            live_backend = out.get("backend_kind") == "droid" or (
+                out.get("backend_kind") == "stdio_resident" and live_sent[0] > 0
+            )
             reasoning_to_skip = reasoning_live_chars
             for kind, value in out.get("events") or []:
                 if kind in ("content", "reasoning"):

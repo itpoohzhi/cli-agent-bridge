@@ -16,7 +16,17 @@ CODEX_CONFIG_DENY_EXTRA: Final[tuple[str, ...]] = ("hooks",)
 CODEX_CONFIG_FORCED: Final[Mapping[str, Any]] = {"project_doc_max_bytes": 0}
 
 MUSE_SETTINGS_ALLOWLIST: Final[frozenset[str]] = frozenset(
-    ("provider", "model", "auth", "api_base", "proxy")
+    (
+        "schema_version",
+        "provider",
+        "model",
+        "auth",
+        "api_base",
+        "proxy",
+        "provider_retry",
+        "contributor_mode_enabled",
+        "contributor_mode_disclosure_acknowledged",
+    )
 )
 MUSE_ZERO_CANON_FLAG: Final[str] = "MUSE_ZERO_CANON_ENABLED"
 
