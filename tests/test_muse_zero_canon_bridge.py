@@ -164,6 +164,11 @@ def test_muse_driver_default_serve_args_include_preset_empty_and_dedup_item_comp
     assert "s1" not in drv._streamed_items
 
 
+def test_server_sse_suppresses_replay_for_live_stdio_resident() -> None:
+    src = (Path(__file__).resolve().parents[1] / "server.py").read_text(encoding="utf-8")
+    assert 'out.get("backend_kind") == "stdio_resident" and live_sent[0] > 0' in src
+
+
 def test_subbridge_prepare_muse_launch_sets_muse_bin(tmp_path: Path) -> None:
     import importlib.util
     import sys
