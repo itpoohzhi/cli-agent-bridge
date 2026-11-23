@@ -244,12 +244,24 @@ def test_single_writer_done_for_every_attempt(monkeypatch, outcome, sliding, buf
     assert handler._defer_done_log is False
 
 
-def test_ast_proves_runner_execute_and_cancellation_wiring():
+def _has_call(tree, attr):
+    return any(
+        isinstance(n, ast.Call)
+        and isinstance(n.func, ast.Attribute)
+        and n.func.attr == attr
+        for n in ast.walk(tree)
+    )
+
+
+def test_ast_proves_runner_activity_wiring():
     runner_tree = ast.parse(
         (_ROOT / "bridges/agy-bridge/agy_runtime/sse_body_runner.py").read_text()
     )
     runner_dump = ast.dump(runner_tree)
     assert "activity_runtime" in runner_dump and "ActivityRuntime" in runner_dump
+
+
+def test_ast_proves_runner_execute_and_cancellation_wiring():
     server_tree = ast.parse((_ROOT / "bridges/agy-bridge/server.py").read_text())
     execute = next(
         n
@@ -267,9 +279,4 @@ def test_ast_proves_runner_execute_and_cancellation_wiring():
         for n in ast.walk(server_tree)
         if isinstance(n, ast.FunctionDef) and n.name == "_run_once_impl"
     )
-    assert any(
-        isinstance(n, ast.Call)
-        and isinstance(n.func, ast.Attribute)
-        and n.func.attr == "close"
-        for n in ast.walk(impl)
-    )
+    assert _has_call(impl, "close")
