@@ -326,3 +326,38 @@ def native_autonomy(route: PostRoute) -> tuple[Any, str] | None:
         route.reject(400, error.reason, str(error))
         return None
     return route.request.get("autonomy"), "request"
+
+
+def selected_route_allowed(route: PostRoute) -> bool:
+    """Сохраняет post-selection deny и проверку отложенной авторизации."""
+    handler, host = route.handler, route.host
+    if str(route.model.get("backend") or "").strip().lower() == "droid":
+        trace = getattr(handler, "_trace", None) or host._resolve_trace(
+            dict(handler.headers.items()), route.request,
+        )
+        if host.denied_subagent(
+            "DROID", str(handler.headers.get("X-Subagent-Id") or ""), trace.subagent_id,
+        ):
+            return route.reject(403, "droid_forbidden_for_role",
+                                "droid route is forbidden for this subagent role")
+    denial = host._quarantine_denial(route.model_id, handler.headers.get("X-Subagent-Id"))
+    if denial is not None:
+        handler._log_reject(denial.reason, route.model_id, route.model_len)
+        handler.close_connection = True
+        handler._send(denial.http, denial.body())
+        return False
+    if route.ingress.deferred_passthrough_auth:
+        selected = host.BACKENDS.get(route.model["backend"])
+        if not isinstance(selected, host.PassthroughAdapter) or not (
+            selected.validate_client_token(host._extract_auth_token(handler))
+        ):
+            route.ingress.send_error(401, "auth_error", "unauthorized")
+            return False
+    return True
+
+
+__all__ = (
+    "PostRoute", "PreparedPostBody", "prepare_post_body", "prepare_route_request",
+    "_notes_allow", "_internal_allowed", "_penalty_allowed", "_provider_allowed",
+    "selected_route_allowed",
+)
