@@ -48,7 +48,7 @@ class StdioPoolConfig:
             math.inf,
             integer=True,
         ),
-        "lease_wait_s": _S(("BRIDGE_STDIO_LEASE_WAIT_S",), 30.0, 0.1, 300.0),
+        "lease_wait_s": _S(("BRIDGE_STDIO_LEASE_WAIT_S",), 30.0, 0.1, 600.0),
         "cancel_grace_s": _S(("BRIDGE_STDIO_CANCEL_GRACE_S",), 5.0, 0.1, 60.0),
         "shutdown_timeout_s": _S(
             ("BRIDGE_STDIO_SHUTDOWN_TIMEOUT_S",), 10.0, 0.5, 120.0

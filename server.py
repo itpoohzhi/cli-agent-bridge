@@ -7273,6 +7273,12 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
         try:
             out = self._dispatch(ctx, None)
         except ResidentTurnError as exc:
+            from core.stdio_resident.sse_error_bridge import _sanitize_log_text
+
+            safe_err = _sanitize_log_text(exc.response.message, extra_code=exc.response.code)
+            _log(
+                f"json_resident_error status={exc.status} code={exc.response.code} err={safe_err!r}"
+            )
             lease.record_failure(exc)
             self._send(exc.status, exc.response.body)
             return

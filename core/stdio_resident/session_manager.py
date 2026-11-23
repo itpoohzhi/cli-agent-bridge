@@ -6,7 +6,6 @@ from __future__ import annotations
 
 import hashlib
 import inspect
-import math
 import os
 import shutil
 import tempfile
@@ -16,37 +15,35 @@ from collections.abc import Callable, Generator, Iterator, Mapping
 from contextlib import suppress
 from dataclasses import dataclass
 from enum import Enum
-from typing import IO, Any, Final, cast
+from typing import IO, Any, cast
 
 from core.stdio_resident.config import StdioPoolConfig
 from core.stdio_resident.process_io import TIMEOUT
 from core.stdio_resident.process_pool import ResidentProcessPool, SlotLeaseTimeoutError
 from core.stdio_resident.protocol_driver import DecodedChunk, StdioProtocolDriver
+from core.stdio_resident.turn_deadlines import (
+    DEFAULT_FIRST_PROGRESS_TIMEOUT_S,
+    DEFAULT_SAFETY_CAP_S,
+    DEFAULT_TURN_IDLE_TIMEOUT_S,
+    TurnTimeoutError,
+    _resolve_deadlines,
+    _TurnDeadlines,
+)
 from core.stdio_resident.types import ExecutionFingerprint, SlotAffinityKey
 from core.stdio_resident.zero_canon_router import ZeroCanonIsolation, zero_canon_isolation
+from core.timeout_ladder import ActivityKind
 from core.zero_canon_fs import acquire_turn_lock, cleanup_turn_sandbox
 
-__all__ = ["SessionTurnMode", "SessionTurnResult", "SlotLeaseTimeoutError", "StdioSessionManager", "TurnTimeoutError"]
-
-DEFAULT_FIRST_PROGRESS_TIMEOUT_S: Final[float] = 60.0
-DEFAULT_TURN_IDLE_TIMEOUT_S: Final[float] = 180.0
-DEFAULT_SAFETY_CAP_S: Final[float] = 900.0
-_TIMEOUT_CODES: Final[dict[str, str]] = {
-    "first_progress": "first_progress_timeout",
-    "idle": "idle_timeout",
-    "safety_cap": "safety_cap_timeout",
-}
-
-
-class TurnTimeoutError(TimeoutError):
-    """Typed timeout separating first-progress, idle, and safety cap."""
-
-    http_status: int = 504
-
-    def __init__(self, timeout_kind: str, message: str) -> None:
-        self.timeout_kind: str = timeout_kind
-        self.code: str = _TIMEOUT_CODES.get(timeout_kind, "turn_timeout")
-        super().__init__(f"{self.code}: {message}")
+__all__ = [
+    "DEFAULT_FIRST_PROGRESS_TIMEOUT_S",
+    "DEFAULT_SAFETY_CAP_S",
+    "DEFAULT_TURN_IDLE_TIMEOUT_S",
+    "SessionTurnMode",
+    "SessionTurnResult",
+    "SlotLeaseTimeoutError",
+    "StdioSessionManager",
+    "TurnTimeoutError",
+]
 
 
 class SessionTurnMode(str, Enum):
@@ -79,36 +76,6 @@ class _TurnRequest:
 
 
 @dataclass(slots=True)
-class _TurnDeadlines:
-    idle_s: float
-    safety_deadline: float
-    first_progress_deadline: float
-    idle_deadline: float
-    has_progress: bool = False
-
-    def record_useful(self, now: float) -> None:
-        self.has_progress = True
-        if now < self.safety_deadline:
-            self.idle_deadline = max(self.idle_deadline, min(self.safety_deadline, now + self.idle_s))
-
-    def next_timeout(self, now: float) -> float:
-        if now >= self.safety_deadline:
-            raise TurnTimeoutError("safety_cap", "turn safety cap exceeded")
-        active = min(self.idle_deadline if self.has_progress else self.first_progress_deadline, self.safety_deadline)
-        if now >= active:
-            kind = "idle" if self.has_progress else "first_progress"
-            raise TurnTimeoutError(kind, f"resident process {kind} timeout exceeded")
-        return active - now
-
-    def timeout_error(self, now: float) -> TurnTimeoutError:
-        active = self.idle_deadline if self.has_progress else self.first_progress_deadline
-        if now >= self.safety_deadline or self.safety_deadline <= active:
-            return TurnTimeoutError("safety_cap", "turn safety cap exceeded")
-        kind = "idle" if self.has_progress else "first_progress"
-        return TurnTimeoutError(kind, f"resident process {kind} timeout exceeded")
-
-
-@dataclass(slots=True)
 class _ActiveTurn:
     slot: Any
     session_key: str
@@ -123,38 +90,6 @@ class _ActiveTurn:
     teardown_completed: bool = False
     released: bool = False
     is_tool_stop: bool = False
-
-
-def _parse_pos_float(value: object) -> float | None:
-    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
-        return None
-    try:
-        parsed = float(value)
-    except ValueError:
-        return None
-    return parsed if math.isfinite(parsed) and parsed > 0.0 else None
-
-
-def _pick_timeout(ctx: Mapping[str, Any], cfg: object, names: tuple[str, ...], env_key: str) -> float | None:
-    for name in names:
-        if (val := _parse_pos_float(ctx.get(name))) is not None:
-            return val
-    for name in names:
-        if (val := _parse_pos_float(getattr(cfg, name, None))) is not None:
-            return val
-    return _parse_pos_float(os.environ.get(env_key))
-
-
-def _resolve_deadlines(cfg: object, ctx: Mapping[str, Any], now: float) -> _TurnDeadlines:
-    idle_s = _pick_timeout(ctx, cfg, ("idle_timeout_s", "turn_idle_timeout_s"), "BRIDGE_STDIO_TURN_IDLE_TIMEOUT_S")
-    idle_val = DEFAULT_TURN_IDLE_TIMEOUT_S if idle_s is None else idle_s
-    first_raw = _pick_timeout(ctx, cfg, ("first_progress_timeout_s", "turn_first_progress_timeout_s"), "BRIDGE_STDIO_FIRST_PROGRESS_TIMEOUT_S")
-    first_val = min(DEFAULT_FIRST_PROGRESS_TIMEOUT_S if first_raw is None else first_raw, idle_val)
-    cap_raw = _pick_timeout(ctx, cfg, ("safety_cap_s", "turn_safety_cap_s"), "BRIDGE_STDIO_SAFETY_CAP_S")
-    legacy_total = _parse_pos_float(getattr(cfg, "turn_total_timeout_s", None)) or DEFAULT_SAFETY_CAP_S
-    cap_val = max(DEFAULT_SAFETY_CAP_S, idle_val, legacy_total) if cap_raw is None else cap_raw
-    safety_dl = now + cap_val
-    return _TurnDeadlines(idle_val, safety_dl, min(safety_dl, now + first_val), min(safety_dl, now + idle_val))
 
 
 def _collect_id_maps(raw: object) -> list[Mapping[str, Any]]:
@@ -344,8 +279,12 @@ class StdioSessionManager:
             if (chunk_error := getattr(decoded, "error", None)) is not None:
                 self._cancel_active(active, send_payload=False)
                 raise RuntimeError(chunk_error)
-            if decoded.text or decoded.reasoning or decoded.tool_calls:
-                deadlines.record_useful(self._clock())
+            if decoded.text:
+                deadlines.record_useful(self._clock(), ActivityKind.CONTENT)
+            elif decoded.reasoning:
+                deadlines.record_useful(self._clock(), ActivityKind.REASONING)
+            elif decoded.tool_calls:
+                deadlines.record_useful(self._clock(), ActivityKind.TOOL_CALLS)
             if (reply_bytes := getattr(decoded, "reply_bytes", None)) is not None:
                 active.slot.handle.write(reply_bytes)
         if self._driver.is_terminal(raw_line, decoded):
