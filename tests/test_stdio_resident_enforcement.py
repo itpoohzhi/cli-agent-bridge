@@ -419,6 +419,12 @@ def test_handle_cold_wal_wait_and_resolve_counter(
     tracker._advance_watermark = lambda: None
     tracker._sqlite_off = lambda _reason: None
 
+    assert tracker._wal_wait_limit(None) == 32
+    assert tracker._wal_wait_limit(7) == 7
+    tracker._wal_wait_max_polls = 5
+    assert tracker._wal_wait_limit(None) == 5
+    del tracker._wal_wait_max_polls
+
     cold_exc = sqlite3.OperationalError("unable to open database file")
     assert tracker._on_sqlite_error(cold_exc) is None
     assert tracker.failed is False

@@ -2,6 +2,7 @@ from __future__ import annotations  # noqa: E402
 
 """Тесты канареечного конфига AGY_RESIDENT_ENABLED, отката и стоп-причин."""
 
+import importlib  # noqa: E402
 import math  # noqa: E402
 import sys  # noqa: E402
 from dataclasses import FrozenInstanceError  # noqa: E402
@@ -15,6 +16,8 @@ for _path in (_REPO_ROOT, _BRIDGE_DIR):
     if str(_path) not in sys.path:
         sys.path.insert(0, str(_path))
 
+import adapters.stdio_drivers.agy_config as agy_config_mod  # noqa: E402
+import agy_runtime.agy_resident_canary as canary_mod  # noqa: E402
 from adapters.stdio_drivers.agy_config import (  # noqa: E402
     AgyResidentConfig,
     apply_canary_limits,
@@ -318,3 +321,75 @@ def test_load_agy_canary_config_and_apply_limits() -> None:
         base_cfg, custom_canary, env={"AGY_CANARY_BASELINE": "1"}
     )
     assert clamped_baseline.max_slots == 3
+
+
+def test_check_rss_metric_returns_none_and_checks_bounds() -> None:
+    """Прямой вызов _check_rss_metric всегда возвращает None и фиксирует невалидные входы."""
+    reasons_missing: list[str] = []
+    assert (
+        canary_mod._check_rss_metric(
+            None, "max_slot_rss_mb", 300, "rss_per_slot_exceeded", reasons_missing
+        )
+        is None
+    )
+    assert reasons_missing == ["telemetry_missing:max_slot_rss_mb"]
+
+    reasons_invalid: list[str] = []
+    assert (
+        canary_mod._check_rss_metric(
+            math.inf,
+            "max_slot_rss_mb",
+            300,
+            "rss_per_slot_exceeded",
+            reasons_invalid,
+        )
+        is None
+    )
+    assert reasons_invalid == ["invalid_metric:max_slot_rss_mb"]
+
+    reasons_negative: list[str] = []
+    assert (
+        canary_mod._check_rss_metric(
+            -1.0,
+            "max_slot_rss_mb",
+            300,
+            "rss_per_slot_exceeded",
+            reasons_negative,
+        )
+        is None
+    )
+    assert reasons_negative == ["invalid_metric:max_slot_rss_mb"]
+
+    reasons_ok: list[str] = []
+    assert (
+        canary_mod._check_rss_metric(
+            100.0, "max_slot_rss_mb", 300, "rss_per_slot_exceeded", reasons_ok
+        )
+        is None
+    )
+    assert reasons_ok == []
+
+
+def test_agy_config_fallback_import_adds_bridge_dir_to_sys_path() -> None:
+    """Fallback-импорт agy_config добавляет _BRIDGE_DIR в sys.path и импортирует конфиг."""
+    orig_sys_path = list(sys.path)
+    saved_agy_modules = {
+        name: mod
+        for name, mod in sys.modules.items()
+        if name == "agy_runtime" or name.startswith("agy_runtime.")
+    }
+    try:
+        for name in saved_agy_modules:
+            sys.modules.pop(name, None)
+        sys.path[:] = [p for p in orig_sys_path if "bridges/agy-bridge" not in p]
+
+        reloaded = importlib.reload(agy_config_mod)
+        assert reloaded.AgyResidentCanaryConfig is not None
+        assert any("bridges/agy-bridge" in p for p in sys.path)
+    finally:
+        sys.path[:] = orig_sys_path
+        for name in list(sys.modules):
+            if name == "agy_runtime" or name.startswith("agy_runtime."):
+                sys.modules.pop(name, None)
+        sys.modules.update(saved_agy_modules)
+        importlib.reload(agy_config_mod)
