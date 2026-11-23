@@ -1,21 +1,29 @@
-"""Конфигурация резидентного драйвера `agy` и быстрый JSON-сериализатор (AD-003)."""
-
 from __future__ import annotations
 
-import importlib
-import math
-from collections.abc import Callable, Mapping
-from dataclasses import dataclass
-from typing import TypeVar, cast
+"""Конфигурация резидентного драйвера `agy` и быстрый JSON-сериализатор (AD-003)."""
 
-from core.stdio_resident.config import StdioPoolConfig
+import importlib  # noqa: E402
+import math  # noqa: E402
+from collections.abc import Callable, Mapping  # noqa: E402
+from dataclasses import dataclass  # noqa: E402
+from typing import TypeVar, cast  # noqa: E402
+
+from core.stdio_resident.config import StdioPoolConfig  # noqa: E402
+
+from .agy_canary import (  # noqa: E402
+    AgyResidentCanaryConfig as AgyResidentCanaryConfig,
+    apply_canary_limits as apply_canary_limits,
+    load_agy_canary_config as load_agy_canary_config,
+)
 
 __all__ = [
     "FLAG_AGY_RESIDENT",
     "AgyResidentConfig",
+    "apply_canary_limits",
     "build_agy_pool_config",
     "encode_json_bytes",
     "is_agy_resident_enabled",
+    "load_agy_canary_config",
     "load_agy_resident_config",
 ]
 
