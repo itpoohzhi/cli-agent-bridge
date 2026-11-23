@@ -351,8 +351,19 @@ def test_non_weakref_slots_handle_never_inherits_previous_handle_tls_state() -> 
             return TaggedLine(line=self._out.pop(0), generation=0, pid=self.pid, is_stderr=False) if self._out else None
 
     driver = CodexAppServerV2Driver()
-    h1 = _BareSlottedHandle(9601)
+    h1: _BareSlottedHandle | None = _BareSlottedHandle(9601)
     h2 = _BareSlottedHandle(9602)
     assert driver.run_handshake(h1, timeout_s=5.0) is True
     # Calling prepare_turn on a brand-new uninitialized h2 must fail-closed (not inherit h1's INITIALIZED state!)
     assert driver.prepare_turn(h2, {"model": "gpt-6.1-sol", "review_profile": "standard"}, timeout_s=1.0) is False
+
+    # F-001 regression: even after h1 finishes teardown, is deleted & GC'd (allowing CPython id() reuse),
+    # a newly allocated bare __slots__ handle MUST NOT inherit h1's FSM state!
+    import gc
+
+    assert driver.run_handshake(h1, timeout_s=5.0) is True
+    assert driver.perform_turn_teardown(h1, {}, timeout_s=1.0) is True
+    h1 = None
+    _ = gc.collect()
+    h3 = _BareSlottedHandle(9603)
+    assert driver.prepare_turn(h3, {"model": "gpt-6.1-sol", "review_profile": "standard"}, timeout_s=1.0) is False

@@ -285,7 +285,7 @@ class _V2SlotState:
     state: ProtocolState
     last_turn_state: ProtocolState | None = None
     last_effects: tuple[ProtocolEffect, ...] = ()
-    handle_id: int | None = None
+    bound_handle: object | None = None
 
 
 class CodexAppServerV2Driver(StreamJsonDriver):
@@ -321,7 +321,7 @@ class CodexAppServerV2Driver(StreamJsonDriver):
         return ctx
 
     def _bind_handle_state(self, handle: Any, slot: _V2SlotState) -> None:
-        slot.handle_id = id(handle) if handle is not None else None
+        slot.bound_handle = None
         self._tls.ctx = slot
         if handle is None:
             return
@@ -341,7 +341,9 @@ class CodexAppServerV2Driver(StreamJsonDriver):
         try:
             ref = weakref.ref(handle, _cleanup)
         except TypeError:
-            # Handle supports neither __dict__ nor __weakref__: keep handle_id-guarded TLS only.
+            # Handle supports neither __dict__ nor __weakref__: hold object identity reference
+            # for the active turn (released in teardown), making CPython id() aliasing impossible.
+            slot.bound_handle = handle
             return
         with self._slot_lock:
             self._weak_slots[key] = (ref, slot)
@@ -479,8 +481,8 @@ class CodexAppServerV2Driver(StreamJsonDriver):
             self._tls.ctx = bound
         elif handle is not None:
             cur = cast(_V2SlotState | None, getattr(self._tls, "ctx", None))
-            if cur is not None and cur.handle_id is not None and cur.handle_id != id(handle):
-                self._tls.ctx = _V2SlotState(state=ProtocolState(), handle_id=id(handle))
+            if cur is None or cur.bound_handle is not handle:
+                self._tls.ctx = _V2SlotState(state=ProtocolState())
         ctx = _mapping(turn_context) or {}
         profile_raw = ctx.get("review_profile")
         zc = is_zero_canon_profile(profile_raw) if isinstance(profile_raw, str) and profile_raw.strip() else False
@@ -577,11 +579,16 @@ class CodexAppServerV2Driver(StreamJsonDriver):
     @override
     def perform_turn_teardown(self, handle: Any, turn_context: Any, timeout_s: float = 2.0) -> bool:
         _ = (turn_context, timeout_s)
-        slot = self._lookup_handle_state(handle) or self._ctx()
+        bound = self._lookup_handle_state(handle)
+        slot = bound if bound is not None else self._ctx()
         self._tls.ctx = slot
         slot.last_turn_state = slot.state
         was_zero_canon = slot.state.zero_canon
         _ = self.advance_epoch()
+        if bound is None:
+            # Release strong reference held for bare non-weakref handles so GC can reclaim them
+            # and no future handle reusing the same address can match `bound_handle is handle`.
+            slot.bound_handle = None
         if was_zero_canon:
             self._release_handle_state(handle)
         return True
