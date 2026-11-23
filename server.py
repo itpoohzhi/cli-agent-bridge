@@ -7545,7 +7545,7 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
             from core.stdio_resident.sse_error_bridge import SseErrorContext, handle_sse_stream_exception
             if handle_sse_stream_exception(exc, live_sent[0], SseErrorContext(self, lease, emit, stream_error_frame, _log)):
                 return
-            if gate.handle_pre_stream_error(exc, lease):
+            if gate.handle_pre_stream_error(exc, lease, log_fn=_log):
                 return
             raise
         if gate.failed_closed:
