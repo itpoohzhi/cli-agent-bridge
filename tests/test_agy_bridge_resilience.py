@@ -15024,23 +15024,7 @@ def test_w2b_run_once_defer_done_log_and_legacy_default() -> None:
             assert sum("done model=" in line for line in logs) == (not deferred)
 
 
-def test_w2b_runner_final_log_extended_graceful_and_fail_closed(
-    monkeypatch: Any, tmp_path: Path
-) -> None:
-    from tests.test_stream_activity_window import _config, _runner
-
-    monkeypatch.setenv("BRIDGE_DYNAMIC_CONFIG_PATH", str(tmp_path / "dynamic.json"))
-    manual = _FakeClock()
-    clock = SimpleNamespace(monotonic=manual, sleep=lambda _seconds: None)
-    runner, _old_handler, _old_logs = _runner(monkeypatch, _config(monkeypatch), clock)
-    handler = srv.Handler.__new__(srv.Handler)
-    handler._acquire_slot = lambda _keepalive: ""
-    caps: list[float] = []
-
-    class _Run(_StubRun):
-        def __init__(self, *_args: object, **kwargs: object) -> None:
-            self.policy = kwargs["policy"]
-
+def _w2b_extended_execute(handler, manual, clock, caps):
     def execute(run: Any, *_args: object, **_kwargs: object) -> dict[str, object]:
         fake = _ext_run(manual, lambda _tick, now, active: _stamp(active, now))
         fake.policy = run.policy
@@ -15050,8 +15034,24 @@ def test_w2b_runner_final_log_extended_graceful_and_fail_closed(
             srv.Handler._execute(handler, fake, _text_sink, _tool_sink, _text_sink, None)
         caps.append(manual())
         return _scripted_out("done", text="")
+    return execute
 
-    handler._execute = execute
+
+def test_w2b_runner_final_log_extended_graceful_and_fail_closed(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    from tests.test_stream_activity_window import _config, _runner
+    monkeypatch.setenv("BRIDGE_DYNAMIC_CONFIG_PATH", str(tmp_path / "dynamic.json"))
+    manual = _FakeClock()
+    clock = SimpleNamespace(monotonic=manual, sleep=lambda _seconds: None)
+    runner, _old_handler, _old_logs = _runner(monkeypatch, _config(monkeypatch), clock)
+    handler = srv.Handler.__new__(srv.Handler)
+    handler._acquire_slot = lambda _keepalive: ""
+    caps: list[float] = []
+    class _Run(_StubRun):
+        def __init__(self, *_args: object, **kwargs: object) -> None:
+            self.policy = kwargs["policy"]
+    handler._execute = _w2b_extended_execute(handler, manual, clock, caps)
     runner.s.handler = handler
     runner.s.ctx = _ctx(stream=True)
     logs: list[str] = []
@@ -15064,8 +15064,9 @@ def test_w2b_runner_final_log_extended_graceful_and_fail_closed(
     done = [line for line in logs if "done model=" in line]
     assert caps == [1300]
     assert (out["state"], out["rc"], out["text"]) == ("timeout", 124, "")
-    assert srv.Handler._error_body(out)["code"] == 504
-    assert len(done) == 1
-    for field in ("rc=124", "state=timeout", "out_bytes=0", "had_progress=False"):
+    assert (srv.Handler._error_body(out)["code"], len(done)) == (504, 1)
+    for field in (
+        "rc=124", "state=timeout", "out_bytes=0", "had_progress=False",
+        "err='retry_budget_exhausted'",
+    ):
         assert field in done[0]
-    assert "err='retry_budget_exhausted'" in done[0]

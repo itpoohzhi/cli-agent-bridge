@@ -205,23 +205,38 @@ def render_final_outcome(raw_out: Mapping[str, object], snapshot: ActivitySnapsh
 build_final_outcome = render_final_outcome
 
 
+def _expired_outcome(raw_out: Mapping[str, object], snapshot: ActivitySnapshot, *,
+                     req_id: str, cid: str) -> FinalStreamOutcome:
+    return FinalStreamOutcome(
+        state="timeout",
+        rc=124,
+        err="retry_budget_exhausted",
+        timeout_limit_s=snapshot.timeout_limit_s,
+        had_progress=snapshot.had_progress,
+        elapsed_s=snapshot.elapsed_s,
+        req_id=routes.redact_diagnostic_text(
+            req_id if req_id else str(raw_out.get("req_id", ""))
+        ),
+        cid=routes.redact_diagnostic_text(
+            cid if cid else str(raw_out.get("cid", ""))
+        ),
+    )
+
+
 def _final_outcome(raw_out: Mapping[str, object], snapshot: ActivitySnapshot, *,
                    req_id: str, cid: str) -> FinalStreamOutcome:
-    expired = snapshot.state in _EXPIRED
+    if snapshot.state in _EXPIRED:
+        return _expired_outcome(raw_out, snapshot, req_id=req_id, cid=cid)
     raw_rc = raw_out.get("rc", 0)
     raw_limit = raw_out.get("timeout_limit_s", snapshot.timeout_limit_s)
     valid_limit = type(raw_limit) in (int, float) and math.isfinite(raw_limit)
     limit = raw_limit if valid_limit else 0.0
     return FinalStreamOutcome(
-        state="timeout" if expired else str(raw_out.get("state", "")),
-        rc=124 if expired else raw_rc if type(raw_rc) is int else 0,
-        err="retry_budget_exhausted" if expired else routes.redact_diagnostic_text(
-            str(raw_out.get("err", ""))
-        ),
-        timeout_limit_s=snapshot.timeout_limit_s if expired else max(0.0, float(limit)),
-        had_progress=snapshot.had_progress if expired else bool(
-            raw_out.get("had_progress", snapshot.had_progress)
-        ),
+        state=str(raw_out.get("state", "")),
+        rc=raw_rc if type(raw_rc) is int else 0,
+        err=routes.redact_diagnostic_text(str(raw_out.get("err", ""))),
+        timeout_limit_s=max(0.0, float(limit)),
+        had_progress=bool(raw_out.get("had_progress", snapshot.had_progress)),
         elapsed_s=snapshot.elapsed_s,
         req_id=routes.redact_diagnostic_text(
             req_id if req_id else str(raw_out.get("req_id", ""))
