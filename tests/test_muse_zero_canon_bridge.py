@@ -125,6 +125,12 @@ def test_session_start_clears_developer_prompt_only_in_zero_canon() -> None:
         )
     )
     assert zc_msg["params"]["config"] == {"developerPrompt": None}
+    drv = MuseMspDriver({})
+    sent: list[dict[str, Any]] = []
+    drv._send_and_wait_ack = lambda _h, payload, _pred, _t: (sent.append(json.loads(payload)), True)[1]  # type: ignore[method-assign]
+    for ctx in ({"review_profile": "Zero-Canon"}, {"review_profile": "zero_canon"}, {"zero_canon": True}):
+        assert drv.prepare_turn(object(), ctx) is True
+        assert sent[-1]["params"]["config"] == {"developerPrompt": None}
 
 
 def test_subbridge_prepare_muse_launch_sets_muse_bin(tmp_path: Path) -> None:

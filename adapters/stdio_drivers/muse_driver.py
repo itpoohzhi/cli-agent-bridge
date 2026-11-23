@@ -167,7 +167,8 @@ class MuseMspDriver(StdioProtocolDriver):
         model_id = str(ctx.get("model_id") or ctx.get("model") or self._config.get("model_id") or self._config.get("model") or "muse-wonder-1.0")
         approval_mode = str(ctx.get("approval_mode") or self._config.get("approval_mode") or "denyUnmatched")
         req_id = self._allocate_id()
-        is_zero_canon = str(ctx.get("review_profile") or "").strip().lower() == "zero-canon"
+        profile_norm = str(ctx.get("review_profile") or "").strip().lower().replace("_", "-")
+        is_zero_canon = profile_norm == "zero-canon" or str(ctx.get("zero_canon") or "").strip().lower() in ("1", "true")
         payload = build_session_start_msg(
             self._ensure_session_id(turn_context, True),
             model_id,
