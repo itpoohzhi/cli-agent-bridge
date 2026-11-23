@@ -94,6 +94,7 @@ import queue
 import random
 import re
 import select
+import secrets
 import shutil
 import socket
 import sqlite3
@@ -1747,7 +1748,7 @@ def _catalog_model_order() -> list[str]:
     return [mid for mid in order if _model_in_allowlist(mid, allowed)]
 
 
-def _launch_env(zero_canon: bool = False) -> dict:
+def _launch_env(zero_canon: bool = False, req_id: str = "") -> dict:
     """Окружение для `agy`. Ключ моста потомку не передаётся.
 
     HOME указывает на изолированный <clean-home> (Zero-Canon); браузер для
@@ -1780,6 +1781,8 @@ def _launch_env(zero_canon: bool = False) -> dict:
     env.setdefault(ALLOWED_MODELS_ENV, _allowed_models_file())
     env["BRIDGE_ZERO_CANON"] = "1"
     env["BROWSER"] = "/usr/bin/false"
+    if req_id:
+        env.setdefault("AGY_REQUEST_ID", req_id)
     return _lsc.apply_direct_mode_policy(env, config_path=DYNAMIC_CONFIG_PATH)
 
 
@@ -1803,6 +1806,17 @@ def _auth_ok(handler: BaseHTTPRequestHandler) -> bool:
     if hdr.startswith("Bearer "):
         return hdr[7:].strip() == AUTH_KEY
     return handler.headers.get("x-api-key", "") == AUTH_KEY or hdr.strip() == AUTH_KEY
+
+
+_REQUEST_ID_RE = re.compile(r"[A-Za-z0-9_.-]{1,64}")
+
+
+def _request_id(headers: Mapping[str, str]) -> str:
+    """Return a safe request id without ever exposing a rejected raw value."""
+    raw = headers.get("X-Request-Id", "")
+    if isinstance(raw, str) and _REQUEST_ID_RE.fullmatch(raw):
+        return raw
+    return "req_" + secrets.token_hex(8)
 
 
 def _flatten_content(content: Any, img_counter: list[int] | None = None) -> str:
@@ -5532,6 +5546,7 @@ class Run:
         add_dir: Path | None = None,
         mode: str = "agent",
         zero_canon: bool = False,
+        req_id: str = "",
     ):
         launcher = _launcher()
         WORKSPACE.mkdir(parents=True, exist_ok=True)
@@ -5578,6 +5593,7 @@ class Run:
         if self.run_cid and not _cid_acquire(self.run_cid, self.turn_id):
             plan.anchored = False
             plan.reason = "cid_busy"
+        spawn_started = time.monotonic()
         try:
             self.proc = spawn_registered(
                 cmd,
@@ -5586,12 +5602,18 @@ class Run:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 start_new_session=True,
-                env=_launch_env(zero_canon=zero_canon),
+                env=_launch_env(zero_canon=zero_canon, req_id=req_id),
             )
         except BaseException:
             _cid_release(self.run_cid, self.turn_id)
             raise
         self.started = time.monotonic()
+        self.req_id = req_id
+        self.spawn_ms = int((self.started - spawn_started) * 1000)
+        self.first_event_at: float | None = None
+        self.first_reasoning_at: float | None = None
+        self.first_content_at: float | None = None
+        self.stream_chunks = 0
         # Политика попытки (AD-003): None — прежние TIMEOUT_S/IDLE_TIMEOUT_S.
         self.policy = policy
         enabled = _is_watchdog_enabled()
@@ -5716,6 +5738,8 @@ class Run:
                 self._last_reasoning_step_index = idx
                 if out_delta:
                     self._last_reasoning_chunk = out_delta
+                if getattr(self, "first_reasoning_at", None) is None:
+                    self.first_reasoning_at = time.monotonic()
                 self.q.put(("reasoning", out_delta))
                 if on_delivered is not None:
                     on_delivered()
@@ -6011,6 +6035,8 @@ class Run:
                 except ValueError:
                     continue
                 self.got_event = True
+                if getattr(self, "first_event_at", None) is None:
+                    self.first_event_at = time.monotonic()
                 self.note_producer_activity("stdout")
                 etype = ev.get("event")
                 if etype == "init":
@@ -6050,6 +6076,7 @@ class Run:
                                 tool_steps = self._tool_step_indices = set()
                             tool_steps.add(t_idx)
                     if kind == "agent_response" and step.get("text_delta"):
+                        self.stream_chunks = getattr(self, "stream_chunks", 0) + 1
                         step_idx = _as_int(step.get("step_index"))
                         delta = str(step["text_delta"])
                         if not isinstance(
@@ -6469,10 +6496,11 @@ class Handler(BaseHTTPRequestHandler):
             keepalive=keepalive,
             keepalive_interval_s=_lsc.queue_keepalive_interval_s(config_path=DYNAMIC_CONFIG_PATH),
         )
-        outcome, wait_ms = acquire_slot_timed(
+        outcome, _wait_ms = acquire_slot_timed(
             slots, max(0.0, deadline - time.monotonic()), self._job_client_gone, opts
         )
-        self._last_queue_wait_ms = wait_ms
+        # Admission latency is measured from HTTP ingress, not merely semaphore polling.
+        self._last_queue_wait_ms = int((time.monotonic() - float(t_req_start)) * 1000)
         if dict(ok=True).get(outcome, False):
             _maybe_checkpoint_sqlite_wal()
             return ""
@@ -6536,6 +6564,8 @@ class Handler(BaseHTTPRequestHandler):
         def add_content(text: str) -> None:
             if gone[0] or not text:
                 return
+            if getattr(run, "first_content_at", None) is None:
+                run.first_content_at = time.monotonic()
             pieces.append(text)
             if not on_text(text):
                 gone[0] = True
@@ -6819,12 +6849,27 @@ class Handler(BaseHTTPRequestHandler):
         """Одна строка done на каждом выходе _run_once (O-EXIT)."""
         conversation = str(out.get("conversation_id") or "-")[:8]
         out_bytes = len(str(out.get("text") or "").encode())
+        run = getattr(self, "_metric_run", None)
+        wall_ms = int((time.monotonic() - t0) * 1000)
+
+        def elapsed(at: object) -> str:
+            return str(int((at - run.started) * 1000)) if run is not None and isinstance(at, (int, float)) else "-"
+
+        ttfc = elapsed(getattr(run, "first_content_at", None))
+        gen_ms = str(max(0, wall_ms - int(ttfc))) if ttfc != "-" else "-"
+        req_id = str(getattr(self, "_request_id", "") or "-")
         None if getattr(self, "_defer_done_log", False) else _log(
-            f"done model={model} rc={out.get('rc')} state={out.get('state')} "
+            f"done req_id={req_id} model={model} rc={out.get('rc')} state={out.get('state')} "
             f"conversation={conversation} "
             f"turns={out.get('num_turns')} tool_events={out.get('tool_events')} "
             f"out_bytes={out_bytes} had_progress={out.get('had_progress')} "
-            f"wall_s={time.monotonic() - t0:.1f}"
+            f"wall_s={time.monotonic() - t0:.1f} "
+            f"queue_wait_ms={getattr(self, '_last_queue_wait_ms', '-')} "
+            f"spawn_ms={getattr(run, 'spawn_ms', '-')} "
+            f"first_event_ms={elapsed(getattr(run, 'first_event_at', None))} "
+            f"ttft_reasoning_ms={elapsed(getattr(run, 'first_reasoning_at', None))} "
+            f"ttfc_ms={ttfc} gen_ms={gen_ms} "
+            f"stream_chunks={getattr(run, 'stream_chunks', '-')}"
             f"{_usage_log_fields(out.get('usage_resolved'))} "
             f"err={_err_summary(out.get('err'))!r} {tag}"
         )
@@ -6976,6 +7021,7 @@ class Handler(BaseHTTPRequestHandler):
             )
             return early
         t0 = time.monotonic()
+        self._metric_run = None
         out: dict = {}
         typed_ctx = cast("dict[str, object]", ctx)
         images = cast("list[dict[str, object]]", typed_ctx.get("images") or [])
@@ -7110,7 +7156,9 @@ class Handler(BaseHTTPRequestHandler):
                         add_dir=img_dir if images else None,
                         **({"mode": ctx["agy_mode"]} if "agy_mode" in ctx else {}),
                         **({"zero_canon": True} if ctx.get("zero_canon") else {}),
+                        req_id=str(ctx.get("req_id") or ""),
                     )
+                    self._metric_run = run
                 except LauncherUnavailable:
                     self._reject(
                         503,
@@ -7528,6 +7576,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         t_req_start = time.monotonic()  # старт бюджета запроса: до admission
+        self._request_id = _request_id(self.headers)
+        self._metric_run = None
         self._pending_response_headers = None
         self._last_queue_wait_ms = 0
         self._observed_cid = ""
@@ -7897,11 +7947,13 @@ class Handler(BaseHTTPRequestHandler):
             req_id, sub_id = extract_correlation(
                 self.headers, max_len=_lsc.corr_max_len(config_path=DYNAMIC_CONFIG_PATH)
             )
+            req_id = self._request_id
             _anchor_meta = (messages, continuity_scope, chat_id, _CID_RE)
             ctx = {
                 "registry_use_cid": use_cid,
                 "registry_owned_cid": owned_cid,
                 "t_req_start": t_req_start,
+                "req_id": req_id,
                 "step_job_id": str(
                     self.headers.get("X-Idempotency-Key")
                     or req.get("step_job_id")

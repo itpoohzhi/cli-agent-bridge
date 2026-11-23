@@ -413,7 +413,7 @@ class RequestTrace:
 
 @functools.cache
 def _trace_pattern(max_len: int) -> re.Pattern[str]:
-    return re.compile(r"[A-Za-z0-9_.:@-]{1,%d}" % max_len)
+    return re.compile(r"[A-Za-z0-9_.-]{1,%d}" % max_len)
 
 
 def _sanitize_trace_id(value: object, max_len: int) -> str | None:
