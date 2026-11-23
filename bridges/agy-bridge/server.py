@@ -4001,13 +4001,13 @@ def _sqlite_ro_pool() -> _ro_pool.SqliteRoPool | None:
     try:
         config = _ro_pool.load_sqlite_ro_pool_config(os.environ)
     except ValueError:
+        if _env_bool(_ro_pool.FLAG_SQLITE_RO_POOL, False):
+            raise
         return None
     if not config.enabled:
         return None
     with _sqlite_guard_lock:
         if _sqlite_ro_pool_cached is None or _sqlite_ro_pool_cached[0] != config:
-            if _sqlite_ro_pool_cached is not None:
-                _sqlite_ro_pool_cached[1].close_all()
             _sqlite_ro_pool_cached = (config, _ro_pool.SqliteRoPool(config))
         return _sqlite_ro_pool_cached[1]
 

@@ -12,6 +12,10 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, cast
 
+from adapters.stdio_drivers.agy_driver import (
+    AgyStreamJsonDriver,
+    load_agy_resident_config,
+)
 from adapters.stdio_drivers.muse_driver import MuseMspDriver
 from adapters.stdio_drivers.opencode_driver import OpenCodeAcpDriver
 from core.stdio_resident.rpc_drivers import register_protocol_driver
@@ -25,8 +29,10 @@ from core.zero_canon_fs import read_gigarc_bool, resolve_hub_dynamic_config
 _REPO_DYNAMIC_CONFIG: Path = Path(__file__).resolve().parents[2] / "dynamic_config.json"
 
 register_protocol_driver("opencode-acp", OpenCodeAcpDriver)
+register_protocol_driver("agy-stream-json", AgyStreamJsonDriver)
 
 __all__ = [
+    "AgyStreamJsonDriver",
     "CODEX_APP_SERVER_V2_FLAG",
     "MuseMspDriver",
     "OpenCodeAcpDriver",
@@ -46,6 +52,7 @@ _SESSION_ID_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,128}\Z")
 _ENV_MUSE_RESIDENT_ENABLED = "BRIDGE_MUSE_RESIDENT_ENABLED"
 _ENV_OPENCODE_RESIDENT_ENABLED = "BRIDGE_OPENCODE_RESIDENT_ENABLED"
 CODEX_APP_SERVER_V2_FLAG = "BRIDGE_CODEX_APP_SERVER_V2_ENABLED"
+_AGY_IDS = frozenset({"agy", "antigravity", "agy-bridge", "agy-cli"})
 _CLAUDE_IDS = frozenset({"claude", "claude-p", "claude_p"})
 _CODEX_IDS = frozenset({"codex", "codex-cli", "codex-app-server"})
 _CODEX_V2_IDS = frozenset(
@@ -171,12 +178,15 @@ def _infer_protocol_from_id(
     *,
     codex_v2: bool,
     native_cc: bool,
+    agy_on: bool = False,
 ) -> str | None:
     if actual_id == "muse":
         return "msp-v1"
     if actual_id in ("opencode", "opencode-resident"):
         return "opencode-acp"
     lower_id = actual_id.lower()
+    if agy_on and lower_id in _AGY_IDS:
+        return "agy-stream-json"
     if codex_v2 and lower_id in _CODEX_V2_IDS:
         return "codex-app-server-v2"
     if not native_cc:
@@ -191,6 +201,7 @@ def _infer_protocol_from_wrapper(
     *,
     codex_v2: bool,
     native_cc: bool,
+    agy_on: bool = False,
 ) -> str:
     if not wrapper_path:
         return "stream-json"
@@ -200,6 +211,8 @@ def _infer_protocol_from_wrapper(
     if "opencode" in name:
         return "opencode-acp"
     base = name.split(".")[0]
+    if agy_on and (base in _AGY_IDS or name.startswith("agy-cli")):
+        return "agy-stream-json"
     if codex_v2 and name.split()[0].split(".")[0] in _CODEX_V2_IDS:
         return "codex-app-server-v2"
     if not native_cc:
@@ -218,23 +231,28 @@ def infer_protocol(
     config_path: Path | None = None,
 ) -> str:
     """Infer driver protocol from explicit options, backend id, or wrapper basename."""
+    env = os.environ if environ is None else environ
     codex_v2 = is_codex_app_server_v2_enabled(environ, config_path=config_path)
     native_cc = is_claude_codex_resident_protocol_enabled(
         environ, config_path=config_path
     )
+    agy_on = load_agy_resident_config(env).enabled
     explicit = options.get("protocol")
     if isinstance(explicit, str) and explicit.strip():
         clean = explicit.strip()
         if clean == "codex-app-server-v2" and not codex_v2:
             return "codex-app-server" if native_cc else "stream-json"
         return clean
-    by_id = _infer_protocol_from_id(actual_id, codex_v2=codex_v2, native_cc=native_cc)
+    by_id = _infer_protocol_from_id(
+        actual_id, codex_v2=codex_v2, native_cc=native_cc, agy_on=agy_on
+    )
     if by_id is not None:
         return by_id
     return _infer_protocol_from_wrapper(
         _extract_wrapper_path(actual_config),
         codex_v2=codex_v2,
         native_cc=native_cc,
+        agy_on=agy_on,
     )
 
 

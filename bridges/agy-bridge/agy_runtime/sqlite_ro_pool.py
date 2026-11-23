@@ -174,6 +174,10 @@ class SqliteRoPool:
         with self._guard:
             lock = self._locks.get(key)
             if lock is None:
+                if len(self._locks) >= 512:
+                    stale = [k for k, lk in self._locks.items() if not lk.locked()]
+                    for k in stale[: len(stale) // 2 + 1]:
+                        _ = self._locks.pop(k, None)
                 lock = threading.Lock()
                 self._locks[key] = lock
             return lock

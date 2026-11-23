@@ -20,6 +20,11 @@ from typing import Any
 
 from core.dataclass_compat import DC_SLOTS
 from core.nonstream_aggregator import relax_socket_timeout
+from core.timeout_ladder import (
+    ActivityKind,
+    SlidingActivityPolicy,
+    TimeoutLadderConfig,
+)
 
 FLAG_PASSTHROUGH_SLIDING_WINDOW = "BRIDGE_PASSTHROUGH_SLIDING_WINDOW_ENABLED"
 
@@ -99,6 +104,21 @@ class SlidingDeadline:
         self.deadline_s: float = deadline_s
         self.state: SlidingStreamState | None = None
         self._enabled_fn = enabled_fn
+        self._policy: SlidingActivityPolicy | None = None
+        self._policy_now: float = 0.0
+
+    def arm_ladder(self, now: float, ladder: TimeoutLadderConfig) -> None:
+        """Подключает доменную политику `SlidingActivityPolicy` (AD-001, L-LIVE/v1)."""
+        self._policy_now = now
+        self._policy = SlidingActivityPolicy(ladder, lambda: self._policy_now)
+        self.deadline_s = max(self.deadline_s, self._policy.record(ActivityKind.EMPTY))
+
+    def expiry_reason(self, now: float) -> str | None:
+        """Причина истечения окна из `SlidingActivityPolicy` (или None)."""
+        if self._policy is None:
+            return None
+        self._policy_now = now
+        return self._policy.expiry_reason()
 
     def arm(self, state: SlidingStreamState) -> None:
         """Подключает КА; дедлайн ячейки только растёт (F-008), эпоха не убывает."""
@@ -139,10 +159,13 @@ class SlidingDeadline:
     def advance(
         self, now: float, is_useful_chunk: bool, epoch: int | None = None
     ) -> None:
-        """Применяет чанк к КА (если ячейка вооружена) и публикует новый дедлайн.
-
-        Транспортные пульсы флаг не читают: снимок GigaRC опрашивается только на полезных чанках.
-        """
+        """Применяет чанк к КА и `SlidingActivityPolicy` (keepalive дедлайн не двигает)."""
+        if self._policy is not None:
+            self._policy_now = now
+            kind = ActivityKind.CONTENT if is_useful_chunk else ActivityKind.KEEPALIVE
+            p_deadline = self._policy.record(kind)
+            if is_useful_chunk and self.enabled():
+                self.deadline_s = max(self.deadline_s, p_deadline)
         if self.state is None or not is_useful_chunk:
             return
         self.state = step_sliding_stream(self.state, now, True, self.enabled(), epoch)
@@ -177,4 +200,7 @@ def open_sliding_deadline(
             else limits.idle_timeout_s
         )
         cell.arm_for(now, limits, ext)
+        ladder = getattr(limits, "timeout_ladder", None)
+        if isinstance(ladder, TimeoutLadderConfig) and ladder.enabled:
+            cell.arm_ladder(now, ladder)
     return cell

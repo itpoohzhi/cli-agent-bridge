@@ -242,6 +242,7 @@ class PassthroughLimits:
     max_keepalive_connections: int = 32
     keepalive_expiry_s: float = 30.0
     nonstream: NonstreamConfig = field(default_factory=NonstreamConfig)
+    timeout_ladder: TimeoutLadderConfig = field(default_factory=TimeoutLadderConfig)
 
     @classmethod
     def from_env(
@@ -282,6 +283,7 @@ class PassthroughLimits:
             repetition_guard_enabled=env_bool(env, (ENV_REPETITION_GUARD_ENABLED,), False),
             invoke_normalization_enabled=env_bool(env, (ENV_INVOKE_NORMALIZATION_ENABLED,), False),
             nonstream=ns,
+            timeout_ladder=ladder,
         )
 
 

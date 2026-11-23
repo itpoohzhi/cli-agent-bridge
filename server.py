@@ -7689,7 +7689,7 @@ class Server(ThreadingHTTPServer):
 
     # ThreadingMixIn отслеживает non-daemon потоки: выход main не обрывает SSE.
     daemon_threads = _bridge_env("BRIDGE_HTTP_DAEMON_THREADS", "false").strip().lower() in ("1", "true", "yes", "on")
-    request_queue_size = max(16, _env_int_nonneg("BRIDGE_HTTP_REQUEST_QUEUE_SIZE", 64))
+    request_queue_size = min(4096, max(16, _env_int_nonneg("BRIDGE_HTTP_REQUEST_QUEUE_SIZE", 64)))
     allow_reuse_address = True
 
     def get_request(self) -> tuple[Any, Any]:

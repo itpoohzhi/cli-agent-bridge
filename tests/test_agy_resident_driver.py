@@ -82,9 +82,27 @@ def test_env_overrides_idle_precedence_and_fail_closed() -> None:
         {"AGY_RESIDENT_ENABLED": "maybe"},
         {"AGY_RESIDENT_MAX_SLOTS": "eight"},
         {"AGY_RESIDENT_IDLE_TIMEOUT_S": "nan"},
+        {"AGY_RESIDENT_MAX_SLOTS": "0"},
+        {"AGY_RESIDENT_MAX_RSS_MB": "32"},
+        {"AGY_RESIDENT_MAX_TURNS": "0"},
+        {"AGY_RESIDENT_IDLE_TIMEOUT_S": "5000", "AGY_RESIDENT_TTL_S": "60"},
     ):
         with pytest.raises(ValueError):
             _ = load_agy_resident_config(bad)
+    drv = AgyStreamJsonDriver(cfg)
+    assert not drv.should_recycle_after_turns(6) and drv.should_recycle_after_turns(7)
+
+
+def test_runtime_registry_and_infer_protocol_wiring() -> None:
+    from adapters.stdio_drivers import infer_protocol
+    from core.stdio_resident.rpc_drivers import create_protocol_driver
+
+    assert infer_protocol("agy", {}, {}, environ={}) == "stream-json"
+    assert (
+        infer_protocol("agy", {}, {}, environ={FLAG_AGY_RESIDENT: "true"})
+        == "agy-stream-json"
+    )
+    assert isinstance(create_protocol_driver("agy-stream-json"), AgyStreamJsonDriver)
 
 
 def test_config_is_frozen() -> None:
@@ -97,30 +115,14 @@ def test_build_argv_adds_stream_json_model_conversation_without_dupes() -> None:
     base = ["agy.real"]
     argv = driver.build_argv(base, {"model": "gemini-x", "conversation_id": "cid-1"})
     assert base == ["agy.real"]
-    assert argv == [
-        "agy.real",
-        "--input-format",
-        "stream-json",
-        "--output-format",
-        "stream-json",
-        "--print-timeout",
-        "0",
-        "--model",
-        "gemini-x",
-        "--conversation",
-        "cid-1",
+    expected = [
+        "agy.real", "--input-format", "stream-json", "--output-format", "stream-json",
+        "--print-timeout", "0", "--model", "gemini-x", "--conversation", "cid-1",
     ]
-    assert (
-        driver.build_argv(argv, {"model": "gemini-x", "conversation_id": "cid-1"})
-        == argv
-    )
-    merged = driver.build_argv(
-        ["agy.real", "--input-format=stream-json", "--print-timeout=0"], {}
-    )
-    assert (
-        merged.count("--input-format=stream-json") == 1
-        and "--input-format" not in merged
-    )
+    assert argv == expected
+    assert driver.build_argv(argv, {"model": "gemini-x", "conversation_id": "cid-1"}) == argv
+    merged = driver.build_argv(["agy.real", "--input-format=stream-json", "--print-timeout=0"], {})
+    assert merged.count("--input-format=stream-json") == 1 and "--input-format" not in merged
     assert merged.count("--print-timeout=0") == 1 and "--print-timeout" not in merged
 
 

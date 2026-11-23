@@ -43,6 +43,7 @@ KIND = "stdio_resident"
 _PROTOCOLS = (
     "stream-json", "stream-jsonrpc", "acp", "msp-v1", "opencode-acp",
     "claude-stream-json", "codex-app-server", "codex-app-server-v2",
+    "agy-stream-json",
 )
 _ADAPTER_OPTION_KEYS = frozenset({
     "protocol", "cli_argv", "argv", "cli_args", "sandbox_flags",

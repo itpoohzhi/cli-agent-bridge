@@ -191,6 +191,45 @@ def test_monotonicity_fail_closed_when_upper_below_lower() -> None:
         validate_ladder_monotonicity(below_cap, lower)
     with pytest.raises(ValueError):
         validate_ladder_monotonicity(lower, lower, margin_s=1.0)
+    below_connect = TimeoutLadderConfig(enabled=True, connect_timeout_s=5.0)
+    with pytest.raises(ValueError):
+        validate_ladder_monotonicity(below_connect, lower)
+
+
+def test_open_sliding_deadline_wires_sliding_activity_policy() -> None:
+    from types import SimpleNamespace
+
+    from core.passthrough_sliding_window import open_sliding_deadline
+
+    ladder = load_timeout_ladder_config(
+        {
+            FLAG_TIMEOUT_LADDER: "true",
+            "BRIDGE_TIMEOUT_FIRST_EVENT_S": "600",
+            "BRIDGE_TIMEOUT_IDLE_S": "600",
+            "BRIDGE_TIMEOUT_SAFETY_CAP_S": "3600",
+        }
+    )
+    limits = SimpleNamespace(
+        total_timeout_s=300.0,
+        idle_timeout_s=600.0,
+        stream_safety_cap_s=3600.0,
+        timeout_ladder=ladder,
+    )
+    cell = open_sliding_deadline(
+        deadline=300.0,
+        limits=limits,
+        is_internal=False,
+        request={"stream": True},
+        flag_enabled_fn=lambda: True,
+        now_s=100.0,
+    )
+    assert cell.deadline_s == 700.0
+    cell.advance(now=500.0, is_useful_chunk=False)
+    assert cell.deadline_s == 700.0
+    cell.advance(now=500.0, is_useful_chunk=True)
+    assert cell.deadline_s == 1100.0
+    assert cell.expiry_reason(1050.0) is None
+    assert cell.expiry_reason(1100.0) == "idle_timeout"
 
 
 def test_invalid_negative_or_zero_config_raises_value_error() -> None:

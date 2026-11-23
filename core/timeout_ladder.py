@@ -155,6 +155,10 @@ def validate_ladder_monotonicity(
         raise ValueError(f"margin_s must be finite and >= 0, got {margin_s!r}")
     upper.validate()
     lower.validate()
+    if upper.connect_timeout_s < lower.connect_timeout_s:
+        raise ValueError(
+            f"upper connect ({upper.connect_timeout_s!r}) below lower ({lower.connect_timeout_s!r})"
+        )
     pairs = (
         ("first_event", upper.effective_first_event_s, lower.effective_first_event_s),
         ("idle", upper.effective_idle_s, lower.effective_idle_s),
