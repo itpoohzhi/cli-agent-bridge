@@ -130,37 +130,30 @@ def _sse_module(monkeypatch):
     return importlib.import_module("agy_runtime.sse_body_runner")
 
 
-def test_defers_done_log_signature_detection(monkeypatch):
-    module = _sse_module(monkeypatch)
-    assert module._defers_done_log(lambda ctx, *a, **kw: None) is True
-    assert module._defers_done_log(lambda ctx, a, b, c, d: None) is False
-    assert module._defers_done_log(lambda ctx, defer_done_log=False: None) is True
-
-
-def test_invoke_legacy_does_not_defer_or_duplicate_done_log(monkeypatch):
+def test_invoke_legacy_defers_and_runner_writes_one_done_log(monkeypatch):
     clock = FakeClock()
     runner, handler, logs = _runner(
         monkeypatch, _config(monkeypatch, enabled=False), clock
     )
     seen = []
 
-    def once(_ctx, *_args, defer_done_log=False, **_named):
-        seen.append((defer_done_log, _named))
+    def once(_ctx, *_args, **_named):
+        seen.append(getattr(handler, "_defer_done_log", False))
         return {"state": "done", "rc": 0}
 
     handler._run_once = once
     assert runner._invoke()["state"] == "done"
-    assert seen == [(False, {})]
-    assert logs == []
+    assert seen == [True]
+    assert len(logs) == 1 and logs[0]["state"] == "done"
 
 
-def test_log_final_guards_missing_callable_and_non_deferred(monkeypatch):
+def test_log_final_guards_missing_callable_and_writes_owned_log(monkeypatch):
     runner, handler, logs = _runner(monkeypatch, _config(monkeypatch), FakeClock())
     handler._log_done = None
-    runner._log_final({"state": "done"}, deferred=True)
-    handler._log_done = lambda *_args: logs.append("unexpected")
-    runner._log_final({"state": "done"}, deferred=False)
-    assert logs == []
+    runner._log_final({"state": "done"})
+    handler._log_done = lambda *_args: logs.append("done")
+    runner._log_final({"state": "done"})
+    assert logs == ["done"]
 
 
 class _CrossingQueue:
@@ -174,6 +167,9 @@ class _CrossingQueue:
             self.clock.advance(400.0)
             raise queue.Empty
         return "done", (0, "", {})
+
+    def empty(self):
+        return False
 
 
 def _load_server(monkeypatch):
@@ -221,11 +217,14 @@ def test_stage_tool_calls_tolerates_partial_json_and_ignores_empty_list(monkeypa
     runner, _handler, _logs = _runner(monkeypatch, _config(monkeypatch), clock)
     runner.s.commit = lambda: True
     runner._activity_window = runner.replay.arm_attempt(300.0)
+    runtime = importlib.import_module("agy_runtime.activity_runtime")
+    runner._activity_runtime = runtime.ActivityRuntime(runner._activity_window)
     fragment = '{"partial": '
     assert runner.stage(fragment, "tool_calls") is True
     assert runner._activity_window.check_expired(clock.now_s).had_progress is True
     assert runner.s.buffer.commit_fragments() == (("tool_calls", fragment),)
     runner._activity_window = runner.replay.arm_attempt(300.0)
+    runner._activity_runtime = runtime.ActivityRuntime(runner._activity_window)
     assert runner.stage("[]", "tool_calls") is True
     assert runner._activity_window.check_expired(clock.now_s).had_progress is False
 
@@ -234,9 +233,11 @@ def test_invoke_deferred_logs_redacted_error_exactly_once(monkeypatch):
     clock = FakeClock()
     runner, handler, logs = _runner(monkeypatch, _config(monkeypatch), clock)
     runner._activity_window = runner.replay.arm_attempt(300.0)
+    runtime = importlib.import_module("agy_runtime.activity_runtime")
+    runner._activity_runtime = runtime.ActivityRuntime(runner._activity_window)
 
-    def once(_ctx, *_args, defer_done_log=False, **_named):
-        assert defer_done_log is True
+    def once(_ctx, *_args, **_named):
+        assert handler._defer_done_log is True
         raise RuntimeError("boom sk-secret-123")
 
     handler._run_once = once

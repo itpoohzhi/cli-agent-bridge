@@ -149,7 +149,7 @@ def test_timeout_overwrite_is_single_final_done_log(monkeypatch):
     def once(_ctx, *callbacks, defer_done_log=False, **_named):
         clock.advance(400)
         out = {"state": "done", "rc": 0}
-        if not defer_done_log:
+        if not getattr(handler, "_defer_done_log", False):
             handler._log_done("m", out, 0, "test")
         return out
 

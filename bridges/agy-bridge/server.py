@@ -6619,9 +6619,10 @@ class Handler(BaseHTTPRequestHandler):
                     if dec.should_stop:
                         return dict(state("done", 0), tool_turn_stop=dec.tool_turn_stop, tool_turn_clean_eof=dec.tool_turn_clean_eof)
             now = time.monotonic()
+            if (scope := sse_body_runner.activity_runtime.execute_scope(self, run, policy, deadline, last_wd_check)) and (activity := scope[1]) is not None and ((policy := scope[0]) or True) and (deadline := scope[2]) and (last_wd_check := scope[3]) and now >= activity.current_deadline() and (snapshot := activity.check_expired(now)): return finish("timeout", 124, "retry_budget_exhausted", snapshot.timeout_limit_s)  # noqa: E701
             ext = policy is not None and _new_flag("extended_timeout_enabled")
             if ext:
-                cap = min(policy.effective_max_timeout_s, float(getattr(self, "_attempt_budget_s", None) or policy.effective_max_timeout_s)) if getattr(self, "_defer_done_log", False) else policy.effective_max_timeout_s
+                cap = policy.effective_max_timeout_s
                 if now - run.started >= cap:
                     return finish("timeout", 124, f"proxy timeout after {cap:g}s", cap)
                 last_progress = max(
@@ -6818,7 +6819,7 @@ class Handler(BaseHTTPRequestHandler):
         """Одна строка done на каждом выходе _run_once (O-EXIT)."""
         conversation = str(out.get("conversation_id") or "-")[:8]
         out_bytes = len(str(out.get("text") or "").encode())
-        None if getattr(self, "_defer_done_log", False) and "had_progress" not in out else _log(
+        None if getattr(self, "_defer_done_log", False) else _log(
             f"done model={model} rc={out.get('rc')} state={out.get('state')} "
             f"conversation={conversation} "
             f"turns={out.get('num_turns')} tool_events={out.get('tool_events')} "
@@ -6841,7 +6842,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def _run_once(self, ctx: dict, *callbacks, **named_callbacks) -> dict:
         """Сохранить legacy-вызов, делегируя владение job отдельному координатору."""
-        self._defer_done_log, self._attempt_budget_s = bool(named_callbacks.pop("defer_done_log", False)), ctx.get("attempt_budget_s")
+        self._defer_done_log, self._attempt_budget_s, self._activity_runtime = bool(named_callbacks.pop("defer_done_log", getattr(self, "_defer_done_log", False))), ctx.get("attempt_budget_s"), ctx.get("activity_runtime")
         return self._run_registered_attempt(ctx, self._run_once_callbacks(*callbacks, **named_callbacks))
 
     def _run_registered_attempt(self, ctx: dict, callbacks: tuple) -> dict:
