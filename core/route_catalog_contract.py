@@ -10,19 +10,13 @@ from dataclasses import dataclass
 from typing import NoReturn, TypeAlias, cast
 
 CONTRACT_SCHEMA_VERSION = 1
-CODEX_V2_ROUTE_ID, CODEX_LEGACY_ROUTE_ID = "codex-app-server-v2", "codex"
-CODEX_PASSTHROUGH_ROUTE_ID = "codex-passthrough"
+CODEX_V2_ROUTE_ID, CODEX_LEGACY_ROUTE_ID, CODEX_PASSTHROUGH_ROUTE_ID = "codex-app-server-v2", "codex", "codex-passthrough"
 BACKEND_KIND_STDIO_RESIDENT, BACKEND_KIND_PASSTHROUGH = "stdio_resident", "passthrough"
 ALLOWED_BACKEND_KINDS = frozenset({BACKEND_KIND_STDIO_RESIDENT, BACKEND_KIND_PASSTHROUGH})
-CODEX_APP_SERVER_V2_CONTRACT = "codex.app-server.v2@codex-cli-0.171.0-alpha.13"
-CODEX_APP_SERVER_V2_PREFIX = "codex.app-server.v2@"
-TRANSPORT_FAMILY_RESIDENT_V2 = "resident_v2"
-TRANSPORT_FAMILY_RESIDENT_LEGACY = "resident_legacy"
-TRANSPORT_FAMILY_PASSTHROUGH_HTTP = "passthrough_http"
-SOL_MODEL_ID, TERRA_MODEL_ID = "gpt-6.1-sol", "gpt-6.1-terra"
-UNAVAILABLE_MODEL_IDS = frozenset({"gpt-6.2-sol"})
-SOL_EFFORTS = ("low", "medium", "high", "xhigh", "max")
-TERRA_EFFORTS = ("low", "medium", "high")
+CODEX_APP_SERVER_V2_CONTRACT, CODEX_APP_SERVER_V2_PREFIX = "codex.app-server.v2@codex-cli-0.171.0-alpha.13", "codex.app-server.v2@"
+TRANSPORT_FAMILY_RESIDENT_V2, TRANSPORT_FAMILY_RESIDENT_LEGACY, TRANSPORT_FAMILY_PASSTHROUGH_HTTP = "resident_v2", "resident_legacy", "passthrough_http"
+SOL_MODEL_ID, TERRA_MODEL_ID, UNAVAILABLE_MODEL_IDS = "gpt-6.1-sol", "gpt-6.1-terra", frozenset({"gpt-6.2-sol"})
+SOL_EFFORTS, TERRA_EFFORTS = ("low", "medium", "high", "xhigh", "max"), ("low", "medium", "high")
 
 _CONTRACT_PREFIXES = (
     (CODEX_APP_SERVER_V2_PREFIX, TRANSPORT_FAMILY_RESIDENT_V2),
@@ -32,8 +26,7 @@ _CONTRACT_PREFIXES = (
     ("openai.chat-completions.http.v1@", TRANSPORT_FAMILY_PASSTHROUGH_HTTP),
 )
 _RANK = {"off": 0, "low": 1, "medium": 2, "high": 3, "xhigh": 4, "max": 5}
-_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
-_VER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$")
+_ID_RE, _VER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"), re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$")
 _SEC_VAL = re.compile(r"(?i)(^sk-[a-z0-9_-]{4,}|bearer\s+\S+|eyJ[A-Za-z0-9_-]{8,}\.)")
 _SEC_KEYS = frozenset("api_key apikey secret token authorization bearer password credential credentials auth".split())
 
@@ -203,26 +196,18 @@ class VersionedRouteEntry:
         object.__setattr__(self, "capabilities", tuple(sorted(caps, key=lambda c: c.model_id)))
 
     @property
-    def transport_family(self) -> str:
-        return classify_upstream_contract(self.upstream_contract)
-
+    def transport_family(self) -> str: return classify_upstream_contract(self.upstream_contract)
     @property
-    def is_resident_v2(self) -> bool:
-        return self.transport_family == TRANSPORT_FAMILY_RESIDENT_V2
-
+    def is_resident_v2(self) -> bool: return self.transport_family == TRANSPORT_FAMILY_RESIDENT_V2
     @property
-    def is_passthrough(self) -> bool:
-        return self.transport_family == TRANSPORT_FAMILY_PASSTHROUGH_HTTP
-
-    def capability_for(self, model_id: str) -> ModelCapability | None:
-        return next((c for c in self.capabilities if c.model_id == model_id), None)
+    def is_passthrough(self) -> bool: return self.transport_family == TRANSPORT_FAMILY_PASSTHROUGH_HTTP
+    def capability_for(self, model_id: str) -> ModelCapability | None: return next((c for c in self.capabilities if c.model_id == model_id), None)
 
     def canonical_dict(self) -> dict[str, object]:
         return {
             "schema_version": self.schema_version, "route_id": self.route_id, "backend": self.backend,
-            "backend_kind": self.backend_kind, "upstream_contract": self.upstream_contract,
-            "enabled": self.enabled, "zero_canon_attested": self.zero_canon_attested,
-            "capabilities": [c.canonical_dict() for c in self.capabilities],
+            "backend_kind": self.backend_kind, "upstream_contract": self.upstream_contract, "enabled": self.enabled,
+            "zero_canon_attested": self.zero_canon_attested, "capabilities": [c.canonical_dict() for c in self.capabilities],
         }
 
     @classmethod
@@ -231,8 +216,7 @@ class VersionedRouteEntry:
             _fail("invalid_route_mapping")
         if reject_secrets and (keys := find_forbidden_secret_keys(raw)):
             _fail("secret_field_forbidden", ",".join(keys))
-        kind, contract = raw.get("backend_kind", raw.get("kind", "")), raw.get("upstream_contract", "")
-        ver = raw.get("schema_version", CONTRACT_SCHEMA_VERSION)
+        kind, contract, ver = raw.get("backend_kind", raw.get("kind", "")), raw.get("upstream_contract", ""), raw.get("schema_version", CONTRACT_SCHEMA_VERSION)
         if type(ver) is not int or ver != CONTRACT_SCHEMA_VERSION:
             _fail("invalid_schema_version", str(ver))
         return cls(
@@ -266,22 +250,13 @@ class RouteCatalogContract:
         object.__setattr__(self, "entries", tuple(sorted(coerced, key=lambda e: (e.route_id, e.backend, e.upstream_contract))))
 
     @property
-    def catalog_hash(self) -> str:
-        return compute_catalog_hash(self.entries)
-
+    def catalog_hash(self) -> str: return compute_catalog_hash(self.entries)
     @property
-    def resident_v2_routes(self) -> tuple[VersionedRouteEntry, ...]:
-        return tuple(e for e in self.entries if e.is_resident_v2)
-
+    def resident_v2_routes(self) -> tuple[VersionedRouteEntry, ...]: return tuple(e for e in self.entries if e.is_resident_v2)
     @property
-    def passthrough_routes(self) -> tuple[VersionedRouteEntry, ...]:
-        return tuple(e for e in self.entries if e.is_passthrough)
-
-    def route_for_id(self, route_id: str) -> VersionedRouteEntry | None:
-        return next((e for e in self.entries if e.route_id == route_id), None)
-
-    def canonical_dict(self) -> dict[str, object]:
-        return {"schema_version": self.schema_version, "routes": [e.canonical_dict() for e in self.entries]}
+    def passthrough_routes(self) -> tuple[VersionedRouteEntry, ...]: return tuple(e for e in self.entries if e.is_passthrough)
+    def route_for_id(self, route_id: str) -> VersionedRouteEntry | None: return next((e for e in self.entries if e.route_id == route_id), None)
+    def canonical_dict(self) -> dict[str, object]: return {"schema_version": self.schema_version, "routes": [e.canonical_dict() for e in self.entries]}
 
 
 def canonical_catalog_bytes(entries: Iterable[RouteInput]) -> bytes:
@@ -298,14 +273,9 @@ def verify_catalog_hash(entries: Iterable[RouteInput], expected_hash: str) -> bo
     return bool(expected_hash) and compute_catalog_hash(entries) == expected_hash
 
 
-def separate_routes_by_transport(
-    entries: Iterable[RouteInput],
-) -> tuple[tuple[VersionedRouteEntry, ...], tuple[VersionedRouteEntry, ...]]:
+def separate_routes_by_transport(entries: Iterable[RouteInput]) -> tuple[tuple[VersionedRouteEntry, ...], tuple[VersionedRouteEntry, ...]]:
     cat = RouteCatalogContract(tuple(_coerce(e) for e in entries))
-    return (
-        tuple(e for e in cat.entries if e.backend_kind == BACKEND_KIND_STDIO_RESIDENT),
-        tuple(e for e in cat.entries if e.backend_kind == BACKEND_KIND_PASSTHROUGH),
-    )
+    return tuple(e for e in cat.entries if e.backend_kind == BACKEND_KIND_STDIO_RESIDENT), tuple(e for e in cat.entries if e.backend_kind == BACKEND_KIND_PASSTHROUGH)
 
 
 def validate_no_forbidden_aliases(aliases: Mapping[str, Mapping[str, object]]) -> None:
@@ -318,14 +288,8 @@ def validate_no_forbidden_aliases(aliases: Mapping[str, Mapping[str, object]]) -
 def build_codex_v2_primary_route(*, enabled: bool = True) -> VersionedRouteEntry:
     sol = ModelCapability(SOL_MODEL_ID, SOL_EFFORTS, "high", 272_000, 200_000, 128_000)
     terra = ModelCapability(TERRA_MODEL_ID, TERRA_EFFORTS, "high", 500_000, 340_000, 128_000)
-    return VersionedRouteEntry(
-        CODEX_V2_ROUTE_ID, CODEX_LEGACY_ROUTE_ID, BACKEND_KIND_STDIO_RESIDENT,
-        CODEX_APP_SERVER_V2_CONTRACT, enabled, (sol, terra), True,
-    )
+    return VersionedRouteEntry(CODEX_V2_ROUTE_ID, CODEX_LEGACY_ROUTE_ID, BACKEND_KIND_STDIO_RESIDENT, CODEX_APP_SERVER_V2_CONTRACT, enabled, (sol, terra), True)
 
 
 def build_codex_passthrough_route(*, contract_version: str = "unverified", enabled: bool = False) -> VersionedRouteEntry:
-    return VersionedRouteEntry(
-        CODEX_PASSTHROUGH_ROUTE_ID, CODEX_PASSTHROUGH_ROUTE_ID,
-        BACKEND_KIND_PASSTHROUGH, f"codex.passthrough.http.v1@{contract_version}", enabled,
-    )
+    return VersionedRouteEntry(CODEX_PASSTHROUGH_ROUTE_ID, CODEX_PASSTHROUGH_ROUTE_ID, BACKEND_KIND_PASSTHROUGH, f"codex.passthrough.http.v1@{contract_version}", enabled)

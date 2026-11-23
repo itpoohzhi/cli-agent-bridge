@@ -107,13 +107,8 @@ def _passthrough_entries(
         ver = _contract_ver(backends[bid].get("base_url"))
         out.append(
             rcc.VersionedRouteEntry(
-                bid,
-                bid,
-                rcc.BACKEND_KIND_PASSTHROUGH,
-                f"openai.chat-completions.http.v1@{ver}",
-                bool(backends[bid].get("enabled", True)),
-                tuple(caps[bid]),
-                False,
+                bid, bid, rcc.BACKEND_KIND_PASSTHROUGH, f"openai.chat-completions.http.v1@{ver}",
+                bool(backends[bid].get("enabled", True)), tuple(caps[bid]), False,
             )
         )
     return tuple(out)
@@ -196,12 +191,8 @@ def generate_fleet(
     build_catalog(fleet, kinds, mode="strict", constraints_enabled=False)
     fleet_bytes = fc.render_fleet_json(fleet)
     return SyncResult(
-        fleet,
-        fleet_bytes,
-        hashlib.sha256(fleet_bytes).hexdigest(),
-        contract.catalog_hash,
-        contract,
-        tuple(sorted(updated)),
+        fleet, fleet_bytes, hashlib.sha256(fleet_bytes).hexdigest(),
+        contract.catalog_hash, contract, tuple(sorted(updated)),
     )
 
 

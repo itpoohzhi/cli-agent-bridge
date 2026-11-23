@@ -7,7 +7,7 @@ from enum import Enum
 from typing import Final
 
 CREDENTIAL_ERROR_CODES: Final[frozenset[str]] = frozenset(
-    ("credential_unavailable", "rate_limit_transient", "quota_exhausted", "rate_limit_unknown", "auth_failed", "auth_refresh_exhausted")
+    "credential_unavailable rate_limit_transient quota_exhausted rate_limit_unknown auth_failed auth_refresh_exhausted".split()
 )
 _VALID_PHASES: Final[frozenset[str]] = frozenset(("admitted", "completed"))
 _INF: Final[float] = float("inf")
@@ -18,25 +18,21 @@ class HealthDomain(str, Enum):  # noqa: UP042
 
 
 class RecoveryPhase(str, Enum):  # noqa: UP042
-    HEALTHY, BLOCKED, PROBE_DUE = "HEALTHY", "BLOCKED", "PROBE_DUE"
-    PONG_IN_FLIGHT, COOLDOWN = "PONG_IN_FLIGHT", "COOLDOWN"
+    HEALTHY, BLOCKED, PROBE_DUE, PONG_IN_FLIGHT, COOLDOWN = "HEALTHY", "BLOCKED", "PROBE_DUE", "PONG_IN_FLIGHT", "COOLDOWN"
 
 
 class EvidenceKind(str, Enum):  # noqa: UP042
-    PONG_RECEIPT, HEALTH_200, EMPTY_DONE = "pong_receipt", "health_200", "empty_done"
-    UNIT_TEST, COUNTER_RESET = "unit_test", "counter_reset"
+    PONG_RECEIPT, HEALTH_200, EMPTY_DONE, UNIT_TEST, COUNTER_RESET = "pong_receipt", "health_200", "empty_done", "unit_test", "counter_reset"
 
 
 class RecoveryEventKind(str, Enum):  # noqa: UP042
-    FAILURE, TICK, SCHEDULE_PROBE = "failure", "tick", "schedule_probe"
-    PROBE_STARTED, PONG_RECEIPT = "probe_started", "pong_receipt"
-    PROBE_FAILED, NON_PONG_SIGNAL = "probe_failed", "non_pong_signal"
+    FAILURE, TICK, SCHEDULE_PROBE, PROBE_STARTED = "failure", "tick", "schedule_probe", "probe_started"
+    PONG_RECEIPT, PROBE_FAILED, NON_PONG_SIGNAL = "pong_receipt", "probe_failed", "non_pong_signal"
 
 
 class RecoveryEffectKind(str, Enum):  # noqa: UP042
-    MARK_BLOCKED, ENTER_COOLDOWN, PROBE_READY = "mark_blocked", "enter_cooldown", "probe_ready"
-    START_PONG_PROBE, MARK_HEALTHY = "start_pong_probe", "mark_healthy"
-    EMIT_RECOVERY_RECEIPT, REJECT_TRANSITION = "emit_recovery_receipt", "reject_transition"
+    MARK_BLOCKED, ENTER_COOLDOWN, PROBE_READY, START_PONG_PROBE = "mark_blocked", "enter_cooldown", "probe_ready", "start_pong_probe"
+    MARK_HEALTHY, EMIT_RECOVERY_RECEIPT, REJECT_TRANSITION = "mark_healthy", "emit_recovery_receipt", "reject_transition"
 
 
 @dataclass(frozen=True, slots=True)
@@ -96,18 +92,12 @@ class CodexRecoveryState:
     credential_id: str
     route: DomainHealthState
     credential: DomainHealthState
-
     @property
-    def is_route_healthy(self) -> bool:
-        return self.route.phase is RecoveryPhase.HEALTHY
-
+    def is_route_healthy(self) -> bool: return self.route.phase is RecoveryPhase.HEALTHY
     @property
-    def is_credential_healthy(self) -> bool:
-        return self.credential.phase is RecoveryPhase.HEALTHY
-
+    def is_credential_healthy(self) -> bool: return self.credential.phase is RecoveryPhase.HEALTHY
     @property
-    def is_healthy(self) -> bool:
-        return self.is_route_healthy and self.is_credential_healthy
+    def is_healthy(self) -> bool: return self.is_route_healthy and self.is_credential_healthy
 
 
 @dataclass(frozen=True, slots=True)
@@ -140,13 +130,10 @@ _OUT = tuple[DomainHealthState, tuple[RecoveryEffect, ...]]
 
 def create_recovery_state(
     expectation: ProbeExpectation, credential_id: str,
-    route_phase: RecoveryPhase = RecoveryPhase.BLOCKED,
-    credential_phase: RecoveryPhase = RecoveryPhase.BLOCKED,
+    route_phase: RecoveryPhase = RecoveryPhase.BLOCKED, credential_phase: RecoveryPhase = RecoveryPhase.BLOCKED,
 ) -> CodexRecoveryState:
     """Create dual-domain recovery state (fail-closed BLOCKED by default)."""
-    return CodexRecoveryState(
-        expectation, credential_id, DomainHealthState(_HD.ROUTE, route_phase), DomainHealthState(_HD.CREDENTIAL, credential_phase)
-    )
+    return CodexRecoveryState(expectation, credential_id, _DS(_HD.ROUTE, route_phase), _DS(_HD.CREDENTIAL, credential_phase))
 
 
 def classify_failure_domain(error_code: str) -> HealthDomain:
@@ -173,9 +160,7 @@ def _attest_ok(r: PongReceipt) -> bool:
     if kv is None:
         return False
     prof = r.profile.strip().lower()
-    if (kv.get("profile", "").lower(), kv.get("backend")) != (prof, r.backend):
-        return False
-    if (kv.get("model"), kv.get("effort")) != (r.actual_model, r.actual_effort):
+    if (kv.get("profile", "").lower(), kv.get("backend"), kv.get("model"), kv.get("effort")) != (prof, r.backend, r.actual_model, r.actual_effort):
         return False
     ph = kv.get("phase")
     if prof != "zero-canon":
@@ -183,22 +168,19 @@ def _attest_ok(r: PongReceipt) -> bool:
     return (kv.get("tools"), kv.get("sandbox"), kv.get("approval")) == ("off", "read-only", "never") and ph in _VALID_PHASES
 
 
+def _field_ok(actual: str, expected: str) -> bool: return bool(actual) and expected in ("", actual)
+def _identity_ok(req: str, actual: str, expected: str) -> bool: return _field_ok(actual, expected) and req == actual
+
+
 def validate_pong_receipt(receipt: PongReceipt, expected: _EXP) -> tuple[bool, str]:
     """Validate complete attested PONG receipt required for HEALTHY."""
     r, e = receipt, expected
-    p, ep = r.profile.strip().lower(), e.profile.strip().lower()
-    m_ok = bool(r.actual_model) and r.requested_model == r.actual_model
-    ef_ok = bool(r.actual_effort) and r.requested_effort == r.actual_effort
     checks = (
-        ("non_pong_evidence", r.evidence_kind is EvidenceKind.PONG_RECEIPT),
-        ("incomplete_receipt", r.complete and r.done_received),
-        ("invalid_terminal", (r.finish_reason, r.error_count, r.tool_event_count) == ("stop", 0, 0)),
-        ("empty_pong_content", bool(r.content.strip())),
-        ("model_mismatch", m_ok and e.model_id in ("", r.actual_model)),
-        ("effort_mismatch", ef_ok and e.effort in ("", r.actual_effort)),
-        ("backend_mismatch", bool(r.backend) and e.backend in ("", r.backend)),
-        ("route_mismatch", bool(r.route_id) and e.route_id in ("", r.route_id)),
-        ("profile_mismatch", bool(p) and ep in ("", p)),
+        ("non_pong_evidence", r.evidence_kind is EvidenceKind.PONG_RECEIPT), ("incomplete_receipt", r.complete and r.done_received),
+        ("invalid_terminal", (r.finish_reason, r.error_count, r.tool_event_count) == ("stop", 0, 0)), ("empty_pong_content", bool(r.content.strip())),
+        ("model_mismatch", _identity_ok(r.requested_model, r.actual_model, e.model_id)), ("effort_mismatch", _identity_ok(r.requested_effort, r.actual_effort, e.effort)),
+        ("backend_mismatch", _field_ok(r.backend, e.backend)), ("route_mismatch", _field_ok(r.route_id, e.route_id)),
+        ("profile_mismatch", _field_ok(r.profile.strip().lower(), e.profile.strip().lower())),
     )
     for reason, ok in checks:
         if not ok:
@@ -212,8 +194,7 @@ def _bounded(val: float | None, limit: float) -> float | None:
     return min(val, limit) if 0.0 < limit < _INF else val
 
 
-def _rej(domain: HealthDomain, reason: str) -> tuple[RecoveryEffect, ...]:
-    return (RecoveryEffect(_EK.REJECT_TRANSITION, domain, reason),)
+def _rej(domain: HealthDomain, reason: str) -> tuple[RecoveryEffect, ...]: return (RecoveryEffect(_EK.REJECT_TRANSITION, domain, reason),)
 
 
 def _cooldown_for(ev: _EV_T, pol: _POL, fails: int, in_flight: bool) -> float | None:
@@ -241,7 +222,7 @@ def _fail_domain(ds: _DS, ev: _EV_T, pol: _POL, reason: str) -> _OUT:
     if until is not None and ds.cooldown_until_s is not None:
         until = max(until, ds.cooldown_until_s)
     ph, ek = (_RP.BLOCKED, _EK.MARK_BLOCKED) if until is None else (_RP.COOLDOWN, _EK.ENTER_COOLDOWN)
-    return DomainHealthState(ds.domain, ph, until, None, fails, reason, ds.last_receipt), (RecoveryEffect(ek, ds.domain, reason, until),)
+    return _DS(ds.domain, ph, until, None, fails, reason, ds.last_receipt), (RecoveryEffect(ek, ds.domain, reason, until),)
 
 
 def _apply_pong(ds: _DS, ev: _EV_T, exp: _EXP, pol: _POL) -> _OUT:
@@ -255,10 +236,8 @@ def _apply_pong(ds: _DS, ev: _EV_T, exp: _EXP, pol: _POL) -> _OUT:
         nxt, eff = _fail_domain(ds, ev, pol, why)
         return nxt, (*_rej(ds.domain, why), *eff)
     pid = rcpt.probe_id
-    return (
-        DomainHealthState(ds.domain, _RP.HEALTHY, last_receipt=rcpt),
-        (RecoveryEffect(_EK.MARK_HEALTHY, ds.domain, "", None, pid, rcpt), RecoveryEffect(_EK.EMIT_RECOVERY_RECEIPT, ds.domain, "", None, pid, rcpt)),
-    )
+    effs = (RecoveryEffect(_EK.MARK_HEALTHY, ds.domain, "", None, pid, rcpt), RecoveryEffect(_EK.EMIT_RECOVERY_RECEIPT, ds.domain, "", None, pid, rcpt))
+    return _DS(ds.domain, _RP.HEALTHY, last_receipt=rcpt), effs
 
 
 def _apply_probe(ds: _DS, ev: _EV_T, pol: _POL) -> _OUT:
@@ -274,14 +253,21 @@ def _apply_probe(ds: _DS, ev: _EV_T, pol: _POL) -> _OUT:
     return _fail_domain(ds, ev, pol, ev.error_code.strip() or "probe_failed")
 
 
+def _apply_schedule_or_tick(ds: _DS, ev: _EV_T) -> _OUT:
+    if ev.kind is _EV.SCHEDULE_PROBE:
+        due = ds.phase is _RP.BLOCKED
+    else:
+        due = ds.phase is _RP.COOLDOWN and ds.cooldown_until_s is not None and ev.now_s >= ds.cooldown_until_s
+    if due:
+        return replace(ds, phase=_RP.PROBE_DUE, cooldown_until_s=None), (RecoveryEffect(_EK.PROBE_READY, ds.domain),)
+    return ds, (() if ev.kind is _EV.TICK else _rej(ds.domain, "probe_schedule_invalid_phase"))
+
+
 def _step_domain(ds: _DS, ev: _EV_T, exp: _EXP, pol: _POL) -> _OUT:
     if ev.kind is _EV.NON_PONG_SIGNAL:
         return ds, _rej(ds.domain, ev.evidence_kind.value if ev.evidence_kind else "non_pong_signal")
     if ev.kind in (_EV.TICK, _EV.SCHEDULE_PROBE):
-        due = ds.phase is _RP.BLOCKED if ev.kind is _EV.SCHEDULE_PROBE else (ds.phase is _RP.COOLDOWN and ds.cooldown_until_s is not None and ev.now_s >= ds.cooldown_until_s)
-        if due:
-            return replace(ds, phase=_RP.PROBE_DUE, cooldown_until_s=None), (RecoveryEffect(_EK.PROBE_READY, ds.domain),)
-        return ds, (() if ev.kind is _EV.TICK else _rej(ds.domain, "probe_schedule_invalid_phase"))
+        return _apply_schedule_or_tick(ds, ev)
     if ev.kind is _EV.FAILURE:
         return _fail_domain(ds, ev, pol, ev.error_code.strip() or "failure")
     return _apply_pong(ds, ev, exp, pol) if ev.kind is _EV.PONG_RECEIPT else _apply_probe(ds, ev, pol)

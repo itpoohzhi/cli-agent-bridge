@@ -2,26 +2,40 @@
 
 from __future__ import annotations
 
-import ast
-import copy
-import hashlib
-import importlib.util
-import os
-import re
-import shutil
-import signal
-import subprocess
-import sys
 import time
 from collections.abc import Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
 from pathlib import Path
 
-REPO = Path(__file__).resolve().parents[1]
+from tests._codex_l4_engine import (
+    REPO as REPO,
+)
+from tests._codex_l4_engine import (
+    L4Report as L4Report,
+)
+from tests._codex_l4_engine import (
+    Mutant as Mutant,
+)
+from tests._codex_l4_engine import (
+    ast_mutants_for_file,
+    changed_lines,
+    eval_mutant,
+    run_pytest_in_copy,
+)
+from tests._codex_l4_engine import (
+    build_disposable_copy as build_disposable_copy,
+)
+from tests._codex_l4_engine import (
+    pytest_command as pytest_command,
+)
+from tests._codex_l4_engine import (
+    run_cmd_pgid as run_cmd_pgid,
+)
+from tests._codex_l4_engine import (
+    tree_digest as tree_digest,
+)
+
 DEFAULT_BASE_REV = "18039277c2da6d2e072e7b5fcdb1fc987e1ab154"
-_HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
-_STRIP_ENV_PREFIXES = ("BRIDGE_", "AGY_", "OPENAI_", "CODEX_")
 _KILLER_MAP: Mapping[str, tuple[str, ...]] = {
     "core/stdio_resident/codex_protocol_fsm.py": ("test_codex_app_server_v2_fsm.py", "test_codex_app_server_v2_contract.py"),
     "core/codex_zero_canon_policy.py": ("test_codex_zero_canon_policy.py", "test_codex_l3_incident_corpus.py"),
@@ -32,7 +46,6 @@ _KILLER_MAP: Mapping[str, tuple[str, ...]] = {
     "core/codex_recovery_fsm.py": ("test_codex_app_server_v2_fsm.py", "test_codex_l3_incident_corpus.py"),
     "core/route_catalog_contract.py": ("test_codex_app_server_v2_contract.py", "test_codex_l3_incident_corpus.py"),
 }
-_SUPPORT_TESTS = ("conftest.py",)
 _CRITICAL_SPECS: tuple[tuple[str, str, str, str, tuple[str, ...]], ...] = (
     ("any-terminal", "core/stdio_resident/codex_protocol_fsm.py", 'if status == "completed":', 'if status in ("completed", "failed", "interrupted"):', ("test_codex_app_server_v2_fsm.py", "test_codex_app_server_v2_contract.py")),
     ("drop-read-only", "core/stdio_resident/codex_protocol_fsm.py", 'params["sandbox"], params["approvalPolicy"] = "read-only", "never"', 'params["approvalPolicy"] = "never"', ("test_codex_app_server_v2_fsm.py",)),
@@ -49,208 +62,6 @@ _CRITICAL_SPECS: tuple[tuple[str, str, str, str, tuple[str, ...]], ...] = (
 )
 
 
-@dataclass(frozen=True, slots=True)
-class Mutant:
-    """One isolated source mutation with killer test suite and criticality flag."""
-
-    name: str
-    path: str
-    source: str
-    killers: tuple[str, ...]
-    critical: bool
-    kind: str
-
-
-@dataclass(frozen=True, slots=True)
-class L4Report:
-    """Aggregated L4 mutation and sabotage verification outcome."""
-
-    total: int
-    killed: int
-    survivors: tuple[str, ...]
-    surviving_critical: tuple[str, ...]
-    timeout_count: int
-    generated: int
-    invalid: int
-    elapsed_s: float
-    baseline_ok: bool
-    state_leaks: int
-
-    @property
-    def kill_rate(self) -> float:
-        return self.killed / self.total if self.total else 0.0
-
-    @property
-    def invalid_rate(self) -> float:
-        return self.invalid / self.generated if self.generated else 0.0
-
-    @property
-    def passed(self) -> bool:
-        return (
-            self.baseline_ok
-            and self.total > 0
-            and self.kill_rate >= 0.85
-            and not self.surviving_critical
-            and self.timeout_count == 0
-            and self.invalid_rate <= 0.10
-            and self.elapsed_s <= 60.0
-            and self.state_leaks == 0
-        )
-
-
-def pytest_command(args: Sequence[str]) -> list[str]:
-    """Resolve pytest executable using sys.executable when pytest is installed there."""
-    if importlib.util.find_spec("pytest") is not None:
-        return [sys.executable, "-m", "pytest", *args]
-    exe = shutil.which("pytest")
-    return [exe, *args] if exe else [sys.executable, "-m", "pytest", *args]
-
-
-def _kill_owned_pgid(pgid: int) -> None:
-    if pgid <= 1 or pgid == os.getpgrp():
-        return
-    for sig in (signal.SIGTERM, signal.SIGKILL):
-        try:
-            os.killpg(pgid, sig)
-        except ProcessLookupError:
-            return
-
-
-def run_cmd_pgid(
-    cmd: Sequence[str], cwd: Path, env: Mapping[str, str], timeout_s: float
-) -> tuple[int, bool]:
-    """Run command in its own process group with guaranteed PGID teardown in finally."""
-    proc = subprocess.Popen(
-        list(cmd),
-        cwd=str(cwd),
-        env=dict(env),
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        start_new_session=True,
-    )
-    pgid = proc.pid
-    timed_out = False
-    try:
-        return proc.wait(timeout=timeout_s), False
-    except subprocess.TimeoutExpired:
-        timed_out = True
-        return -1, True
-    finally:
-        if timed_out or proc.poll() is None:
-            _kill_owned_pgid(pgid)
-        try:
-            proc.wait(timeout=5.0)
-        except subprocess.TimeoutExpired:
-            _kill_owned_pgid(pgid)
-            proc.wait()
-
-
-def tree_digest(root: Path = REPO) -> str:
-    """SHA-256 fingerprint of product sources proving the worktree is never mutated."""
-    digest = hashlib.sha256()
-    files: list[Path] = [root / "fleet.json", root / "server.py"]
-    for sub in ("core", "adapters", "scripts", "providers.d"):
-        files.extend(p for p in (root / sub).rglob("*") if p.is_file() and "__pycache__" not in p.parts)
-    for path in sorted(set(files)):
-        if path.is_file():
-            digest.update(str(path.relative_to(root)).encode("utf-8") + b"\0")
-            digest.update(path.read_bytes())
-    return digest.hexdigest()
-
-
-def build_disposable_copy(dst: Path, tests: Sequence[str]) -> None:
-    """Create a disposable copy of product code and required tests inside tmp dir."""
-    skip = shutil.ignore_patterns("__pycache__", "*.pyc", ".pytest_cache")
-    for sub in ("core", "adapters", "scripts", "providers.d"):
-        if (REPO / sub).is_dir():
-            shutil.copytree(REPO / sub, dst / sub, ignore=skip)
-    shutil.copy2(REPO / "fleet.json", dst / "fleet.json")
-    (dst / "tests").mkdir(parents=True, exist_ok=True)
-    for name in sorted({*_SUPPORT_TESTS, *tests}):
-        src = REPO / "tests" / name
-        if src.is_file():
-            shutil.copy2(src, dst / "tests" / name)
-
-
-def _changed_lines(base_revision: str, paths: Sequence[str]) -> dict[str, set[int]]:
-    cmd = ["git", "-C", str(REPO), "diff", "-U0", base_revision, "--", *paths]
-    out = subprocess.check_output(cmd, text=True, timeout=15.0)
-    result: dict[str, set[int]] = {}
-    current = ""
-    for line in out.splitlines():
-        if line.startswith("+++ b/"):
-            current = line[6:]
-        elif line.startswith("@@ ") and current:
-            match = _HUNK_RE.match(line)
-            if match:
-                start = int(match.group(1))
-                count = 1 if match.group(2) is None else int(match.group(2))
-                if count > 0:
-                    result.setdefault(current, set()).update(range(start, start + count))
-    return result
-
-
-def _flip_op(op: ast.cmpop) -> ast.cmpop | None:
-    if isinstance(op, ast.Eq):
-        return ast.NotEq()
-    if isinstance(op, ast.NotEq):
-        return ast.Eq()
-    if isinstance(op, ast.In):
-        return ast.NotIn()
-    if isinstance(op, ast.NotIn):
-        return ast.In()
-    if isinstance(op, ast.Gt):
-        return ast.LtE()
-    if isinstance(op, ast.Lt):
-        return ast.GtE()
-    return None
-
-
-def _mutate_ast_site(tree: ast.Module, idx: int) -> bool:
-    nodes = list(ast.walk(tree))
-    node = nodes[idx]
-    if isinstance(node, ast.Compare) and len(node.ops) == 1:
-        flipped = _flip_op(node.ops[0])
-        if flipped is not None:
-            node.ops = [flipped]
-            return True
-    if isinstance(node, ast.BoolOp):
-        node.op = ast.Or() if isinstance(node.op, ast.And) else ast.And()
-        return True
-    return False
-
-
-def _ast_mutants_for_file(
-    rel: str, lines: set[int], killers: tuple[str, ...], per_file: int
-) -> tuple[list[Mutant], int, int]:
-    src = (REPO / rel).read_text(encoding="utf-8")
-    tree = ast.parse(src, filename=rel)
-    sites = [
-        (i, getattr(n, "lineno", 0))
-        for i, n in enumerate(ast.walk(tree))
-        if getattr(n, "lineno", 0) in lines
-        and ((isinstance(n, ast.Compare) and len(n.ops) == 1 and _flip_op(n.ops[0]) is not None) or isinstance(n, ast.BoolOp))
-    ]
-    mutants: list[Mutant] = []
-    generated = invalid = 0
-    step = max(1, len(sites) // max(1, per_file))
-    for site_idx, lineno in sites[::step][:per_file]:
-        generated += 1
-        cloned = copy.deepcopy(tree)
-        if not _mutate_ast_site(cloned, site_idx):
-            invalid += 1
-            continue
-        rendered = ast.unparse(cloned) + "\n"
-        try:
-            ast.parse(rendered, filename=rel)
-        except SyntaxError:
-            invalid += 1
-            continue
-        slug = rel.rsplit("/", 1)[-1].replace(".py", "")
-        mutants.append(Mutant(f"ast-{slug}-L{lineno}", rel, rendered, killers, False, "ast_diff"))
-    return mutants, generated, invalid
-
-
 def build_critical_mutants() -> list[Mutant]:
     """Build mandatory ADR-001 critical sabotage mutants with unique fragment check."""
     mutants: list[Mutant] = []
@@ -264,44 +75,37 @@ def build_critical_mutants() -> list[Mutant]:
 
 def generate_ast_diff_mutants(base_revision: str, per_file: int = 1) -> tuple[list[Mutant], int, int]:
     """Generate syntax-validated AST diff mutants on changed executable lines."""
-    changed = _changed_lines(base_revision, tuple(_KILLER_MAP))
+    changed = changed_lines(base_revision, tuple(_KILLER_MAP))
     mutants: list[Mutant] = []
     generated = invalid = 0
     for rel, killers in _KILLER_MAP.items():
         lines = changed.get(rel)
         if not lines:
             continue
-        file_m, gen, inv = _ast_mutants_for_file(rel, lines, killers, per_file)
+        file_m, gen, inv = ast_mutants_for_file(rel, lines, killers, per_file)
         mutants.extend(file_m)
         generated += gen
         invalid += inv
     return mutants, generated, invalid
 
 
-def _run_pytest_in_copy(root: Path, tests: Sequence[str], timeout_s: float) -> tuple[int, bool]:
-    iso = root / ".iso_home"
-    iso.mkdir(mode=0o700, exist_ok=True)
-    env = {k: v for k, v in os.environ.items() if not k.startswith(_STRIP_ENV_PREFIXES)}
-    env.update(
-        HOME=str(iso),
-        CODEX_HOME=str(iso / ".codex"),
-        XDG_CONFIG_HOME=str(iso / ".config"),
-        XDG_DATA_HOME=str(iso / ".local" / "share"),
-        XDG_CACHE_HOME=str(iso / ".cache"),
-        XDG_STATE_HOME=str(iso / ".local" / "state"),
-        PYTHONPATH=str(root),
-        PYTHONDONTWRITEBYTECODE="1",
-    )
-    cmd = pytest_command([*(f"tests/{t}" for t in tests), "-x", "-q", "-p", "no:cacheprovider"])
-    return run_cmd_pgid(cmd, root, env, timeout_s)
-
-
-def _eval_mutant(base: Path, mutant: Mutant, timeout_s: float) -> tuple[str, bool, bool]:
-    work = base / mutant.name
-    build_disposable_copy(work, mutant.killers)
-    (work / mutant.path).write_text(mutant.source, encoding="utf-8")
-    rc, timed_out = _run_pytest_in_copy(work, mutant.killers, timeout_s)
-    return mutant.name, (rc != 0 and not timed_out), timed_out
+def _collect_outcome_stats(
+    mutants: Sequence[Mutant], outcomes: Sequence[tuple[str, bool, bool]]
+) -> tuple[int, tuple[str, ...], tuple[str, ...], int]:
+    crit_names = {m.name for m in mutants if m.critical}
+    killed_n, timeout_n = 0, 0
+    survivors: list[str] = []
+    surv_crit: list[str] = []
+    for name, killed, timed_out in outcomes:
+        if killed:
+            killed_n += 1
+        elif timed_out:
+            timeout_n += 1
+        else:
+            survivors.append(name)
+            if name in crit_names:
+                surv_crit.append(name)
+    return killed_n, tuple(survivors), tuple(surv_crit), timeout_n
 
 
 def run_l4_gate(
@@ -316,19 +120,16 @@ def run_l4_gate(
     all_tests = tuple(sorted({t for m in mutants for t in m.killers}))
     baseline_dir = base / "baseline"
     build_disposable_copy(baseline_dir, all_tests)
-    base_rc, base_to = _run_pytest_in_copy(baseline_dir, all_tests, timeout_s)
+    base_rc, base_to = run_pytest_in_copy(baseline_dir, all_tests, timeout_s)
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        outcomes = list(pool.map(lambda m: _eval_mutant(base, m, timeout_s), mutants))
-    survivors = tuple(name for name, killed, timed_out in outcomes if not killed and not timed_out)
-    timeouts = sum(1 for _, _, timed_out in outcomes if timed_out) + int(base_to)
-    crit_names = {m.name for m in mutants if m.critical}
-    surv_crit = tuple(n for n in survivors if n in crit_names)
+        outcomes = list(pool.map(lambda m: eval_mutant(base, m, timeout_s), mutants))
+    killed, survivors, surv_crit, timeouts = _collect_outcome_stats(mutants, outcomes)
     return L4Report(
         total=len(mutants),
-        killed=sum(1 for _, killed, _ in outcomes if killed),
+        killed=killed,
         survivors=survivors,
         surviving_critical=surv_crit,
-        timeout_count=timeouts,
+        timeout_count=timeouts + int(base_to),
         generated=len(critical) + ast_gen,
         invalid=ast_inv,
         elapsed_s=round(time.monotonic() - started, 3),

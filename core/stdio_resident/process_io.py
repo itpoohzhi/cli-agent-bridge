@@ -372,6 +372,7 @@ class ResidentProcessHandle:
                 self._emit_stdout_line(bytes(buf), gen)
         except RuntimeError as exc:
             self._handle_overflow(exc)
-            raise
+            if str(exc) not in _OVERFLOW_ERRORS:
+                raise
         finally:
             self._queue.put(None)

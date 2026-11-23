@@ -51,18 +51,27 @@ def _extract_cfg_arg(argv: list[str], idx: int) -> tuple[str | None, int]:
     return None, 1
 
 
-def _build_zero_canon_argv(argv: list[str], model: str = "", effort: str = "") -> list[str]:
+def _is_denied_cfg_key(key: str) -> bool:
+    return any(key == d or key.startswith(f"{d}.") for d in _DENIED_ZC_CFG)
+
+
+def _zero_canon_overrides(model: str, effort: str) -> dict[str, str]:
     overrides = {"project_doc_max_bytes": "0"}
     if model and model != "default":
         overrides["model"] = json.dumps(model)
     if effort and effort != "default":
         overrides["model_reasoning_effort"] = json.dumps(effort)
+    return overrides
+
+
+def _build_zero_canon_argv(argv: list[str], model: str = "", effort: str = "") -> list[str]:
+    overrides = _zero_canon_overrides(model, effort)
     cleaned, idx = [], 0
     while idx < len(argv):
         cfg_val, step = _extract_cfg_arg(argv, idx)
         if cfg_val is not None:
             key = cfg_val.split("=", 1)[0].strip()
-            if any(key == d or key.startswith(f"{d}.") for d in _DENIED_ZC_CFG):
+            if _is_denied_cfg_key(key):
                 raise ValueError(f"forbidden_codex_zero_canon_config:{key}")
             if key in overrides:
                 idx += step

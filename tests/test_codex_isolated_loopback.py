@@ -110,9 +110,7 @@ def _make_upstream(status: int, body: dict[str, Any], extra: list[tuple[str, str
     hits: list[int] = []
 
     class _Up(BaseHTTPRequestHandler):
-        def log_message(self, *_: object) -> None:
-            return
-
+        def log_message(self, *_: object) -> None: return
         def do_POST(self) -> None:
             _ = self.rfile.read(int(self.headers.get("Content-Length", "0")))
             hits.append(1)
@@ -139,39 +137,43 @@ def _stream_codex(handler: BaseHTTPRequestHandler, first: dict[str, Any], it: An
         _ = seb.handle_sse_stream_exception(exc, live, ctx)
 
 
+def _collect_non_stream(first: dict[str, Any], it: Any) -> tuple[str, bool]:
+    parts = [str(first["choices"][0]["delta"].get("content", ""))]
+    done = first["choices"][0]["finish_reason"] == "stop"
+    for ch in it:
+        parts.append(str(ch["choices"][0]["delta"].get("content", "")))
+        done = done or ch["choices"][0]["finish_reason"] == "stop"
+    return "".join(parts), done
+
+
+def _send_codex_json(handler: BaseHTTPRequestHandler, text: str, adm: zhttp.ZeroCanonAdmissionProof, done: bool, is_zc: bool) -> None:
+    comp = zhttp.ZeroCanonCompletionProof(adm, terminal_status="completed" if done else "incomplete") if is_zc else None
+    handler.send_response(200)
+    handler.send_header("Content-Type", "application/json")
+    zhttp.emit_turn_headers(handler, None, [], ("", None), attestation=(comp, "completed") if comp else None)
+    _ = handler.wfile.write(json.dumps({"choices": [{"message": {"content": text}, "finish_reason": "stop"}]}).encode("utf-8"))
+
+
 def _run_codex(handler: BaseHTTPRequestHandler, adapter: StdioResidentAdapter, body: dict[str, Any], cwd: Path, is_zc: bool) -> None:
     clean = zpol.sanitize_strict_request(body) if is_zc else dict(body)
     model, effort = str(clean.get("model", SOL)), str(clean.get("reasoning_effort", "high"))
     it = adapter.execute_chat({"model": model, "effort": effort, "cwd": str(cwd), "prompt": "PING", "review_profile": "Zero-Canon" if is_zc else "standard"})
     try:
         first = next(it)
+        st = adapter._driver.protocol_state  # type: ignore[attr-defined]
+        adm = zhttp.ZeroCanonAdmissionProof(model, effort, st.thread_id or "", st.turn_id or "", clean_home_verified=is_zc, handshake_acked=True, requested_model=model, requested_effort=effort)
+        if bool(clean.get("stream", False)):
+            return _stream_codex(handler, first, it, adm if is_zc else None)
+        text, done = _collect_non_stream(first, it)
     except Exception as exc:
         err = build_turn_error(exc, live_sent=0)
         return _send_json(handler, err.status, {"error": {"code": err.code, "message": err.message}})
-    st = adapter._driver.protocol_state  # type: ignore[attr-defined]
-    adm = zhttp.ZeroCanonAdmissionProof(model, effort, st.thread_id or "", st.turn_id or "", clean_home_verified=is_zc, handshake_acked=True, requested_model=model, requested_effort=effort)
-    if bool(clean.get("stream", False)):
-        return _stream_codex(handler, first, it, adm if is_zc else None)
-    parts, done = [str(first["choices"][0]["delta"].get("content", ""))], first["choices"][0]["finish_reason"] == "stop"
-    try:
-        for ch in it:
-            parts.append(str(ch["choices"][0]["delta"].get("content", "")))
-            done = done or ch["choices"][0]["finish_reason"] == "stop"
-    except Exception as exc:
-        err = build_turn_error(exc, live_sent=0)
-        return _send_json(handler, err.status, {"error": {"code": err.code, "message": err.message}})
-    comp = zhttp.ZeroCanonCompletionProof(adm, terminal_status="completed" if done else "incomplete") if is_zc else None
-    handler.send_response(200)
-    handler.send_header("Content-Type", "application/json")
-    zhttp.emit_turn_headers(handler, None, [], ("", None), attestation=(comp, "completed") if comp else None)
-    _ = handler.wfile.write(json.dumps({"choices": [{"message": {"content": "".join(parts)}, "finish_reason": "stop"}]}).encode("utf-8"))
+    _send_codex_json(handler, text, adm, done, is_zc)
 
 
 def _make_hub(adapter: StdioResidentAdapter, routes: list[dict[str, Any]], cwd: Path) -> RunningHTTPServer:
     class _Hub(BaseHTTPRequestHandler):
-        def log_message(self, *_: object) -> None:
-            return
-
+        def log_message(self, *_: object) -> None: return
         def do_POST(self) -> None:
             body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", "0"))).decode("utf-8"))
             try:
@@ -194,6 +196,15 @@ def _make_hub(adapter: StdioResidentAdapter, routes: list[dict[str, Any]], cwd: 
     return RunningHTTPServer(_Hub)
 
 
+def _assert_runs_clean(trace: Path) -> None:
+    runs = [json.loads(ln) for ln in trace.read_text(encoding="utf-8").splitlines()]
+    assert (len(runs), runs[0]["pid"] != runs[1]["pid"], runs[0]["home"] != runs[1]["home"]) == (2, True, True)
+    for r in runs:
+        assert (r["auth_mode"], "hooks" in r["cfg"], "project_doc_max_bytes = 0" in r["cfg"]) == (0o600, False, True)
+        t_start = next(f["params"] for f in r["frames"] if f.get("method") == "turn/start")
+        assert (t_start["sandboxPolicy"], is_pgid_alive(r["pgid"])) == ({"type": "readOnly", "networkAccess": False}, False)
+
+
 def test_loopback_zero_canon_two_phase_attestation_tools_off_and_canary(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """L2-01: Two-phase attestation (admitted/completed), tools-off, clean-home, PGID teardown, canary."""
     script, canary_before, _ = _seed_env(tmp_path, monkeypatch, v2_on=True)
@@ -204,16 +215,11 @@ def test_loopback_zero_canon_two_phase_attestation_tools_off_and_canary(tmp_path
             req = {"model": TERRA, "reasoning_effort": "medium", "tools": [{"type": "function"}], "emulate_tools": True}
             st_ns, hdrs_ns, body_ns = _post(hub.port, {**req, "stream": False}, ZC_HDR)
             st_sse, hdrs_sse, body_sse = _post(hub.port, {**req, "stream": True}, ZC_HDR)
-        assert (st_ns, st_sse) == (200, 200) and json.loads(body_ns)["choices"][0]["message"]["content"] == "PONG"
-        assert "PONG" in body_sse and body_sse.endswith(DONE_FRAME)
+        assert (st_ns, st_sse, json.loads(body_ns)["choices"][0]["message"]["content"]) == (200, 200, "PONG")
+        assert ("PONG" in body_sse, body_sse.endswith(DONE_FRAME)) == (True, True)
         a_ns, a_sse = zpol.parse_attestation_header(hdrs_ns[ATT_HDR.lower()]), zpol.parse_attestation_header(hdrs_sse[ATT_HDR.lower()])
         assert (a_ns["phase"], a_sse["phase"], a_ns["model"], a_ns["effort"], a_ns["tools"]) == ("completed", "admitted", TERRA, "medium", "off")
-        runs = [json.loads(ln) for ln in trace.read_text(encoding="utf-8").splitlines()]
-        assert len(runs) == 2 and runs[0]["pid"] != runs[1]["pid"] and runs[0]["home"] != runs[1]["home"]
-        for r in runs:
-            assert r["auth_mode"] == 0o600 and "hooks" not in r["cfg"] and "project_doc_max_bytes = 0" in r["cfg"]
-            t_start = next(f["params"] for f in r["frames"] if f.get("method") == "turn/start")
-            assert t_start["sandboxPolicy"] == {"type": "readOnly", "networkAccess": False} and not is_pgid_alive(r["pgid"])
+        _assert_runs_clean(trace)
         assert {p: _sha256(Path(p)) for p in canary_before} == canary_before
         with pytest.raises(OSError):
             _ = _post(hub.port, req)
@@ -235,11 +241,11 @@ def test_loopback_flag_off_503_profile_typo_400_and_spoof_strip(tmp_path: Path, 
                 st_std, h_std, _ = _post(hub.port, {"model": SOL}, {"X-Review-Profile": "standard"})
                 assert (st400, json.loads(b400)["error"]["code"]) == (400, "invalid_review_profile")
                 assert (st503, json.loads(b503)["error"]["code"]) == (503, "zero_canon_unsupported_by_driver")
-                assert ATT_HDR.lower() not in h400 and ATT_HDR.lower() not in h503
-                assert st_std == 200 and ATT_HDR.lower() not in h_std and h_std["x-up"] == "ok" and len(up_hits) == 1
+                assert (ATT_HDR.lower() in h400, ATT_HDR.lower() in h503) == (False, False)
+                assert (st_std, ATT_HDR.lower() in h_std, h_std["x-up"], len(up_hits)) == (200, False, "ok", 1)
                 dyn_cfg.write_text(json.dumps({V2_FLAG: True}), encoding="utf-8")
                 st_zc, h_zc, _ = _post(hub.port, {"model": SOL}, ZC_HDR)
-                assert st_zc == 200 and ATT_HDR.lower() in h_zc and len(up_hits) == 1
+                assert (st_zc, ATT_HDR.lower() in h_zc, len(up_hits)) == (200, True, 1)
     finally:
         adapter.shutdown(timeout_s=1.0)
 
@@ -255,14 +261,14 @@ def test_loopback_tool_event_incomplete_and_failover_rules(tmp_path: Path, monke
             st_t, hdr_t, bt = _post(ht.port, {"model": SOL, "stream": False}, ZC_HDR)
             st_ts, _, bts = _post(ht.port, {"model": SOL, "stream": True}, ZC_HDR)
             st_e, hdr_e, be = _post(he.port, {"model": SOL, "stream": False}, ZC_HDR)
-            assert (st_t, json.loads(bt)["error"]["code"]) == (502, "zero_canon_tool_event_forbidden") and ATT_HDR.lower() not in hdr_t and DUMMY_KEY not in bt
-            assert st_ts == 200 and "zero_canon_tool_event_forbidden" in bts and '"finish_reason": "stop"' not in bts and bts.endswith(DONE_FRAME)
-            assert (st_e, json.loads(be)["error"]["code"]) == (502, "upstream_incomplete_stream") and ATT_HDR.lower() not in hdr_e
+            assert (st_t, json.loads(bt)["error"]["code"], ATT_HDR.lower() in hdr_t, DUMMY_KEY in bt) == (502, "zero_canon_tool_event_forbidden", False, False)
+            assert (st_ts, "zero_canon_tool_event_forbidden" in bts, '"finish_reason": "stop"' in bts, bts.endswith(DONE_FRAME)) == (200, True, False, True)
+            assert (st_e, json.loads(be)["error"]["code"], ATT_HDR.lower() in hdr_e) == (502, "upstream_incomplete_stream", False)
             st_u, _, bu = _post(up_503.port, {"model": SOL})
-            assert zpol.classify_error(bu, status_code=st_u, bytes_sent=0).allow_same_model_failover is True and len(hits_503) == 1
+            assert (zpol.classify_error(bu, status_code=st_u, bytes_sent=0).allow_same_model_failover, len(hits_503)) == (True, 1)
             assert zpol.classify_error(bu, status_code=st_u, bytes_sent=8).allow_same_model_failover is False
             st_fo, h_fo, b_fo = _post(hok.port, {"model": SOL, "reasoning_effort": "high"}, ZC_HDR)
-            assert st_fo == 200 and json.loads(b_fo)["choices"][0]["message"]["content"] == "PONG" and ATT_HDR.lower() in h_fo
+            assert (st_fo, json.loads(b_fo)["choices"][0]["message"]["content"], ATT_HDR.lower() in h_fo) == (200, "PONG", True)
         for tr in (tr_t, tr_e, tr_ok):
             assert all(not is_pgid_alive(json.loads(ln)["pgid"]) for ln in tr.read_text(encoding="utf-8").splitlines())
     finally:
@@ -279,7 +285,7 @@ def test_loopback_memory_cap_overflow_and_cancel_pgid_teardown(tmp_path: Path, m
     try:
         with _make_hub(ad_ov, CODEX_ROUTE, tmp_path) as hub:
             st, hdrs, body = _post(hub.port, {"model": SOL, "stream": False}, ZC_HDR)
-        assert (st, json.loads(body)["error"]["code"]) == (502, "output_limit_exceeded") and ATT_HDR.lower() not in hdrs
+        assert (st, json.loads(body)["error"]["code"], ATT_HDR.lower() in hdrs) == (502, "output_limit_exceeded", False)
         assert not is_pgid_alive(json.loads(tr_ov.read_text(encoding="utf-8").splitlines()[0])["pgid"])
         cancel = threading.Event()
         key = SlotAffinityKey("own", "chat-cancel", "codex", SOL, "high", str(tmp_path), "zero-canon")

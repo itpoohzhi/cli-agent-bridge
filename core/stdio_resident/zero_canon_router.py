@@ -206,6 +206,23 @@ def _build_routed_turn_error(exc: BaseException, live_sent: int) -> TurnErrorRes
     return build_turn_error(exc, live_sent=live_sent)
 
 
+def _stream_bridge_chunks(
+    route: ZeroCanonRoute,
+    request: dict[str, Any],
+    headers: Mapping[str, str] | None,
+) -> Iterator[tuple[str, str]]:
+    content, thought = proxy_zero_canon_bridge_turn(
+        route.base_url,
+        str(request.get("model") or "default"),
+        str(request.get("prompt") or ""),
+        headers,
+    )
+    if content:
+        yield "content", content
+    if thought:
+        yield "reasoning_content", thought
+
+
 def _stream_routed_chunks(
     execute_chat: Callable[[dict[str, Any]], Iterator[dict[str, Any]]],
     route: ZeroCanonRoute,
@@ -213,27 +230,16 @@ def _stream_routed_chunks(
     headers: Mapping[str, str] | None,
 ) -> Iterator[tuple[str, str]]:
     if route.kind == KIND_BRIDGE:
-        content, thought = proxy_zero_canon_bridge_turn(
-            route.base_url,
-            str(request.get("model") or "default"),
-            str(request.get("prompt") or ""),
-            headers,
-        )
-        if content:
-            yield "content", content
-        if thought:
-            yield "reasoning_content", thought
+        yield from _stream_bridge_chunks(route, request, headers)
         return
     if is_zero_canon_profile(str(request.get("review_profile") or "")) and route.kind == KIND_RESIDENT:
         raise RuntimeError("zero_canon_resident_route_forbidden")
     routed_req = {**request, "is_ephemeral": bool(request.get("is_ephemeral")) or route.is_ephemeral}
     for chunk in execute_chat(routed_req):
         delta = chunk["choices"][0]["delta"]
-        content = delta.get("content")
-        thought = delta.get("reasoning_content")
-        if isinstance(content, str):
+        if isinstance(content := delta.get("content"), str):
             yield "content", content
-        if isinstance(thought, str):
+        if isinstance(thought := delta.get("reasoning_content"), str):
             yield "reasoning_content", thought
 
 

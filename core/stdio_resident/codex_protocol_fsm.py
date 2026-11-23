@@ -63,24 +63,15 @@ class ProtocolState:
 TransitionResult: TypeAlias = tuple[ProtocolState, tuple[ProtocolEffect, ...]]
 _Handler: TypeAlias = Callable[[ProtocolState, JsonMap], TransitionResult]
 
-_DELTAS: Mapping[str, str] = {
-    "item/agentMessage/delta": "content",
-    "item/reasoning/textDelta": "reasoning",
-    "item/reasoning/summaryTextDelta": "reasoning_summary",
-}
+_DELTAS: Mapping[str, str] = {"item/agentMessage/delta": "content", "item/reasoning/textDelta": "reasoning", "item/reasoning/summaryTextDelta": "reasoning_summary"}
 _TOOL_METHODS = frozenset(
     "item/tool/call item/tool/requestUserInput applyPatchApproval execCommandApproval "
-    "item/commandExecution/requestApproval item/fileChange/requestApproval "
-    "item/permissions/requestApproval item/commandExecution/outputDelta "
-    "item/fileChange/outputDelta item/commandExecution/terminalInteraction "
+    "item/commandExecution/requestApproval item/fileChange/requestApproval item/permissions/requestApproval "
+    "item/commandExecution/outputDelta item/fileChange/outputDelta item/commandExecution/terminalInteraction "
     "item/fileChange/patchUpdated item/mcpToolCall/progress".split()
 )
-_TOOL_ITEMS = frozenset(
-    "commandExecution fileChange mcpToolCall dynamicToolCall collabAgentToolCall webSearch".split()
-)
-_THREAD_PHASES = frozenset(
-    (ProtocolPhase.INITIALIZED, ProtocolPhase.THREAD_READY, ProtocolPhase.COMPLETED, ProtocolPhase.CANCELLED)
-)
+_TOOL_ITEMS = frozenset("commandExecution fileChange mcpToolCall dynamicToolCall collabAgentToolCall webSearch".split())
+_THREAD_PHASES = frozenset((ProtocolPhase.INITIALIZED, ProtocolPhase.THREAD_READY, ProtocolPhase.COMPLETED, ProtocolPhase.CANCELLED))
 _TURN_PHASES = frozenset((ProtocolPhase.THREAD_READY, ProtocolPhase.COMPLETED, ProtocolPhase.CANCELLED))
 
 
@@ -100,20 +91,13 @@ def _rpc(method: str, params: JsonMap, rid: int | None = None) -> ProtocolEffect
 
 
 def _fail(s: ProtocolState, code: str, msg: str) -> TransitionResult:
-    nxt = replace(
-        s, phase=ProtocolPhase.FAILED, pending_request_id=None,
-        interrupt_request_id=None, error_code=code, error_message=msg,
-    )
+    nxt = replace(s, phase=ProtocolPhase.FAILED, pending_request_id=None, interrupt_request_id=None, error_code=code, error_message=msg)
     return nxt, (ProtocolEffect(EffectKind.EMIT_ERROR, {"code": code, "message": msg}),)
 
 
 def _term(s: ProtocolState, phase: ProtocolPhase, status: str, bump: bool = False) -> TransitionResult:
-    nxt = replace(
-        s, phase=phase, epoch=s.epoch + int(bump),
-        pending_request_id=None, interrupt_request_id=None,
-    )
-    meta: dict[str, object] = {"status": status, "thread_id": s.thread_id, "turn_id": s.turn_id}
-    return nxt, (ProtocolEffect(EffectKind.EMIT_TERMINAL, meta),)
+    nxt = replace(s, phase=phase, epoch=s.epoch + int(bump), pending_request_id=None, interrupt_request_id=None)
+    return nxt, (ProtocolEffect(EffectKind.EMIT_TERMINAL, {"status": status, "thread_id": s.thread_id, "turn_id": s.turn_id}),)
 
 
 def _err(err: object, default: str) -> str:
@@ -138,12 +122,8 @@ def _is_tool_event(method: str, params: JsonMap) -> bool:
 def _start_initialize(s: ProtocolState, p: JsonMap) -> TransitionResult:
     if s.phase is not ProtocolPhase.IDLE:
         return _fail(s, "resident_protocol_failed", "initialize requires IDLE")
-    info = {
-        "name": _str(p.get("client_name")) or "cli-agent-bridge",
-        "version": _str(p.get("client_version")) or "1.0",
-    }
-    nxt = replace(s, phase=ProtocolPhase.INITIALIZING, pending_request_id=1, next_request_id=2)
-    return nxt, (_rpc("initialize", {"clientInfo": info}, 1),)
+    info = {"name": _str(p.get("client_name")) or "cli-agent-bridge", "version": _str(p.get("client_version")) or "1.0"}
+    return replace(s, phase=ProtocolPhase.INITIALIZING, pending_request_id=1, next_request_id=2), (_rpc("initialize", {"clientInfo": info}, 1),)
 
 
 def _start_thread(s: ProtocolState, p: JsonMap) -> TransitionResult:
@@ -159,9 +139,8 @@ def _start_thread(s: ProtocolState, p: JsonMap) -> TransitionResult:
     if zc:
         params["sandbox"], params["approvalPolicy"] = "read-only", "never"
     nxt = ProtocolState(
-        phase=ProtocolPhase.THREAD_STARTING, epoch=s.epoch + 1, next_request_id=rid + 1,
-        pending_request_id=rid, zero_canon=zc, requested_model=model,
-        user_agent=s.user_agent, pending_utf8=s.pending_utf8,
+        phase=ProtocolPhase.THREAD_STARTING, epoch=s.epoch + 1, next_request_id=rid + 1, pending_request_id=rid,
+        zero_canon=zc, requested_model=model, user_agent=s.user_agent, pending_utf8=s.pending_utf8,
     )
     return nxt, (_rpc("thread/start", params, rid),)
 
@@ -171,25 +150,18 @@ def _start_turn(s: ProtocolState, p: JsonMap) -> TransitionResult:
         return _fail(s, "resident_protocol_failed", "turn/start needs server threadId")
     rid, zc = s.next_request_id, bool(p.get("zero_canon", s.zero_canon))
     raw_in = p.get("input")
-    items: list[object] = (
-        list(cast(list[object], raw_in))
-        if isinstance(raw_in, list)
-        else [{"type": "text", "text": str(p.get("prompt", ""))}]
-    )
-    model = _str(p.get("model")) or s.requested_model
-    effort = _str(p.get("effort")) or s.requested_effort
+    items: list[object] = list(cast(list[object], raw_in)) if isinstance(raw_in, list) else [{"type": "text", "text": str(p.get("prompt", ""))}]
+    model, effort = _str(p.get("model")) or s.requested_model, _str(p.get("effort")) or s.requested_effort
     params: dict[str, object] = {"threadId": s.thread_id, "input": items}
     if model is not None:
         params["model"] = model
     if effort is not None:
         params["effort"] = effort
     if zc:
-        params["approvalPolicy"] = "never"
-        params["sandboxPolicy"] = {"type": "readOnly", "networkAccess": False}
+        params["approvalPolicy"], params["sandboxPolicy"] = "never", {"type": "readOnly", "networkAccess": False}
     nxt = replace(
-        s, phase=ProtocolPhase.TURN_ACTIVE, epoch=s.epoch + 1, pending_request_id=rid,
-        interrupt_request_id=None, next_request_id=rid + 1, turn_id=None, zero_canon=zc,
-        requested_model=model, requested_effort=effort, error_code=None, error_message=None,
+        s, phase=ProtocolPhase.TURN_ACTIVE, epoch=s.epoch + 1, pending_request_id=rid, interrupt_request_id=None,
+        next_request_id=rid + 1, turn_id=None, zero_canon=zc, requested_model=model, requested_effort=effort, error_code=None, error_message=None,
     )
     return nxt, (_rpc("turn/start", params, rid),)
 
@@ -199,20 +171,14 @@ def _cancel_turn(s: ProtocolState, _p: JsonMap) -> TransitionResult:
         return s, ()
     if s.thread_id and s.turn_id:
         rid = s.next_request_id
-        params = {"threadId": s.thread_id, "turnId": s.turn_id}
-        nxt = replace(s, interrupt_request_id=rid, next_request_id=rid + 1)
-        return nxt, (_rpc("turn/interrupt", params, rid),)
+        return replace(s, interrupt_request_id=rid, next_request_id=rid + 1), (_rpc("turn/interrupt", {"threadId": s.thread_id, "turnId": s.turn_id}, rid),)
     return _term(s, ProtocolPhase.CANCELLED, "interrupted", bump=True)
 
 
 def _advance_epoch(s: ProtocolState, _p: JsonMap) -> TransitionResult:
     active = s.phase in _TURN_PHASES or s.phase is ProtocolPhase.TURN_ACTIVE
     phase = ProtocolPhase.THREAD_READY if active and s.thread_id else s.phase
-    nxt = replace(
-        s, phase=phase, epoch=s.epoch + 1, turn_id=None,
-        pending_request_id=None, interrupt_request_id=None,
-    )
-    return nxt, ()
+    return replace(s, phase=phase, epoch=s.epoch + 1, turn_id=None, pending_request_id=None, interrupt_request_id=None), ()
 
 
 def _on_handshake_frame(s: ProtocolState, frame: JsonMap) -> TransitionResult:
@@ -226,18 +192,11 @@ def _on_handshake_frame(s: ProtocolState, frame: JsonMap) -> TransitionResult:
     if res is None:
         return _fail(s, "resident_protocol_failed", "handshake missing result")
     if s.phase is ProtocolPhase.INITIALIZING:
-        nxt = replace(
-            s, phase=ProtocolPhase.INITIALIZED, pending_request_id=None,
-            user_agent=_str(res.get("userAgent")),
-        )
-        return nxt, (_rpc("initialized", {}),)
+        return replace(s, phase=ProtocolPhase.INITIALIZED, pending_request_id=None, user_agent=_str(res.get("userAgent"))), (_rpc("initialized", {}),)
     tid = _extract_id(res, "thread", "threadId")
     if tid is None:
         return _fail(s, "resident_protocol_failed", "thread/start missing threadId")
-    nxt = replace(
-        s, phase=ProtocolPhase.THREAD_READY, pending_request_id=None, thread_id=tid,
-        actual_model=_str(res.get("model")), actual_effort=_str(res.get("reasoningEffort")),
-    )
+    nxt = replace(s, phase=ProtocolPhase.THREAD_READY, pending_request_id=None, thread_id=tid, actual_model=_str(res.get("model")), actual_effort=_str(res.get("reasoningEffort")))
     return nxt, ()
 
 
@@ -250,8 +209,7 @@ def _on_turn_response(s: ProtocolState, frame: JsonMap) -> TransitionResult:
     if fid != s.pending_request_id:
         return s, ()
     bound = _extract_id(_as_map(frame.get("result")), "turn", "turnId") or s.turn_id
-    ack = ProtocolEffect(EffectKind.EMIT_TURN_ACK, {"thread_id": s.thread_id, "turn_id": bound})
-    return replace(s, pending_request_id=None, turn_id=bound), (ack,)
+    return replace(s, pending_request_id=None, turn_id=bound), (ProtocolEffect(EffectKind.EMIT_TURN_ACK, {"thread_id": s.thread_id, "turn_id": bound}),)
 
 
 def _on_turn_completed(s: ProtocolState, p: JsonMap) -> TransitionResult:
@@ -265,8 +223,7 @@ def _on_turn_completed(s: ProtocolState, p: JsonMap) -> TransitionResult:
         return _term(s, ProtocolPhase.CANCELLED, "interrupted")
     if status == "failed":
         nxt, errs = _fail(s, "turn_failed", _err(turn.get("error"), "turn failed"))
-        meta: dict[str, object] = {"status": "failed", "thread_id": s.thread_id, "turn_id": s.turn_id}
-        return nxt, (*errs, ProtocolEffect(EffectKind.EMIT_TERMINAL, meta))
+        return nxt, (*errs, ProtocolEffect(EffectKind.EMIT_TERMINAL, {"status": "failed", "thread_id": s.thread_id, "turn_id": s.turn_id}))
     return _fail(s, "resident_protocol_failed", f"unexpected status: {status!r}")
 
 
@@ -274,18 +231,14 @@ def _on_delta(s: ProtocolState, channel: str, p: JsonMap) -> TransitionResult:
     delta = p.get("delta")
     if s.turn_id is None or p.get("threadId") != s.thread_id or p.get("turnId") != s.turn_id or not isinstance(delta, str):
         return s, ()
-    data: dict[str, object] = {
-        "channel": channel, "delta": delta, "item_id": str(p.get("itemId", "")),
-        "thread_id": s.thread_id, "turn_id": s.turn_id,
-    }
+    data: dict[str, object] = {"channel": channel, "delta": delta, "item_id": str(p.get("itemId", "")), "thread_id": s.thread_id, "turn_id": s.turn_id}
     return s, (ProtocolEffect(EffectKind.EMIT_DELTA, data),)
 
 
 def _on_turn_started(s: ProtocolState, p: JsonMap) -> TransitionResult:
     tid = _extract_id(p, "turn", "turnId")
     if p.get("threadId") == s.thread_id and s.turn_id is None and tid is not None:
-        ack = ProtocolEffect(EffectKind.EMIT_TURN_ACK, {"thread_id": s.thread_id, "turn_id": tid})
-        return replace(s, turn_id=tid), (ack,)
+        return replace(s, turn_id=tid), (ProtocolEffect(EffectKind.EMIT_TURN_ACK, {"thread_id": s.thread_id, "turn_id": tid}),)
     return s, ()
 
 
@@ -312,27 +265,26 @@ def _on_turn_frame(s: ProtocolState, frame: JsonMap) -> TransitionResult:
     return _on_turn_notification(s, method, _as_map(frame.get("params")) or {}) if method is not None else (s, ())
 
 
-_FRAMES: Mapping[ProtocolPhase, _Handler] = {
-    ProtocolPhase.INITIALIZING: _on_handshake_frame,
-    ProtocolPhase.THREAD_STARTING: _on_handshake_frame,
-    ProtocolPhase.TURN_ACTIVE: _on_turn_frame,
-}
+_FRAMES: Mapping[ProtocolPhase, _Handler] = {ProtocolPhase.INITIALIZING: _on_handshake_frame, ProtocolPhase.THREAD_STARTING: _on_handshake_frame, ProtocolPhase.TURN_ACTIVE: _on_turn_frame}
 _CMDS: Mapping[EventKind, _Handler] = {
     EventKind.START_INITIALIZE: _start_initialize, EventKind.START_THREAD: _start_thread,
-    EventKind.START_TURN: _start_turn, EventKind.CANCEL_TURN: _cancel_turn,
-    EventKind.ADVANCE_EPOCH: _advance_epoch,
+    EventKind.START_TURN: _start_turn, EventKind.CANCEL_TURN: _cancel_turn, EventKind.ADVANCE_EPOCH: _advance_epoch,
 }
+
+
+def _on_server_frame(state: ProtocolState, event: ProtocolEvent) -> TransitionResult:
+    if event.epoch is not None and event.epoch != state.epoch:
+        return state, ()
+    if "jsonrpc" in event.payload and event.payload["jsonrpc"] != "2.0":
+        return _fail(state, "resident_protocol_failed", "invalid jsonrpc version")
+    handler = _FRAMES.get(state.phase)
+    return handler(state, event.payload) if handler is not None else (state, ())
 
 
 def transition(state: ProtocolState, event: ProtocolEvent) -> TransitionResult:
     """Pure transition(state, event) -> (new_state, effects) with zero I/O."""
     if event.kind is EventKind.SERVER_FRAME:
-        if event.epoch is not None and event.epoch != state.epoch:
-            return state, ()
-        if "jsonrpc" in event.payload and event.payload["jsonrpc"] != "2.0":
-            return _fail(state, "resident_protocol_failed", "invalid jsonrpc version")
-        handler = _FRAMES.get(state.phase)
-        return handler(state, event.payload) if handler is not None else (state, ())
+        return _on_server_frame(state, event)
     if event.kind is EventKind.TRANSPORT_ERROR:
         code = _str(event.payload.get("code")) or "upstream_incomplete_stream"
         return _fail(state, code, _str(event.payload.get("message")) or "transport err")

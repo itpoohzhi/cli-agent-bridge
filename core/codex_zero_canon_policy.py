@@ -20,30 +20,24 @@ CODEX_EFFORT_MATRIX: Final[Mapping[str, tuple[str, ...]]] = MappingProxyType({
     "gpt-6.1-sol": ("low", "medium", "high", "xhigh", "max"),
     "gpt-6.1-terra": ("low", "medium", "high"),
 })
-CODEX_DEFAULT_EFFORTS: Final[Mapping[str, str]] = MappingProxyType(
-    {"gpt-6.1-sol": "high", "gpt-6.1-terra": "high"}
-)
+CODEX_DEFAULT_EFFORTS: Final[Mapping[str, str]] = MappingProxyType({"gpt-6.1-sol": "high", "gpt-6.1-terra": "high"})
 STRICT_STRIPPED_REQUEST_KEYS: Final[frozenset[str]] = frozenset(
     "tools tool_choice emulate_tools functions function_call parallel_tool_calls".split()
 )
 FORBIDDEN_TOOL_METHODS: Final[frozenset[str]] = frozenset(
     "item/commandExecution/requestApproval item/commandExecution/outputDelta "
     "item/commandExecution/terminalInteraction item/fileChange/requestApproval "
-    "item/fileChange/outputDelta item/fileChange/patchUpdated "
-    "item/mcpToolCall/progress item/permissions/requestApproval "
-    "item/tool/call item/tool/requestUserInput command/exec/outputDelta "
-    "mcpServer/elicitation/request applyPatchApproval execCommandApproval".split()
+    "item/fileChange/outputDelta item/fileChange/patchUpdated item/mcpToolCall/progress "
+    "item/permissions/requestApproval item/tool/call item/tool/requestUserInput "
+    "command/exec/outputDelta mcpServer/elicitation/request applyPatchApproval execCommandApproval".split()
 )
 FORBIDDEN_TOOL_ITEM_TYPES: Final[frozenset[str]] = frozenset(
     "commandExecution fileChange mcpToolCall dynamicToolCall collabAgentToolCall "
-    "webSearch functionCallOutput imageView imageGeneration "
-    "tool_call toolCall function_call functionCall".split()
+    "webSearch functionCallOutput imageView imageGeneration tool_call toolCall function_call functionCall".split()
 )
-_TIMEOUT_MAP: Final[Mapping[str, str]] = MappingProxyType({
-    "first_progress": "first_progress_timeout",
-    "idle": "idle_timeout",
-    "safety_cap": "safety_cap_timeout",
-})
+_TIMEOUT_MAP: Final[Mapping[str, str]] = MappingProxyType(
+    {"first_progress": "first_progress_timeout", "idle": "idle_timeout", "safety_cap": "safety_cap_timeout"}
+)
 # error_class -> (http_status, scope, retryable, failover_pre_byte, cancel_pgid, fail_closed)
 ERROR_TAXONOMY: Final[Mapping[str, tuple[int, str, bool, bool, bool, bool]]] = MappingProxyType({
     "credential_unavailable": (503, "credential", False, True, False, False),
@@ -90,16 +84,10 @@ class CodexZeroCanonRestrictions:
         cleaned = cwd.strip()
         if not cleaned:
             raise _err("invalid_cwd", "Zero-Canon requires non-empty cwd", 400)
-        return {
-            "model": self.model, "cwd": cleaned, "ephemeral": self.ephemeral,
-            "sandbox": self.sandbox, "approvalPolicy": self.approval_policy,
-        }
+        return {"model": self.model, "cwd": cleaned, "ephemeral": self.ephemeral, "sandbox": self.sandbox, "approvalPolicy": self.approval_policy}
 
     def turn_start_params(self) -> dict[str, object]:
-        return {
-            "model": self.model, "effort": self.effort, "approvalPolicy": self.approval_policy,
-            "sandboxPolicy": {"type": "readOnly", "networkAccess": self.network_access},
-        }
+        return {"model": self.model, "effort": self.effort, "approvalPolicy": self.approval_policy, "sandboxPolicy": {"type": "readOnly", "networkAccess": self.network_access}}
 
 
 @dataclass(frozen=True, slots=True)
@@ -136,18 +124,14 @@ class ZeroCanonAttestationReceipt:
         return self.phase == "completed" and self.completeness == "complete"
 
     def header_value(self) -> str:
-        return format_attestation_header(
-            self.actual.model, self.actual.effort, phase=self.phase, backend=self.actual.backend
-        )
+        return format_attestation_header(self.actual.model, self.actual.effort, phase=self.phase, backend=self.actual.backend)
 
     def to_dict(self) -> dict[str, object]:
         return {
-            "profile": ZERO_CANON_PROFILE, "backend": self.actual.backend,
-            "route_id": self.actual.route_id, "tools": "off", "sandbox": "read-only",
-            "approval": "never", "requested_model": self.requested.model,
-            "actual_model": self.actual.model, "requested_effort": self.requested.effort,
-            "actual_effort": self.actual.effort, "phase": self.phase,
-            "completeness": self.completeness, "header": self.header_value(),
+            "profile": ZERO_CANON_PROFILE, "backend": self.actual.backend, "route_id": self.actual.route_id,
+            "tools": "off", "sandbox": "read-only", "approval": "never", "requested_model": self.requested.model,
+            "actual_model": self.actual.model, "requested_effort": self.requested.effort, "actual_effort": self.actual.effort,
+            "phase": self.phase, "completeness": self.completeness, "header": self.header_value(),
         }
 
 
@@ -164,9 +148,7 @@ class ErrorClassification:
     clear_penalty: bool = False
 
 
-def validate_codex_model_effort(
-    model: str, effort: str | None = None, *, default_if_missing: bool = True
-) -> tuple[str, str]:
+def validate_codex_model_effort(model: str, effort: str | None = None, *, default_if_missing: bool = True) -> tuple[str, str]:
     """Validate `(model, effort)` against CODEX_EFFORT_MATRIX without silent clamp."""
     norm_model = model.strip().lower()
     allowed = CODEX_EFFORT_MATRIX.get(norm_model)
@@ -182,9 +164,7 @@ def validate_codex_model_effort(
     return norm_model, norm_effort
 
 
-def build_zero_canon_restrictions(
-    model: str, effort: str | None = None, *, route_id: str = CODEX_V2_ROUTE_ID
-) -> CodexZeroCanonRestrictions:
+def build_zero_canon_restrictions(model: str, effort: str | None = None, *, route_id: str = CODEX_V2_ROUTE_ID) -> CodexZeroCanonRestrictions:
     """Build immutable Zero-Canon restrictions after strict model/effort validation."""
     valid_model, valid_effort = validate_codex_model_effort(model, effort)
     return CodexZeroCanonRestrictions(valid_model, valid_effort, route_id)
@@ -229,14 +209,11 @@ def verify_turn_identity(requested: RequestedTurnSpec, actual: ActualTurnObserva
         ("model", requested.model, actual.model), ("effort", requested.effort, actual.effort),
         ("profile", requested.profile, actual.profile), ("backend", requested.backend, actual.backend),
     )
-    drift = [name for name, exp, got in checks if exp != got]
-    if drift:
+    if drift := [name for name, exp, got in checks if exp != got]:
         raise _err("zero_canon_attestation_failed", f"Identity mismatch: {', '.join(drift)}")
 
 
-def build_attestation_receipt(
-    requested: RequestedTurnSpec, actual: ActualTurnObservation, *, phase: str
-) -> ZeroCanonAttestationReceipt:
+def build_attestation_receipt(requested: RequestedTurnSpec, actual: ActualTurnObservation, *, phase: str) -> ZeroCanonAttestationReceipt:
     """Validate Zero-Canon proof invariants and produce an attestation receipt."""
     if phase not in ATTESTATION_PHASES or requested.profile != ZERO_CANON_PROFILE:
         raise _err("zero_canon_attestation_failed", f"Invalid phase={phase!r} or profile")
@@ -244,22 +221,15 @@ def build_attestation_receipt(
     _ = validate_codex_model_effort(actual.model, actual.effort, default_if_missing=False)
     if phase == "completed" and actual.terminal_status != "completed":
         raise _err("upstream_incomplete_stream", f"terminal_status={actual.terminal_status!r}")
-    return ZeroCanonAttestationReceipt(
-        requested, actual, phase, "complete" if phase == "completed" else "admitted"
-    )
+    return ZeroCanonAttestationReceipt(requested, actual, phase, "complete" if phase == "completed" else "admitted")
 
 
-def format_attestation_header(
-    model: str, effort: str, *, phase: str = "completed", backend: str = CODEX_BACKEND_ID
-) -> str:
+def format_attestation_header(model: str, effort: str, *, phase: str = "completed", backend: str = CODEX_BACKEND_ID) -> str:
     """Format canonical X-Zero-Canon-Attestation header after validating inputs."""
     m, e = validate_codex_model_effort(model, effort, default_if_missing=False)
     if phase not in ATTESTATION_PHASES:
         raise _err("zero_canon_attestation_failed", f"Invalid phase: {phase!r}")
-    return (
-        f"profile={ZERO_CANON_PROFILE};backend={backend};tools=off;"
-        f"sandbox=read-only;approval=never;model={m};effort={e};phase={phase}"
-    )
+    return f"profile={ZERO_CANON_PROFILE};backend={backend};tools=off;sandbox=read-only;approval=never;model={m};effort={e};phase={phase}"
 
 
 def parse_attestation_header(header_value: str) -> dict[str, str]:
@@ -304,13 +274,10 @@ def _resolve_error_class(lower_msg: str, status_code: int | None, timeout_kind: 
 
 
 def classify_error(
-    message: str = "", *, status_code: int | None = None,
-    timeout_kind: str | None = None, bytes_sent: int = 0,
+    message: str = "", *, status_code: int | None = None, timeout_kind: str | None = None, bytes_sent: int = 0
 ) -> ErrorClassification:
     """Classify failure by protocol/HTTP semantics only; never replay after bytes_sent > 0."""
     err_class = _resolve_error_class(message.lower(), status_code, timeout_kind)
     status, scope, retryable, failover, cancel_pgid, fail_closed = ERROR_TAXONOMY[err_class]
     pre_byte = bytes_sent <= 0
-    return ErrorClassification(
-        err_class, status, scope, retryable and pre_byte, failover and pre_byte, cancel_pgid, fail_closed
-    )
+    return ErrorClassification(err_class, status, scope, retryable and pre_byte, failover and pre_byte, cancel_pgid, fail_closed)

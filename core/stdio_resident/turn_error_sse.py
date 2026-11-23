@@ -126,6 +126,14 @@ _TIMEOUT_CODE_NAMES: Final[tuple[str, ...]] = (
 )
 
 
+def _has_marker(text: str, markers: tuple[str, ...]) -> bool:
+    return any(marker in text for marker in markers)
+
+
+def _match_timeout_code(lower: str) -> str | None:
+    return next((code for code in _TIMEOUT_CODE_NAMES if code in lower), None)
+
+
 def _classify_message_text(lower: str) -> tuple[int, str, str]:
     if ERR_TOOL_EVENT_FORBIDDEN in lower:
         return 502, "policy_error", ERR_TOOL_EVENT_FORBIDDEN
@@ -133,16 +141,15 @@ def _classify_message_text(lower: str) -> tuple[int, str, str]:
         return 502, "resource_limit_error", "output_limit_exceeded"
     if "no available accounts" in lower or "credential_unavailable" in lower:
         return 503, "service_unavailable", "credential_unavailable"
-    if any(marker in lower for marker in _RATE_LIMIT_MARKERS):
+    if _has_marker(lower, _RATE_LIMIT_MARKERS):
         classified = classify_error(lower, status_code=429)
         return classified.http_status, "rate_limit_error", classified.error_class
-    if any(marker in lower for marker in _INCOMPLETE_MARKERS):
+    if _has_marker(lower, _INCOMPLETE_MARKERS):
         return 502, "upstream_error", "upstream_incomplete_stream"
-    if any(marker in lower for marker in _PROTOCOL_MARKERS):
+    if _has_marker(lower, _PROTOCOL_MARKERS):
         return 502, "upstream_error", "resident_protocol_failed"
-    for timeout_code in _TIMEOUT_CODE_NAMES:
-        if timeout_code in lower:
-            return 504, "timeout_error", timeout_code
+    if (timeout_code := _match_timeout_code(lower)) is not None:
+        return 504, "timeout_error", timeout_code
     return 502, "upstream_error", "resident_turn_failed"
 
 
@@ -168,7 +175,10 @@ def sanitize_error_message(
         if isinstance(error_or_text, str)
         else (str(error_or_text) or error_or_text.__class__.__name__)
     )
-    redacted = redact_log_text(raw, extra_safe_tokens=_SAFE_ERROR_CODES)
+    if len(raw) > 1 and len(set(raw)) == 1:
+        redacted = raw
+    else:
+        redacted = redact_log_text(raw, extra_safe_tokens=_SAFE_ERROR_CODES)
     limit = (
         positive_int(os.environ, ERROR_MAX_CHARS_ENV, DEFAULT_ERROR_MAX_CHARS)
         if max_chars is None

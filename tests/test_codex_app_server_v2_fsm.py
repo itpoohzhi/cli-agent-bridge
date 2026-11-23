@@ -74,18 +74,8 @@ def _boot(
 
 def _pong(*, probe_id: str = "p1", done: bool = True) -> rec.PongReceipt:
     return rec.PongReceipt(
-        probe_id,
-        SOL,
-        SOL,
-        "high",
-        "high",
-        "codex",
-        "codex-app-server-v2",
-        "zero-canon",
-        ATTEST_SOL,
-        done,
-        done,
-        "PONG",
+        probe_id, SOL, SOL, "high", "high", "codex",
+        "codex-app-server-v2", "zero-canon", ATTEST_SOL, done, done, "PONG",
     )
 
 
@@ -258,17 +248,9 @@ def test_recovery_fsm_domain_isolation_and_cooldown_tick() -> None:
     st, rej = rec.transition(st, h200)
     assert rej[0].kind is REF.REJECT_TRANSITION and st.credential.phase is RPH.BLOCKED
 
-    cd = REv(
-        REV.FAILURE,
-        20.0,
-        error_code="quota_exhausted",
-        cooldown_s=30.0,
-        proven_reset=True,
-    )
+    cd = REv(REV.FAILURE, 20.0, error_code="quota_exhausted", cooldown_s=30.0, proven_reset=True)
     st, _ = rec.transition(st, cd)
-    assert (
-        st.credential.phase is RPH.COOLDOWN and st.credential.cooldown_until_s == 50.0
-    )
+    assert st.credential.phase is RPH.COOLDOWN and st.credential.cooldown_until_s == 50.0
     st, early = rec.transition(st, REv(REV.TICK, 49.9))
     assert early == () and st.credential.phase is RPH.COOLDOWN
     st, due = rec.transition(st, REv(REV.TICK, 50.0))
