@@ -4903,33 +4903,11 @@ class _TranscriptTail(InterruptionTailState):
 
     def _get_wal_wait_polls(self) -> int:
         """Вернуть число холодных ожиданий WAL без модификации __init__ трекера."""
-        attr = "_wal_wait_polls"
-        val = getattr(self, attr, None)
-        if isinstance(val, int) and not isinstance(val, bool):
-            return val
-        fallback = cast(
-            "dict[int, int] | None",
-            getattr(type(self), "_wal_wait_polls_fallback", None),
-        )
-        if isinstance(fallback, dict):
-            return fallback.get(id(self), 0)
-        return 0
+        return int(getattr(self, "_wal_wait_polls", 0))
 
     def _set_wal_wait_polls(self, count: int) -> None:
-        """Обновить счётчик холодных ожиданий WAL с fallback на случай __slots__."""
-        attr = "_wal_wait_polls"
-        try:
-            setattr(self, attr, count)
-        except AttributeError:
-            fb_attr = "_wal_wait_polls_fallback"
-            fallback = cast("dict[int, int] | None", getattr(type(self), fb_attr, None))
-            if not isinstance(fallback, dict):
-                fallback = {}
-                setattr(type(self), fb_attr, fallback)
-            if count <= 0:
-                _ = fallback.pop(id(self), None)
-            else:
-                fallback[id(self)] = count
+        """Обновить счётчик холодных ожиданий WAL в поле инстанса."""
+        self._wal_wait_polls = count
 
     def _resolve_wal_wait(self) -> None:
         """Зафиксировать выход из холодного ожидания WAL при первом успешном SELECT."""
@@ -4937,6 +4915,18 @@ class _TranscriptTail(InterruptionTailState):
         if waited > 0:
             self._set_wal_wait_polls(0)
             _log(f"sqlite-wal-resolved cid={self._cid8()} waited_polls={waited}")
+
+    def _handle_cold_wal_wait(self, exc: sqlite3.Error) -> bool:
+        """Обработать холодное ожидание WAL до первого SELECT или появления -wal."""
+        # cold-open: базы или её -wal ещё нет либо ошибка до первого успешного SELECT.
+        wal = Path(str(self._db_path) + "-wal")
+        if self.selects_ok == 0 or not wal.exists():
+            waited = self._get_wal_wait_polls()
+            self._set_wal_wait_polls(waited + 1)
+            if waited == 0:
+                _log(f"sqlite-wal-wait cid={self._cid8()} err={type(exc).__name__}")
+            return True
+        return False
 
     def _on_sqlite_error(self, exc: sqlite3.Error) -> None:
         message = str(exc).lower()
@@ -4951,13 +4941,7 @@ class _TranscriptTail(InterruptionTailState):
             _log(f"sqlite-schema-mismatch cid={self._cid8()}")
             self._sqlite_off("schema")
         elif operational:
-            # cold-open: базы или её -wal ещё нет либо ошибка до первого успешного SELECT.
-            wal = Path(str(self._db_path) + "-wal")
-            if self.selects_ok == 0 or not wal.exists():
-                waited = self._get_wal_wait_polls()
-                self._set_wal_wait_polls(waited + 1)
-                if waited == 0:
-                    _log(f"sqlite-wal-wait cid={self._cid8()} err={type(exc).__name__}")
+            if self._handle_cold_wal_wait(exc):
                 return
             self.failed = True
         elif isinstance(exc, sqlite3.DatabaseError):

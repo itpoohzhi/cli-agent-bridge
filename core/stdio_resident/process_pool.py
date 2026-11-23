@@ -69,7 +69,7 @@ class ResidentProcessPool:
         with self._cv:
             if self._closed:
                 raise PoolClosedError("resident process pool is closed")
-            self.start_maintenance()
+            _ = self.start_maintenance()
             while True:
                 if self._closed:
                     raise PoolClosedError("resident process pool is closed")
@@ -132,15 +132,19 @@ class ResidentProcessPool:
                 return
             self._cv.notify_all()
 
-    def start_maintenance(self) -> None:
-        """Запустить фоновый daemon-поток обслуживания пула при enabled=True."""
+    def start_maintenance(self) -> bool:
+        """Запустить фоновый daemon-поток обслуживания пула при enabled=True.
+
+        Возвращает True, если поток запущен этим вызовом, и False если запуск
+        пропущен (пул выключен, закрыт, остановлен или поток уже жив).
+        """
         if not self._config.enabled:
-            return
+            return False
         with self._cv:
             if self._closed or self._stop_event.is_set():
-                return
+                return False
             if self._maint_thread is not None and self._maint_thread.is_alive():
-                return
+                return False
             thread = threading.Thread(
                 target=self._maintenance_loop,
                 name="stdio-resident-maintenance",
@@ -148,6 +152,7 @@ class ResidentProcessPool:
             )
             self._maint_thread = thread
             thread.start()
+            return True
 
     async def drain_and_shutdown(self, timeout_s: float | None = None) -> None:
         """Close idle slots, wait for active leases up to timeout, then shut down."""
