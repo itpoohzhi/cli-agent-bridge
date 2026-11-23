@@ -264,6 +264,14 @@ async def _serve(handler: Any, request: Payload, host: Any, upstream: Callable[.
     finally:
         await response.stream.aclose()
 
+def is_alias_request(request: Mapping[str, Any]) -> bool:
+    """Возвращает True, если включён fallback-хук и model является алиасом цепочки."""
+    if not _enabled():
+        return False
+    model = request.get("model")
+    return isinstance(model, str) and model.strip() in _catalog().chains
+
+
 def dispatch(handler: Any, request: Mapping[str, Any], host: Any, upstream: Callable[..., None], scope: str | None = None) -> bool:
     """True означает полностью обработанный алиас; прямые модели не затрагиваются."""
     if not _enabled():

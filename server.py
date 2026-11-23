@@ -198,6 +198,9 @@ from core.liveness_signals import (  # noqa: E402
     passthrough_window as passthrough_window,
 )
 from core.runtime_env import DynamicFlagSource, allow_hub_client_response_header, flag_enabled  # noqa: E402
+from core import zero_canon_http as _zc_http  # noqa: E402
+from core.stdio_resident import codex_attestation_wire as _zc_wire  # noqa: E402
+from core.stdio_resident.turn_error_sse import ResidentTurnError  # noqa: E402
 from core.turn_dispatch import ToolSchemaScope, dispatch_turn  # noqa: E402
 from core.request_telemetry import RequestTelemetryStore  # noqa: E402
 from core.telemetry_hooks import (  # noqa: E402
@@ -1925,11 +1928,7 @@ class _HandlerSink(ResponseSink):
             return
         try:
             self._handler.send_response(int(status))
-            for key, value in headers:
-                if allow_hub_client_response_header(key, self._DROP | self._extra_names, self._handler, _LOOPBACK_PEERS):
-                    self._handler.send_header(key, value)
-            for key, value in self._extra_headers:
-                self._handler.send_header(key, value)
+            _zc_http.emit_passthrough_headers(self._handler, headers, self._DROP | self._extra_names, self._extra_headers, lambda k, b: allow_hub_client_response_header(k, b, self._handler, _LOOPBACK_PEERS))
             if not any(key.lower() == "content-length" for key, _ in headers):
                 self._handler.close_connection = (
                     True  # тело без длины (SSE) — конец по закрытию
@@ -7271,7 +7270,12 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
 
     def _serve_json_body(self, ctx: dict[str, Any]) -> None:
         lease = self._current_lease()
-        out = self._dispatch(ctx, None)
+        try:
+            out = self._dispatch(ctx, None)
+        except ResidentTurnError as exc:
+            lease.record_failure(exc)
+            self._send(exc.status, exc.response.body)
+            return
         if out.get("state") == "client_gone":
             lease.record_discard("client_disconnected")
             return
@@ -7347,14 +7351,7 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(total))
-        active_turn = getattr(self, "_active_managed_turn", None)
-        if active_turn is not None:
-            self.send_header("X-Turn-Id", active_turn.turn_id)
-        for key, value in _trace_headers(self._trace):
-            self.send_header(key, value)
-        if self._context_pruned:
-            self.send_header(ctxres.PRUNED_HEADER, self._context_pruned)
-        self.end_headers()
+        _zc_http.emit_turn_headers(self, getattr(self, "_active_managed_turn", None), _trace_headers(self._trace), (ctxres.PRUNED_HEADER, self._context_pruned), attestation=(None if out.get("tool_calls") else (out.get("zero_canon_completion") or getattr(self, "_zero_canon_completion", None)), "completed"))
         for index, value in enumerate(values):
             self.wfile.write(segments[index] + b'"')
             for piece in _text_slices(value):
@@ -7405,71 +7402,41 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
         managed_turn: ManagedTurn | None = ctx.get("managed_turn") or getattr(
             self, "_active_managed_turn", None
         )
-        try:
-            self._response_status = 200
-            if not getattr(self, "_headers_already_sent", False):
-                self._headers_already_sent = True
-                self.send_response(200)
-                self.send_header("Content-Type", "text/event-stream")
-                self.send_header("Cache-Control", "no-cache")
-                self.send_header("X-Accel-Buffering", "no")
-                if managed_turn is not None:
-                    self.send_header("X-Turn-Id", managed_turn.turn_id)
-                for key, value in _trace_headers(self._trace):
-                    self.send_header(key, value)
-                if self._context_pruned:
-                    self.send_header(ctxres.PRUNED_HEADER, self._context_pruned)
-                self.end_headers()
-            self.close_connection = True
-        except (BrokenPipeError, ConnectionResetError, OSError):
+        def _on_hdr_drop() -> None:
             _log("client gone before headers")
             self._telemetry_gone()
             lease.record_discard("client_disconnected")
             if managed_turn is not None and ctx.get("detach_on_disconnect"):
                 TURN_MANAGER.mark_detached(managed_turn.turn_id)
-            return
 
+        def chunk(delta: dict, finish=None) -> str:
+            payload = {"id": completion_id, "object": "chat.completion.chunk", "created": created, "model": shown_model, "choices": [{"index": 0, "delta": delta, "finish_reason": finish}]}
+            return "data: " + json.dumps(payload, ensure_ascii=False) + "\n\n"
+
+        live_sent, reasoning_live_chars = [0], 0  # RW-211: байты, реально отданные этим запросом
+        sse_lock, sink_closed = threading.RLock(), threading.Event()
+
+        def emit(frame: str) -> bool:
+            with sse_lock:
+                return self._emit(frame)
+
+        gate = _zc_wire.ZeroCanonSseHeaderGate.for_request(
+            self, ctx, _trace_headers(self._trace), (ctxres.PRUNED_HEADER, self._context_pruned),
+            initial_frame_fn=lambda: emit(chunk({"role": "assistant", "content": ""})),
+        )
+        gate.on_disconnect = _on_hdr_drop
         if ctx.get("attached_existing") and managed_turn is not None:
+            if not gate.ensure_headers(emit_initial=False):
+                return
             from_seq = self._parse_from_seq() or 0
             for frame in TURN_MANAGER.iter_sse_stream(
-                managed_turn,
-                from_seq=from_seq,
-                keepalive_interval_s=KEEPALIVE_S,
+                managed_turn, from_seq=from_seq, keepalive_interval_s=KEEPALIVE_S,
                 client_gone_fn=lambda: _client_gone(self.connection),
             ):
                 if not self._emit(frame):
                     TURN_MANAGER.mark_detached(managed_turn.turn_id)
                     return
             return
-
-        def chunk(delta: dict, finish=None) -> str:
-            return (
-                "data: "
-                + json.dumps(
-                    {
-                        "id": completion_id,
-                        "object": "chat.completion.chunk",
-                        "created": created,
-                        "model": shown_model,
-                        "choices": [
-                            {"index": 0, "delta": delta, "finish_reason": finish}
-                        ],
-                    },
-                    ensure_ascii=False,
-                )
-                + "\n\n"
-            )
-
-        live_sent = [
-            0
-        ]  # RW-211: байты content/reasoning, реально отданные этим запросом
-        reasoning_live_chars = 0
-        sse_lock = threading.RLock()
-        sink_closed = threading.Event()
-
-        def emit(frame: str) -> bool:
-            with sse_lock:
-                return self._emit(frame)
 
         def stream_error_frame(
             message: str,
@@ -7498,6 +7465,8 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
                 return write_keepalive()
 
         def write_keepalive() -> bool:
+            if not gate.allow_keepalive():
+                return True
             # RW-201/RW-009: та же защита, что у sse_writer ниже — запись ограничена
             # LIVE_WRITE_TIMEOUT_S, а не таймаутом соединения (300с), иначе клиент,
             # который просто не читает, держит T/L все 300с на одном keepalive.
@@ -7510,7 +7479,7 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
 
         def sse_writer(kind: str, text: str) -> bool:
             with sse_lock:
-                if sink_closed.is_set() or self._client_write_dead:
+                if sink_closed.is_set() or self._client_write_dead or gate.failed_closed:
                     return False
                 return write_live(kind, text)
 
@@ -7527,23 +7496,28 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
             prev_timeout = self.connection.gettimeout()
             try:
                 self.connection.settimeout(LIVE_WRITE_TIMEOUT_S)
-                for piece in _text_slices(text) if text else [text]:
-                    if not emit(chunk({field: piece})):
-                        ok = False
-                        break
-                    self._telemetry_note(chunk=True)
-                    live_sent[0] += len(piece.encode("utf-8"))
-                    if kind == "reasoning":
-                        reasoning_live_chars += len(piece)
+                if not gate.ensure_live_headers():
+                    ok = False
+                else:
+                    for piece in _text_slices(text) if text else [text]:
+                        if not emit(chunk({field: piece})):
+                            ok = False
+                            break
+                        self._telemetry_note(chunk=True)
+                        live_sent[0] += len(piece.encode("utf-8"))
+                        if kind == "reasoning":
+                            reasoning_live_chars += len(piece)
             finally:
                 self.connection.settimeout(prev_timeout)
-            if not ok:
+            if not ok and not gate.failed_closed:
                 # RW-203: отказ фиксируется на Handler — _serve_sse больше не отправит
                 # этому клиенту ни одного терминального кадра (включая keepalive).
                 self._client_write_dead = True
             return ok
 
-        if not emit(chunk({"role": "assistant", "content": ""})):
+        if not gate.ensure_initial_headers():
+            if gate.header_write_failed:
+                return
             # Пустой стартовый кадр успехом не считается; обрыв клиента нейтрален.
             lease.record_discard("client_disconnected")
             if managed_turn is not None and ctx.get("detach_on_disconnect"):
@@ -7560,10 +7534,16 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
                 with sse_lock:
                     sink_closed.set()
         except Exception as exc:  # noqa: BLE001 - RW-211: клиенту нужен конверт, а не сырой сбой
+            if gate.failed_closed:
+                return
             from core.stdio_resident.sse_error_bridge import SseErrorContext, handle_sse_stream_exception
             if handle_sse_stream_exception(exc, live_sent[0], SseErrorContext(self, lease, emit, stream_error_frame, _log)):
                 return
+            if gate.handle_pre_stream_error(exc, lease):
+                return
             raise
+        if gate.failed_closed:
+            return
         if self._client_write_dead:
             # RW-203: сокет отверг живую запись — терминальные кадры (tool_call, stop,
             # usage, error) и [DONE] мёртвому клиенту не отправляются.
@@ -7586,13 +7566,13 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
         self._record_turn_outcome(lease, out, backend_err, model_id=cli_canon_id)
         err = backend_err or self._reserve_delivery(out)
         self._telemetry_error(err)
+        if not gate.finalize_zero_chunk_headers(err):
+            return
         if err is None:
             # Доставка — отдельный этап: T/L уже свободны, checkpoint записан; обрыв клиента
             # здесь ни на что, кроме самого ответа, не влияет. У droid content/reasoning уже ушли
             # живьём из _execute (sse_writer выше): здесь остаются только tool_call-кадры.
-            live_backend = out.get("backend_kind") == "droid" or (
-                out.get("backend_kind") == "stdio_resident" and live_sent[0] > 0
-            )
+            live_backend = out.get("backend_kind") == "droid" or (out.get("backend_kind") == "stdio_resident" and live_sent[0] > 0)
             reasoning_to_skip = reasoning_live_chars
             for kind, value in out.get("events") or []:
                 if kind in ("content", "reasoning"):

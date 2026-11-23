@@ -229,6 +229,22 @@ class AcpDriver(StreamJsonDriver):
         return b'{"event": "cancel"}\n'
 
 
+def _create_lazy_driver(protocol_name: str) -> StdioProtocolDriver | None:
+    if protocol_name in {"claude-stream-json", "claude_stream_json"}:
+        from core.stdio_resident.claude_driver import ClaudeStreamJsonDriver
+
+        return ClaudeStreamJsonDriver()
+    if protocol_name in {"codex-app-server", "codex_app_server"}:
+        from core.stdio_resident.codex_driver import CodexAppServerDriver
+
+        return CodexAppServerDriver()
+    if protocol_name in {"codex-app-server-v2", "codex_app_server_v2"}:
+        from core.stdio_resident.codex_driver import CodexAppServerV2Driver
+
+        return CodexAppServerV2Driver()
+    return None
+
+
 def create_protocol_driver(
     protocol_name: str,
     config: Mapping[str, Any] | None = None,
@@ -241,14 +257,9 @@ def create_protocol_driver(
             return factory(config=config, **kwargs)
         return factory(**kwargs) if kwargs else factory()
 
-    if protocol_name in {"claude-stream-json", "claude_stream_json"}:
-        from core.stdio_resident.claude_driver import ClaudeStreamJsonDriver
-
-        return ClaudeStreamJsonDriver()
-    if protocol_name in {"codex-app-server", "codex_app_server"}:
-        from core.stdio_resident.codex_driver import CodexAppServerDriver
-
-        return CodexAppServerDriver()
+    lazy = _create_lazy_driver(protocol_name)
+    if lazy is not None:
+        return lazy
 
     drivers: dict[str, type[StdioProtocolDriver]] = {
         "stream-json": StreamJsonDriver,

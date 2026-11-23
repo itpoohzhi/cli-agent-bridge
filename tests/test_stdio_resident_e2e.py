@@ -208,7 +208,11 @@ class _BlockFormattingDriver(StreamJsonDriver):
         decoded = super().decode_line(raw_line)
         if decoded is None or decoded.is_terminal:
             return decoded
-        decoded.text = "Block one." if decoded.text == "echo: " else "Block two."
+        if decoded.text == "echo: ":
+            decoded.text = "Block one."
+        else:
+            decoded.text = "Block two."
+            decoded.raw["step_boundary"] = True
         return decoded
 
 

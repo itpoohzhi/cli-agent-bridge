@@ -10,7 +10,7 @@ import re
 import uuid
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from adapters.stdio_drivers.muse_driver import MuseMspDriver
 from adapters.stdio_drivers.opencode_driver import OpenCodeAcpDriver
@@ -27,10 +27,13 @@ _REPO_DYNAMIC_CONFIG: Path = Path(__file__).resolve().parents[2] / "dynamic_conf
 register_protocol_driver("opencode-acp", OpenCodeAcpDriver)
 
 __all__ = [
+    "CODEX_APP_SERVER_V2_FLAG",
     "MuseMspDriver",
     "OpenCodeAcpDriver",
     "build_affinity_key",
     "infer_protocol",
+    "is_claude_codex_resident_protocol_enabled",
+    "is_codex_app_server_v2_enabled",
     "is_opencode_resident_enabled",
     "is_resident_enabled",
     "resolve_chat_key",
@@ -42,8 +45,12 @@ _SESSION_ID_KEYS: tuple[str, ...] = ("chat_key", "session_id", "conversation_id"
 _SESSION_ID_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,128}\Z")
 _ENV_MUSE_RESIDENT_ENABLED = "BRIDGE_MUSE_RESIDENT_ENABLED"
 _ENV_OPENCODE_RESIDENT_ENABLED = "BRIDGE_OPENCODE_RESIDENT_ENABLED"
+CODEX_APP_SERVER_V2_FLAG = "BRIDGE_CODEX_APP_SERVER_V2_ENABLED"
 _CLAUDE_IDS = frozenset({"claude", "claude-p", "claude_p"})
 _CODEX_IDS = frozenset({"codex", "codex-cli", "codex-app-server"})
+_CODEX_V2_IDS = frozenset(
+    {"codex", "codex-cli", "codex-app-server", "codex-app-server-v2"}
+)
 _TRUE_VALUES = frozenset({"1", "true", "yes", "on", "enabled"})
 _FALSE_VALUES = frozenset({"0", "false", "no", "off", "disabled"})
 
@@ -109,15 +116,21 @@ def resolve_owner_hash(
 
 
 def _extract_wrapper_path(config: Mapping[str, Any]) -> str:
-    for key in ("wrapper", "wrapper_path"):
-        value = config.get(key)
-        if isinstance(value, str) and value.strip():
-            return value.strip()
-    fingerprint = config.get("fingerprint")
-    if isinstance(fingerprint, Mapping):
-        value = fingerprint.get("wrapper_path")
-        if isinstance(value, str) and value.strip():
-            return value.strip()
+    candidates: list[Mapping[str, Any]] = [config]
+    for section in ("bridge", "fingerprint"):
+        sub = config.get(section)
+        if isinstance(sub, Mapping):
+            candidates.append(cast(Mapping[str, Any], sub))
+    transport = config.get("transport")
+    if isinstance(transport, Mapping):
+        bridge = cast(Mapping[str, Any], transport).get("bridge")
+        if isinstance(bridge, Mapping):
+            candidates.append(cast(Mapping[str, Any], bridge))
+    for mapping in candidates:
+        for key in ("wrapper", "wrapper_path"):
+            value = mapping.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
     return ""
 
 
@@ -137,37 +150,92 @@ def is_claude_codex_resident_protocol_enabled(
     )
 
 
+def is_codex_app_server_v2_enabled(
+    environ: Mapping[str, str] | None = None,
+    *,
+    config_path: Path | None = None,
+) -> bool:
+    """Kill-switch выбора Codex app-server v2 (`dynamic_config.json > env > False`)."""
+    env = os.environ if environ is None else environ
+    default_cfg = resolve_hub_dynamic_config(env)
+    return read_gigarc_bool(
+        CODEX_APP_SERVER_V2_FLAG,
+        default_cfg if config_path is None else config_path,
+        environ=env,
+        default=False,
+    )
+
+
+def _infer_protocol_from_id(
+    actual_id: str,
+    *,
+    codex_v2: bool,
+    native_cc: bool,
+) -> str | None:
+    if actual_id == "muse":
+        return "msp-v1"
+    if actual_id in ("opencode", "opencode-resident"):
+        return "opencode-acp"
+    lower_id = actual_id.lower()
+    if codex_v2 and lower_id in _CODEX_V2_IDS:
+        return "codex-app-server-v2"
+    if not native_cc:
+        return None
+    if lower_id in _CLAUDE_IDS:
+        return "claude-stream-json"
+    return "codex-app-server" if lower_id in _CODEX_IDS else None
+
+
+def _infer_protocol_from_wrapper(
+    wrapper_path: str,
+    *,
+    codex_v2: bool,
+    native_cc: bool,
+) -> str:
+    if not wrapper_path:
+        return "stream-json"
+    name = os.path.basename(wrapper_path.replace("\\", "/")).lower()
+    if name == "muse-cli.sh":
+        return "msp-v1"
+    if "opencode" in name:
+        return "opencode-acp"
+    base = name.split(".")[0]
+    if codex_v2 and name.split()[0].split(".")[0] in _CODEX_V2_IDS:
+        return "codex-app-server-v2"
+    if not native_cc:
+        return "stream-json"
+    if base in _CLAUDE_IDS or name.startswith("claude-p-"):
+        return "claude-stream-json"
+    return "codex-app-server" if base in _CODEX_IDS else "stream-json"
+
+
 def infer_protocol(
     actual_id: str,
     actual_config: Mapping[str, Any],
     options: Mapping[str, Any],
     *,
     environ: Mapping[str, str] | None = None,
+    config_path: Path | None = None,
 ) -> str:
     """Infer driver protocol from explicit options, backend id, or wrapper basename."""
+    codex_v2 = is_codex_app_server_v2_enabled(environ, config_path=config_path)
+    native_cc = is_claude_codex_resident_protocol_enabled(
+        environ, config_path=config_path
+    )
     explicit = options.get("protocol")
     if isinstance(explicit, str) and explicit.strip():
-        return explicit.strip()
-    if actual_id == "muse":
-        return "msp-v1"
-    if actual_id in ("opencode", "opencode-resident"):
-        return "opencode-acp"
-    native_cc = is_claude_codex_resident_protocol_enabled(environ)
-    if native_cc and actual_id.lower() in _CLAUDE_IDS:
-        return "claude-stream-json"
-    if native_cc and actual_id.lower() in _CODEX_IDS:
-        return "codex-app-server"
-    wrapper_path = _extract_wrapper_path(actual_config)
-    name = os.path.basename(wrapper_path.replace("\\", "/")).lower() if wrapper_path else ""
-    if name == "muse-cli.sh":
-        return "msp-v1"
-    if "opencode" in name:
-        return "opencode-acp"
-    if native_cc and (name.split(".")[0] in _CLAUDE_IDS or name.startswith("claude-p-")):
-        return "claude-stream-json"
-    if native_cc and name.split(".")[0] in _CODEX_IDS:
-        return "codex-app-server"
-    return "stream-json"
+        clean = explicit.strip()
+        if clean == "codex-app-server-v2" and not codex_v2:
+            return "codex-app-server" if native_cc else "stream-json"
+        return clean
+    by_id = _infer_protocol_from_id(actual_id, codex_v2=codex_v2, native_cc=native_cc)
+    if by_id is not None:
+        return by_id
+    return _infer_protocol_from_wrapper(
+        _extract_wrapper_path(actual_config),
+        codex_v2=codex_v2,
+        native_cc=native_cc,
+    )
 
 
 def validate_cwd(data: Mapping[str, Any]) -> str:

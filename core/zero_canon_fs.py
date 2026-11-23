@@ -2,15 +2,18 @@
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 import shutil
+import stat
 import tempfile
 import threading
+import tomllib
 import uuid
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Final
+from typing import IO, Final
 
 _ENV_TRUE: Final[frozenset[str]] = frozenset({"1", "true", "yes", "on"})
 _ENV_FALSE: Final[frozenset[str]] = frozenset({"0", "false", "no", "off"})
@@ -74,25 +77,75 @@ def remove_entry(path: Path) -> None:
         shutil.rmtree(path, ignore_errors=True)
 
 
-def write_atomic_0600(dst: Path, data: bytes) -> None:
-    """Атомарно записывает байты в `dst` с правами `0o600` (O_CREAT|O_EXCL)."""
-    if dst.is_symlink():
-        dst.unlink()
-    tmp = dst.parent / f".tmp_{dst.name}_{uuid.uuid4().hex}"
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+def read_regular_file_nofollow(path: str | Path) -> bytes:
+    """Атомарно читает только обычный файл через `O_RDONLY|O_NOFOLLOW` и `fstat(S_ISREG)`."""
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    fd = os.open(os.fspath(path), flags)
     try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            raise OSError(errno.EINVAL, "Refusing non-regular file", os.fspath(path))
+        with os.fdopen(fd, "rb") as handle:
+            fd = -1
+            return handle.read()
+    finally:
+        if fd >= 0:
+            os.close(fd)
+
+
+def _read_optional_regular_nofollow(path: Path) -> bytes | None:
+    try:
+        return read_regular_file_nofollow(path)
+    except FileNotFoundError:
+        return None
+
+
+def write_atomic_0600(dst: Path, data: bytes) -> None:
+    """Атомарно создаёт новый файл `dst` (`0o600`, `O_CREAT|O_EXCL`), fail-closed при существующем/symlink."""
+    tmp = dst.parent / f".tmp_{dst.name}_{uuid.uuid4().hex}"
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(os.fspath(tmp), flags, 0o600)
+    try:
+        os.fchmod(fd, 0o600)
         with os.fdopen(fd, "wb") as handle:
-            handle.write(data)
-        os.chmod(tmp, 0o600)
-        os.replace(tmp, dst)
-    except BaseException:
+            fd = -1
+            _ = handle.write(data)
+        os.link(os.fspath(tmp), os.fspath(dst))
+    finally:
+        if fd >= 0:
+            os.close(fd)
         tmp.unlink(missing_ok=True)
-        raise
 
 
 def write_atomic_text_0600(dst: Path, text: str) -> None:
     """Атомарно записывает UTF-8 текст в `dst` с правами `0o600`."""
     write_atomic_0600(dst, text.encode("utf-8"))
+
+
+def prepare_codex_zero_canon_home(base_env: Mapping[str, str], root: str | Path) -> dict[str, str]:
+    """Готовит приватный per-turn Codex Zero-Canon HOME (`0o700`), filtered config и nofollow auth (`0o600`)."""
+    from core.subbridge_zero_canon import dump_toml, filter_codex_config
+
+    zc_root = Path(root)
+    dst_codex = zc_root / ".codex"
+    for directory in (zc_root, dst_codex, zc_root / "cwd"):
+        ensure_private_dir(directory, 0o700)
+    src_home = base_env.get("HOME", "")
+    src_codex_raw = base_env.get("CODEX_HOME") or (f"{src_home}/.codex" if src_home else "")
+    src_codex = Path(src_codex_raw) if src_codex_raw else None
+    raw_cfg: dict[str, object] = {}
+    if src_codex is not None:
+        cfg_bytes = _read_optional_regular_nofollow(src_codex / "config.toml")
+        if cfg_bytes is not None:
+            raw_cfg = tomllib.loads(cfg_bytes.decode("utf-8"))
+        auth_bytes = _read_optional_regular_nofollow(src_codex / "auth.json")
+        if auth_bytes is not None:
+            write_atomic_0600(dst_codex / "auth.json", auth_bytes)
+    write_atomic_text_0600(dst_codex / "config.toml", dump_toml(filter_codex_config(raw_cfg)))
+    cleaned = sanitize_zero_canon_env(base_env, zc_root)
+    cleaned["CODEX_HOME"] = str(dst_codex)
+    cleaned["BRIDGE_ZERO_CANON"] = "1"
+    return cleaned
 
 
 def make_ephemeral_zc_cwd(parent: Path, prefix: str = "zc-cwd-") -> Path:
@@ -193,7 +246,7 @@ def acquire_turn_lock(lock_path: str, handle: object) -> object:
     return lock_file
 
 
-def cleanup_turn_sandbox(turn_sandbox: str, lock_file: object | None, lock_path: str | None) -> None:
+def cleanup_turn_sandbox(turn_sandbox: str, lock_file: IO[str] | None, lock_path: str | None) -> None:
     """Удаляет песочницу хода и освобождает lock-файл."""
     import fcntl
     from contextlib import suppress
@@ -202,9 +255,9 @@ def cleanup_turn_sandbox(turn_sandbox: str, lock_file: object | None, lock_path:
         shutil.rmtree(turn_sandbox)
     if lock_file is not None:
         with suppress(OSError):
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)  # type: ignore[attr-defined]
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
         with suppress(OSError):
-            lock_file.close()  # type: ignore[attr-defined]
+            lock_file.close()
     if lock_path is not None:
         with suppress(FileNotFoundError):
             os.unlink(lock_path)
