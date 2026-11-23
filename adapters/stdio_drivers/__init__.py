@@ -12,6 +12,10 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, cast
 
+from adapters.stdio_drivers.agy_canary import (
+    apply_canary_limits,
+    load_agy_canary_config,
+)
 from adapters.stdio_drivers.agy_config import (
     build_agy_pool_config,
     is_agy_resident_enabled,
@@ -274,6 +278,7 @@ def resolve_pool_and_driver(
     env = os.environ if environ is None else environ
     if protocol in ("agy-stream-json", "agy_stream_json"):
         agy_cfg = load_agy_resident_config(env)
+        agy_cfg = apply_canary_limits(agy_cfg, load_agy_canary_config(env))
         return build_agy_pool_config(agy_cfg), create_protocol_driver(protocol, config=agy_cfg)
     return StdioPoolConfig.from_env(environ), create_protocol_driver(
         protocol, config=driver_config

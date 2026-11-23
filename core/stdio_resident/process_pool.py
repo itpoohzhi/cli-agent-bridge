@@ -104,6 +104,8 @@ class ResidentProcessPool:
         lease_id: str | None = None,
     ) -> None:
         """Return a successful lease or destroy an unsafe process."""
+        teardown_entry: _SlotEntry | None = None
+        end_ev: SlotEvent | None = None
         with self._cv:
             entry = self._slots.get(slot_id)
             if entry is None or entry.lease_id is None:
@@ -115,35 +117,37 @@ class ResidentProcessPool:
                 start_ev = SlotEvent.CancelRequested if cancel else SlotEvent.WriteError
                 end_ev = SlotEvent.CancelConfirmed if cancel else SlotEvent.TeardownDone
                 _ = self._transition(entry, start_ev)
-                try:
-                    self._finish_teardown(entry, self._config.cancel_grace_s)
-                finally:
-                    _ = self._transition(entry, end_ev)
-                    self._cv.notify_all()
-                return
-            if entry.rss_evict_pending:
+                _ = self._slots.pop(entry.slot_id, None)
+                teardown_entry = entry
+            elif entry.rss_evict_pending:
                 _ = self._transition(entry, SlotEvent.Shutdown)
-                try:
-                    self._finish_teardown(entry, self._config.cancel_grace_s)
-                finally:
+                _ = self._slots.pop(entry.slot_id, None)
+                teardown_entry = entry
+            else:
+                effects = self._transition(entry, SlotEvent.TurnTerminal)
+                if SlotEffect.AdvanceGeneration in effects:
+                    _ = entry.handle.advance_generation()
+                now = time.monotonic()
+                entry.last_used_mono = now
+                expired = now - entry.handle.created_at_mono > self._config.ttl_s
+                if entry.is_ephemeral or entry.state is not SlotState.READY or expired:
+                    if entry.state is SlotState.READY:
+                        ev = SlotEvent.TtlExpired if expired else SlotEvent.Shutdown
+                        _ = self._transition(entry, ev)
+                    _ = self._slots.pop(entry.slot_id, None)
+                    teardown_entry = entry
+                else:
                     self._cv.notify_all()
-                return
-            effects = self._transition(entry, SlotEvent.TurnTerminal)
-            if SlotEffect.AdvanceGeneration in effects:
-                _ = entry.handle.advance_generation()
-            now = time.monotonic()
-            entry.last_used_mono = now
-            expired = now - entry.handle.created_at_mono > self._config.ttl_s
-            if entry.is_ephemeral or entry.state is not SlotState.READY or expired:
-                if entry.state is SlotState.READY:
-                    ev = SlotEvent.TtlExpired if expired else SlotEvent.Shutdown
-                    _ = self._transition(entry, ev)
-                try:
-                    self._finish_teardown(entry, self._config.cancel_grace_s)
-                finally:
-                    self._cv.notify_all()
-                return
-            self._cv.notify_all()
+                    return
+        try:
+            self._finish_teardown(teardown_entry, self._config.cancel_grace_s)
+        finally:
+            with self._cv:
+                if end_ev is not None:
+                    _ = self._transition(teardown_entry, end_ev)
+                if teardown_entry.dead and not self._closed:
+                    self._slots[teardown_entry.slot_id] = teardown_entry
+                self._cv.notify_all()
 
     def start_maintenance(self) -> bool:
         """Запустить фоновый daemon-поток обслуживания пула при enabled=True.
@@ -193,13 +197,16 @@ class ResidentProcessPool:
         if already_empty:
             await asyncio.to_thread(self._join_maintenance, thread, grace_s)
             return
+        err: Exception | None = None
         try:
             if idle_entries:
-                await asyncio.to_thread(
+                idle_err = await asyncio.to_thread(
                     self._terminate_victims,
                     idle_entries,
                     min(grace_s, self._config.cancel_grace_s),
                 )
+                if err is None:
+                    err = idle_err
             while time.monotonic() < deadline:
                 with self._cv:
                     if not any(e.lease_id is not None for e in self._slots.values()):
@@ -209,9 +216,15 @@ class ResidentProcessPool:
             if final_thread is not None:
                 thread = final_thread
             if remaining_entries:
-                await asyncio.to_thread(self._terminate_victims, remaining_entries, grace_s)
+                rem_err = await asyncio.to_thread(
+                    self._terminate_victims, remaining_entries, grace_s
+                )
+                if err is None:
+                    err = rem_err
         finally:
             await asyncio.to_thread(self._join_maintenance, thread, grace_s)
+        if err is not None:
+            raise err
 
     def _collect_all_for_shutdown(self) -> tuple[threading.Thread | None, list[_SlotEntry]]:
         """Пометить пул закрытым под _cv и забрать поток обслуживания и все слоты."""
@@ -233,11 +246,14 @@ class ResidentProcessPool:
         """Close the pool and terminate every child process."""
         grace_s = max(0.0, self._config.shutdown_timeout_s if timeout_s is None else timeout_s)
         thread, entries = self._collect_all_for_shutdown()
+        err: Exception | None = None
         try:
             if entries:
-                self._terminate_victims(entries, grace_s)
+                err = self._terminate_victims(entries, grace_s)
         finally:
             self._join_maintenance(thread, grace_s)
+        if err is not None:
+            raise err
 
     def _maintenance_loop(self) -> None:
         """Фоновый цикл обслуживания: шаг reap_interval_s, устойчив к ошибкам прохода."""
@@ -329,10 +345,10 @@ class ResidentProcessPool:
         entries: list[_SlotEntry],
         grace_s: float,
         reason: str = "evict",
-    ) -> None:
-        """Вывести слоты из _slots под _cv, завершить вне _cv и вернуть в карантин при ошибке."""
+    ) -> Exception | None:
+        """Вывести слоты из _slots под _cv, завершить вне _cv и вернуть первую ошибку."""
         if not entries:
-            return
+            return None
         with self._cv:
             changed = False
             for entry in entries:
@@ -344,12 +360,20 @@ class ResidentProcessPool:
             if changed:
                 self._cv.notify_all()
 
+        first_error: Exception | None = None
         failed_entries: list[_SlotEntry] = []
         for entry in entries:
             try:
                 self._terminate(entry, grace_s)
-            except Exception:
+            except StdioProcessTerminated as exc:
+                if first_error is None:
+                    first_error = exc
+                failed_entries.append(entry)
+                continue
+            except Exception as exc:
                 _LOGGER.exception("failed to close %s slot %s", reason, entry.slot_id)
+                if first_error is None:
+                    first_error = exc
                 failed_entries.append(entry)
                 continue
             if not getattr(entry.handle, "_pgid_dead", True):
@@ -357,11 +381,23 @@ class ResidentProcessPool:
 
         if failed_entries:
             with self._cv:
-                for entry in failed_entries:
-                    entry.lease_id = None
-                    entry.dead = True
-                    self._slots[entry.slot_id] = entry
-                self._cv.notify_all()
+                if not self._closed:
+                    for entry in failed_entries:
+                        entry.lease_id = None
+                        entry.dead = True
+                        self._slots[entry.slot_id] = entry
+                    self._cv.notify_all()
+                else:
+                    for entry in failed_entries:
+                        entry.lease_id = None
+                        entry.dead = True
+                        _LOGGER.warning(
+                            "orphan-risk %s slot %s pgid=%s remains after pool close",
+                            reason,
+                            entry.slot_id,
+                            self._entry_pgid(entry),
+                        )
+        return first_error
 
     @staticmethod
     def _join_maintenance(thread: threading.Thread | None, timeout_s: float) -> None:
@@ -477,13 +513,16 @@ class ResidentProcessPool:
         try:
             self._terminate(entry, grace_s)
             terminated = True
+        except StdioProcessTerminated:
+            raise
         except Exception:
             _LOGGER.exception("failed to terminate slot %s", entry.slot_id)
         finally:
-            if terminated and getattr(entry.handle, "_pgid_dead", True):
-                _ = self._slots.pop(entry.slot_id, None)
-            else:
-                entry.dead = True
+            with self._cv:
+                if terminated and getattr(entry.handle, "_pgid_dead", True):
+                    _ = self._slots.pop(entry.slot_id, None)
+                else:
+                    entry.dead = True
 
     @staticmethod
     def _transition(entry: _SlotEntry, event: SlotEvent) -> list[SlotEffect]:

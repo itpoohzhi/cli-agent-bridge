@@ -430,9 +430,8 @@ def test_handle_cold_wal_wait_and_resolve_counter(
     assert tracker._on_sqlite_error(cold_exc) is None
     assert tracker.failed is False
     assert tracker._get_wal_wait_polls() == 1
-    assert logs[-1].startswith("sqlite-wal-wait cid=cid12345 err=OperationalError")
+    assert logs[-1] == "sqlite-wal-wait cid=cid12345 err=OperationalError wal=0"
 
-    wal_path.write_text("", encoding="utf-8")
     assert tracker._handle_cold_wal_wait(cold_exc) is True
     assert tracker._get_wal_wait_polls() == 2
     assert len(logs) == 1
@@ -446,34 +445,48 @@ def test_handle_cold_wal_wait_and_resolve_counter(
     tracker._resolve_wal_wait()
     assert len(logs) == log_count
 
+    # при существующем -wal даже 'unable to open database file' считается реальной ошибкой
     wal_path.write_text("", encoding="utf-8")
     tracker.selects_ok = 0
     tracker.failed = False
     tracker._open_fail_logged = False
-    non_cold_exc = sqlite3.OperationalError("disk I/O error")
-    # whitelist-miss при selects_ok == 0: реальная ошибка, не ожидание (return False, не None)
-    assert tracker._handle_cold_wal_wait(non_cold_exc) is False
-    assert tracker._on_sqlite_error(non_cold_exc) is None
+    assert tracker._handle_cold_wal_wait(cold_exc) is False
+    assert tracker._on_sqlite_error(cold_exc) is None
     assert tracker.failed is True
     assert any("sqlite-open-fail" in entry and "cold=0" in entry for entry in logs)
 
-    # после первого успешного SELECT окно холодного ожидания закрыто:
-    # даже whitelisted-ошибка больше не классифицируется как ожидание
+    wal_path.unlink()
+    tracker.selects_ok = 0
+    tracker.failed = False
+    tracker._open_fail_logged = False
+    non_cold_exc = sqlite3.OperationalError("disk I/O error")
+    assert tracker._handle_cold_wal_wait(non_cold_exc) is False
+    assert tracker._on_sqlite_error(non_cold_exc) is None
+    assert tracker.failed is True
+
+    # 'database is locked' убран из whitelist даже при selects_ok == 0 и отсутствии -wal
+    tracker.selects_ok = 0
+    tracker.failed = False
+    tracker._open_fail_logged = False
+    locked_exc = sqlite3.OperationalError("database is locked")
+    assert tracker._handle_cold_wal_wait(locked_exc) is False
+    assert tracker._on_sqlite_error(locked_exc) is None
+    assert tracker.failed is True
+
+    # после первого успешного SELECT окно холодного ожидания закрыто
     tracker.selects_ok = 1
     tracker.failed = False
     assert tracker._handle_cold_wal_wait(cold_exc) is False
     assert tracker._get_wal_wait_polls() == 0
 
-    # whitelist: 'database is locked' до первого SELECT — ожидание; бюджет эскалации (дефолтный лимит)
+    # бюджет эскалации остаётся для 'unable to open database file' при отсутствии -wal
     tracker.selects_ok = 0
     tracker.failed = False
-    locked_exc = sqlite3.OperationalError("database is locked")
-    assert tracker._handle_cold_wal_wait(locked_exc) is True
-    while tracker._handle_cold_wal_wait(locked_exc):
+    while tracker._handle_cold_wal_wait(cold_exc):
         pass
     assert tracker._wal_wait_budget_exceeded is True
     tracker._open_fail_logged = False
-    assert tracker._on_sqlite_error(locked_exc) is None
+    assert tracker._on_sqlite_error(cold_exc) is None
     assert tracker.failed is True
     assert any(
         "sqlite-open-fail" in entry and "wal_wait_budget_exceeded=1" in entry
@@ -848,3 +861,136 @@ def test_join_maintenance_logs_warning_on_timeout(
         release_step.set()
         if pool._maint_thread is not None:
             pool._maint_thread.join(timeout=0.25)
+
+
+@pytest.mark.parametrize("mode", ["cancel", "rss_evict"])
+def test_release_teardown_runs_outside_cv_lock(
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+) -> None:
+    """R1: release() выполняет _finish_teardown вне self._cv для cancel и rss_evict_pending."""
+    handle = _FakeHandle(pid=9101, pgid=9101, created_at_mono=real_time.monotonic())
+    monkeypatch.setattr(
+        pool_mod.ResidentProcessHandle,
+        "spawn",
+        staticmethod(lambda *args, **kwargs: handle),
+    )
+    pool = ResidentProcessPool(StdioPoolConfig(enabled=False, shutdown_timeout_s=0.5))
+    entered = threading.Event()
+    allow_finish = threading.Event()
+    acquired_cv = threading.Event()
+
+    def _blocking_terminate(slot_entry: pool_mod._SlotEntry, _grace_s: float) -> None:
+        entered.set()
+        assert allow_finish.wait(timeout=0.5)
+        slot_entry.handle._alive = False
+        slot_entry.handle._pgid_dead = True
+
+    monkeypatch.setattr(pool, "_terminate", _blocking_terminate)
+    try:
+        entry = pool.acquire(_key(f"owner-r1-{mode}"), lambda: ["echo"], cwd=".")
+        if mode == "rss_evict":
+            entry.rss_evict_pending = True
+
+        rel_thread = threading.Thread(
+            target=lambda: pool.release(entry.slot_id, cancel=(mode == "cancel")),
+        )
+        rel_thread.start()
+        assert entered.wait(timeout=0.5)
+
+        def _probe_cv() -> None:
+            with pool._cv:
+                acquired_cv.set()
+
+        probe = threading.Thread(target=_probe_cv)
+        probe.start()
+        assert acquired_cv.wait(timeout=0.25)
+        probe.join(timeout=0.25)
+        allow_finish.set()
+        rel_thread.join(timeout=0.5)
+        assert entry.slot_id not in pool._slots
+    finally:
+        allow_finish.set()
+        pool.shutdown()
+
+
+def test_shutdown_and_drain_propagate_stdio_terminated_and_respect_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R2: shutdown/drain пробрасывают StdioProcessTerminated после всех терминаций и не возвращают слот при _closed."""
+    handles = [
+        _FakeHandle(pid=9201, pgid=9201, created_at_mono=real_time.monotonic()),
+        _FakeHandle(pid=9202, pgid=9202, created_at_mono=real_time.monotonic()),
+    ]
+    spawn_iter = iter(handles)
+    monkeypatch.setattr(
+        pool_mod.ResidentProcessHandle,
+        "spawn",
+        staticmethod(lambda *args, **kwargs: next(spawn_iter)),
+    )
+    terminated_pids: list[int] = []
+
+    def _failing_on_first(slot_entry: pool_mod._SlotEntry, grace_s: float) -> None:
+        terminated_pids.append(slot_entry.handle.pid)
+        if slot_entry.handle.pid == 9201:
+            raise pool_mod.StdioProcessTerminated("term failed")
+        slot_entry.handle.terminate_gracefully(grace_s=grace_s)
+
+    pool = ResidentProcessPool(StdioPoolConfig(enabled=False, max_slots=4, shutdown_timeout_s=0.5))
+    monkeypatch.setattr(pool, "_terminate", _failing_on_first)
+    e1 = pool.acquire(_key("owner-r2-1"), lambda: ["echo"], cwd=".")
+    e2 = pool.acquire(_key("owner-r2-2"), lambda: ["echo"], cwd=".")
+    pool.release(e1.slot_id)
+    pool.release(e2.slot_id)
+    with pytest.raises(pool_mod.StdioProcessTerminated):
+        pool.shutdown()
+    assert sorted(terminated_pids) == [9201, 9202]
+    assert len(pool._slots) == 0
+
+    h3 = _FakeHandle(pid=9203, pgid=9203, created_at_mono=real_time.monotonic())
+    monkeypatch.setattr(
+        pool_mod.ResidentProcessHandle,
+        "spawn",
+        staticmethod(lambda *args, **kwargs: h3),
+    )
+    pool2 = ResidentProcessPool(StdioPoolConfig(enabled=False, max_slots=2, shutdown_timeout_s=0.5))
+
+    def _drain_fail(_slot_entry: pool_mod._SlotEntry, _grace_s: float) -> None:
+        raise pool_mod.StdioProcessTerminated("drain term failed")
+
+    monkeypatch.setattr(pool2, "_terminate", _drain_fail)
+    e3 = pool2.acquire(_key("owner-r2-drain"), lambda: ["echo"], cwd=".")
+    pool2.release(e3.slot_id)
+    with pytest.raises(pool_mod.StdioProcessTerminated):
+        asyncio.run(pool2.drain_and_shutdown(timeout_s=0.05))
+    assert len(pool2._slots) == 0
+
+
+def test_finish_teardown_propagates_stdio_terminated_on_release(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R2: _finish_teardown пробрасывает StdioProcessTerminated и помечает слот dead в карантин."""
+    handle = _FakeHandle(pid=9301, pgid=9301, created_at_mono=real_time.monotonic())
+    monkeypatch.setattr(
+        pool_mod.ResidentProcessHandle,
+        "spawn",
+        staticmethod(lambda *args, **kwargs: handle),
+    )
+    pool = ResidentProcessPool(StdioPoolConfig(enabled=False, shutdown_timeout_s=0.5))
+    allow_cleanup = [False]
+
+    def _term(slot_entry: pool_mod._SlotEntry, _grace_s: float) -> None:
+        if not allow_cleanup[0]:
+            raise pool_mod.StdioProcessTerminated("cancel term failed")
+        slot_entry.handle._alive = False
+
+    monkeypatch.setattr(pool, "_terminate", _term)
+    try:
+        entry = pool.acquire(_key("owner-r2-rel"), lambda: ["echo"], cwd=".")
+        with pytest.raises(pool_mod.StdioProcessTerminated):
+            pool.release(entry.slot_id, cancel=True)
+        assert entry.dead is True
+        assert entry.slot_id in pool._slots
+    finally:
+        allow_cleanup[0] = True
+        pool.shutdown()

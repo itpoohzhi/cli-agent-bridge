@@ -100,24 +100,32 @@ def test_canary_config_valid_boundaries() -> None:
 
 
 def test_rollback_plan_returns_expected_commands() -> None:
-    """rollback_plan возвращает персистентный launchctl-откат, рестарт и верификацию."""
+    """rollback_plan возвращает сессионный/plist-откат, рестарт и верификацию с rc."""
     cmds = rollback_plan()
-    expected_verify = (
-        "for pid in $(pgrep -f '[b]ridges/agy-bridge/server.py'); do "
-        'ps eww "$pid" | tr \' \' \'\\n\' | grep -q \'^AGY_RESIDENT_ENABLED=false\' '
-        '|| echo "ROLLBACK_VERIFY_FAILED pid=$pid"; done'
+    expected_plist = (
+        "/usr/libexec/PlistBuddy -c 'Set :EnvironmentVariables:AGY_RESIDENT_ENABLED false' "
+        '"$HOME/Library/LaunchAgents/com.user.dsh-hub.plist"'
     )
+    expected_verify = (
+        'sh -c \'pids=$(pgrep -f "[b]ridges/agy-bridge/server.py"); '
+        'test -n "$pids" || { echo "ROLLBACK_VERIFY_FAILED: no server process"; exit 1; }; '
+        'for pid in $pids; do ps eww "$pid" | tr " " "\\n" '
+        '| grep -q "^AGY_RESIDENT_ENABLED=false" '
+        '|| { echo "ROLLBACK_VERIFY_FAILED pid=$pid"; rc=1; }; '
+        "done; exit ${rc:-0}'"
+    )
+    doc = rollback_plan.__doc__ or ""
+    assert "сессионный откат GUI-сессии launchd" in doc
+    assert "EnvironmentVariables plist" in doc
     assert LAUNCHD_SERVICE_LABEL == "gui/$(id -u)/com.user.dsh-hub"
-    assert len(cmds) == 3
+    assert len(cmds) == 4
     assert cmds[0] == "launchctl setenv AGY_RESIDENT_ENABLED false"
-    assert cmds[1] == f"launchctl kickstart -k {LAUNCHD_SERVICE_LABEL}"
-    assert cmds[2] == expected_verify
-    assert "'[b]ridges/agy-bridge/server.py'" in cmds[2]
-    assert "for pid in $(pgrep -f '[b]ridges/agy-bridge/server.py'); do" in cmds[2]
-    assert 'ps eww "$pid"' in cmds[2]
-    assert "'^AGY_RESIDENT_ENABLED=false'" in cmds[2]
-    assert 'echo "ROLLBACK_VERIFY_FAILED pid=$pid"' in cmds[2]
-    assert "ps eww $(" not in cmds[2]
+    assert cmds[1] == expected_plist
+    assert cmds[2] == f"launchctl kickstart -k {LAUNCHD_SERVICE_LABEL}"
+    assert cmds[3] == expected_verify
+    assert "test -n" in cmds[3]
+    assert "exit 1" in cmds[3]
+    assert "rc=1" in cmds[3]
 
 
 def test_canary_stop_reasons_boundaries_and_fail_closed_defaults() -> None:
@@ -378,34 +386,30 @@ def test_check_rss_metric_returns_none_and_checks_bounds() -> None:
     assert reasons_ok == []
 
 
-def test_agy_config_fallback_import_adds_bridge_dir_to_sys_path() -> None:
-    """Fallback-импорт agy_config добавляет _BRIDGE_DIR в sys.path и импортирует конфиг.
+def test_agy_canary_shared_layer_reexport_and_no_sys_path_hack() -> None:
+    """agy_config импортирует общий слой напрямую без sys.path.insert, а bridge делает re-export."""
+    import adapters.stdio_drivers.agy_canary as shared_canary_mod
 
-    Исполняет исходник модуля в изолированном namespace (без importlib.reload),
-    чтобы не подменять объект модуля в sys.modules и не ломать identity классов
-    для других тестов.
-    """
-    orig_sys_path = list(sys.path)
-    saved_agy_modules = {
-        name: mod
-        for name, mod in sys.modules.items()
-        if name == "agy_runtime" or name.startswith("agy_runtime.")
-    }
+    assert agy_config_mod.AgyResidentCanaryConfig is shared_canary_mod.AgyResidentCanaryConfig
+    assert canary_mod.AgyResidentCanaryConfig is shared_canary_mod.AgyResidentCanaryConfig
+    assert agy_config_mod.load_agy_canary_config is shared_canary_mod.load_agy_canary_config
+    assert agy_config_mod.apply_canary_limits is shared_canary_mod.apply_canary_limits
+    assert "реализация перенесена в общий слой" in (canary_mod.__doc__ or "")
     source = Path(agy_config_mod.__file__).read_text(encoding="utf-8")
-    try:
-        for name in saved_agy_modules:
-            sys.modules.pop(name, None)
-        sys.path[:] = [p for p in orig_sys_path if "bridges/agy-bridge" not in p]
-        namespace: dict[str, object] = {
-            "__name__": "adapters.stdio_drivers.agy_config",
-            "__file__": str(agy_config_mod.__file__),
-        }
-        exec(compile(source, str(agy_config_mod.__file__), "exec"), namespace)
-        assert namespace.get("AgyResidentCanaryConfig") is not None
-        assert any("bridges/agy-bridge" in p for p in sys.path)
-    finally:
-        sys.path[:] = orig_sys_path
-        for name in list(sys.modules):
-            if name == "agy_runtime" or name.startswith("agy_runtime."):
-                sys.modules.pop(name, None)
-        sys.modules.update(saved_agy_modules)
+    assert "sys.path.insert" not in source
+
+
+def test_agy_resident_and_canary_baseline_wiring_chain() -> None:
+    """Связка load_agy_resident_config + load_agy_canary_config + apply_canary_limits при baseline=1."""
+    env = {
+        "AGY_RESIDENT_ENABLED": "1",
+        "AGY_RESIDENT_MAX_SLOTS": "8",
+        "AGY_RESIDENT_MAX_RSS_MB": "1024",
+        "AGY_CANARY_BASELINE": "1",
+    }
+    base_cfg = agy_config_mod.load_agy_resident_config(env)
+    canary_cfg = load_agy_canary_config(env)
+    effective_cfg = apply_canary_limits(base_cfg, canary_cfg)
+    assert effective_cfg.enabled is True
+    assert effective_cfg.max_slots == 2
+    assert effective_cfg.max_rss_mb == 300

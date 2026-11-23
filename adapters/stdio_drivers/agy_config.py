@@ -4,21 +4,17 @@ from __future__ import annotations
 
 import importlib  # noqa: E402
 import math  # noqa: E402
-import sys  # noqa: E402
 from collections.abc import Callable, Mapping  # noqa: E402
-from dataclasses import dataclass, replace  # noqa: E402
-from pathlib import Path  # noqa: E402
+from dataclasses import dataclass  # noqa: E402
 from typing import TypeVar, cast  # noqa: E402
 
 from core.stdio_resident.config import StdioPoolConfig  # noqa: E402
 
-try:
-    from agy_runtime.agy_resident_canary import AgyResidentCanaryConfig  # noqa: E402
-except ImportError:
-    _BRIDGE_DIR = Path(__file__).resolve().parents[2] / "bridges" / "agy-bridge"
-    if str(_BRIDGE_DIR) not in sys.path:
-        sys.path.insert(0, str(_BRIDGE_DIR))
-    from agy_runtime.agy_resident_canary import AgyResidentCanaryConfig  # noqa: E402
+from .agy_canary import (  # noqa: E402
+    AgyResidentCanaryConfig as AgyResidentCanaryConfig,
+    apply_canary_limits as apply_canary_limits,
+    load_agy_canary_config as load_agy_canary_config,
+)
 
 __all__ = [
     "FLAG_AGY_RESIDENT",
@@ -148,66 +144,6 @@ def load_agy_resident_config(
         lease_wait_timeout_s=p(
             env, "AGY_RESIDENT_LEASE_WAIT_S", float, d.lease_wait_timeout_s
         ),
-    )
-
-
-def load_agy_canary_config(env: Mapping[str, str]) -> AgyResidentCanaryConfig:
-    """Загрузить канареечные пороги `AGY_CANARY_*` из явного окружения без `os.environ`."""
-    d, p = AgyResidentCanaryConfig(), _parse_num
-    baseline_max_slots = p(
-        env, "AGY_CANARY_BASELINE_MAX_SLOTS", int, d.baseline_max_slots
-    )
-    max_slots = p(env, "AGY_CANARY_MAX_SLOTS", int, d.max_slots)
-    rss_per_slot = p(
-        env, "AGY_CANARY_RSS_CEILING_PER_SLOT_MB", int, d.rss_ceiling_per_slot_mb
-    )
-    rss_total = p(env, "AGY_CANARY_RSS_CEILING_TOTAL_MB", int, d.rss_ceiling_total_mb)
-    fd_limit = p(env, "AGY_CANARY_FD_LIMIT_PER_SLOT", int, d.fd_limit_per_slot)
-    error_rate_stop = p(
-        env, "AGY_CANARY_ERROR_RATE_STOP_PCT", float, d.error_rate_stop_pct
-    )
-    fd_leak_stop = _parse_bool(env, "AGY_CANARY_FD_LEAK_STOP", d.fd_leak_stop)
-    is_baseline = _parse_bool(env, "AGY_CANARY_BASELINE", False)
-    if is_baseline:
-        AgyResidentCanaryConfig(
-            baseline_max_slots=baseline_max_slots,
-            max_slots=max_slots,
-            rss_ceiling_per_slot_mb=rss_per_slot,
-            rss_ceiling_total_mb=rss_total,
-            fd_limit_per_slot=fd_limit,
-            error_rate_stop_pct=error_rate_stop,
-            fd_leak_stop=fd_leak_stop,
-        )
-        max_slots = min(max_slots, baseline_max_slots)
-    return AgyResidentCanaryConfig(
-        baseline_max_slots=baseline_max_slots,
-        max_slots=max_slots,
-        rss_ceiling_per_slot_mb=rss_per_slot,
-        rss_ceiling_total_mb=rss_total,
-        fd_limit_per_slot=fd_limit,
-        error_rate_stop_pct=error_rate_stop,
-        fd_leak_stop=fd_leak_stop,
-    )
-
-
-def apply_canary_limits(
-    cfg: AgyResidentConfig,
-    canary: AgyResidentCanaryConfig,
-    *,
-    baseline: bool = False,
-    env: Mapping[str, str] | None = None,
-) -> AgyResidentConfig:
-    """Клампит лимиты резидентного конфига потолками канарейки и возвращает новый инстанс."""
-    cfg.validate()
-    canary.validate()
-    use_baseline = baseline or (
-        env is not None and _parse_bool(env, "AGY_CANARY_BASELINE", False)
-    )
-    slot_cap = canary.baseline_max_slots if use_baseline else canary.max_slots
-    return replace(
-        cfg,
-        max_slots=min(cfg.max_slots, slot_cap),
-        max_rss_mb=min(cfg.max_rss_mb, canary.rss_ceiling_per_slot_mb),
     )
 
 

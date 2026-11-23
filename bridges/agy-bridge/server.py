@@ -4934,10 +4934,10 @@ class _TranscriptTail(InterruptionTailState):
         if not isinstance(exc, sqlite3.OperationalError) or self.selects_ok != 0:
             return False
         message = str(exc).lower()
-        if (
-            "unable to open database file" not in message
-            and "database is locked" not in message
-        ):
+        if "unable to open database file" not in message:
+            return False
+        wal = Path(str(self._db_path) + "-wal")
+        if wal.exists():
             return False
         limit = self._wal_wait_limit(max_polls)
         waited = self._get_wal_wait_polls()
@@ -4946,9 +4946,8 @@ class _TranscriptTail(InterruptionTailState):
             return False
         self._set_wal_wait_polls(waited + 1)
         if waited == 0:
-            wal_exists = int(Path(str(self._db_path) + "-wal").exists())
             _log(
-                f"sqlite-wal-wait cid={self._cid8()} err={type(exc).__name__} wal={wal_exists}"
+                f"sqlite-wal-wait cid={self._cid8()} err={type(exc).__name__} wal=0"
             )
         return True
 
