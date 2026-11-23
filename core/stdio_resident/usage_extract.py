@@ -11,7 +11,7 @@ from core.turn_usage import UsageScope, UsageUpdate
 _MUSE_IN = ("inputTokens", "promptTokens", "input_tokens", "prompt_tokens")
 _MUSE_OUT = ("outputTokens", "completionTokens", "output_tokens", "completion_tokens")
 _MUSE_CACHE_READ = ("cachedTokens", "cacheReadTokens", "cache_read_tokens", "cached_tokens")
-_MUSE_CACHE_CREATE = ("cacheCreationTokens", "cache_creation_tokens")
+_MUSE_CACHE_CREATE = ("cacheWriteTokens", "cacheCreationTokens", "cache_creation_tokens")
 _MUSE_REASONING = ("reasoningTokens", "reasoning_tokens")
 _MUSE_TOTAL = ("totalTokens", "total_tokens")
 _GENERIC_IN = ("input_tokens", "inputTokens")
@@ -178,7 +178,7 @@ def extract_multiprovider_usage(
 
 
 _MUSE_TOKEN_POLICY = UsageExtractPolicy(
-    source="muse_msp_v1", paths=((),), input_keys=_MUSE_IN, output_keys=_MUSE_OUT,
+    source="muse_msp_v1", paths=(("usage",), ("tokenUsage",), ()), input_keys=_MUSE_IN, output_keys=_MUSE_OUT,
     cache_read_keys=_MUSE_CACHE_READ, cache_creation_keys=_MUSE_CACHE_CREATE,
     reasoning_keys=_MUSE_REASONING, total_keys=_MUSE_TOTAL,
 )

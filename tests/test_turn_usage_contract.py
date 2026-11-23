@@ -179,7 +179,31 @@ def test_ver002_assembler_terminal_only_and_concurrent_isolation() -> None:
 
 
 def test_ver003_all_six_vendor_drivers_and_generic_extractors() -> None:
-    # 1. Muse MSP v1: session/tokenUsage + turn/completed
+    # 1. Muse MSP v1: real nested params.usage (with cacheWriteTokens & cumulative ignored) + flat fallback
+    muse_nested = decode_msp_line(
+        json.dumps({
+            "jsonrpc": "2.0",
+            "method": "session/tokenUsage",
+            "params": {
+                "usage": {
+                    "inputTokens": 21752,
+                    "outputTokens": 46,
+                    "cachedTokens": 16000,
+                    "cacheWriteTokens": 120,
+                    "cacheReadTokens": 16000,
+                    "reasoningTokens": 36,
+                },
+                "promptTokens": 21752,
+                "totalTokens": 21798,
+                "cumulative": {"promptTokens": 99999, "outputTokens": 500, "totalTokens": 100499},
+            },
+        })
+    )
+    assert muse_nested.usage is not None
+    assert normalize_usage_update(muse_nested.usage).usage == TurnUsage(
+        21752, 46, 16000, 120, 36, "muse_msp_v1"
+    )
+
     muse_u = decode_msp_line(
         json.dumps({
             "jsonrpc": "2.0",
