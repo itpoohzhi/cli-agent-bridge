@@ -1,18 +1,18 @@
 """Тесты runtime-enforcement параметров ResidentProcessPool."""
 
-from __future__ import annotations
+from __future__ import annotations  # noqa: E402
 
-import asyncio
-import importlib.util
-import os
-import sqlite3
-import sys
-import threading
-import time as real_time
-from collections.abc import Callable
-from pathlib import Path
+import asyncio  # noqa: E402
+import importlib.util  # noqa: E402
+import os  # noqa: E402
+import sqlite3  # noqa: E402
+import sys  # noqa: E402
+import threading  # noqa: E402
+import time as real_time  # noqa: E402
+from collections.abc import Callable  # noqa: E402
+from pathlib import Path  # noqa: E402
 
-import pytest
+import pytest  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -423,7 +423,7 @@ def test_handle_cold_wal_wait_and_resolve_counter(
     assert tracker._on_sqlite_error(cold_exc) is None
     assert tracker.failed is False
     assert tracker._get_wal_wait_polls() == 1
-    assert logs == ["sqlite-wal-wait cid=cid12345 err=OperationalError"]
+    assert logs[-1].startswith("sqlite-wal-wait cid=cid12345 err=OperationalError")
 
     wal_path.write_text("", encoding="utf-8")
     assert tracker._handle_cold_wal_wait(cold_exc) is True
@@ -439,18 +439,33 @@ def test_handle_cold_wal_wait_and_resolve_counter(
     tracker._resolve_wal_wait()
     assert len(logs) == log_count
 
-    wal_path.unlink()
-    assert tracker._handle_cold_wal_wait(cold_exc) is True
-    assert tracker._get_wal_wait_polls() == 1
-    tracker._resolve_wal_wait()
-    assert tracker._get_wal_wait_polls() == 0
-
     wal_path.write_text("", encoding="utf-8")
     non_cold_exc = sqlite3.OperationalError("disk I/O error")
     assert tracker._handle_cold_wal_wait(non_cold_exc) is False
     assert tracker._on_sqlite_error(non_cold_exc) is None
     assert tracker.failed is True
     assert any("sqlite-open-fail" in entry and "cold=0" in entry for entry in logs)
+
+    # после первого успешного SELECT окно холодного ожидания закрыто:
+    # даже whitelisted-ошибка больше не классифицируется как ожидание
+    assert tracker._handle_cold_wal_wait(cold_exc) is False
+    assert tracker._get_wal_wait_polls() == 0
+
+    # whitelist: 'database is locked' до первого SELECT — ожидание; бюджет эскалации (дефолтный лимит)
+    tracker.selects_ok = 0
+    tracker.failed = False
+    locked_exc = sqlite3.OperationalError("database is locked")
+    assert tracker._handle_cold_wal_wait(locked_exc) is True
+    while tracker._handle_cold_wal_wait(locked_exc):
+        pass
+    assert tracker._wal_wait_budget_exceeded is True
+    tracker._open_fail_logged = False
+    assert tracker._on_sqlite_error(locked_exc) is None
+    assert tracker.failed is True
+    assert any(
+        "sqlite-open-fail" in entry and "wal_wait_budget_exceeded=1" in entry
+        for entry in logs
+    )
 
 
 def test_start_maintenance_guards_closed_stop_event_and_thread_state() -> None:

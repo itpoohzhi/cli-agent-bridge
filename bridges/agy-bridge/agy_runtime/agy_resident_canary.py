@@ -1,17 +1,20 @@
+from __future__ import annotations
+
 """Канареечная конфигурация включения AGY_RESIDENT_ENABLED и чистая проверка стоп-условий.
 
 Параметры модуля — предварительные, некалиброванные, калибруются по базовому тесту
 max_slots=2, утверждаются владельцем/Советом перед выкатом.
 """
 
-from __future__ import annotations
+import math  # noqa: E402
+from dataclasses import dataclass  # noqa: E402
 
-import math
-from collections.abc import Mapping
-from dataclasses import dataclass
+LAUNCHD_SERVICE_LABEL = "gui/$(id -u)/com.user.dsh-hub"
 
 __all__ = [
+    "LAUNCHD_SERVICE_LABEL",
     "AgyResidentCanaryConfig",
+    "CanaryObservations",
     "canary_stop_reasons",
     "rollback_plan",
 ]
@@ -48,6 +51,10 @@ class AgyResidentCanaryConfig:
         for name, value in int_fields:
             if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
                 raise ValueError(f"{name} must be a positive int, got {value!r}")
+        if self.baseline_max_slots > self.max_slots:
+            raise ValueError(
+                f"baseline_max_slots ({self.baseline_max_slots}) must be <= max_slots ({self.max_slots})"
+            )
         if self.rss_ceiling_total_mb < self.rss_ceiling_per_slot_mb:
             raise ValueError("rss_ceiling_total_mb must be >= rss_ceiling_per_slot_mb")
         if (
@@ -64,99 +71,107 @@ class AgyResidentCanaryConfig:
             raise ValueError(f"fd_leak_stop must be a bool, got {self.fd_leak_stop!r}")
 
 
+@dataclass(frozen=True)
+class CanaryObservations:
+    """Типизированные наблюдения канарейки для fail-closed проверки стоп-условий."""
+
+    max_slot_rss_mb: float | None = None
+    total_rss_mb: float | None = None
+    fd_open_per_slot: int | None = None
+    errors: int | None = None
+    total_requests: int | None = None
+    fd_leak_detected: bool = False
+
+
 def rollback_plan() -> list[str]:
-    """Вернуть команды отката канареечного включения AGY_RESIDENT_ENABLED без исполнения."""
+    """Вернуть команды персистентного отката AGY_RESIDENT_ENABLED через launchd без исполнения."""
     return [
-        "AGY_RESIDENT_ENABLED=false",
-        "launchctl kickstart -k gui/$(id -u)/com.user.dsh-hub",
+        "launchctl setenv AGY_RESIDENT_ENABLED false",
+        f"launchctl kickstart -k {LAUNCHD_SERVICE_LABEL}",
+        "sh -c 'ps eww $(pgrep -f \"bridges/agy-bridge/server.py\") | tr \" \" \"\\n\" | grep -q \"AGY_RESIDENT_ENABLED=false\" || echo ROLLBACK_VERIFY_FAILED'",
     ]
 
 
-def _read_float(
-    observations: Mapping[str, object], keys: tuple[str, ...]
-) -> tuple[str, float] | None:
-    """Прочитать первое присутствующее числовое наблюдение по набору ключей."""
-    for key in keys:
-        if key not in observations:
-            continue
-        raw = observations[key]
-        if isinstance(raw, bool) or not isinstance(raw, (int, float)):
-            return key, math.nan
-        return key, float(raw)
-    return None
+def _is_valid_number(value: object) -> bool:
+    """Проверить, что значение является конечным числом, а не bool."""
+    return (
+        not isinstance(value, bool)
+        and isinstance(value, (int, float))
+        and math.isfinite(float(value))
+    )
+
+
+def _check_rss_metric(
+    value: float | None,
+    metric_name: str,
+    ceiling_mb: int,
+    exceeded_label: str,
+    reasons: list[str],
+) -> None:
+    """Fail-closed проверка метрики RSS против заданного потолка в MiB."""
+    if value is None:
+        reasons.append(f"telemetry_missing:{metric_name}")
+        return
+    if not _is_valid_number(value) or float(value) < 0.0:
+        reasons.append(f"invalid_metric:{metric_name}")
+        return
+    val = float(value)
+    if val > ceiling_mb:
+        reasons.append(f"{exceeded_label}: {val:.1f} MiB > {ceiling_mb} MiB")
 
 
 def canary_stop_reasons(
-    observations: Mapping[str, object],
+    obs: CanaryObservations,
     config: AgyResidentCanaryConfig | None = None,
 ) -> list[str]:
-    """Оценить словарь наблюдений канарейки и вернуть список причин остановки rollout."""
+    """Fail-closed оценка типизированных наблюдений канарейки и выдача причин остановки."""
     cfg = config if config is not None else AgyResidentCanaryConfig()
     cfg.validate()
     reasons: list[str] = []
 
-    slot_rss = _read_float(
-        observations, ("max_slot_rss_mb", "rss_per_slot_mb", "slot_rss_mb")
+    _check_rss_metric(
+        obs.max_slot_rss_mb,
+        "max_slot_rss_mb",
+        cfg.rss_ceiling_per_slot_mb,
+        "rss_per_slot_exceeded",
+        reasons,
     )
-    if slot_rss is not None:
-        key, val = slot_rss
-        if not math.isfinite(val):
-            reasons.append(f"invalid_metric:{key}")
-        elif val > cfg.rss_ceiling_per_slot_mb:
-            reasons.append(
-                f"rss_per_slot_exceeded: {val:.1f} MiB > {cfg.rss_ceiling_per_slot_mb} MiB"
-            )
+    _check_rss_metric(
+        obs.total_rss_mb,
+        "total_rss_mb",
+        cfg.rss_ceiling_total_mb,
+        "rss_total_exceeded",
+        reasons,
+    )
 
-    total_rss = _read_float(observations, ("total_rss_mb", "rss_total_mb"))
-    if total_rss is not None:
-        key, val = total_rss
-        if not math.isfinite(val):
-            reasons.append(f"invalid_metric:{key}")
-        elif val > cfg.rss_ceiling_total_mb:
-            reasons.append(
-                f"rss_total_exceeded: {val:.1f} MiB > {cfg.rss_ceiling_total_mb} MiB"
-            )
-
-    err_rate = _read_float(observations, ("error_rate_pct", "error_rate"))
-    if (
-        err_rate is None
-        and "errors" in observations
-        and "total_requests" in observations
+    if obs.errors is None or obs.total_requests is None:
+        reasons.append("telemetry_missing:error_rate")
+    elif (
+        not _is_valid_number(obs.errors)
+        or not _is_valid_number(obs.total_requests)
+        or float(obs.errors) < 0.0
+        or float(obs.total_requests) <= 0.0
     ):
-        errs = _read_float(observations, ("errors",))
-        reqs = _read_float(observations, ("total_requests",))
-        if (
-            errs is not None
-            and reqs is not None
-            and math.isfinite(errs[1])
-            and math.isfinite(reqs[1])
-            and reqs[1] > 0.0
-        ):
-            err_rate = ("error_rate_pct", (errs[1] / reqs[1]) * 100.0)
-    if err_rate is not None:
-        key, val = err_rate
-        if not math.isfinite(val):
-            reasons.append(f"invalid_metric:{key}")
-        elif val > cfg.error_rate_stop_pct:
+        reasons.append("invalid_metric:error_rate")
+    else:
+        rate_pct = (float(obs.errors) / float(obs.total_requests)) * 100.0
+        if rate_pct > cfg.error_rate_stop_pct:
             reasons.append(
-                f"error_rate_exceeded: {val:.2f}% > {cfg.error_rate_stop_pct:.2f}%"
+                f"error_rate_exceeded: {rate_pct:.2f}% > {cfg.error_rate_stop_pct:.2f}%"
             )
 
-    if cfg.fd_leak_stop:
-        if bool(observations.get("fd_leak")) or bool(
-            observations.get("fd_leak_detected")
-        ):
-            reasons.append("fd_leak_detected")
-        slot_fds = _read_float(
-            observations, ("max_slot_fds", "fd_per_slot", "fds_per_slot")
+    if obs.fd_open_per_slot is None:
+        reasons.append("telemetry_missing:fd_open_per_slot")
+    elif not _is_valid_number(obs.fd_open_per_slot) or int(obs.fd_open_per_slot) < 0:
+        reasons.append("invalid_metric:fd_open_per_slot")
+    elif int(obs.fd_open_per_slot) > cfg.fd_limit_per_slot:
+        reasons.append(
+            f"fd_limit_exceeded: {int(obs.fd_open_per_slot)} > {cfg.fd_limit_per_slot}"
         )
-        if slot_fds is not None:
-            key, val = slot_fds
-            if not math.isfinite(val):
-                reasons.append(f"invalid_metric:{key}")
-            elif val > cfg.fd_limit_per_slot:
-                reasons.append(
-                    f"fd_limit_exceeded: {int(val)} > {cfg.fd_limit_per_slot}"
-                )
+
+    if not isinstance(obs.fd_leak_detected, bool):
+        reasons.append("invalid_metric:fd_leak_detected")
+    elif cfg.fd_leak_stop and obs.fd_leak_detected is True:
+        reasons.append("fd_leak_detected")
 
     return reasons

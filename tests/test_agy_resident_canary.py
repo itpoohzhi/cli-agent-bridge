@@ -1,20 +1,29 @@
+from __future__ import annotations  # noqa: E402
+
 """Тесты канареечного конфига AGY_RESIDENT_ENABLED, отката и стоп-причин."""
 
-from __future__ import annotations
+import math  # noqa: E402
+import sys  # noqa: E402
+from dataclasses import FrozenInstanceError  # noqa: E402
+from pathlib import Path  # noqa: E402
 
-import math
-import sys
-from dataclasses import FrozenInstanceError
-from pathlib import Path
+import pytest  # noqa: E402
 
-import pytest
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+_BRIDGE_DIR = _REPO_ROOT / "bridges" / "agy-bridge"
+for _path in (_REPO_ROOT, _BRIDGE_DIR):
+    if str(_path) not in sys.path:
+        sys.path.insert(0, str(_path))
 
-_BRIDGE_DIR = Path(__file__).resolve().parents[1] / "bridges" / "agy-bridge"
-if str(_BRIDGE_DIR) not in sys.path:
-    sys.path.insert(0, str(_BRIDGE_DIR))
-
+from adapters.stdio_drivers.agy_config import (  # noqa: E402
+    AgyResidentConfig,
+    apply_canary_limits,
+    load_agy_canary_config,
+)
 from agy_runtime.agy_resident_canary import (  # noqa: E402
+    LAUNCHD_SERVICE_LABEL,
     AgyResidentCanaryConfig,
+    CanaryObservations,
     canary_stop_reasons,
     rollback_plan,
 )
@@ -42,6 +51,7 @@ def test_canary_config_defaults_and_docstring() -> None:
         {"baseline_max_slots": -1},
         {"baseline_max_slots": True},
         {"baseline_max_slots": 1.5},
+        {"baseline_max_slots": 5, "max_slots": 4},
         {"max_slots": 0},
         {"max_slots": -1},
         {"max_slots": True},
@@ -88,75 +98,223 @@ def test_canary_config_valid_boundaries() -> None:
 
 
 def test_rollback_plan_returns_expected_commands() -> None:
-    """rollback_plan возвращает точный список из двух команд отката."""
+    """rollback_plan возвращает персистентный launchctl-откат, рестарт и верификацию."""
     cmds = rollback_plan()
-    assert len(cmds) == 2
-    assert cmds[0] == "AGY_RESIDENT_ENABLED=false"
-    assert cmds[1] == "launchctl kickstart -k gui/$(id -u)/com.user.dsh-hub"
+    assert LAUNCHD_SERVICE_LABEL == "gui/$(id -u)/com.user.dsh-hub"
+    assert len(cmds) == 3
+    assert cmds[0] == "launchctl setenv AGY_RESIDENT_ENABLED false"
+    assert cmds[1] == f"launchctl kickstart -k {LAUNCHD_SERVICE_LABEL}"
+    assert "ps eww" in cmds[2]
+    assert "AGY_RESIDENT_ENABLED=false" in cmds[2]
+    assert "ROLLBACK_VERIFY_FAILED" in cmds[2]
 
 
-def test_canary_stop_reasons_boundaries_and_unknown_keys() -> None:
-    """Значения ровно на потолке и неизвестные ключи не дают причин остановки."""
-    at_ceiling = {
-        "max_slot_rss_mb": 300.0,
-        "total_rss_mb": 3000.0,
-        "error_rate_pct": 5.0,
-        "fd_leak": False,
-        "max_slot_fds": 256,
-        "unknown_metric": 999999,
-    }
+def test_canary_stop_reasons_boundaries_and_fail_closed_defaults() -> None:
+    """Значения на потолке не останавливают rollout, а пустой DTO даёт fail-closed причины."""
+    at_ceiling = CanaryObservations(
+        max_slot_rss_mb=300.0,
+        total_rss_mb=3000.0,
+        fd_open_per_slot=256,
+        errors=5,
+        total_requests=100,
+        fd_leak_detected=False,
+    )
     assert canary_stop_reasons(at_ceiling) == []
-    assert canary_stop_reasons({"unknown_only": "ignored"}) == []
+    assert canary_stop_reasons(CanaryObservations()) == [
+        "telemetry_missing:max_slot_rss_mb",
+        "telemetry_missing:total_rss_mb",
+        "telemetry_missing:error_rate",
+        "telemetry_missing:fd_open_per_slot",
+    ]
 
-    over_ceiling = {
-        "max_slot_rss_mb": 301.0,
-        "total_rss_mb": 3001.0,
-        "error_rate_pct": 5.1,
-        "fd_leak_detected": True,
-        "max_slot_fds": 257,
-    }
+    over_ceiling = CanaryObservations(
+        max_slot_rss_mb=301.0,
+        total_rss_mb=3001.0,
+        fd_open_per_slot=257,
+        errors=6,
+        total_requests=100,
+        fd_leak_detected=True,
+    )
     reasons = canary_stop_reasons(over_ceiling)
     assert len(reasons) == 5
     assert "rss_per_slot_exceeded: 301.0 MiB > 300 MiB" in reasons
     assert "rss_total_exceeded: 3001.0 MiB > 3000 MiB" in reasons
-    assert "error_rate_exceeded: 5.10% > 5.00%" in reasons
-    assert "fd_leak_detected" in reasons
+    assert "error_rate_exceeded: 6.00% > 5.00%" in reasons
+    assert "fd_open_per_slot" not in reasons
     assert "fd_limit_exceeded: 257 > 256" in reasons
+    assert "fd_leak_detected" in reasons
 
 
 @pytest.mark.parametrize(
-    ("observations", "expected"),
+    ("obs", "expected_reason"),
     [
-        ({"max_slot_rss_mb": math.nan}, ["invalid_metric:max_slot_rss_mb"]),
-        ({"max_slot_rss_mb": True}, ["invalid_metric:max_slot_rss_mb"]),
-        ({"max_slot_rss_mb": "bad"}, ["invalid_metric:max_slot_rss_mb"]),
-        ({"total_rss_mb": math.inf}, ["invalid_metric:total_rss_mb"]),
-        ({"error_rate_pct": math.nan}, ["invalid_metric:error_rate_pct"]),
-        ({"max_slot_fds": math.nan}, ["invalid_metric:max_slot_fds"]),
-        ({"errors": 5, "total_requests": 100}, []),
         (
-            {"errors": 6, "total_requests": 100},
-            ["error_rate_exceeded: 6.00% > 5.00%"],
+            CanaryObservations(
+                max_slot_rss_mb=None,
+                total_rss_mb=100.0,
+                fd_open_per_slot=10,
+                errors=0,
+                total_requests=10,
+            ),
+            "telemetry_missing:max_slot_rss_mb",
         ),
-        ({"error_rate_pct": 1.0, "errors": 50, "total_requests": 100}, []),
-        ({"errors": 10}, []),
-        ({"total_requests": 100}, []),
-        ({"errors": math.nan, "total_requests": 100}, []),
-        ({"errors": 10, "total_requests": math.nan}, []),
-        ({"errors": 10, "total_requests": 0}, []),
-        ({"errors": 10, "total_requests": -5}, []),
+        (
+            CanaryObservations(
+                max_slot_rss_mb=math.nan,
+                total_rss_mb=100.0,
+                fd_open_per_slot=10,
+                errors=0,
+                total_requests=10,
+            ),
+            "invalid_metric:max_slot_rss_mb",
+        ),
+        (
+            CanaryObservations(
+                max_slot_rss_mb=100.0,
+                total_rss_mb=None,
+                fd_open_per_slot=10,
+                errors=0,
+                total_requests=10,
+            ),
+            "telemetry_missing:total_rss_mb",
+        ),
+        (
+            CanaryObservations(
+                max_slot_rss_mb=100.0,
+                total_rss_mb=math.inf,
+                fd_open_per_slot=10,
+                errors=0,
+                total_requests=10,
+            ),
+            "invalid_metric:total_rss_mb",
+        ),
+        (
+            CanaryObservations(
+                max_slot_rss_mb=100.0,
+                total_rss_mb=200.0,
+                fd_open_per_slot=None,
+                errors=0,
+                total_requests=10,
+            ),
+            "telemetry_missing:fd_open_per_slot",
+        ),
+        (
+            CanaryObservations(
+                max_slot_rss_mb=100.0,
+                total_rss_mb=200.0,
+                fd_open_per_slot=-1,
+                errors=0,
+                total_requests=10,
+            ),
+            "invalid_metric:fd_open_per_slot",
+        ),
+        (
+            CanaryObservations(
+                max_slot_rss_mb=100.0,
+                total_rss_mb=200.0,
+                fd_open_per_slot=10,
+                errors=None,
+                total_requests=10,
+            ),
+            "telemetry_missing:error_rate",
+        ),
+        (
+            CanaryObservations(
+                max_slot_rss_mb=100.0,
+                total_rss_mb=200.0,
+                fd_open_per_slot=10,
+                errors=1,
+                total_requests=None,
+            ),
+            "telemetry_missing:error_rate",
+        ),
+        (
+            CanaryObservations(
+                max_slot_rss_mb=100.0,
+                total_rss_mb=200.0,
+                fd_open_per_slot=10,
+                errors=1,
+                total_requests=0,
+            ),
+            "invalid_metric:error_rate",
+        ),
+        (
+            CanaryObservations(
+                max_slot_rss_mb=100.0,
+                total_rss_mb=200.0,
+                fd_open_per_slot=10,
+                errors=1,
+                total_requests=-5,
+            ),
+            "invalid_metric:error_rate",
+        ),
+        (
+            CanaryObservations(
+                max_slot_rss_mb=100.0,
+                total_rss_mb=200.0,
+                fd_open_per_slot=10,
+                errors=0,
+                total_requests=10,
+                fd_leak_detected="false",  # type: ignore[arg-type]
+            ),
+            "invalid_metric:fd_leak_detected",
+        ),
     ],
 )
-def test_canary_stop_reasons_invalid_metrics_and_error_rate_derived(
-    observations: dict[str, object],
-    expected: list[str],
+def test_canary_stop_reasons_fail_closed_and_invalid_metrics(
+    obs: CanaryObservations,
+    expected_reason: str,
 ) -> None:
-    """Невалидные метрики, bool/строки и расчёт error_rate из errors/total_requests."""
-    assert canary_stop_reasons(observations) == expected
+    """Отсутствующие/неконечные метрики и не-bool fd_leak_detected дают fail-closed отказ."""
+    assert canary_stop_reasons(obs) == [expected_reason]
 
 
 def test_canary_stop_reasons_respects_fd_leak_stop_disabled() -> None:
     """При fd_leak_stop=False утечка FD не добавляет причину остановки."""
     cfg = AgyResidentCanaryConfig(fd_leak_stop=False)
-    reasons = canary_stop_reasons({"fd_leak": True, "max_slot_fds": 999}, config=cfg)
-    assert reasons == []
+    obs = CanaryObservations(
+        max_slot_rss_mb=100.0,
+        total_rss_mb=200.0,
+        fd_open_per_slot=10,
+        errors=0,
+        total_requests=10,
+        fd_leak_detected=True,
+    )
+    assert canary_stop_reasons(obs, config=cfg) == []
+
+
+def test_load_agy_canary_config_and_apply_limits() -> None:
+    """load_agy_canary_config парсит AGY_CANARY_*, а apply_canary_limits клампит без мутации."""
+    default_canary = load_agy_canary_config({})
+    assert default_canary == AgyResidentCanaryConfig()
+
+    baseline_canary = load_agy_canary_config({"AGY_CANARY_BASELINE": "1"})
+    assert baseline_canary.max_slots == baseline_canary.baseline_max_slots == 2
+
+    custom_canary = load_agy_canary_config(
+        {
+            "AGY_CANARY_BASELINE_MAX_SLOTS": "3",
+            "AGY_CANARY_MAX_SLOTS": "6",
+            "AGY_CANARY_RSS_CEILING_PER_SLOT_MB": "256",
+            "AGY_CANARY_RSS_CEILING_TOTAL_MB": "1536",
+            "AGY_CANARY_FD_LIMIT_PER_SLOT": "128",
+            "AGY_CANARY_ERROR_RATE_STOP_PCT": "2.5",
+            "AGY_CANARY_FD_LEAK_STOP": "false",
+        }
+    )
+    assert custom_canary.max_slots == 6
+    assert custom_canary.rss_ceiling_per_slot_mb == 256
+    assert custom_canary.fd_leak_stop is False
+
+    base_cfg = AgyResidentConfig(enabled=True, max_slots=8, max_rss_mb=1024)
+    clamped = apply_canary_limits(base_cfg, custom_canary)
+    assert clamped is not base_cfg
+    assert clamped.max_slots == 6
+    assert clamped.max_rss_mb == 256
+    assert base_cfg.max_slots == 8
+    assert base_cfg.max_rss_mb == 1024
+
+    clamped_baseline = apply_canary_limits(
+        base_cfg, custom_canary, env={"AGY_CANARY_BASELINE": "1"}
+    )
+    assert clamped_baseline.max_slots == 3

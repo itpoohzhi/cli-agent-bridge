@@ -4909,24 +4909,48 @@ class _TranscriptTail(InterruptionTailState):
         """Обновить счётчик холодных ожиданий WAL в поле инстанса."""
         self._wal_wait_polls = count
 
+    def _wal_wait_limit(self, max_polls: int | None) -> int:
+        """Вернуть порог последовательных холодных ожиданий WAL."""
+        if max_polls is not None:
+            return max_polls
+        attr = getattr(self, "_wal_wait_max_polls", None)
+        if isinstance(attr, int) and not isinstance(attr, bool):
+            return attr
+        return int(globals().get("AGY_SQLITE_WAL_WAIT_MAX_POLLS", 32))
+
     def _resolve_wal_wait(self) -> None:
         """Зафиксировать выход из холодного ожидания WAL при первом успешном SELECT."""
         waited = self._get_wal_wait_polls()
         if waited > 0:
             self._set_wal_wait_polls(0)
+            self._wal_wait_budget_exceeded = False
             _log(f"sqlite-wal-resolved cid={self._cid8()} waited_polls={waited}")
 
-    def _handle_cold_wal_wait(self, exc: sqlite3.Error) -> bool:
-        """Обработать холодное ожидание WAL до первого SELECT или появления -wal."""
-        # cold-open: базы или её -wal ещё нет либо ошибка до первого успешного SELECT.
-        wal = Path(str(self._db_path) + "-wal")
-        if self.selects_ok == 0 or not wal.exists():
-            waited = self._get_wal_wait_polls()
-            self._set_wal_wait_polls(waited + 1)
-            if waited == 0:
-                _log(f"sqlite-wal-wait cid={self._cid8()} err={type(exc).__name__}")
-            return True
-        return False
+    def _handle_cold_wal_wait(
+        self, exc: sqlite3.Error, max_polls: int | None = None
+    ) -> bool:
+        """Обработать холодное ожидание WAL до первого SELECT строго по whitelist."""
+        self._wal_wait_budget_exceeded = False
+        if not isinstance(exc, sqlite3.OperationalError) or self.selects_ok != 0:
+            return False
+        message = str(exc).lower()
+        if (
+            "unable to open database file" not in message
+            and "database is locked" not in message
+        ):
+            return False
+        limit = self._wal_wait_limit(max_polls)
+        waited = self._get_wal_wait_polls()
+        if waited >= limit:
+            self._wal_wait_budget_exceeded = True
+            return False
+        self._set_wal_wait_polls(waited + 1)
+        if waited == 0:
+            wal_exists = int(Path(str(self._db_path) + "-wal").exists())
+            _log(
+                f"sqlite-wal-wait cid={self._cid8()} err={type(exc).__name__} wal={wal_exists}"
+            )
+        return True
 
     def _on_sqlite_error(self, exc: sqlite3.Error) -> None:
         message = str(exc).lower()
@@ -4936,6 +4960,7 @@ class _TranscriptTail(InterruptionTailState):
         schema = operational and (
             "no such table" in message or "no such column" in message
         )
+        budget_exceeded = False
         if schema:
             self.failed = True
             _log(f"sqlite-schema-mismatch cid={self._cid8()}")
@@ -4943,14 +4968,16 @@ class _TranscriptTail(InterruptionTailState):
         elif operational:
             if self._handle_cold_wal_wait(exc):
                 return
+            budget_exceeded = bool(getattr(self, "_wal_wait_budget_exceeded", False))
             self.failed = True
         elif isinstance(exc, sqlite3.DatabaseError):
             self.failed = True
             self._sqlite_off("db_error")
         if not self._open_fail_logged:
             self._open_fail_logged = True
+            suffix = " wal_wait_budget_exceeded=1" if budget_exceeded else ""
             _log(
-                f"sqlite-open-fail cid={self._cid8()} err={type(exc).__name__} cold=0"
+                f"sqlite-open-fail cid={self._cid8()} err={type(exc).__name__} cold=0{suffix}"
             )
 
     def _select_rows(self, conn: sqlite3.Connection) -> tuple[int, int]:
