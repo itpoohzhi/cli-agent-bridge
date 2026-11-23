@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import os
 import shutil
 import tempfile
@@ -16,16 +15,25 @@ from pathlib import Path
 from typing import Any
 
 from core.runtime_env import env_bool, env_first
+from core.stdio_resident.routed_turn_result import (
+    ProxyBridgeOptions,
+    RoutedExecOptions,
+    RoutedTurnResult,
+    _NoRedirectHandler as _NoRedirectHandler,
+    build_routed_turn_error as _build_routed_turn_error,  # noqa: F401
+    execute_routed_turn_result as _execute_routed_turn_result_impl,
+    proxy_zero_canon_bridge_turn_result as _proxy_result_impl,
+)
 from core.stdio_resident.turn_error_sse import (
-    DONE_FRAME,
-    ResidentTurnError,
-    TurnErrorResponse,
-    build_turn_error,
+    DONE_FRAME as DONE_FRAME,
+    ResidentTurnError as ResidentTurnError,
+    TurnErrorResponse as TurnErrorResponse,
+    build_turn_error as build_turn_error,
 )
 from core.subbridge_zero_canon import (
     HUB_ZERO_CANON_ROUTING_FLAG,
-    REVIEW_PROFILE_HEADER,
-    ZERO_CANON_PROFILE,
+    REVIEW_PROFILE_HEADER as REVIEW_PROFILE_HEADER,
+    ZERO_CANON_PROFILE as ZERO_CANON_PROFILE,
     is_zero_canon_profile,
 )
 from core.timeout_ladder import FLAG_TIMEOUT_LADDER, TimeoutLadderConfig, load_timeout_ladder_config
@@ -153,11 +161,6 @@ def zero_canon_isolation(driver: Any, review_profile: str | None) -> Iterator[Ze
         shutil.rmtree(root, ignore_errors=True)
 
 
-class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
-    def redirect_request(self, req: Any, fp: Any, code: int, msg: str, headers: Any, newurl: str) -> None:
-        raise urllib.error.HTTPError(newurl, code, f"redirect blocked ({msg})", headers, fp)
-
-
 _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
 
 
@@ -186,6 +189,25 @@ def _resolve_proxy_timeout_s(
     return ladder.effective_first_event_s if ladder.enabled else 180.0
 
 
+def proxy_zero_canon_bridge_turn_result(
+    base_url: str,
+    model: str,
+    prompt: str,
+    headers: Mapping[str, str] | None = None,
+    *,
+    timeout_s: float | None = None,
+) -> RoutedTurnResult:
+    """Перенаправляет Zero-Canon Claude-ход на локальный `:9881` с сохранением TurnUsage."""
+    opts = ProxyBridgeOptions(
+        validate_url_fn=_validate_loopback_bridge_url,
+        resolve_timeout_fn=_resolve_proxy_timeout_s,
+        opener_factory=urllib.request.build_opener,
+        timeout_s=timeout_s,
+        usage_enabled=True,
+    )
+    return _proxy_result_impl(base_url, model, prompt, headers, opts)
+
+
 def proxy_zero_canon_bridge_turn(
     base_url: str,
     model: str,
@@ -194,86 +216,58 @@ def proxy_zero_canon_bridge_turn(
     *,
     timeout_s: float | None = None,
 ) -> tuple[str, str]:
-    """Перенаправляет Zero-Canon Claude-ход на локальный loopback claude-p-bridge (`:9881`)."""
-    effective_timeout = _resolve_proxy_timeout_s(timeout_s)
-    url = _validate_loopback_bridge_url(base_url) + "/chat/completions"
-    body = json.dumps(
-        {"model": model, "messages": [{"role": "user", "content": prompt}], "stream": False},
-        ensure_ascii=False,
-    ).encode("utf-8")
-    req_headers: dict[str, str] = {
-        "Content-Type": "application/json",
-        REVIEW_PROFILE_HEADER: ZERO_CANON_PROFILE,
-    }
-    if headers:
-        for key, value in headers.items():
-            if key.lower() == "x-subagent-id" and value:
-                req_headers["X-Subagent-Id"] = value
-    bridge_key = os.environ.get("CLAUDE_P_BRIDGE_KEY") or os.environ.get("CLAUDE_BRIDGE_KEY") or ""
-    if bridge_key:
-        req_headers["Authorization"] = f"Bearer {bridge_key}"
-    req = urllib.request.Request(url, data=body, headers=req_headers, method="POST")
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirectHandler())
-    with opener.open(req, timeout=effective_timeout) as resp:
-        parsed = json.loads(resp.read().decode("utf-8"))
-    choices = parsed.get("choices") if isinstance(parsed, dict) else None
-    if not isinstance(choices, list) or not choices:
-        return "", ""
-    msg = choices[0].get("message") if isinstance(choices[0], dict) else {}
-    if not isinstance(msg, dict):
-        return "", ""
-    return str(msg.get("content") or ""), str(msg.get("reasoning_content") or "")
-
-
-def _build_routed_turn_error(exc: BaseException, live_sent: int) -> TurnErrorResponse:
-    if isinstance(exc, RuntimeError) and str(exc).startswith("zero_canon_unsupported_by_driver:"):
-        status = 503 if not live_sent else 200
-        error_type = "zero_canon_unsupported"
-        code = "zero_canon_unsupported_by_driver"
-        message = str(exc)[:500]
-        body: dict[str, object] = {"error": {"message": message, "type": error_type, "code": code}}
-        sse = "data: " + json.dumps(body, ensure_ascii=False) + "\n\n" + DONE_FRAME
-        return TurnErrorResponse(
-            status=status, error_type=error_type, code=code, message=message, sse=sse, body=body
-        )
-    return build_turn_error(exc, live_sent=live_sent)
-
-
-def _stream_bridge_chunks(
-    route: ZeroCanonRoute,
-    request: dict[str, Any],
-    headers: Mapping[str, str] | None,
-) -> Iterator[tuple[str, str]]:
-    content, thought = proxy_zero_canon_bridge_turn(
-        route.base_url,
-        str(request.get("model") or "default"),
-        str(request.get("prompt") or ""),
-        headers,
+    """Legacy-обёртка над `proxy_zero_canon_bridge_turn_result` (возвращает `(text, reasoning)`)."""
+    res = proxy_zero_canon_bridge_turn_result(
+        base_url, model, prompt, headers, timeout_s=timeout_s
     )
-    if content:
-        yield "content", content
-    if thought:
-        yield "reasoning_content", thought
+    return res.text, res.reasoning
 
 
-def _stream_routed_chunks(
+_DEFAULT_PROXY_TURN = proxy_zero_canon_bridge_turn
+
+
+def _bridge_proxy_compat(
+    base_url: str,
+    model: str,
+    prompt: str,
+    headers: Mapping[str, str] | None = None,
+    *,
+    usage_enabled: bool = True,
+) -> RoutedTurnResult:
+    if proxy_zero_canon_bridge_turn is _DEFAULT_PROXY_TURN:
+        opts = ProxyBridgeOptions(
+            validate_url_fn=_validate_loopback_bridge_url,
+            resolve_timeout_fn=_resolve_proxy_timeout_s,
+            opener_factory=urllib.request.build_opener,
+            usage_enabled=usage_enabled,
+        )
+        return _proxy_result_impl(base_url, model, prompt, headers, opts)
+    content, thought = proxy_zero_canon_bridge_turn(base_url, model, prompt, headers)
+    return RoutedTurnResult(content, thought, None)
+
+
+def execute_routed_turn_result(
     execute_chat: Callable[[dict[str, Any]], Iterator[dict[str, Any]]],
-    route: ZeroCanonRoute,
+    protocol: str,
     request: dict[str, Any],
-    headers: Mapping[str, str] | None,
-) -> Iterator[tuple[str, str]]:
-    if route.kind == KIND_BRIDGE:
-        yield from _stream_bridge_chunks(route, request, headers)
-        return
-    if is_zero_canon_profile(str(request.get("review_profile") or "")) and route.kind == KIND_RESIDENT:
-        raise RuntimeError("zero_canon_resident_route_forbidden")
-    routed_req = {**request, "is_ephemeral": bool(request.get("is_ephemeral")) or route.is_ephemeral}
-    for chunk in execute_chat(routed_req):
-        delta = chunk["choices"][0]["delta"]
-        if isinstance(content := delta.get("content"), str):
-            yield "content", content
-        if isinstance(thought := delta.get("reasoning_content"), str):
-            yield "reasoning_content", thought
+    sse_writer: Callable[[str, str], Any] | None,
+    *,
+    headers: Mapping[str, str] | None = None,
+) -> RoutedTurnResult:
+    """Выполняет ход с учётом `decide_zero_canon_route`, возвращая `RoutedTurnResult`."""
+    route = decide_zero_canon_route(
+        str(request.get("review_profile") or ""),
+        protocol,
+        backend_id=str(request.get("backend_id") or ""),
+    )
+    raw_enabled = request.get("_usage_enabled")
+    usage_enabled = raw_enabled if isinstance(raw_enabled, bool) else True
+    opts = RoutedExecOptions(
+        bridge_proxy_fn=_bridge_proxy_compat,
+        headers=headers,
+        usage_enabled=usage_enabled,
+    )
+    return _execute_routed_turn_result_impl(execute_chat, route, request, sse_writer, opts)
 
 
 def execute_routed_turn(
@@ -284,19 +278,8 @@ def execute_routed_turn(
     *,
     headers: Mapping[str, str] | None = None,
 ) -> tuple[str, str]:
-    """Выполняет ход с учётом `decide_zero_canon_route` и `build_turn_error`."""
-    route = decide_zero_canon_route(
-        str(request.get("review_profile") or ""), protocol, backend_id=str(request.get("backend_id") or "")
+    """Legacy-обёртка над `execute_routed_turn_result` (возвращает `(text, reasoning)`)."""
+    res = execute_routed_turn_result(
+        execute_chat, protocol, request, sse_writer, headers=headers
     )
-    parts: dict[str, list[str]] = {"content": [], "reasoning_content": []}
-    live_sent = 0
-    try:
-        for kind, value in _stream_routed_chunks(execute_chat, route, request, headers):
-            parts[kind].append(value)
-            if sse_writer is not None:
-                live_sent += 1
-                _ = sse_writer(kind, value)
-    except Exception as exc:
-        err = _build_routed_turn_error(exc, live_sent)
-        raise ResidentTurnError(err) from exc
-    return "".join(parts["content"]), "".join(parts["reasoning_content"])
+    return res.text, res.reasoning

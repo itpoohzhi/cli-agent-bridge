@@ -14,6 +14,7 @@ from core.stdio_resident.protocol_driver import (
     StdioProtocolDriver,
     StreamJsonDriver,
 )
+from core.stdio_resident.usage_extract import extract_acp_usage, extract_jsonrpc_usage
 
 _EXTRA_DRIVERS: dict[str, Callable[..., StdioProtocolDriver]] = {}
 
@@ -134,6 +135,7 @@ class StreamJsonRpcDriver(StreamJsonDriver):
             is_terminal=terminal,
             is_tool_stop=terminal and _tool_stop(payload),
             raw=payload,
+            usage=extract_jsonrpc_usage(payload),
         )
 
     @override
@@ -208,6 +210,7 @@ class AcpDriver(StreamJsonDriver):
             is_terminal=terminal,
             is_tool_stop=event == "tool_stop",
             raw=payload,
+            usage=extract_acp_usage(payload),
         )
 
     @override

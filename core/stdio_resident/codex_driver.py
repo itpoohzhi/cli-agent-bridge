@@ -15,6 +15,7 @@ from typing import Any, ClassVar, Final, cast, override
 from core.stdio_resident.codex_protocol_fsm import (
     EffectKind, EventKind, ProtocolEffect, ProtocolEvent, ProtocolPhase, ProtocolState, transition,
 )
+from core.stdio_resident.codex_usage import codex_v2_effects_to_chunk, extract_codex_legacy_usage
 from core.stdio_resident.protocol_driver import DecodedChunk, DriverCapabilities, StreamJsonDriver
 from core.subbridge_zero_canon import is_zero_canon_profile
 from core.zero_canon_fs import prepare_codex_zero_canon_home
@@ -120,30 +121,6 @@ def _first_send_frame(effects: tuple[ProtocolEffect, ...]) -> bytes | None:
     return None
 
 
-def _format_effect_error(payload: Mapping[str, object]) -> str:
-    code, msg = str(payload.get("code") or ""), str(payload.get("message") or "")
-    if code and msg:
-        return f"{code}: {msg}"
-    return code or msg or "resident_protocol_failed"
-
-
-def _effects_to_chunk(effects: tuple[ProtocolEffect, ...], payload: dict[str, Any]) -> DecodedChunk | None:
-    if not effects:
-        return None
-    text_parts, reasoning_parts, error, is_term = [], [], None, False
-    for eff in effects:
-        if eff.kind is EffectKind.EMIT_DELTA:
-            target = text_parts if eff.payload.get("channel") == "content" else reasoning_parts
-            target.append(str(eff.payload.get("delta", "")))
-        elif eff.kind is EffectKind.EMIT_ERROR:
-            error = _format_effect_error(eff.payload)
-        elif eff.kind is EffectKind.EMIT_TERMINAL:
-            is_term = True
-            if eff.payload.get("status") == "interrupted" and error is None:
-                error = "turn_interrupted"
-    return DecodedChunk(text="".join(text_parts), reasoning="".join(reasoning_parts), is_terminal=is_term, raw=payload, error=error)
-
-
 def _legacy_error_text(payload: Mapping[str, Any]) -> tuple[dict[str, Any] | None, str | None]:
     error = _mapping(payload.get("error"))
     if error is not None:
@@ -230,6 +207,7 @@ class CodexAppServerDriver(StreamJsonDriver):
         return DecodedChunk(
             text=text, reasoning=reasoning, tool_calls=tool_calls, is_terminal=_is_legacy_terminal(payload),
             is_tool_stop=bool(tool_calls) or self._tool_stop(content), raw=error if error is not None else payload, error=err_text,
+            usage=extract_codex_legacy_usage(payload),
         )
 
     @override
@@ -542,7 +520,7 @@ class CodexAppServerV2Driver(StreamJsonDriver):
             if self._state.phase is not ProtocolPhase.IDLE
             else self._probe_effects(payload)
         )
-        return _effects_to_chunk(effects, payload)
+        return codex_v2_effects_to_chunk(effects, payload)
 
     @override
     def is_terminal(self, raw_line: str, decoded: DecodedChunk | None) -> bool:

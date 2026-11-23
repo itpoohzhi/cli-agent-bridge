@@ -16,6 +16,7 @@ from typing import Any, ClassVar, cast, override
 
 from core.stdio_resident.protocol_driver import DecodedChunk, DriverCapabilities
 from core.stdio_resident.rpc_drivers import AcpDriver
+from core.stdio_resident.usage_extract import extract_opencode_usage
 from core.subbridge_zero_canon import is_zero_canon_profile
 from core.zero_canon_fs import prepare_opencode_zc_env
 
@@ -235,7 +236,7 @@ class OpenCodeAcpDriver(AcpDriver):
             return None
         if "error" in payload:
             err_dict = self._mapping(payload["error"])
-            return OpenCodeDecodedChunk(error=str(err_dict.get("message") if err_dict else payload["error"]), is_terminal=True, raw=payload)
+            return OpenCodeDecodedChunk(error=str(err_dict.get("message") if err_dict else payload["error"]), is_terminal=True, raw=payload, usage=extract_opencode_usage(payload))
         res = payload.get("result")
         if isinstance(res, dict) and "sessionId" in res:
             self._active_session_id = str(res["sessionId"])
@@ -248,7 +249,7 @@ class OpenCodeAcpDriver(AcpDriver):
         text, reasoning, tool_calls, is_tool_stop = self._parse_update(params) if method == "session/update" else ("", "", [], False)
         return OpenCodeDecodedChunk(
             text=text, reasoning=reasoning, tool_calls=tool_calls,
-            is_terminal=self._check_terminal(payload), is_tool_stop=is_tool_stop, raw=payload,
+            is_terminal=self._check_terminal(payload), is_tool_stop=is_tool_stop, raw=payload, usage=extract_opencode_usage(payload),
         )
 
     def _check_terminal(self, payload: Mapping[str, Any]) -> bool:

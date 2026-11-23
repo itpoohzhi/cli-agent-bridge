@@ -23,6 +23,7 @@ from core.stdio_resident.protocol_driver import (
     DriverCapabilities,
     StreamJsonDriver,
 )
+from core.stdio_resident.usage_extract import extract_claude_usage
 from core.zero_canon_fs import ensure_private_dir, sanitize_zero_canon_env, write_atomic_0600, write_atomic_text_0600
 
 
@@ -107,6 +108,7 @@ class ClaudeStreamJsonDriver(StreamJsonDriver):
             is_tool_stop=tool_stop,
             raw=payload if is_error or error else {},
             error=error,
+            usage=extract_claude_usage(payload),
         )
 
     @classmethod

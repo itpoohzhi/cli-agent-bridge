@@ -9,6 +9,12 @@ import shlex
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from typing import Any, cast, override
 
+from adapters.stdio_resident_delta import (
+    execute_stdio_turn,
+    format_stream_delta as _format_delta,  # noqa: F401
+    sample_usage_enabled,
+    stream_assembled_deltas,
+)
 from core import backend_adapter as _ba
 from core.backend_adapter import (
     BackendAdapter,
@@ -20,22 +26,12 @@ from core.backend_adapter import (
     TurnContext,
     TurnResult,
 )
-from core.stdio_resident.codex_attestation_wire import (
-    record_v2_turn_completion,
-    should_wire_v2_zero_canon,
-    wrap_v2_sse_writer,
-)
 from core.stdio_resident.config import StdioPoolConfig
 from core.stdio_resident.process_pool import ResidentProcessPool
 from core.stdio_resident.protocol_driver import StdioProtocolDriver
 from core.stdio_resident.session_manager import StdioSessionManager
-from core.stdio_resident.turn_stream import AssembledStreamDelta, TurnStreamAssembler
 from core.stdio_resident.types import SlotAffinityKey
-from core.stdio_resident.zero_canon_router import execute_routed_turn
-from core.subbridge_zero_canon import (
-    normalize_review_profile,
-    review_profile_from_headers,
-)
+from core.subbridge_zero_canon import normalize_review_profile
 
 ADAPTER_API = _ba.ADAPTER_API
 KIND = "stdio_resident"
@@ -70,19 +66,6 @@ def _resolve_str(
             if isinstance(val, str) and val:
                 return val
     return default
-
-
-def _format_delta(delta: AssembledStreamDelta) -> dict[str, Any]:
-    payload: dict[str, Any] = {}
-    if delta.content:
-        payload["content"] = delta.content
-    if delta.reasoning_content:
-        payload["reasoning_content"] = delta.reasoning_content
-    if delta.tool_calls:
-        payload["tool_calls"] = delta.tool_calls
-    stop = "tool_calls" if delta.is_tool_stop else "stop"
-    reason = stop if delta.is_terminal else None
-    return {"choices": [{"index": 0, "delta": payload, "finish_reason": reason}]}
 
 
 class StdioResidentAdapter(BackendAdapter):
@@ -244,9 +227,13 @@ class StdioResidentAdapter(BackendAdapter):
             turn_context=turn_context,
             is_ephemeral=bool(data.get("is_ephemeral", False)),
         )
-        assembler = TurnStreamAssembler()
-        for chunk in stream:
-            yield _format_delta(assembler.process_chunk(chunk))
+        raw_sink = data.get("_turn_usage_sink")
+        usage_sink = raw_sink if isinstance(raw_sink, list) else None
+        yield from stream_assembled_deltas(
+            stream,
+            usage_enabled=sample_usage_enabled(data),
+            usage_sink=usage_sink,
+        )
 
     def _build_argv(self) -> list[str]:
         if not self._cli_argv:
@@ -310,36 +297,7 @@ class StdioResidentAdapter(BackendAdapter):
 
     @override
     def execute_turn(self, ctx: TurnContext, sse_writer: StreamSink | None) -> TurnResult:
-        protocol = self._sync_protocol()
-        handler = getattr(ctx, "handler", None)
-        raw_headers = getattr(handler, "headers", None)
-        profile = review_profile_from_headers(raw_headers)
-        request: dict[str, Any] = {
-            "chat_key": ctx.turn_id or ctx.rid or "default",
-            "backend_id": self.id,
-            "model": ctx.model,
-            "effort": ctx.effort,
-            "cwd": ctx.cwd or os.getcwd(),
-            "prompt": ctx.prompt,
-            "env": ctx.fwd_env,
-            "review_profile": profile,
-            "turn_context": {"model": ctx.model, "effort": ctx.effort, "review_profile": profile},
-        }
-        hdr_map = dict(raw_headers.items()) if hasattr(raw_headers, "items") else None
-        wire_zc = should_wire_v2_zero_canon(protocol, profile, handler)
-        writer = (
-            wrap_v2_sse_writer(sse_writer, self._driver, handler, ctx.model, ctx.effort)
-            if wire_zc
-            else sse_writer
-        )
-        text, reasoning = execute_routed_turn(
-            self.execute_chat, protocol, request, writer, headers=hdr_map
-        )
-        if wire_zc:
-            record_v2_turn_completion(
-                self._driver, handler, model=ctx.model, effort=ctx.effort, has_sse=sse_writer is not None
-            )
-        return TurnResult(text=text, reasoning=reasoning)
+        return execute_stdio_turn(self, self._sync_protocol(), ctx, sse_writer)
 
     @override
     def close_session(self, sid: str) -> None:

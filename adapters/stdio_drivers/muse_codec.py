@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from typing import Any, cast
 
 from core.stdio_resident.protocol_driver import DecodedChunk
+from core.stdio_resident.usage_extract import extract_muse_usage
 
 ALLOWED_ERROR_CODES: frozenset[str] = frozenset({
     "protocol_error", "turn_timeout", "turn_failed", "auth_error",
@@ -274,14 +275,15 @@ def decode_msp_line(raw_line: str) -> DecodedChunk:
         if kind in {"assistantMessage", "agentMessage", "message"} and text:
             return MuseDecodedChunk(text=text, raw=payload)
         return MuseDecodedChunk(raw=payload)
+    usage = extract_muse_usage(method, params)
     if method == "turn/completed" and (params.get("terminal") == "failed" or params.get("error") is not None):
-        return MuseDecodedChunk(error=normalize_msp_error(params.get("error") or params, default="turn_failed"), is_terminal=True, raw=payload)
+        return MuseDecodedChunk(error=normalize_msp_error(params.get("error") or params, default="turn_failed"), is_terminal=True, raw=payload, usage=usage)
     if method in {"run.terminal.completed", "turn/completed"}:
         tool_stop = params.get("stopReason") in {"tool", "tool_stop", "tool_call"} or params.get("is_tool_stop") is True
-        return MuseDecodedChunk(text=_pick_str(params, ("text", "content", "output")), reasoning=_pick_str(params, ("reasoning", "thought", "reasoning_content")), is_terminal=True, is_tool_stop=tool_stop, raw=payload)
+        return MuseDecodedChunk(text=_pick_str(params, ("text", "content", "output")), reasoning=_pick_str(params, ("reasoning", "thought", "reasoning_content")), is_terminal=True, is_tool_stop=tool_stop, raw=payload, usage=usage)
     if method in {"run.terminal.failed", "turn/failed"}:
         err_src = params["error"] if params.get("error") is not None else params
-        return MuseDecodedChunk(error=normalize_msp_error(err_src, default="turn_failed"), is_terminal=True, reply_bytes=None, raw=payload)
+        return MuseDecodedChunk(error=normalize_msp_error(err_src, default="turn_failed"), is_terminal=True, reply_bytes=None, raw=payload, usage=usage)
     if method in {"approval.request", "approval/request"}:
         return MuseDecodedChunk(reply_bytes=_build_approval_deny(payload, params), raw=payload)
-    return MuseDecodedChunk(raw=payload)
+    return MuseDecodedChunk(raw=payload, usage=usage)

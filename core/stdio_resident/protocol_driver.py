@@ -9,6 +9,8 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, ClassVar, Protocol, cast, runtime_checkable
 
+from core.turn_usage import UsageUpdate
+
 
 @dataclass(frozen=True)
 class DriverCapabilities:
@@ -30,6 +32,7 @@ class DecodedChunk:
     is_tool_stop: bool = False
     raw: dict[str, Any] = field(default_factory=dict)
     error: str | None = None
+    usage: UsageUpdate | None = None
 
 
 @runtime_checkable
@@ -146,6 +149,8 @@ class StreamJsonDriver(StdioProtocolDriver):
 
         event_type = payload.get("type")
         is_tool_stop = event_type == "tool_turn_stop"
+        from core.stdio_resident.usage_extract import extract_stream_json_usage
+
         return DecodedChunk(
             text=self._extract_string(payload, ("content", "delta", "text")),
             reasoning=self._extract_string(payload, ("reasoning", "thought")),
@@ -155,6 +160,7 @@ class StreamJsonDriver(StdioProtocolDriver):
             ),
             is_tool_stop=is_tool_stop,
             raw=payload,
+            usage=extract_stream_json_usage(payload),
         )
 
     def is_terminal(self, raw_line: str, decoded: DecodedChunk | None) -> bool:
