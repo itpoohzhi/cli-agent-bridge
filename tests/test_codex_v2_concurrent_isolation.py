@@ -207,8 +207,9 @@ def test_zero_canon_does_not_leak_into_subsequent_standard_turn_on_same_thread(t
     zc_handle = _ScriptedCodexHandle(11, barrier=None)
     zc_ctx = {"model": "gpt-6.1-terra", "effort": "medium", "review_profile": "Zero-Canon", "cwd": str(zc_root)}
     assert driver.run_handshake(zc_handle, timeout_s=5.0) is True
-    assert driver.protocol_state.zero_canon is True
+    assert driver.protocol_state.zero_canon is False
     assert driver.prepare_turn(zc_handle, zc_ctx, timeout_s=5.0) is True
+    assert driver.protocol_state.zero_canon is True
     zc_handle.write(driver.encode_turn("zc-prompt", zc_ctx))
     while True:
         line = zc_handle.read_stdout_line(timeout_s=5.0)
@@ -265,5 +266,93 @@ def test_slots_only_handle_weakref_cleanup_prevents_leak_and_id_aliasing() -> No
     assert driver._lookup_handle_state(h) is not None
     assert len(driver._weak_slots) == 1
     h = None
-    gc.collect()
+    _ = gc.collect()
     assert len(driver._weak_slots) == 0
+
+
+def test_failed_zero_canon_env_setup_never_pollutes_next_standard_turn_on_same_thread(tmp_path: Path) -> None:
+    """F-006 regression: aborted Zero-Canon env setup leaves zero TLS residue for next standard turn."""
+    import pytest
+
+    driver = CodexAppServerV2Driver()
+    # 1) Symlink auth.json forces prepare_codex_zero_canon_home to fail closed before run_handshake
+    bad_home = tmp_path / "bad_home"
+    bad_codex = bad_home / ".codex"
+    bad_codex.mkdir(parents=True)
+    target = tmp_path / "outside.json"
+    target.write_text("{}", encoding="utf-8")
+    (bad_codex / "auth.json").symlink_to(target)
+    with pytest.raises(OSError):
+        _ = driver.build_zero_canon_env({"HOME": str(bad_home), "CODEX_HOME": str(bad_codex)}, str(tmp_path / "zc-fail"))
+    # 2) Even after a successful build_zero_canon_env aborted before run_handshake, TLS stays clean
+    ok_home = tmp_path / "ok_home"
+    ok_codex = ok_home / ".codex"
+    ok_codex.mkdir(parents=True)
+    (ok_codex / "auth.json").write_text("{}", encoding="utf-8")
+    _ = driver.build_zero_canon_env({"HOME": str(ok_home), "CODEX_HOME": str(ok_codex)}, str(tmp_path / "zc-aborted"))
+
+    std_handle = _ScriptedCodexHandle(21, barrier=None)
+    std_ctx = {"model": "gpt-6.1-sol", "effort": "high", "review_profile": "standard"}
+    assert driver.run_handshake(std_handle, timeout_s=5.0) is True
+    assert driver.protocol_state.zero_canon is False
+    assert driver.prepare_turn(std_handle, std_ctx, timeout_s=5.0) is True
+    assert driver.protocol_state.zero_canon is False
+
+
+def test_failed_handshake_cleans_up_handle_state() -> None:
+    """F-002 regression: false-return from run_handshake releases handle state cleanly."""
+
+    class _FailingHandle:
+        def write(self, _data: bytes) -> None:
+            pass
+
+        def read_stdout_line(self, timeout_s: float | None = None) -> TaggedLine | None:
+            _ = timeout_s
+            return None
+
+    driver = CodexAppServerV2Driver()
+    fh = _FailingHandle()
+    assert driver.run_handshake(fh, timeout_s=0.1) is False
+    assert driver._lookup_handle_state(fh) is None
+
+
+def test_review_profile_single_ssot_in_protocol_state() -> None:
+    """F-001 regression: ProtocolState.zero_canon is sole SSOT; switching profile updates FSM mode."""
+    driver = CodexAppServerV2Driver()
+    handle = _ScriptedCodexHandle(31, barrier=None)
+    assert driver.run_handshake(handle, timeout_s=5.0) is True
+    assert driver.prepare_turn(handle, {"model": "gpt-6.1-terra", "review_profile": "Zero-Canon"}, timeout_s=5.0) is True
+    assert driver.protocol_state.zero_canon is True
+    assert driver._zero_canon is True
+    # Switching to standard starts a fresh standard thread (no stale zero_canon=True in FSM)
+    assert driver.prepare_turn(handle, {"model": "gpt-6.1-sol", "review_profile": "standard"}, timeout_s=5.0) is True
+    assert driver.protocol_state.zero_canon is False
+    assert driver._zero_canon is False
+
+
+def test_non_weakref_slots_handle_never_inherits_previous_handle_tls_state() -> None:
+    """F-007 regression: two consecutive __slots__ handles without __weakref__ stay isolated."""
+
+    class _BareSlottedHandle:
+        __slots__ = ("_out", "pid", "generation")
+
+        def __init__(self, pid: int) -> None:
+            self.pid = pid
+            self.generation = 0
+            self._out: list[str] = []
+
+        def write(self, data: bytes) -> None:
+            msg = json.loads(data.decode("utf-8").strip())
+            if msg.get("method") == "initialize":
+                self._out.append(json.dumps({"jsonrpc": "2.0", "id": msg["id"], "result": {"userAgent": "codex/2"}}))
+
+        def read_stdout_line(self, timeout_s: float | None = None) -> TaggedLine | None:
+            _ = timeout_s
+            return TaggedLine(line=self._out.pop(0), generation=0, pid=self.pid, is_stderr=False) if self._out else None
+
+    driver = CodexAppServerV2Driver()
+    h1 = _BareSlottedHandle(9601)
+    h2 = _BareSlottedHandle(9602)
+    assert driver.run_handshake(h1, timeout_s=5.0) is True
+    # Calling prepare_turn on a brand-new uninitialized h2 must fail-closed (not inherit h1's INITIALIZED state!)
+    assert driver.prepare_turn(h2, {"model": "gpt-6.1-sol", "review_profile": "standard"}, timeout_s=1.0) is False
