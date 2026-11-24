@@ -44,8 +44,11 @@ def test_compute_cache_hit_pct_boundaries() -> None:
 
 def test_enrich_with_cache_hit_adds_computed_fields() -> None:
     rows = enrich_with_cache_hit([{"prompt_tokens": 1000, "cached_tokens": 250}])
-    assert rows[0]["cache_hit_pct"] == 25.0
-    assert rows[0]["uncached_prompt_tokens"] == 750
+    assert rows == [{"prompt_tokens": 1000, "cached_tokens": 250, "cache_hit_pct": 25.0}]
+    assert "uncached_prompt_tokens" not in rows[0]
+    aggregated = aggregate_records([_record(prompt_tokens=1000, cached_tokens=250)])
+    assert aggregated["summary"]["uncached_prompt_tokens"] == 750
+    assert aggregated["by_model"][0]["uncached_prompt_tokens"] == 750
 
 
 def test_aggregate_records_summary_and_buckets() -> None:

@@ -67,16 +67,23 @@ def compute_cache_hit_pct(cached_tokens: int | None, prompt_tokens: int | None) 
 
 
 def enrich_with_cache_hit(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
-    """Вернуть копии строк с вычисленными полями cache_hit_pct и uncached_prompt_tokens."""
+    """Вернуть копии строк с вычисленным полем cache_hit_pct."""
+    return [
+        {**r, "cache_hit_pct": compute_cache_hit_pct(r.get("cached_tokens"), r.get("prompt_tokens"))}
+        for r in rows
+    ]
+
+
+def _with_uncached(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """Добавить cache_hit_pct и uncached_prompt_tokens к строкам агрегированных разрезов."""
     return [
         {
             **r,
-            "cache_hit_pct": compute_cache_hit_pct(r.get("cached_tokens"), r.get("prompt_tokens")),
             "uncached_prompt_tokens": compute_uncached_prompt_tokens(
                 r.get("prompt_tokens"), r.get("cached_tokens")
             ),
         }
-        for r in rows
+        for r in enrich_with_cache_hit(rows)
     ]
 
 
@@ -233,13 +240,13 @@ def aggregate_records(
         summary["prompt_tokens"], summary["cached_tokens"]
     )
     models = sorted(
-        enrich_with_cache_hit(list(by_model.values())),
+        _with_uncached(list(by_model.values())),
         key=lambda x: (-x["requests"], -x["prompt_tokens"], x["model"], x["backend_id"]),
     )
     roles = sorted(
-        enrich_with_cache_hit(list(by_role.values())),
+        _with_uncached(list(by_role.values())),
         key=lambda x: (-x["prompt_tokens"], -x["requests"], x["subagent_role"], x["subagent_id"]),
     )
-    days = sorted(enrich_with_cache_hit(list(by_day.values())), key=lambda x: x["day"])
+    days = sorted(_with_uncached(list(by_day.values())), key=lambda x: x["day"])
     anomalies = detect_prompt_anomalies(days, records, thresholds)
     return {"summary": summary, "by_model": models, "by_role": roles, "by_day": days, "prompt_anomalies": anomalies}
