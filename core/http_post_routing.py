@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any
 
+from core import zero_canon_routing as _zcr
 from core.http_post_context import PostRequestContext
 from core.http_post_ingress import clean_transport_request
 from core.muse_usage_client import MuseUsageClient
@@ -188,7 +189,7 @@ _MUSE_USAGE_GATE = _MuseUsageGate()
 
 
 def check_muse_usage_gate(route: PostRoute) -> bool:
-    """Fail-Closed при `exhausted`, Fail-Open при `unknown`/ошибках; только Muse-слоты и включённый флаг."""
+    """Fail-Closed при `exhausted`, Fail-Open при `unknown`/ошибках; только Muse-слоты и включенный флаг."""
     if str(route.model.get("backend") or "").strip().lower() != "muse":
         return True
     try:
@@ -210,17 +211,11 @@ def _lookup_backend(backends: Any, name: str | None) -> Any:
 
 
 def _backend_configs(host: Any) -> dict[str, Mapping[str, Any]]:
-    backends = getattr(host, "BACKENDS", None)
-    adapters = getattr(backends, "adapters", None)
-    return {name: getattr(adapter, "config", {}) for name, adapter in adapters.items() if hasattr(adapter, "config")} if isinstance(adapters, Mapping) else {}
+    return _zcr.backend_configs(host)
 
 
 def _apply_filtered_routes(route: PostRoute, routing: dict[str, Any], kept: list[Any]) -> None:
-    routing["routes"] = kept
-    chosen = kept[0].get("backend") if isinstance(kept[0], dict) else None
-    if isinstance(chosen, str) and chosen:
-        route.model["backend"] = chosen
-        routing["zero_canon_backend"] = chosen
+    _zcr.apply_filtered_routes(route, routing, kept, routing_enabled=route.host.flag_enabled("BRIDGE_TRANSPORT_ROUTING_ENABLED"))
 
 
 def _selected_backend_in_provider_scope(route: PostRoute, kept: list[Any] | None = None) -> bool:
@@ -279,13 +274,14 @@ def resolve_post_route(context: PostRequestContext) -> PostRoute | None:
     requested_id, host = route.model_id, route.host
     models = host.FLEET.get("models", {}) if isinstance(host.FLEET, dict) else {}
     _resolve_alias(route, models)
+    if isinstance(models, Mapping) and route.model_id in models:
+        route.model = dict(models[route.model_id])
     if not _request_allowed(route, requested_id):
         return None
     route.handler._telemetry_meta(model=route.model_id)
     if route.model_id not in models:
         route.handler._reject(404, "model_not_found", "model is not in the catalogue", "unknown", route.model_len)
         return None
-    route.model = dict(models[route.model_id])
     if not check_muse_usage_gate(route):
         return None
     return route if _finalize_route_model(route) else None
