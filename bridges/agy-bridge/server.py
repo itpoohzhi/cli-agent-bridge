@@ -4025,25 +4025,13 @@ def _sqlite_ro_pool() -> _ro_pool.SqliteRoPool | None:
         return _sqlite_ro_pool_cached[1]
 
 
-def _sqlite_max_idx(db_path: Path) -> int | None:
-    """Наибольший idx шага в БД (или -1); None — прочитать не удалось."""
-    pool = _sqlite_ro_pool()
-    if pool is not None:
-        return sqlite_tail_lifecycle.safe_sqlite_max_idx(pool, db_path, "SELECT COALESCE(MAX(idx), -1) FROM steps")
-    conn: sqlite3.Connection | None = None
-    try:
-        conn = _sqlite_open_ro(db_path)
-        row = cast(
-            "tuple[object, ...]",
-            conn.execute("SELECT COALESCE(MAX(idx), -1) FROM steps").fetchone(),
-        )
-        value = row[0]
-        return value if isinstance(value, int) else None
-    except sqlite3.Error:
-        return None
-    finally:
-        if conn is not None:
-            _sqlite_close(conn)
+def _sqlite_max_idx(
+    db_path: Path,
+) -> tuple[int | None, sqlite_tail_lifecycle.ResumeAnchorCause | None]:
+    """Наибольший idx и точная причина fail-closed resume anchor."""
+    deps = sqlite_tail_lifecycle.ResumeAnchorDeps(_sqlite_open_ro, _sqlite_close, time.sleep)
+    sql = "SELECT COALESCE(MAX(idx), -1) FROM steps"
+    return sqlite_tail_lifecycle.resolve_resume_db_max_idx(_sqlite_ro_pool(), db_path, sql, deps)
 
 
 def _transcript_path(cid: str) -> Path:
@@ -4102,6 +4090,7 @@ class _TurnPlan:
         self.base_idx: int = 0
         self.offset: int = 0
         self.anchored: bool = True
+        self.cause: str | None = None
         self.probe_gen: int | None = None
         self.identity: tuple[int, int] | None = None
         # Файл транскрипта, закреплённый на попытку (только step_scoped_usage_enabled).
@@ -4129,6 +4118,7 @@ def _prespawn_plan(cid: str, resumed: bool, usage_enabled: bool = False) -> _Tur
     anchor = _transcript_anchor(cid, plan.transcript_path)
     if anchor is None:
         plan.reason = "resume_unanchored"
+        plan.cause = sqlite_tail_lifecycle.ResumeAnchorCause.TRANSCRIPT_ERROR
         plan.offset = -1
         return plan
     t_max, plan.offset = anchor
@@ -4140,7 +4130,11 @@ def _prespawn_plan(cid: str, resumed: bool, usage_enabled: bool = False) -> _Tur
         plan.reason = "breaker"
         return plan
     db_path = _db_path_for(cid)
-    db_max = _sqlite_max_idx(db_path) if db_path is not None else None
+    if db_path is None:
+        plan.reason = "resume_unanchored"
+        plan.cause = sqlite_tail_lifecycle.ResumeAnchorCause.DB_MISSING
+        return plan
+    db_max, plan.cause = _sqlite_max_idx(db_path)
     if db_max is None:
         plan.reason = "resume_unanchored"
         return plan
@@ -4479,7 +4473,7 @@ class _TranscriptTail(InterruptionTailState):
             f"turn_mode cid={self._cid8()} mode={self.mode if self.sqlite_active else 'OFF'}"
         )
         if self.plan.mode == "OFF" and self.plan.reason:
-            _log(f"sqlite-off cid={self._cid8()} reason={self.plan.reason}")
+            _log(sqlite_tail_lifecycle.format_resume_off(self._cid8(), self.plan.reason, self.plan.cause))
         self._ready.set()
 
     def interrupt_active_query(self) -> None:
@@ -4894,6 +4888,8 @@ class _TranscriptTail(InterruptionTailState):
         self.last_poll = "skip"
         if not self._sqlite_permitted() or self._db_path is None:
             return None
+        if sqlite_tail_lifecycle.should_skip_cold_db_poll(self, _log):
+            return None
         if not self.bucket.take():
             return None
         conn: sqlite3.Connection | None = None
@@ -4951,54 +4947,10 @@ class _TranscriptTail(InterruptionTailState):
         self, exc: sqlite3.Error, max_polls: int | None = None
     ) -> bool:
         """Обработать холодное ожидание WAL до первого SELECT строго по whitelist."""
-        self._wal_wait_budget_exceeded = False
-        if not isinstance(exc, sqlite3.OperationalError) or self.selects_ok != 0:
-            return False
-        message = str(exc).lower()
-        if "unable to open database file" not in message:
-            return False
-        wal = Path(str(self._db_path) + "-wal")
-        if wal.exists():
-            return False
-        limit = self._wal_wait_limit(max_polls)
-        waited = self._get_wal_wait_polls()
-        if waited >= limit:
-            self._wal_wait_budget_exceeded = True
-            return False
-        self._set_wal_wait_polls(waited + 1)
-        if waited == 0:
-            _log(
-                f"sqlite-wal-wait cid={self._cid8()} err={type(exc).__name__} wal=0"
-            )
-        return True
+        return sqlite_tail_lifecycle.handle_cold_wal_wait(self, exc, max_polls, _log)
 
     def _on_sqlite_error(self, exc: sqlite3.Error) -> None:
-        message = str(exc).lower()
-        if "interrupted" in message and (self._interrupted or self.stop_event.is_set()):
-            return  # собственный stop/interrupt отказом не считается
-        operational = isinstance(exc, sqlite3.OperationalError)
-        schema = operational and (
-            "no such table" in message or "no such column" in message
-        )
-        budget_exceeded = False
-        if schema:
-            self.failed = True
-            _log(f"sqlite-schema-mismatch cid={self._cid8()}")
-            self._sqlite_off("schema")
-        elif operational:
-            if self._handle_cold_wal_wait(exc):
-                return
-            budget_exceeded = bool(getattr(self, "_wal_wait_budget_exceeded", False))
-            self.failed = True
-        elif isinstance(exc, sqlite3.DatabaseError):
-            self.failed = True
-            self._sqlite_off("db_error")
-        if not self._open_fail_logged:
-            self._open_fail_logged = True
-            suffix = " wal_wait_budget_exceeded=1" if budget_exceeded else ""
-            _log(
-                f"sqlite-open-fail cid={self._cid8()} err={type(exc).__name__} cold=0{suffix}"
-            )
+        sqlite_tail_lifecycle.handle_sqlite_error(self, exc, _log)
 
     def _select_rows(self, conn: sqlite3.Connection) -> tuple[int, int]:
         start = max(self.poll_watermark, self.base_idx)
