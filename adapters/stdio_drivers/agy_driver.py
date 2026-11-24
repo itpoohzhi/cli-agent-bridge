@@ -20,6 +20,7 @@ from core.stdio_resident.protocol_driver import (
     DriverCapabilities,
     StreamJsonDriver,
 )
+from core.stdio_resident.usage_extract import extract_agy_usage
 
 __all__ = [
     "FLAG_AGY_RESIDENT",
@@ -120,7 +121,7 @@ class AgyStreamJsonDriver(StreamJsonDriver):
         think = self._extract_string(payload, _REASONING_KEYS)
         calls = self._calls(payload)
         chunk = self._chunk(payload, text, think, calls, err)
-        return replace(chunk, is_terminal=True, is_tool_stop=False)
+        return replace(chunk, is_terminal=True, is_tool_stop=False, usage=extract_agy_usage(payload))
 
     def _result_error(self, payload: _Dict, inner: _Dict, text: str) -> str | None:
         if (error := self._error_text(inner) or self._error_text(payload)) is not None:

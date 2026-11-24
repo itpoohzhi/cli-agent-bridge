@@ -278,3 +278,12 @@ class SseStreamSession:
 
 def keepalive(ctx: dict[str, Any]) -> bool:
     return bool(ctx["keepalive_cb"]())
+
+
+def retry_after_headers(out: dict[str, Any], err: Any) -> dict[str, str] | None:
+    if not isinstance(err, dict) or err.get("type") != "overloaded":
+        return None
+    raw = out.get("retry_after_s")
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)) or not (0 < raw < float("inf")):
+        return None
+    return {"Retry-After": str(max(1, -int(-min(float(raw), 86400.0) // 1)))}

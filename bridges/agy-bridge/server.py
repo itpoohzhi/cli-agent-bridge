@@ -7053,6 +7053,9 @@ class Handler(BaseHTTPRequestHandler):
         if not adm_dec.admitted:
             self._log_reject("overloaded", model, ctx["model_len"])
             shed = _terminal_state("overloaded", "adaptive admission shed")
+            ra_s = getattr(adm_dec, "retry_after_s", 0.0)
+            if not isinstance(ra_s, bool) and isinstance(ra_s, (int, float)) and math.isfinite(ra_s) and ra_s > 0:
+                shed["retry_after_s"] = float(ra_s)
             self._log_done(cast(str, ctx["model"]), shed, t_enter, cast(str, ctx["tag"]))
             return shed
         reason = self._acquire_slot(keepalive)
@@ -8189,8 +8192,12 @@ class Handler(BaseHTTPRequestHandler):
         if err is not None:
             status = cast(int, err.pop("_status", err["code"]))
             headers = cast("dict[str, str] | None", err.pop("_headers", None))
-            self._pending_response_headers = headers
-            self._send(status, {"error": err})
+            extra = sse_stream_helpers.retry_after_headers(out, err)
+            merged = {**(extra or {}), **(headers or {})} or None
+            if merged:
+                self._send(status, {"error": err}, merged)
+            else:
+                self._send(status, {"error": err})
             return
         reg = ctx.get("register_post_turn")
         if callable(reg):

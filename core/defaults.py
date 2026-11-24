@@ -118,6 +118,16 @@ BRIDGE_TELEMETRY_PRUNE_RETRY_S: float = 5.0  # повтор prune после с�
 BRIDGE_TELEMETRY_REDACT_SCAN_FACTOR: int = 4  # строка усекается до max(MAX_FIELD_LEN * FACTOR, SCAN_MIN) до regex-редакции
 BRIDGE_TELEMETRY_REDACT_SCAN_MIN: int = 512
 BRIDGE_TELEMETRY_USAGE_TAIL_BYTES: int = 4096  # хвост ответа passthrough для разбора usage (читается один раз на процесс)
+# --- Лог usage-записей по ходам (core/usage_log.py) и детектор всплесков prompt-токенов ---
+BRIDGE_USAGE_LOG_ENABLED: bool = False  # GigaRC kill-switch, дефолт false
+BRIDGE_USAGE_LOG_PATH: str = "~/.dsh/telemetry/usage.jsonl"
+BRIDGE_USAGE_LOG_MAX_BYTES: int = 10485760  # 10 MiB
+BRIDGE_USAGE_LOG_BACKUP_COUNT: int = 10  # потолок <= 110 MiB: активный + 10 архивов
+BRIDGE_USAGE_LOG_RETENTION_DAYS: int = 14
+BRIDGE_USAGE_LOG_ROTATE_DAILY: bool = True
+BRIDGE_TELEMETRY_PROMPT_SPIKE_RATIO: float = 2.0
+BRIDGE_TELEMETRY_PROMPT_SPIKE_MIN_TURN: int = 100000
+BRIDGE_TELEMETRY_PROMPT_SPIKE_MIN_DAY: int = 5000000
 # Карта backend_id -> (outbound_target, egress_proxy); JSON-override:
 # BRIDGE_TELEMETRY_BACKEND_TOPOLOGY_JSON='{"agy": [":9887", "direct"]}'.
 BRIDGE_TELEMETRY_BACKEND_TOPOLOGY: dict[str, tuple[str, str]] = {
@@ -207,6 +217,15 @@ __all__ = [
     "BRIDGE_TELEMETRY_REDACT_SCAN_FACTOR",
     "BRIDGE_TELEMETRY_REDACT_SCAN_MIN",
     "BRIDGE_TELEMETRY_USAGE_TAIL_BYTES",
+    "BRIDGE_USAGE_LOG_ENABLED",
+    "BRIDGE_USAGE_LOG_PATH",
+    "BRIDGE_USAGE_LOG_MAX_BYTES",
+    "BRIDGE_USAGE_LOG_BACKUP_COUNT",
+    "BRIDGE_USAGE_LOG_RETENTION_DAYS",
+    "BRIDGE_USAGE_LOG_ROTATE_DAILY",
+    "BRIDGE_TELEMETRY_PROMPT_SPIKE_RATIO",
+    "BRIDGE_TELEMETRY_PROMPT_SPIKE_MIN_TURN",
+    "BRIDGE_TELEMETRY_PROMPT_SPIKE_MIN_DAY",
     "BRIDGE_TELEMETRY_BACKEND_TOPOLOGY",
     "BRIDGE_TELEMETRY_TOPOLOGY",
     "get_env_str",

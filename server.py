@@ -175,7 +175,7 @@ from core.chat_key import (  # noqa: E402
     digest_of,
     resolve_chat_key as resolve_chat_key,
 )
-from core.usage_wire import build_wire_usage, extract_cache_read_tokens, positive_wire_usage  # noqa: E402
+from core.usage_wire import build_wire_usage, extract_cache_read_tokens, positive_wire_usage as positive_wire_usage  # noqa: E402
 from core.watchdog import (  # noqa: E402,F401
     DEFAULT_IDLE_TIMEOUT_S,
     DEFAULT_SAFETY_CAP_S,
@@ -201,6 +201,12 @@ from core.runtime_env import DynamicFlagSource, allow_hub_client_response_header
 from core import zero_canon_http as _zc_http  # noqa: E402
 from core.stdio_resident import codex_attestation_wire as _zc_wire  # noqa: E402
 from core.stdio_resident.turn_error_sse import ResidentTurnError  # noqa: E402
+from core.http_usage import (  # noqa: E402
+    SseUsageMeta,
+    error_wire_usage,
+    nonstream_wire_usage,
+    sse_usage_chunk,
+)
 from core.turn_dispatch import ToolSchemaScope, dispatch_turn  # noqa: E402
 from core.request_telemetry import RequestTelemetryStore  # noqa: E402
 from core.telemetry_hooks import (  # noqa: E402
@@ -7298,13 +7304,8 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
         if err is not None:
             self._send(err["code"], {"error": err})
             return
-        usage = out.get("usage") or {}
-        self._telemetry_usage(usage)
-        wire_usage = _wire_usage(
-            usage.get("input_tokens", 0),
-            usage.get("output_tokens", 0),
-            usage.get("cache_read_tokens"),
-        )
+        self._telemetry_usage(out.get("usage") or {})
+        wire_usage = nonstream_wire_usage(out, _wire_usage)
         # content и arguments вызовов сериализуются отдельно и вставляются на место меток: большой текст
         # не проходит через дополнительный dict -> dumps -> encode (RW-012).
         marker = "@@content-" + uuid.uuid4().hex + "@@"
@@ -7613,54 +7614,16 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
             # tokenUsage/contextPressure). Без этого чанка метрики пустые.
             # Шлём только при ненулевых токенах, чтобы нулевой usage от droid
             # не превращался в ложные "0 tok/s / 0%".
-            out_usage = out.get("usage") or {}
-            prompt_toks = out_usage.get("input_tokens", 0)
-            compl_toks = out_usage.get("output_tokens", 0)
-            self._telemetry_usage(out_usage)
-            if prompt_toks or compl_toks:
-                emit(
-                    "data: "
-                    + json.dumps(
-                        {
-                            "id": completion_id,
-                            "object": "chat.completion.chunk",
-                            "created": created,
-                            "model": shown_model,
-                            # AD-004/RW-206: finish уже ушёл отдельным кадром выше ТОЛЬКО
-                            # для живого Droid-стриминга — там finish_reason здесь null (как
-                            # у настоящего OpenAI stream_options.include_usage), а не повтор
-                            # "stop"/"tool_calls" на том же кадре. Для остальных бэкендов это
-                            # поведение не менялось: finish_reason в usage-кадре повторяет finish.
-                            "choices": [
-                                {
-                                    "index": 0,
-                                    "delta": {},
-                                    "finish_reason": None if live_backend else finish,
-                                }
-                            ],
-                            "usage": _wire_usage(
-                                prompt_toks,
-                                compl_toks,
-                                out_usage.get("cache_read_tokens"),
-                            ),
-                        },
-                        ensure_ascii=False,
-                    )
-                    + "\n\n"
-                )
+            self._telemetry_usage(out.get("usage") or {})
+            usage_meta = SseUsageMeta(
+                completion_id, created, shown_model, None if live_backend else finish
+            )
+            if (usage_frame := sse_usage_chunk(out, usage_meta, _wire_usage)) is not None:
+                emit(usage_frame)
         elif err.get("type") == "live_prefix_invalidated" or live_sent[0] > 0:
-            # Накопленные токены закоммиченного потока переживают терминальную ошибку (не 0/0/0).
-            err_usage = out.get("usage") or {}
-            try:
-                kept_usage = positive_wire_usage(
-                    _wire_usage(
-                        _usage_counter(err_usage.get("input_tokens")),
-                        _usage_counter(err_usage.get("output_tokens")),
-                        _usage_counter(err_usage.get("cache_read_tokens")),
-                    )
-                )
-            except (TypeError, ValueError, AttributeError):
-                kept_usage = None
+            kept_usage = error_wire_usage(
+                out, legacy_wire_fn=_wire_usage, counter_fn=_usage_counter
+            )
             if (
                 err.get("type") == "live_prefix_invalidated"
                 or out.get("backend_kind") == "droid"

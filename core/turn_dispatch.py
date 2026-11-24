@@ -18,6 +18,8 @@ from core.backend_adapter import (
     TurnContext,
 )
 from core.runtime_env import synthesize_required_bash_desc_enabled
+from core.turn_usage_result import turn_usage_of
+from core.usage_fields import enrich_turn_usage_dict
 
 _UNBOUND: object = object()
 _TURN_OMIT_KEYS = frozenset(
@@ -156,7 +158,7 @@ def _sanitize_result_calls(result: Any, turn: TurnContext, srv: Any) -> Any:
 
 
 def _format_turn_output(result: Any, backend_kind: str) -> dict[str, Any]:
-    return {
+    out: dict[str, Any] = {
         "state": result.state,
         "rc": result.rc,
         "text": result.text,
@@ -171,6 +173,10 @@ def _format_turn_output(result: Any, backend_kind: str) -> dict[str, Any]:
         ],
         "backend_kind": backend_kind,
     }
+    if (turn_usage := turn_usage_of(result)) is not None:
+        out["usage"] = enrich_turn_usage_dict(out["usage"], turn_usage)
+        out["turn_usage"] = turn_usage
+    return out
 
 
 def dispatch_turn(
