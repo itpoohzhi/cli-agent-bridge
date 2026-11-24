@@ -1,5 +1,6 @@
 """Чистый Zero-I/O разбор блоков `<tool_call>`, линейный курсор закрытия и диагностика."""
 
+# fmt: off
 from __future__ import annotations
 
 import json
@@ -8,8 +9,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Final, cast
 
-from core.tool_json_repair import repair_invalid_json_escapes, repair_unescaped_json_quotes, resolve_odd_quote_tool_close
-
+from core.tool_json_repair import repair_invalid_json_escapes, repair_json_quotes_strict, resolve_odd_quote_tool_close
 _DEFAULT_CLOSE_TAG: Final[str] = "</tool_call>"
 _DEFAULT_MAX_EXTRA_BRACES: Final[int] = 16
 _DEFAULT_WINDOW_CHARS: Final[int] = 120
@@ -146,8 +146,8 @@ def loads_tolerant_json(
         if ok:
             return parsed
         if json_repair_enabled:
-            quoted = repair_unescaped_json_quotes(
-                escaped, allowed_arg_keys=allowed_arg_keys, required_arg_keys=required_arg_keys
+            quoted = repair_json_quotes_strict(
+                text, escaped, allowed_arg_keys=allowed_arg_keys, required_arg_keys=required_arg_keys
             )
             if quoted is not None:
                 ok, parsed = _try_candidate(repair_invalid_json_escapes(quoted))

@@ -1,5 +1,6 @@
 """Чистый Zero-I/O ремонт JSON-escape, неэкранированных `"` и EOF-поиск нечётных `"`."""
 
+# fmt: off
 from __future__ import annotations
 
 import json
@@ -7,6 +8,7 @@ import re
 from collections.abc import Callable
 from typing import Final, cast
 
+from core.tool_trailing_quote_repair import has_single_trailing_quote_suffix, strip_single_trailing_quote
 DEFAULT_MAX_QUOTE_CANDIDATES: Final[int] = 128
 DEFAULT_MAX_VERIFY_CHARS: Final[int] = 65536
 DEFAULT_MAX_NESTING_DEPTH: Final[int] = 32
@@ -211,6 +213,18 @@ def repair_unescaped_json_quotes(
     return repaired if _loads_no_dup(repaired)[0] else None
 
 
+def repair_json_quotes_strict(
+    raw_text: str, escaped_text: str, *,
+    allowed_arg_keys: frozenset[str] | None = None,
+    required_arg_keys: frozenset[str] | None = None,
+) -> str | None:
+    if has_single_trailing_quote_suffix(raw_text):
+        return strip_single_trailing_quote(raw_text)
+    return repair_unescaped_json_quotes(
+        escaped_text, allowed_arg_keys=allowed_arg_keys, required_arg_keys=required_arg_keys
+    )
+
+
 def resolve_odd_quote_tool_close(
     buf: str, start: int, close_tag: str, parse_fn: Callable[[str], object | None]
 ) -> int:
@@ -220,9 +234,9 @@ def resolve_odd_quote_tool_close(
     candidates: list[int] = []
     pos = buf.find(close_tag, start)
     while pos != -1:
-        prefix = buf[start:pos].rstrip(" \t\r\n")
-        prefix = prefix[:-3].rstrip(" \t\r\n") if prefix.endswith(("```", "~~~")) else prefix
-        if prefix.endswith("}"):
+        raw_prefix = buf[start:pos].rstrip(" \t\r\n")
+        prefix = raw_prefix[:-3].rstrip(" \t\r\n") if raw_prefix.endswith(("```", "~~~")) else raw_prefix
+        if prefix.endswith("}") or has_single_trailing_quote_suffix(raw_prefix):
             candidates.append(pos)
             if len(candidates) > DEFAULT_MAX_ODD_CLOSE_CANDIDATES:
                 return -1
