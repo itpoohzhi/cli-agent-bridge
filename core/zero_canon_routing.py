@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import math
 from collections.abc import Mapping
 from typing import Any
 
@@ -13,12 +14,25 @@ def _nonempty_str(value: Any) -> bool:
     return isinstance(value, str) and bool(value)
 
 
-def _numeric(value: Any) -> bool:
-    return isinstance(value, (int, float)) and not isinstance(value, bool)
+def _finite_numeric(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
 
 
-def _is_drained(item: Mapping[str, Any]) -> bool:
-    return "weight" in item and _numeric(item.get("weight")) and item["weight"] <= 0
+def _has_positive_weight(item: Mapping[str, Any]) -> bool:
+    weight = item.get("weight")
+    return _finite_numeric(weight) and weight > 0
+
+
+def _eligible_routes(candidates: list[Mapping[str, Any]]) -> list[Mapping[str, Any]]:
+    """При явных `weight` допускает только конечные `weight > 0`; legacy без `weight` — только если ключа нет нигде."""
+    if all("weight" not in item for item in candidates):
+        return candidates
+    return [item for item in candidates if "weight" in item and _has_positive_weight(item)]
+
+
+def _valid_priority(item: Mapping[str, Any]) -> float | None:
+    raw = item.get("priority")
+    return float(raw) if _finite_numeric(raw) else None
 
 
 def backend_configs(host: Any) -> dict[str, dict[str, Any]]:
@@ -47,20 +61,23 @@ def backend_configs(host: Any) -> dict[str, dict[str, Any]]:
 def select_zero_canon_route(
     kept: list[Any], *, disabled_backend: str | None = None, routing_enabled: bool = True
 ) -> str | None:
-    """Выбирает backend среди недренированных: disabled при выключенном routing, иначе min(priority)."""
+    """Выбирает backend среди eligible-маршрутов: disabled при выключенном routing, иначе min(priority)."""
     candidates = [i for i in kept if isinstance(i, Mapping) and _nonempty_str(i.get("backend"))]
-    eligible = [i for i in candidates if not _is_drained(i)]
+    eligible = _eligible_routes(candidates)
     if not eligible:
         return None
     if not routing_enabled and _nonempty_str(disabled_backend):
         for item in eligible:
             if item.get("backend") == disabled_backend:
                 return disabled_backend
+    if all("priority" not in item for item in eligible):
+        return eligible[0].get("backend")
     best: Mapping[str, Any] | None = None
     best_priority: float = float("inf")
     for item in eligible:
-        raw_p = item.get("priority")
-        priority = float(raw_p) if _numeric(raw_p) else float("inf")
+        priority = _valid_priority(item)
+        if priority is None:
+            continue
         if best is None or priority < best_priority:
             best, best_priority = item, priority
     return best.get("backend") if best is not None else None

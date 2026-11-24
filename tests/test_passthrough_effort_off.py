@@ -282,3 +282,22 @@ def test_route_order_independent_of_effort_and_thinking():
         {**specs[1], "efforts": ("high",)},
     )
     assert tuple(route_order("m", _ORDER_MODEL, "seed-1", None, specs_with_efforts)) == base
+
+
+def test_resolve_off_patch_params_default_field_partial_map_and_adapter_precedence():
+    from types import SimpleNamespace
+
+    a_params_default = SimpleNamespace(id="custom", config={"params": {"effort_map": {"off": "none"}}})
+    assert pem.resolve_provider_off_patch(a_params_default, "custom") == {"reasoning_effort": "none"}
+
+    a_partial_params = SimpleNamespace(
+        id="neuralwatt",
+        config={"params": {"effort_map": {"high": "high"}}, "effort_map": {"low": "low"}},
+    )
+    assert pem.resolve_provider_off_patch(a_partial_params, "neuralwatt") == {"reasoning_effort": "none"}
+
+    a_explicit_none = SimpleNamespace(id="neuralwatt", config={"params": {"effort_map": {"off": None}}})
+    assert pem.resolve_provider_off_patch(a_explicit_none, "neuralwatt") is None
+
+    a_adapter_wins = SimpleNamespace(id="opencode-go", config={})
+    assert pem.resolve_provider_off_patch(a_adapter_wins, "neuralwatt") == {"thinking": {"type": "disabled"}}

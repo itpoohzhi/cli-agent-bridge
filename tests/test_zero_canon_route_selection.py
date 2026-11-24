@@ -218,3 +218,20 @@ def test_clamp_still_detected_when_effort_undeclared():
     assert route is not None
     assert host.clamp_calls == [("low", ["medium", "high"], "high")]
     assert host.logs and "clamp" in host.logs[0]
+
+
+def test_select_route_rejects_missing_string_nan_weight_and_non_numeric_priority():
+    assert zcr.select_zero_canon_route([
+        {"backend": "no-weight", "priority": 1},
+        {"backend": "str-weight", "weight": "10", "priority": 1},
+        {"backend": "nan-weight", "weight": float("nan"), "priority": 1},
+        {"backend": "bool-weight", "weight": True, "priority": 1},
+        {"backend": "ok", "weight": 1, "priority": 5},
+    ]) == "ok"
+    assert zcr.select_zero_canon_route([
+        {"backend": "no-prio", "weight": 1},
+        {"backend": "str-prio", "weight": 1, "priority": "high"},
+        {"backend": "nan-prio", "weight": 1, "priority": float("nan")},
+        {"backend": "inf-prio", "weight": 1, "priority": float("inf")},
+    ]) is None
+    assert zcr.select_zero_canon_route([{"backend": "legacy-first"}, {"backend": "legacy-second"}]) == "legacy-first"

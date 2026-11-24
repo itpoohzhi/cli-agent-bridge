@@ -189,7 +189,7 @@ _MUSE_USAGE_GATE = _MuseUsageGate()
 
 
 def check_muse_usage_gate(route: PostRoute) -> bool:
-    """Fail-Closed при `exhausted`, Fail-Open при `unknown`/ошибках; только Muse-слоты и включенный флаг."""
+    """Fail-Closed при `exhausted`, Fail-Open при `unknown`/ошибках; только Muse-слоты и включённый флаг."""
     if str(route.model.get("backend") or "").strip().lower() != "muse":
         return True
     try:
