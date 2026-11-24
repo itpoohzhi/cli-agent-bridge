@@ -168,6 +168,8 @@ def _hygiene_rt() -> HygieneRuntime:
 from agy_runtime import history_compaction_adapter as _hca  # noqa: E402
 from agy_runtime.history_compaction_domain import json_text_bytes as _json_text_bytes, middle_prune_text as _middle_prune_text  # noqa: E402
 from core.correlation_contract import extract_correlation, format_log_corr_suffix  # noqa: E402
+from core.error_taxonomy import classify_upstream_error, extract_upstream_error_meta, upstream_error_body  # noqa: E402
+from core.replay_policy import apply_budget_to_proof, build_replay_proof, calculate_retry_budget, parse_retry_budget_header  # noqa: E402
 from core.prompt_budget_policy import LazyPromptMaterializer, compute_prompt_budget, resolve_ctx_prompt  # noqa: E402
 from core.slot_acquire import SlotWaitOptions, acquire_slot_timed  # noqa: E402
 from core.tool_turn_settle_policy import (  # noqa: E402
@@ -3722,14 +3724,12 @@ def _breaker_report(probe_gen: int | None, selects_ok: int, failed: bool) -> Non
 
 
 def _retry_credit() -> None:
-    """Первичный запрос пополняет бюджет повторов (+0.2 токена, не выше ёмкости)."""
     global _retry_tenths
     with _sqlite_guard_lock:
         _retry_tenths = min(RETRY_CAPACITY_TENTHS, _retry_tenths + RETRY_CREDIT_TENTHS)
 
 
 def _retry_take() -> bool:
-    """Списать один повтор (1.0 токена); False — бюджет исчерпан."""
     global _retry_tenths
     with _sqlite_guard_lock:
         if _retry_tenths < RETRY_COST_TENTHS:
@@ -3738,8 +3738,17 @@ def _retry_take() -> bool:
         return True
 
 
+def _incident_retry_allowed(ctx: dict, out: dict, delivered: bool, total_s: float) -> bool:
+    status, headers = extract_upstream_error_meta(out)
+    tc = out.get("tool_calls")
+    tc_n = len(tc) if isinstance(tc, (list, tuple)) else tc
+    proof = build_replay_proof(1 if delivered else 0, out.get("response_started"), tc_n,
+                               out.get("fail_stage"), out.get("upstream_not_started"))
+    bounded = apply_budget_to_proof(proof, calculate_retry_budget(total_s, ctx.get("client_retry_budget")))
+    return classify_upstream_error(out.get("err"), status_code=status, headers=headers, replay_proof=bounded).retryable
+
+
 def _retry_pause_s(attempt: int, rng: Callable[[], float] | None = None) -> float:
-    """Full Jitter: U(0, min(2.0, 2.0 * 2^(attempt-1))) через инъецируемый RNG."""
     cap = min(RETRY_PAUSE_CAP_S, RETRY_PAUSE_CAP_S * float(1 << max(0, attempt - 1)))
     source = rng if rng is not None else _rng
     return _TURN_RESILIENCE.pause_s(attempt, source() * cap, cap)
@@ -6196,19 +6205,15 @@ class Run:
                     final_text = str(result.get("response") or "")
                     if str(result.get("status") or "").upper() == "ERROR":
                         self._note_capacity_line(str(result.get("error") or ""))
-                    self.q.put(
-                        (
-                            "result",
-                            {
-                                "conversation_id": result.get("conversation_id") or "",
-                                "status": str(result.get("status") or ""),
-                                "error": str(result.get("error") or ""),
-                                "duration_s": result.get("duration_seconds"),
-                                "num_turns": result.get("num_turns"),
-                                "usage": result.get("usage") or {},
-                            },
-                        )
-                    )
+                    up_status, up_headers = extract_upstream_error_meta(result)
+                    self.q.put(("result", {
+                        "conversation_id": result.get("conversation_id") or "", "status": str(result.get("status") or ""),
+                        "error": str(result.get("error") or ""), "duration_s": result.get("duration_seconds"),
+                        "num_turns": result.get("num_turns"), "usage": result.get("usage") or {},
+                        "upstream_status_code": up_status, "upstream_headers": up_headers,
+                        "upstream_not_started": result.get("upstream_not_started") is True,
+                        "fail_stage": result.get("fail_stage") if isinstance(result.get("fail_stage"), str) else "",
+                    }))
             rc: int | None
             try:
                 rc = self.proc.wait(timeout=PROC_EXIT_WAIT_S)
@@ -6587,20 +6592,20 @@ class Handler(BaseHTTPRequestHandler):
         gone = [False]
 
         def state(name: str, rc: int, err: str = "") -> dict:
-            return {
-                "rc": rc,
-                "text": "".join(pieces),
-                "reasoning": "".join(reasoning_pieces),
-                "usage": usage,
-                "result": result_ev,
-                "state": name,
-                "err": err,
+            out = {
+                "rc": rc, "text": "".join(pieces),
+                "reasoning": "".join(reasoning_pieces), "usage": usage,
+                "result": result_ev, "state": name, "err": err,
                 "conversation_id": conversation_id,
-                "duration_s": result_ev.get("duration_s"),
-                "num_turns": result_ev.get("num_turns"),
-                "tool_events": tool_events,
-                "tool_calls": [],
+                "duration_s": result_ev.get("duration_s"), "num_turns": result_ev.get("num_turns"),
+                "tool_events": tool_events, "tool_calls": [],
+                "response_started": bool(pieces or reasoning_pieces or tool_events),
             }
+            status, headers = extract_upstream_error_meta(result_ev)
+            out.update(upstream_status_code=status, upstream_headers=headers)
+            if result_ev.get("upstream_not_started") is True: out["upstream_not_started"] = True  # noqa: E701
+            if isinstance(result_ev.get("fail_stage"), str): out["fail_stage"] = result_ev["fail_stage"]  # noqa: E701
+            return out
 
         def add_content(text: str) -> None:
             if gone[0] or not text:
@@ -7083,8 +7088,6 @@ class Handler(BaseHTTPRequestHandler):
             universal = bool(typed_ctx.get("universal_fallback"))
             if images and img_dir is not None:
                 if universal and not _is_image_input_enabled():
-                    # Staging выключили, пока ход ждал слот: media не отправляем,
-                    # ход идёт текстом (без mkdir и --add-dir).
                     _downgrade_to_text_in_run_once(
                         typed_ctx, "post_slot", "flag_disabled", 1, img_dir
                     )
@@ -7101,7 +7104,6 @@ class Handler(BaseHTTPRequestHandler):
                         rejected = _terminal_state("image_reject", gate.code)
                         self._log_done(cast(str, ctx["model"]), rejected, t_enter, cast(str, ctx["tag"]))
                         return rejected
-                    # Реестр активных каталогов ПЕРЕД mkdir: sweep не тронет живой ход.
                     with _active_lock:
                         _active_img_dirs.add(str(img_dir))
                     img_registered = True
@@ -7120,11 +7122,18 @@ class Handler(BaseHTTPRequestHandler):
                         img_dir = None
                         img_registered = False
             _retry_credit()
+            client_budget = calculate_retry_budget(T_REQ_BUDGET_S, ctx.get("client_retry_budget"))
             for attempt in (1, 2):
                 cancelled = (
                     self._registry_job is not None and self._registry_job.cancelled.is_set()
                 )
                 policy = None if cancelled else _build_timeout_policy(t_req_start)
+                if not cancelled and policy is None and client_budget.allow_retry and client_budget.attempt_s:
+                    policy = _TimeoutPolicy(t_req_start, min(IDLE_TIMEOUT_S, client_budget.attempt_s),
+                                            T_REQ_BUDGET_S, client_budget.attempt_s)
+                elif policy is not None and client_budget.allow_retry and client_budget.attempt_s:
+                    policy = _TimeoutPolicy(policy.t_req_start, policy.idle_timeout_s, policy.max_timeout_s,
+                                            min(policy.effective_max_timeout_s, client_budget.attempt_s), policy.can_start)
                 allowed, reason = should_allow_retry_attempt(
                     attempt=attempt, cancelled=cancelled, can_start=policy is None or policy.can_start
                 )
@@ -7209,8 +7218,6 @@ class Handler(BaseHTTPRequestHandler):
                         "agy_error",
                         "pump_error",
                     ):
-                        # Graceful-финал пишется ДО зачистки процесса: kill/reap не
-                        # съедает окно финальной записи. Внутренний state/rc не меняются.
                         try:
                             finalize(out)
                         except Exception as exc:  # noqa: BLE001
@@ -7222,10 +7229,7 @@ class Handler(BaseHTTPRequestHandler):
                 if out["state"] == "done":
                     break
                 if out["state"] == "capacity_exhausted":
-                    # Повтор бессмысленен: upstream без ёмкости.
                     break
-                # Выдача клиенту: текст, tool_calls или уже отданное в поток мышление.
-                # JSON-режим мышление клиенту ещё не отдавал — там повтор безопасен.
                 typed_out = cast("dict[str, object]", out)
                 delivered_reasoning = bool(
                     typed_out.get("delivered_reasoning")
@@ -7245,9 +7249,6 @@ class Handler(BaseHTTPRequestHandler):
                     and out["state"] not in ("done", "client_gone")
                     and not delivered
                 ):
-                    # Реальная image-попытка упала без выдачи: один text-only повтор
-                    # ДО обеих legacy-веток (hot continue и transient). Один токен
-                    # бюджета, если есть; иначе — разовый резерв деградации запроса.
                     _downgrade_to_text_in_run_once(
                         typed_ctx,
                         "runtime",
@@ -7267,15 +7268,12 @@ class Handler(BaseHTTPRequestHandler):
                     and AGY_BRIDGE_ENABLE_TRANSIENT_502_RECOVERY
                     and out["state"] in ("agy_error", "pump_error")
                     and not delivered
+                    and _incident_retry_allowed(ctx, out, delivered, T_REQ_BUDGET_S)
                     and _is_transient_upstream_error(out.get("err"))
                 ):
-                    # Сбой upstream (502/503/сеть), а не разговора: сессия не
-                    # инвалидируется, lease cid остаётся в _in_flight_cids до finally
-                    # HTTP-хендлера, повтор идёт в тот же conversation_id.
                     if attempt == 2 or not _TURN_RESILIENCE.take(ctx, out, _retry_take, _log):
                         if attempt != 2:
                             _log(f"retry-budget-exhausted state={out['state']} {tag}")
-                        # Повторы исчерпаны: сломанная сессия не достаётся следующим ходам.
                         _TURN_RESILIENCE.invalidate(ctx, out, _session_invalidate, _log)
                         break
                     _log(
@@ -7285,8 +7283,6 @@ class Handler(BaseHTTPRequestHandler):
                     time.sleep(_retry_pause_s(attempt))
                     continue
                 if ctx.get("hot_resumed") and out["state"] != "client_gone":
-                    # Горячая сессия сломалась: больше её не используем, а повтор
-                    # идёт холодным вызовом с полной историей.
                     _TURN_RESILIENCE.invalidate(ctx, out, _session_invalidate, _log)
                     _cid_release(
                         str(ctx["conversation_id"]), str(ctx.get("turn_id") or "")
@@ -7298,6 +7294,7 @@ class Handler(BaseHTTPRequestHandler):
                         out["state"] == "agy_error"
                         and not delivered
                         and not _is_cli_rejection_outcome(out)
+                        and _incident_retry_allowed(ctx, out, delivered, T_REQ_BUDGET_S)
                     ):
                         if not _retry_take():
                             _log(f"retry-budget-exhausted state={out['state']} {tag}")
@@ -7307,11 +7304,11 @@ class Handler(BaseHTTPRequestHandler):
                             f"cold fallback {tag}"
                         )
                         continue
-                # Транзиентный сбой до выдачи клиенту — один невидимый повтор.
                 transient = (
                     out["state"] in ("agy_error", "pump_error", "done")
                     and not delivered
                     and not _is_cli_rejection_outcome(out)
+                    and _incident_retry_allowed(ctx, out, delivered, T_REQ_BUDGET_S)
                 )
                 if not transient or attempt == 2:
                     break
@@ -7456,11 +7453,8 @@ class Handler(BaseHTTPRequestHandler):
         if st == "capacity_exhausted":
             return capacity_error_body(detail=out.get("err"))
         if st == "agy_error":
-            return {
-                "message": str(out.get("err") or "agy reported an error")[:500],
-                "type": "agy_error",
-                "code": 502,
-            }
+            status, headers = extract_upstream_error_meta(out)
+            return upstream_error_body(out.get("err"), out.get("request_id"), status, headers)
         if resilience is None:
             resilience = _new_flag("AGY_BRIDGE_STREAM_RESILIENCE_ENABLED", True)
         has_payload = bool(out.get("text"))
@@ -7968,6 +7962,7 @@ class Handler(BaseHTTPRequestHandler):
                 "registry_owned_cid": owned_cid,
                 "t_req_start": t_req_start,
                 "req_id": req_id,
+                "client_retry_budget": parse_retry_budget_header(self.headers),
                 "step_job_id": str(
                     self.headers.get("X-Idempotency-Key")
                     or req.get("step_job_id")
@@ -8189,17 +8184,20 @@ class Handler(BaseHTTPRequestHandler):
         retained_reasoning = retained_cache[0][1] if retained_cache else ""
         reasoning = str(out.get("reasoning") or "") + retained_reasoning
         reasoning += "".join(markers)
-        err = self._error_body(out, bool(ctx.get("stream_resilience_enabled", True)))
+        err = self._error_body(out | {"request_id": ctx.get("req_id")}, bool(ctx.get("stream_resilience_enabled", True)))
         if err is None and tool_turn is not None:
             tool_turn.finish()
             if tool_turn.error:
                 err = tool_turn.error_body()
         if err is not None:
+            status = cast(int, err.pop("_status", err["code"]))
+            headers = cast("dict[str, str] | None", err.pop("_headers", None))
             extra = sse_stream_helpers.retry_after_headers(out, err)
-            if extra:
-                self._send(err["code"], {"error": err}, extra)
+            merged = {**(extra or {}), **(headers or {})} or None
+            if merged:
+                self._send(status, {"error": err}, merged)
             else:
-                self._send(err["code"], {"error": err})
+                self._send(status, {"error": err})
             return
         reg = ctx.get("register_post_turn")
         if callable(reg):
