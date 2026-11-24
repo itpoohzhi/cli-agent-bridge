@@ -240,7 +240,7 @@ def test_stage_w2_p_native_zero_reserves_preserve_models(pid: str) -> None:
 @pytest.mark.semantic_red("go_zen_weight_split")
 def test_stage_w2_q_paid_reserve_and_free_zen_independent_catalog() -> None:
     go, zen = raw_provider("opencode-go"), raw_provider("opencode-zen")
-    semantic_equal((go.get("routing"), zen.get("routing")), ({"weight": 40}, {"weight": 100}), "go_zen_weight_split")
+    semantic_equal((go.get("routing"), zen.get("routing")), ({"weight": 0}, {"weight": 100}), "go_zen_weight_split")
     assert zen["transport"]["bridge"]["base_url"] == "http://127.0.0.1:9883/v1"
     assert "deepseek-v4.1-flash" in go["models_overrides"]
     assert {"deepseek-v4.1-flash-free", "big-pickle", "iceman-free"} <= set(zen["models_overrides"])

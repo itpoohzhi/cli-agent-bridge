@@ -710,7 +710,7 @@
       "routing": {
         "algorithm": "weighted-sha256-v1",
         "enabled": true,
-        "catalog_hash": "0e06a2734ba0d4cc9cc59abf8b46ce87188751bd8f791a6dabafc84de6145f17",
+        "catalog_hash": "d744e33d3cfdeacc5ec5f7cbb258d9e1d14117577feee88bd1b5da3b7020d55f",
         "legacy_backend": "neuralwatt",
         "disabled_backend": "neuralwatt",
         "routes": [
@@ -723,13 +723,13 @@
           {
             "route_id": "neuralwatt",
             "backend": "neuralwatt",
-            "weight": 60,
+            "weight": 100,
             "priority": 5
           },
           {
             "route_id": "opencode-go",
             "backend": "opencode-go",
-            "weight": 40,
+            "weight": 0,
             "priority": 10
           }
         ]

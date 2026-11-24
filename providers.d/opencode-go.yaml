@@ -6,7 +6,7 @@ kind: passthrough
 enabled: true
 required: false
 priority: 10
-routing: {weight: 40}
+routing: {weight: 0}
 owned_by: opencode-go
 failover: {statuses: [402, 403], error_types: [permission_error, credit_exhausted, payment_required], message_markers: [credit, subscription, 'usage limit', 'go usage', payment], pool: opencode-go, pool_label: 'OpenCode Go'}
 transport:

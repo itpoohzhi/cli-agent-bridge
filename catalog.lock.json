@@ -1,7 +1,7 @@
 {
-  "compiled_at": "2026-11-23T21:51:11+0300",
+  "compiled_at": "2026-11-24T16:10:13+0300",
   "compiler_version": 1,
-  "fleet_sha256": "dd9ccc122262b4802c7ed26262402156adfaa258d5440c95eb059ef79e1f7d33",
+  "fleet_sha256": "8e7c97211aef1047cda7bcaed18c5d098df09242767483bab0a2147dee7c5bb8",
   "inputs": {
     "discovery_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
     "manifests": {
@@ -14,17 +14,17 @@
       "droid.yaml": "d2e2381093c695824123749e302d57028a113b7a522d7b29a8cdcc6b1c661e47",
       "muse.yaml": "5e7b7200e37d0bf99afd88f59a55239736617a29d096ae6729f8273bf05a81a6",
       "neuralwatt-flex.yaml": "7ec06964bdc72b4a89de8645a02d81b0ea4c1ab5ee17e7f29575dd0c01b33385",
-      "neuralwatt.yaml": "c62a8d1f94ca208813598ab38d43fd5d664a7872d0c77ee2835b3af60ce6ebf0",
+      "neuralwatt.yaml": "590b843f107c6b13abc6d42638cd7b9e22f9147360bd38def4add1eb268a2ee0",
       "openai-key-2.yaml": "e9755fd06af82a3bb341122afd0d5c3e9b2504ef190ecb8fe751495d357e57a3",
       "openai-key-3.yaml": "eccc73e68769ab0d742b5ace825af8bbcb2d02f07068e272c608ddefd1b2177e",
       "opencode-go-claude.yaml": "dc9ae65179f1fc5a8d0287956cb70ac1f905a47ec4fcebb831c9ce4cc7d6ad38",
       "opencode-go-sub1.yaml": "cfec5e987e81f50f9e2f1db08296d7b39ce6a91c53f1ff09d52f34a31a2d9913",
       "opencode-go-sub2.yaml": "a0a9a852f7751c54d875ebb71e526a585b263e85bebd9cb9d2533f3fdb5faea7",
-      "opencode-go.yaml": "a9dcba5a718f7a7c15874f731fd91286960ee8fcf7e3ae69125a422d43401e97",
+      "opencode-go.yaml": "8e7f64d822d952b9d659efba931b92d7667b2a44500f3498e7cc2721073979bb",
       "opencode-resident.yaml": "26bb3cdf0249498e7974181d77265a4db3774dad9ff92dd9e00ca1eff7b08c22",
       "opencode-zen.yaml": "9239b0e1c543c23037f5407b6c64a0db04735d092ba7ccc53d197f83f91d1636"
     },
-    "manifests_sha256": "8511e2e6e56de0f57984b0de99ef40b2d410754ad496b49b8dfc5aa0fc35b74b"
+    "manifests_sha256": "91e58f68086e04a20483bdd86393df73c5e145b3ed0d22bb74d4054de59fd200"
   },
   "models": {
     "beam-free": {
