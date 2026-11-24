@@ -271,7 +271,7 @@ def test_apply_filtered_routes_prefers_positive_weight_over_zero_weight_reserve(
     route = SimpleNamespace(model={"id": "deepseek-v4.1-flash", "backend": "neuralwatt", "routing": routing})
     http_post_routing._apply_filtered_routes(route, routing, list(routing["routes"]))  # type: ignore[arg-type]
     assert route.model["backend"] == "neuralwatt"
-    assert routing["zero_canon_backend"] == "neuralwatt"
+    assert route.model["routing"]["zero_canon_backend"] == "neuralwatt"
     effective = base_model_routing(route.model)
     assert effective is not None
     assert [r["backend"] for r in effective["routes"]] == ["reserve-a", "neuralwatt", "opencode-go"]

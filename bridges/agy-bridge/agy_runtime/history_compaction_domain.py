@@ -14,6 +14,8 @@ import re
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
+from .history_overflow_policy import OverflowSpec, shrink_overflow_parts
+
 DEFAULT_MIDDLE_PRUNED_MARKER = (
     "\n[... часть содержимого сообщения опущена мостом для соблюдения лимита"
     " контекста agy ...]\n"
@@ -253,9 +255,10 @@ def _assemble(layout: _Layout, config: CompactionConfig, digest: str) -> str:
 def _shrink_to_limit(layout: _Layout, config: CompactionConfig) -> tuple[str, _Layout]:
     """Собрать промпт и гарантировать ``<= limit`` управляемой деградацией."""
     budget = _digest_budget(config)
+    if json_text_bytes(_assemble(layout, config, "")) > config.limit_bytes:
+        budget = min(budget, max(config.min_digest_bytes, 512))
     marker = config.middle_pruned_marker
     current = layout
-    budget_reduced = False
     while True:
         middle = _flatten(current.middle)
         digest = _build_digest(middle, _DigestBudget(budget, marker)) if middle else ""
@@ -267,13 +270,15 @@ def _shrink_to_limit(layout: _Layout, config: CompactionConfig) -> tuple[str, _L
                 current.anchor, current.middle + (current.tail[0],), current.tail[1:]
             )
             continue
-        if middle and budget > 0 and not budget_reduced:
-            excess = json_text_bytes(prompt) - config.limit_bytes
-            budget = max(0, budget - excess)
-            budget_reduced = True
-            continue
-        pruned = middle_prune_text(prompt, max(config.limit_bytes, 0), marker)
-        return pruned, current
+        items = [(b.role, b.rendered) for b in _flatten(current.anchor)]
+        if digest:
+            items.append(("digest", digest))
+        items += [(b.role, b.rendered) for b in _flatten(current.tail)]
+        spec = OverflowSpec(
+            max(config.limit_bytes, 0), config.separator, marker,
+            json_text_bytes, middle_prune_text,
+        )
+        return shrink_overflow_parts(items, spec), current
 
 
 def compact_prompt_blocks(

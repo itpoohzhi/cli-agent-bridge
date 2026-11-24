@@ -13,6 +13,7 @@ from core.effort_policy import pin_wire_effort
 from core.http_post_dispatch import _cleanup_post, _passthrough, dispatch_route
 from core.http_post_ingress import begin_post, read_post_request
 from core.http_post_routing import prepare_post_body, resolve_post_route, selected_route_allowed
+import core.passthrough_effort_map as _pem
 from core.passthrough_exchange import _validate_endpoint, internal_trace_scope
 from core.quota_classifier import QuotaRules, classify_429
 from core.retry_control import MAX_RETRY_RATIO, MAX_TOTAL_ATTEMPTS_LIMIT, CircuitPolicy, HealthDomain, RetryReservation, RetrySizing, RetryTokenBucket, RouteCandidate, RouteCircuitBreaker, validate_retry_sizing
@@ -171,23 +172,21 @@ def _route_request(route: Any) -> Mapping[str, Any]:
     return request if isinstance(request, Mapping) else {}
 
 def _effort(route: Any) -> str:
-    request = _route_request(route)
-    model = getattr(route, "model", None)
-    values = (request.get("reasoning_effort"), getattr(route, "alias_effort", None), model.get("default_effort") if isinstance(model, Mapping) else None)
-    return next((value for value in values if isinstance(value, str) and value), "")
+    return _pem.logical_effort(_route_request(route), getattr(route, "alias_effort", None), getattr(route, "model", None))
 
 def _pin_effort(route: Any) -> Any:
     """Закрепляет replay-effort в payload до наложения параметров маршрута."""
     request = getattr(route, "request", None)
     if not isinstance(request, Mapping):
         return route
-    if not (effort := _effort(route)) or request.get("reasoning_effort") == effort:
+    if not (effort := _effort(route)) or request.get("reasoning_effort") == effort or (effort == "off" and _pem.is_thinking_disabled(request)):
         return route
     route.request = pin_wire_effort(dict(request), effort)
     return route
 
 def _attempt(route: Any, spec: Any, body: Any, attempt: RouteAttempt) -> None:
     selected, adapter = _selected(route, spec)
+    selected, body = _pem.apply_attempt_effort_map(selected, adapter, body)
     route.handler._transport_attempt = attempt
     try:
         if isinstance(adapter, route.host.PassthroughAdapter) and spec.credential_ref is not None:
@@ -389,8 +388,9 @@ def _request_policy(route: Any) -> Any:
 def _dispatch(route: Any) -> None:
     routing = effective_model_routing(route.model_id, route.model)
     if not (route.host.flag_enabled(ROUTING_FLAG) and routing and routing.get("enabled", True)):
-        route.model["backend"] = routing.get("disabled_backend") or route.model.get("backend")
-        dispatch_route(route)
+        route.model["backend"] = routing.get("zero_canon_backend") or routing.get("disabled_backend") or route.model.get("backend")
+        route, wire = _pem.apply_attempt_effort_map(route, route.host.BACKENDS.get(route.model.get("backend")), prepare_post_body(route))
+        dispatch_route(route, wire)
         return
     route = replace(route, model={**route.model, "routing": routing})
     if route.model_id.endswith("-" + route.model["backend"]) and not selected_route_allowed(route):

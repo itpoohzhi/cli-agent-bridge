@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any
 
+from core import zero_canon_routing as _zcr
 from core.http_post_context import PostRequestContext
 from core.http_post_ingress import clean_transport_request
 from core.muse_usage_client import MuseUsageClient
@@ -210,39 +211,13 @@ def _lookup_backend(backends: Any, name: str | None) -> Any:
 
 
 def _backend_configs(host: Any) -> dict[str, Mapping[str, Any]]:
-    backends = getattr(host, "BACKENDS", None)
-    adapters = getattr(backends, "adapters", None)
-    if isinstance(adapters, Mapping):
-        return {name: getattr(adapter, "config", {}) for name, adapter in adapters.items() if hasattr(adapter, "config")}
-    if callable(adapters):
-        return {
-            str(adapter.id): getattr(adapter, "config", {})
-            for adapter in adapters()
-            if hasattr(adapter, "id") and hasattr(adapter, "config")
-        }
-    return {}
+    return _zcr.backend_configs(host)
 
 
-def _pick_primary_backend(kept: list[Any], current: object) -> str | None:
-    dict_routes = [item for item in kept if isinstance(item, dict) and isinstance(item.get("backend"), str) and item.get("backend")]
-    if not dict_routes:
-        return None
-    positive = [item for item in dict_routes if (item.get("weight") or 0) > 0]
-    pool = positive or dict_routes
-    if isinstance(current, str) and any(item["backend"] == current for item in pool):
-        return current
-    best = min(pool, key=lambda item: (item.get("priority", 0), dict_routes.index(item)))
-    return str(best["backend"])
-
-
-def _apply_filtered_routes(route: PostRoute, routing: dict[str, Any], kept: list[Any]) -> None:
-    routing["routes"] = kept
-    chosen = _pick_primary_backend(kept, route.model.get("backend"))
-    if isinstance(chosen, str) and chosen:
-        route.model["backend"] = chosen
-        routing["zero_canon_backend"] = chosen
-        if len(kept) > 1 and routing.get("legacy_backend") not in (None, chosen):
-            routing["legacy_backend"] = chosen
+def _apply_filtered_routes(route: PostRoute, routing: dict[str, Any], kept: list[Any]) -> str | None:
+    host = getattr(route, "host", None)
+    routing_enabled = bool(host.flag_enabled("BRIDGE_TRANSPORT_ROUTING_ENABLED")) if host is not None else True
+    return _zcr.apply_filtered_routes(route, routing, kept, routing_enabled=routing_enabled)
 
 
 def _selected_backend_in_provider_scope(route: PostRoute, kept: list[Any] | None = None) -> bool:
@@ -277,7 +252,8 @@ def _zero_canon_route_allowed(route: PostRoute) -> bool:
     if not kept:
         return route.reject(503, "route_unavailable", "no Zero-Canon eligible provider is available")
     if isinstance(routing, dict) and isinstance(routes, list):
-        _apply_filtered_routes(route, routing, kept)
+        if _apply_filtered_routes(route, routing, kept) is None:
+            return route.reject(503, "route_unavailable", "no active Zero-Canon route with positive weight")
     return _selected_backend_in_provider_scope(route, kept)
 
 
@@ -301,13 +277,14 @@ def resolve_post_route(context: PostRequestContext) -> PostRoute | None:
     requested_id, host = route.model_id, route.host
     models = host.FLEET.get("models", {}) if isinstance(host.FLEET, dict) else {}
     _resolve_alias(route, models)
+    if isinstance(models, Mapping) and route.model_id in models:
+        route.model = dict(models[route.model_id])
     if not _request_allowed(route, requested_id):
         return None
     route.handler._telemetry_meta(model=route.model_id)
     if route.model_id not in models:
         route.handler._reject(404, "model_not_found", "model is not in the catalogue", "unknown", route.model_len)
         return None
-    route.model = dict(models[route.model_id])
     if not check_muse_usage_gate(route):
         return None
     return route if _finalize_route_model(route) else None
