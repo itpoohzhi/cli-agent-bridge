@@ -26,8 +26,7 @@ _JOB_HEAD_RE = re.compile(
     r"\[status: [^\]\r\n]+\]\."
 )
 _REPEATED_CALL_NAME_RE = re.compile(r"[A-Za-z0-9_.:/-]+", re.ASCII)
-_REPEATED_CALL_ARG_RE = re.compile(
-    r"[A-Za-z0-9_.-]+=(?:[A-Za-z0-9_./:@-]+|\"[^\"()]*\"|'[^'()]*')", re.ASCII)
+_REPEATED_CALL_ARG_RE = re.compile(r"[A-Za-z0-9_.-]+=[A-Za-z0-9_./:@-]+", re.ASCII)
 _EXACT_REPEAT_NOTICES = (
     "You are repeating the exact same tool call with identical arguments. "
     "Carefully analyze the previous result before calling again: if the task is not "
