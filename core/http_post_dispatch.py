@@ -6,12 +6,10 @@ from functools import partial
 from pathlib import Path
 from typing import Any
 
+from core import passthrough_effort_map as _pem
 from core.http_post_context import PostRequestContext
 from core.http_post_ingress import begin_post, read_post_request
-from core.http_post_routing import (
-    PostRoute, PreparedPostBody, log_route, native_autonomy, native_effort,
-    prepare_post_body, prepare_route_request, resolve_post_route, selected_route_allowed,
-)
+from core.http_post_routing import PostRoute, PreparedPostBody, log_route, native_autonomy, native_effort, prepare_post_body, prepare_route_request, resolve_post_route, selected_route_allowed
 
 _NATIVE_SCRATCH = frozenset({"requested_turn_id", "resume_turn_id", "messages", "raw_key", "keyed"})
 
@@ -38,6 +36,7 @@ def _passthrough(route: PostRoute, adapter: Any, body: PreparedPostBody | None) 
     except host.EffortValidationError as exc:
         route.reject(400, "unsupported_reasoning_effort", str(exc))
         return
+    prepared = _pem.apply_prepared_off_patch(prepared, body.request, route.request, adapter, str(route.model.get("backend") or ""))
     raw = body.raw if prepared == body.request else host.json.dumps(prepared, ensure_ascii=False).encode("utf-8")
     log_route(route, "passthrough")
     handler._serve_resilient(route.model["backend"], partial(

@@ -23,11 +23,19 @@ def _has_positive_weight(item: Mapping[str, Any]) -> bool:
     return _finite_numeric(weight) and weight > 0
 
 
+def _has_nonnegative_weight(item: Mapping[str, Any]) -> bool:
+    weight = item.get("weight")
+    return _finite_numeric(weight) and weight >= 0
+
+
 def _eligible_routes(candidates: list[Mapping[str, Any]]) -> list[Mapping[str, Any]]:
-    """При явных `weight` допускает только конечные `weight > 0`; legacy без `weight` — только если ключа нет нигде."""
+    """Предпочитает конечные `weight > 0`; если после Zero-Canon остались лишь резервные `weight == 0`, допускает их (отвергая <0/NaN)."""
     if all("weight" not in item for item in candidates):
         return candidates
-    return [item for item in candidates if "weight" in item and _has_positive_weight(item)]
+    positive = [item for item in candidates if "weight" in item and _has_positive_weight(item)]
+    if positive:
+        return positive
+    return [item for item in candidates if "weight" in item and _has_nonnegative_weight(item)]
 
 
 def _valid_priority(item: Mapping[str, Any]) -> float | None:
