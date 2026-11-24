@@ -179,7 +179,7 @@ def test_decide_tail_cold_wal_wait(
         (True, "sqlite_ro_pool_backoff", ResumeAnchorCause.POOL_BACKOFF_EXHAUSTED),
         (False, "database is locked", ResumeAnchorCause.DB_LOCKED_EXHAUSTED),
         (False, "database table is busy", ResumeAnchorCause.DB_LOCKED_EXHAUSTED),
-        (False, "unable to open database file", ResumeAnchorCause.DB_LOCKED_EXHAUSTED),
+        (False, "unable to open database file", ResumeAnchorCause.DB_ERROR),
         (False, "database disk image is malformed", ResumeAnchorCause.DB_ERROR),
     ],
 )
@@ -211,6 +211,7 @@ def test_resume_anchor_config_accepts_valid_values(config: ResumeAnchorConfig) -
     [
         {"max_retries": -1},
         {"max_retries": True},
+        {"max_retries": 1.5},
         {"retry_delay_s": float("nan")},
         {"max_retry_delay_s": float("inf")},
         {"retry_delay_s": 1.0, "max_retry_delay_s": 0.5},

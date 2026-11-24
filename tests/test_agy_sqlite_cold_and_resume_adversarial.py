@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import sqlite3
 import sys
+import threading
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Final
 
 import pytest
@@ -14,11 +16,14 @@ for _path in (str(ROOT), str(AGY_BRIDGE)):
         sys.path.insert(0, _path)
 
 from agy_runtime.sqlite_cold_resume_policy import (  # noqa: E402
+    ColdFsProbe,
     ResumeAnchorCause,
     ResumeAnchorConfig,
 )
+from agy_runtime import sqlite_tail_lifecycle  # noqa: E402
 from agy_runtime.sqlite_tail_lifecycle import (  # noqa: E402
     ResumeAnchorDeps,
+    finish_transcript_tail,
     is_cold_wal_error,
     load_resume_anchor_config,
     probe_cold_fs,
@@ -41,6 +46,24 @@ class _SequencePool:
         if isinstance(outcome, BaseException):
             raise outcome
         return [(outcome,)]
+
+
+class _CleanupPool:
+    def __init__(self) -> None:
+        self.release_calls: int = 0
+
+    def release_thread(self) -> None:
+        self.release_calls += 1
+
+
+class _BoolFalsePool(_CleanupPool):
+    def __bool__(self) -> bool:
+        return False
+
+
+class _LenZeroPool(_CleanupPool):
+    def __len__(self) -> int:
+        return 0
 
 
 class _Cursor:
@@ -85,6 +108,30 @@ def _create_steps_db(path: Path, indices: tuple[int, ...] = (2, 7)) -> None:
         )
 
 
+@pytest.mark.parametrize("pool_type", [_BoolFalsePool, _LenZeroPool])
+def test_finish_cleanup_releases_falsy_pool(
+    pool_type: type[_CleanupPool],
+) -> None:
+    pool = pool_type()
+    tail = SimpleNamespace(
+        _finished=False,
+        _conn_lock=threading.Lock(),
+        _active_conn=None,
+        plan=SimpleNamespace(mode="OFF"),
+        _owned_cid="",
+    )
+
+    finish_transcript_tail(
+        tail,
+        lambda _conn: None,
+        lambda: pool,
+        lambda _generation, _selects_ok, _failed: None,
+        lambda _cid, _turn_id: None,
+    )
+
+    assert pool.release_calls == 1
+
+
 def test_missing_db_can_appear_then_anchor_without_pool_poisoning(
     tmp_path: Path,
 ) -> None:
@@ -121,6 +168,72 @@ def test_transient_locked_or_busy_retries_with_injected_sleep(
     assert resolve_resume_db_max_idx(pool, db_path, SQL, deps) == (9, None)
     assert pool.calls == 3
     assert sleeps == [0.05, 0.08]
+
+
+@pytest.mark.parametrize(
+    ("probe", "expected"),
+    [
+        (ColdFsProbe(db_exists=True), ResumeAnchorCause.DB_UNREADABLE),
+        (
+            ColdFsProbe(parent_is_dir=True, parent_accessible=True),
+            ResumeAnchorCause.DB_MISSING,
+        ),
+        (ColdFsProbe(), ResumeAnchorCause.PARENT_UNAVAILABLE),
+        (ColdFsProbe(fs_error=True), ResumeAnchorCause.FS_OSERROR),
+    ],
+)
+def test_unable_to_open_rechecks_fs_and_fails_without_retry(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    probe: ColdFsProbe,
+    expected: ResumeAnchorCause,
+) -> None:
+    db_path = tmp_path / "changed.db"
+    pool = _SequencePool([sqlite3.OperationalError("unable to open database file")])
+    sleeps: list[float] = []
+    probes = iter([ColdFsProbe(db_is_file=True, db_readable=True), probe])
+
+    def next_probe(_path: Path) -> ColdFsProbe:
+        return next(probes)
+
+    monkeypatch.setattr(sqlite_tail_lifecycle, "probe_cold_fs", next_probe)
+    deps = ResumeAnchorDeps(
+        lambda _path: _Connection(0),
+        lambda _conn: None,
+        sleeps.append,
+        ResumeAnchorConfig(max_retries=3),
+    )
+
+    assert resolve_resume_db_max_idx(pool, db_path, SQL, deps) == (None, expected)
+    assert pool.calls == 1
+    assert sleeps == []
+
+
+def test_unable_to_open_retries_only_when_db_remains_readable(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    db_path = tmp_path / "readable.db"
+    pool = _SequencePool([sqlite3.OperationalError("unable to open database file"), 11])
+    sleeps: list[float] = []
+
+    def readable_probe(_path: Path) -> ColdFsProbe:
+        return ColdFsProbe(db_is_file=True, db_readable=True)
+
+    monkeypatch.setattr(
+        sqlite_tail_lifecycle,
+        "probe_cold_fs",
+        readable_probe,
+    )
+    deps = ResumeAnchorDeps(
+        lambda _path: _Connection(0),
+        lambda _conn: None,
+        sleeps.append,
+        ResumeAnchorConfig(max_retries=1),
+    )
+
+    assert resolve_resume_db_max_idx(pool, db_path, SQL, deps) == (11, None)
+    assert pool.calls == 2
+    assert sleeps == [0.05]
 
 
 def test_pool_backoff_fallback_closes_connection_on_failure(tmp_path: Path) -> None:

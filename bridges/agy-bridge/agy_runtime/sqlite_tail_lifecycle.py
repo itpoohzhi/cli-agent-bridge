@@ -81,7 +81,9 @@ def finish_transcript_tail(
             close_conn(conn)
 
     _cleanup("connection", close)
-    _cleanup("pool", lambda: (pool := pool_provider()) and pool.release_thread())
+    _cleanup(
+        "pool", lambda: (pool := pool_provider()) is not None and pool.release_thread()
+    )
     if getattr(tail.plan, "mode", "") in ("LIVE", "SHADOW"):
         _cleanup(
             "breaker",
@@ -188,13 +190,8 @@ def resolve_resume_db_max_idx(
 ) -> tuple[int | None, policy.ResumeAnchorCause | None]:
     """Прочитать db_max с isolated RO fallback и ограниченными ретраями."""
     state = policy.classify_fs_probe(probe_cold_fs(db_path))
-    if state is policy.ColdFsState.DB_MISSING_PARENT_OK:
-        return None, policy.ResumeAnchorCause.DB_MISSING
-    if state not in (
-        policy.ColdFsState.DB_READABLE_NO_WAL,
-        policy.ColdFsState.DB_READY_WITH_WAL,
-    ):
-        return None, policy.ResumeAnchorCause.DB_UNREADABLE
+    if (fs_cause := policy.resume_fs_failure_cause(state)) is not None:
+        return None, fs_cause
     try:
         config = deps.config or load_resume_anchor_config()
     except (TypeError, ValueError):
@@ -211,7 +208,8 @@ def resolve_resume_db_max_idx(
             if backoff and config.backoff_direct_ro and active_pool is not None:
                 active_pool = None
                 continue
-            cause = policy.classify_resume_db_error(backoff, str(exc))
+            fs_state = policy.classify_fs_probe(probe_cold_fs(db_path))
+            cause = policy.classify_resume_db_error(backoff, str(exc), fs_state)
             if (
                 not policy.is_retryable_resume_cause(cause)
                 or retries >= config.max_retries

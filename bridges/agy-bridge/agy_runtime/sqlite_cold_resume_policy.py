@@ -40,6 +40,8 @@ class ResumeAnchorCause(StrEnum):
     TRANSCRIPT_ERROR = "transcript_error"
     DB_MISSING = "db_missing"
     DB_UNREADABLE = "db_unreadable"
+    PARENT_UNAVAILABLE = "parent_unavailable"
+    FS_OSERROR = "fs_oserror"
     POOL_BACKOFF_EXHAUSTED = "pool_backoff_exhausted"
     DB_LOCKED_EXHAUSTED = "db_locked_exhausted"
     DB_ERROR = "db_error"
@@ -78,7 +80,7 @@ class ResumeAnchorConfig:
     backoff_direct_ro: bool = True
 
     def __post_init__(self) -> None:
-        if isinstance(self.max_retries, bool) or self.max_retries < 0:
+        if type(self.max_retries) is not int or self.max_retries < 0:
             raise ValueError("max_retries must be a non-negative integer")
         delays = (self.retry_delay_s, self.max_retry_delay_s)
         if any(not math.isfinite(value) or value < 0.0 for value in delays):
@@ -141,12 +143,31 @@ def decide_tail_cold_wal_wait(
     return ColdWaitDecision(not budget_exceeded, cause)
 
 
-def classify_resume_db_error(pool_backoff: bool, message: str) -> ResumeAnchorCause:
+def resume_fs_failure_cause(state: ColdFsState | None) -> ResumeAnchorCause | None:
+    """Преобразовать небезопасное состояние ФС в точную anchor-причину."""
+    return {
+        ColdFsState.DB_MISSING_PARENT_OK: ResumeAnchorCause.DB_MISSING,
+        ColdFsState.DB_UNREADABLE: ResumeAnchorCause.DB_UNREADABLE,
+        ColdFsState.PARENT_UNAVAILABLE: ResumeAnchorCause.PARENT_UNAVAILABLE,
+        ColdFsState.FS_OSERROR: ResumeAnchorCause.FS_OSERROR,
+        ColdFsState.INVALID_PATH: ResumeAnchorCause.DB_UNREADABLE,
+    }.get(state)
+
+
+def classify_resume_db_error(
+    pool_backoff: bool,
+    message: str,
+    fs_state: ColdFsState | None = None,
+) -> ResumeAnchorCause:
     """Классифицировать исчерпанную ошибку чтения resume anchor."""
     if pool_backoff:
         return ResumeAnchorCause.POOL_BACKOFF_EXHAUSTED
     lowered = message.lower()
-    if any(token in lowered for token in ("locked", "busy", "unable to open")):
+    if "unable to open database file" in lowered:
+        if fs_state is ColdFsState.DB_READABLE_NO_WAL:
+            return ResumeAnchorCause.DB_LOCKED_EXHAUSTED
+        return resume_fs_failure_cause(fs_state) or ResumeAnchorCause.DB_ERROR
+    if any(token in lowered for token in ("locked", "busy")):
         return ResumeAnchorCause.DB_LOCKED_EXHAUSTED
     return ResumeAnchorCause.DB_ERROR
 
