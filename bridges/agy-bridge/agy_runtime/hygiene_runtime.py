@@ -9,7 +9,7 @@ import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
-from typing import Final, Protocol, TypeVar, final
+from typing import Final, Protocol, TypeVar, cast, final
 
 _REPO_ROOT: Final[Path] = Path(__file__).resolve().parents[3]
 if str(_REPO_ROOT) not in sys.path:
@@ -57,7 +57,6 @@ def _safe_kill(pgid: int, sig: int) -> None:
         except OSError:
             pass
 
-
 def _default_waiter(pgid: int, timeout_s: float) -> bool:
     deadline = time.monotonic() + max(0.0, timeout_s)
     while time.monotonic() < deadline:
@@ -69,7 +68,6 @@ def _default_waiter(pgid: int, timeout_s: float) -> bool:
             return True
         time.sleep(0.01)
     return False
-
 
 def _bounded_teardown(pgid: int, kill_fn: Callable[[int, int], None] | None, waiter: Callable[[int, float], bool] | None) -> None:
     if _invalid_pgid(pgid):
@@ -138,18 +136,24 @@ class ManagedSqliteRoPool:
             if not is_cold_sqlite_wal_wait(exc, db_path):
                 with self._lock:
                     _ = self._fsm.record_error(time.monotonic()) if self._enabled else None
-            self._inner.release_thread()
+            self.release_thread()
             raise
         with self._lock:
             _ = self._fsm.record_success() if self._enabled else None
         return res
-    def query_rows(self, db_path: Path | str, sql: str) -> object:
-        return self._exec(lambda p: p.query_rows(Path(db_path), sql), Path(db_path))
+    def query_rows(self, db_path: Path | str, sql: str, params: tuple[object, ...] = ()) -> list[tuple[object, ...]]:
+        path = Path(db_path) if isinstance(db_path, str) else db_path
+        return cast("list[tuple[object, ...]]", self._exec(lambda p: p.query_rows(path, sql) if not params else cast("Callable[[Path, str, tuple[object, ...]], object]", p.query_rows)(path, sql, params), path))
     def run_ro(self, db_path: Path | str, fn: Callable[..., _T], on_conn: Callable[..., None] | None = None) -> _T:
         p = Path(db_path) if isinstance(db_path, str) else db_path
         return self._exec(lambda pool: pool.run_ro(p, fn) if on_conn is None else pool.run_ro(p, fn, on_conn=on_conn), p)
     def release_thread(self) -> None:
-        _ = self._inner.release_thread() if self._inner is not None else None
+        release = cast("Callable[[], None] | None", getattr(self._inner, "release_thread", None))
+        if release is not None:
+            release()
+    def snapshot_metrics(self) -> dict[str, int]:
+        snapshot = cast("Callable[[], dict[str, int]] | None", getattr(self._inner, "snapshot_metrics", None))
+        return snapshot() if snapshot is not None else {}
     def close_all(self) -> None:
         if self._inner is not None:
             self._inner.close_all()
@@ -178,7 +182,6 @@ class HygieneRuntime:
     def _cur_flags(self) -> HygieneFlags:
         with self._flags_lock:
             return self._flags
-
     def snapshot_flags(self, config_path: Path | None = None) -> HygieneFlags:
         cp = config_path or self._config_path
         v = tuple(_lsc.read_bool_setting(dk, ek, False, config_path=cp) for dk, ek in _FLAG_SPECS)
@@ -195,7 +198,6 @@ class HygieneRuntime:
         with self._pool_lock:
             self._pool.set_enabled(nxt.sqlite_ro_hygiene_enabled)
         return nxt
-
     def upstream_held_count(self) -> int:
         with self._orphan_lock:
             return len(self._detached) + len(self._cancelling)
@@ -268,14 +270,12 @@ class HygieneRuntime:
         with self._orphan_lock:
             pgids = list(dict.fromkeys((*self._detached.keys(), *self._cancelling)))
         return self._drain_pgids(pgids, kill_fn, waiter)
-
     def sha_cache_get(self, key: str) -> str | None: return self._sha.get(key, self._cur_flags().bounded_state_enabled)
     def sha_cache_put(self, key: str, value: str) -> None: self._sha.put(key, value, self._cur_flags().bounded_state_enabled)
     def session_claim(self, key: str, value: str = "1") -> bool: return self._session.claim(key, value, self._cur_flags().bounded_state_enabled)
     def session_commit(self, key: str, value: str) -> None: self._session.put(key, value, self._cur_flags().bounded_state_enabled)
     def session_invalidate(self, key: str) -> None: self._session.remove(key)
     def session_prune(self) -> int: return self._session.clear_or_prune(False, self._cur_flags().bounded_state_enabled)
-
     def health_snapshot(self, config_path: Path | None = None) -> dict[str, object]:
         cp = config_path or self._config_path
         flags, now_s = (self.snapshot_flags(cp) if cp is not None else self._cur_flags()), time.monotonic()
