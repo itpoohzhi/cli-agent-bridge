@@ -131,3 +131,31 @@ def test_snapshot_stays_atomic_under_parallel_inserts() -> None:
     payload = store.get_telemetry_payload(24.0, limit=5)
     assert {a["request_id"] for a in _turn_anomalies(payload)} >= set(spike_ids)
     assert payload["summary"]["total_requests"] == 83
+
+
+def test_architecture_flow_panel_vs_skeptic_and_modern_backends() -> None:
+    """W9b: роли panel/skeptic с нормализацией, unknown -> other и все 4 новых backend_id в tier2."""
+    from core.telemetry_flow import build_architecture_flow
+
+    modern_backends = ("neuralwatt", "neuralwatt-flex", "opencode-go", "opencode-go-claude")
+    by_backend = [
+        {"backend_id": bid, "requests": i + 1, "total_tokens": (i + 1) * 100,
+         "avg_total_ms": 15.0, "egress_proxy": ":10820 (xray SOCKS5)"}
+        for i, bid in enumerate(modern_backends)
+    ]
+    callers = [
+        {"subagent_role": "panel", "requests": 2, "user_agent": ""},
+        {"subagent_role": " Panel ", "requests": 1, "user_agent": ""},
+        {"subagent_role": "Skeptic", "requests": 4, "user_agent": ""},
+        {"subagent_role": "unknown-caller", "requests": 5, "user_agent": "custom-client/1.0"},
+    ]
+    flow = build_architecture_flow(by_backend, callers, {"total_requests": 12})
+    t1 = {str(n["id"]): n["requests"] for n in flow["tier1_entry_callers"]["nodes"]}
+    assert t1["council-panel"] == 3
+    assert t1["council-skeptic"] == 4
+    assert t1["other"] == 5
+    t2 = {str(n["id"]): n for n in flow["tier2_l7_bridges"]["nodes"]}
+    assert t2["georouter-10830"]["requests"] == 10
+    assert t2["georouter-10830"]["total_tokens"] == 1000
+    assert t2["universal-9882"]["requests"] == 10
+    assert set(modern_backends) <= set(t2["georouter-10830"]["backends"])

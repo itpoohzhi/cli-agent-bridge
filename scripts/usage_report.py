@@ -86,9 +86,7 @@ def _load_jsonl(path: str, days: float) -> tuple[list[dict[str, Any]], int]:
                 if not isinstance(raw, dict):
                     skipped += 1
                     continue
-                obj: dict[str, Any] = {str(k): v for k, v in raw.items()}
-                if "http_status" in obj:
-                    obj.setdefault("status_code", obj["http_status"])
+                obj = ua.normalize_usage_record_aliases(raw)
                 if isinstance(obj.get("ts"), str):
                     obj.setdefault("ts_iso", obj["ts"])
                 records.append(obj)
@@ -137,6 +135,9 @@ def _load_url(url: str, token_env: str | None, thresholds: ua.AnomalyThresholds)
     summary["cache_hit_pct"] = ua.compute_cache_hit_pct(
         int(summary.get("cached_tokens") or 0), int(summary.get("prompt_tokens") or 0)
     )
+    summary["uncached_prompt_tokens"] = ua.compute_uncached_prompt_tokens(
+        summary.get("prompt_tokens"), summary.get("cached_tokens")
+    )
     groups: dict[str, list[dict[str, Any]]] = {
         k: ua.enrich_with_cache_hit(_as_dict_list(payload.get(k))) for k in ("by_model", "by_role", "by_day")
     }
@@ -175,8 +176,9 @@ def _format_report(report: Mapping[str, Any]) -> str:
         f"Summary: requests={s.get('total_requests', 0)} ok={s.get('ok_requests', 0)} "
         f"err={s.get('error_requests', 0)} prompt={s.get('prompt_tokens', 0)} "
         f"completion={s.get('completion_tokens', 0)} cached={s.get('cached_tokens', 0)} "
-        f"({float(s.get('cache_hit_pct') or 0.0):.2f}%) reasoning={s.get('reasoning_tokens', 0)} "
-        f"total={s.get('total_tokens', 0)}"
+        f"({float(s.get('cache_hit_pct') or 0.0):.2f}%) "
+        f"uncached={s.get('uncached_prompt_tokens', ua.compute_uncached_prompt_tokens(s.get('prompt_tokens'), s.get('cached_tokens')))} "
+        f"reasoning={s.get('reasoning_tokens', 0)} total={s.get('total_tokens', 0)}"
     )
     anomalies = report["prompt_anomalies"]
     fmt = "  - [{scope}] {key}: prompt={prompt_tokens} baseline={baseline_tokens} ratio={ratio}x ({reason})"
