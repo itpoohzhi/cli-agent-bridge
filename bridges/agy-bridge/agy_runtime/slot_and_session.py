@@ -5,7 +5,11 @@ from __future__ import annotations
 import hashlib
 import math
 import os
+import sqlite3
+import threading
+import weakref
 from collections.abc import Callable, Mapping
+from pathlib import Path
 from typing import Any
 
 from core.adaptive_admission import OutcomeKind
@@ -188,6 +192,35 @@ def should_detach_job_orphan(
     )
 
 
+def _finite_float(value: object) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    try:
+        number = float(value)
+    except (OverflowError, TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def is_cold_sqlite_wal_wait(exc: BaseException, db_path: Path | None) -> bool:
+    """Распознаёт штатное ожидание появления холодного WAL."""
+    return (
+        isinstance(exc, sqlite3.OperationalError)
+        and "unable to open database file" in str(exc).lower()
+        and db_path is not None
+        and not Path(f"{db_path}-wal").exists()
+    )
+
+
+def extract_run_ttfc_ms(run: object) -> float | None:
+    first_s = _finite_float(getattr(run, "first_content_at", None))
+    started_s = _finite_float(getattr(run, "started", None))
+    if first_s is None or started_s is None:
+        return None
+    ttfc_ms = (first_s - started_s) * 1000.0
+    return max(0.0, ttfc_ms) if math.isfinite(ttfc_ms) else None
+
+
 _OUTCOME_MAP: dict[str, OutcomeKind] = {
     "done": OutcomeKind.OK,
     "capacity_exhausted": OutcomeKind.CAPACITY_EXHAUSTED,
@@ -196,11 +229,63 @@ _OUTCOME_MAP: dict[str, OutcomeKind] = {
 
 
 def release_admission_for_state(
-    release_fn: Callable[..., object], ticket_id: int, out: Mapping[str, object]
+    release_fn: Callable[..., object],
+    ticket_id: int,
+    out: Mapping[str, object],
+    run: object | None = None,
 ) -> None:
     """Release an adaptive admission ticket from a terminal state mapping."""
     st = str(out.get("state") or "")
-    raw_ttfc = out.get("ttfc_ms")
-    ttfc = float(raw_ttfc) if isinstance(raw_ttfc, (int, float)) else None
+    ttfc = _finite_float(out.get("ttfc_ms"))
+    if ttfc is None:
+        ttfc = extract_run_ttfc_ms(run)
     release_fn(ticket_id, outcome=_OUTCOME_MAP.get(st, OutcomeKind.ERROR), ttfc_ms=ttfc)
+
+
+def start_orphan_reaper(runtime: Any, interval_s: float = 1.0) -> Any:
+    """Запускает один daemon-reaper без сильной ссылки на runtime."""
+    interval = max(0.005, float(interval_s))
+    if getattr(runtime, "_orphan_reaper_stop", None) is not None:
+        return runtime
+    stop = threading.Event()
+    ref = weakref.ref(runtime)
+    setattr(runtime, "_orphan_reaper_stop", stop)
+
+    def worker() -> None:
+        while not stop.wait(interval):
+            current = ref()
+            if current is None:
+                return
+            sweep = getattr(current, "sweep_orphans", None)
+            if callable(sweep):
+                try:
+                    sweep()
+                except Exception:
+                    pass
+            del current
+
+    threading.Thread(target=worker, name="agy-orphan-reaper", daemon=True).start()
+    return runtime
+
+
+def stop_orphan_reaper(runtime: object) -> None:
+    if (stop := getattr(runtime, "_orphan_reaper_stop", None)) is not None:
+        stop.set()
+
+
+def shutdown_hygiene_runtime(runtime: object) -> None:
+    stop_orphan_reaper(runtime)
+    if callable(clean := getattr(runtime, "shutdown_cleanup", None)):
+        clean()
+
+
+def notify_orphan_progress(runtime: object, pgid: int | None) -> None:
+    if pgid is not None and callable(touch := getattr(runtime, "touch_progress", None)):
+        touch(pgid)
+
+
+def release_detached_pgid(runtime: object, pgid: int | None) -> bool:
+    if pgid is None or not callable(release := getattr(runtime, "release_detached", None)):
+        return False
+    return bool(release(pgid))
 
