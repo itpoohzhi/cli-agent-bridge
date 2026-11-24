@@ -23,9 +23,14 @@ _TRANSPORT_RE: Final[re.Pattern[str]] = re.compile(
 _RETRY_AFTER_RE: Final[re.Pattern[str]] = re.compile(
     r"retry[ -]?after\s*[:=]?\s*(\d+(?:\.\d+)?)", re.IGNORECASE
 )
+_KEY_NAMES: Final[str] = r"(?:api[_-]?key|apikey|access_token|refresh_token|token|secret|password|authorization|x-api-key)"
 _SECRET_RE: Final[re.Pattern[str]] = re.compile(
-    r"((?:[\"']?(?:api[_-]?key|apikey|access_token|refresh_token|token|secret|password|authorization|x-api-key)[\"']?)\s*[:=]\s*)"
-    r'(?:"((?:bearer|basic)\s+)?(?:\\.|[^"\\])*"|\'((?:bearer|basic)\s+)?(?:\\.|[^\'\\])*\'|((?:bearer|basic)\s+)?[^\s,;\"\']+)|'
+    rf"((?:\\?[\"']?{_KEY_NAMES}\\?[\"']?)\s*[:=]\s*)"
+    r'(?:(\\")((?:bearer|basic)\s+)?(?:(?!\\").)*(?:\\"|$)|'
+    r"(\\')((?:bearer|basic)\s+)?(?:(?!\\').)*(?:\\'|$)|"
+    r'(")((?:bearer|basic)\s+)?(?:\\.|[^"\\])*(?:"|$)|'
+    r"(')((?:bearer|basic)\s+)?(?:\\.|[^'\\])*(?:'|$)|"
+    r"((?:bearer|basic)\s+)?[^\s,;\"'\\]+)|"
     r"(bearer\s+)[a-z0-9._~+/=-]+|"
     r"(?:sk-[a-z0-9_-]{8,}|ghp_[a-z0-9]{8,}|eyj[a-z0-9_-]+\.[a-z0-9_-]+\.[a-z0-9_-]+)",
     re.IGNORECASE,
@@ -201,11 +206,10 @@ def _sanitize_request_id(value: object) -> str:
 
 def _redact_secret(match: re.Match[str]) -> str:
     if match.group(1):
-        val = match.group(0)[len(match.group(1)):]
-        quote = val[0] if val[:1] in ('"', "'") and val[-1:] == val[0] else ""
-        scheme = match.group(2) or match.group(3) or match.group(4) or ""
+        quote = match.group(2) or match.group(4) or match.group(6) or match.group(8) or ""
+        scheme = match.group(3) or match.group(5) or match.group(7) or match.group(9) or match.group(10) or ""
         return f"{match.group(1)}{quote}{scheme}[REDACTED]{quote}"
-    return (match.group(5) or "") + "[REDACTED]"
+    return (match.group(11) or "") + "[REDACTED]"
 
 
 # Short aliases are useful to transports while retaining descriptive public names.

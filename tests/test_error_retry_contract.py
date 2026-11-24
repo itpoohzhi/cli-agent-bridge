@@ -274,6 +274,17 @@ def test_quoted_secrets_with_escaped_and_nested_quotes_and_spaces() -> None:
     assert msg.count("[REDACTED]") == 4
 
 
+def test_escaped_nested_json_and_truncated_unclosed_quote_redacted() -> None:
+    for raw, leak in (
+        (r'{\"password\": \"hunter2\"}', "hunter2"),
+        (r'api_key=\"abc123opaque\"', "abc123opaque"),
+        ('"token": "truncated_secret_value', "truncated_secret_value"),
+    ):
+        msg = classify_upstream_error(raw).message
+        assert leak not in msg
+        assert "[REDACTED]" in msg
+
+
 def test_quota_body_with_non_429_status_still_enforces_opt_in() -> None:
     lease = SimpleNamespace(handle=object(), finish=lambda *_: None, close=lambda: None)
     quota_body = b'{"error":{"type":"resource_exhausted","message":"quota exceeded"}}'
