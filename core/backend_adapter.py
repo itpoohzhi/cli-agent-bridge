@@ -33,7 +33,6 @@ from core import backend_routing_models as _routing_models
 from core.effort_policy import EFFORT_LEVELS as _RANKED_EFFORT_LEVELS
 from core.route_attempts import ALLOWED_FAILOVER_STATUSES
 from core.routing_contract import FleetViolation as FleetViolation
-from core.usage_normalizer import Usage
 
 # Версия контракта: адаптер обязан подтверждать её в qualify() (несовпадение = модели недоступны).
 ADAPTER_API = 1
@@ -172,6 +171,16 @@ class TurnContext:
     # поддержки поле игнорируют; repr скрыт, чтобы секреты не попадали в логи/трейсы.
     fwd_env: dict[str, str] | None = field(default=None, repr=False)
     target_model: str = ""
+
+
+@dataclass(frozen=True)
+class Usage:
+    """Токены готового ответа."""
+
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cache_read_tokens: int | None = None
+    cache_creation_tokens: int | None = None
 
 
 @dataclass(frozen=True)
