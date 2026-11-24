@@ -10,6 +10,7 @@ from typing import Any
 
 from core import defaults as D
 from core.telemetry_util import as_float, as_int, as_str, first_truthy, value_or_else
+from core.usage_schema import USAGE_LOG_FIELDS, resolve_usage_log_source_value
 
 SCHEMA = (
     "request_id VARCHAR, ts_epoch DOUBLE, ts_iso VARCHAR, client_ip VARCHAR, client_port INTEGER, "
@@ -192,16 +193,9 @@ def make_row(event: Mapping[str, Any], max_len: int | None = None, scan_len: int
     return tuple(_coerce(typ, vals[name]) for name, typ in COLUMNS)
 
 
-USAGE_LOG_FIELDS: tuple[str, ...] = (  # 16 скалярных полей JSONL-записи ротационного usage-лога (интерфейс W1-C)
-    "ts_iso", "ts_epoch", "request_id", "client_kind", "subagent_role", "model", "backend_id", "endpoint",
-    "status_code", "prompt_tokens", "completion_tokens", "cached_tokens", "reasoning_tokens", "total_tokens",
-    "usage_present", "total_ms",
-)
-
-
 def make_usage_log_record(row_dict: Mapping[str, Any]) -> dict[str, Any]:
-    """Санитизированная строка стора -> 16 полей JSONL-записи usage-лога (повторной regex-редакции нет)."""
-    return {name: row_dict.get(name) for name in USAGE_LOG_FIELDS}
+    """Санитизированная строка стора -> 16 канонических полей usage-лога из core.usage_schema (интерфейс W1-C)."""
+    return {name: resolve_usage_log_source_value(row_dict, name) for name in USAGE_LOG_FIELDS}
 
 
 _ALIASES: dict[str, tuple[str, ...]] = {  # канонические имена моста -> имена, которые читает UI control_panel
