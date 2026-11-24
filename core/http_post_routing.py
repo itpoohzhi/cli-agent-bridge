@@ -215,7 +215,9 @@ def _backend_configs(host: Any) -> dict[str, Mapping[str, Any]]:
 
 
 def _apply_filtered_routes(route: PostRoute, routing: dict[str, Any], kept: list[Any]) -> str | None:
-    return _zcr.apply_filtered_routes(route, routing, kept, routing_enabled=route.host.flag_enabled("BRIDGE_TRANSPORT_ROUTING_ENABLED"))
+    host = getattr(route, "host", None)
+    routing_enabled = bool(host.flag_enabled("BRIDGE_TRANSPORT_ROUTING_ENABLED")) if host is not None else True
+    return _zcr.apply_filtered_routes(route, routing, kept, routing_enabled=routing_enabled)
 
 
 def _selected_backend_in_provider_scope(route: PostRoute, kept: list[Any] | None = None) -> bool:

@@ -161,13 +161,15 @@ def _hygiene_rt() -> HygieneRuntime:
         return rt
     with _HYGIENE_LOCK:
         if _HYGIENE_RT is None:
-            _HYGIENE_RT = HygieneRuntime(config_path=DYNAMIC_CONFIG_PATH)
+            _HYGIENE_RT = slot_and_session.start_orphan_reaper(HygieneRuntime(config_path=DYNAMIC_CONFIG_PATH))
         return _HYGIENE_RT
 
 
 from agy_runtime import history_compaction_adapter as _hca  # noqa: E402
 from agy_runtime.history_compaction_domain import json_text_bytes as _json_text_bytes, middle_prune_text as _middle_prune_text  # noqa: E402
 from core.correlation_contract import extract_correlation, format_log_corr_suffix  # noqa: E402
+from core.error_taxonomy import classify_upstream_error, extract_upstream_error_meta, upstream_error_body  # noqa: E402
+from core.replay_policy import apply_budget_to_proof, build_replay_proof, calculate_retry_budget, parse_retry_budget_header  # noqa: E402
 from core.prompt_budget_policy import LazyPromptMaterializer, compute_prompt_budget, resolve_ctx_prompt  # noqa: E402
 from core.slot_acquire import SlotWaitOptions, acquire_slot_timed  # noqa: E402
 from core.tool_turn_settle_policy import (  # noqa: E402
@@ -414,7 +416,7 @@ def _build_bridge_config() -> _BridgeConfig:
         timeout_s=_chain_int(("AGY_BRIDGE_TIMEOUT_S", "AGY_BRIDGE_TIMEOUT"), 1800, 1, 86400),
         keepalive_s=_chain_float(("AGY_BRIDGE_KEEPALIVE_S", "AGY_BRIDGE_KEEPALIVE"), 15.0, 0.5, 300.0),
         first_token_timeout_s=(ladder.effective_first_event_s if ladder.enabled else _chain_float(
-            ("AGY_BRIDGE_FIRST_TOKEN_TIMEOUT_S", "AGY_BRIDGE_FIRST_TOKEN_TIMEOUT"), 120.0, 5.0, 3600.0)),
+            ("AGY_BRIDGE_FIRST_TOKEN_TIMEOUT_S", "AGY_BRIDGE_FIRST_TOKEN_TIMEOUT"), 720.0, 5.0, 3600.0)),
         transcript_poll_s=_chain_float(
             ("AGY_BRIDGE_TRANSCRIPT_POLL_S", "AGY_BRIDGE_TRANSCRIPT_POLL"), 0.05, 0.01, 10.0),
         req_budget_s=(ladder.safety_cap_s if ladder.enabled else _env_float("AGY_BRIDGE_REQ_BUDGET_S", 3600.0, 10.0, 86400.0)),
@@ -424,7 +426,7 @@ def _build_bridge_config() -> _BridgeConfig:
         ext_idle_timeout_s=_chain_float(
             ("AGY_BRIDGE_IDLE_TIMEOUT_S", "AGY_IDLE_TIMEOUT_S", "AGY_BRIDGE_IDLE_TIMEOUT"), 1800.0, 5.0, 86400.0),
         idle_timeout_s=(ladder.effective_idle_s if ladder.enabled else _chain_float(
-            ("AGY_BRIDGE_BASE_IDLE_TIMEOUT_S", "AGY_BRIDGE_IDLE_TIMEOUT"), float(_CORE_IDLE_TIMEOUT_S), 5.0, 86400.0)),
+            ("AGY_BRIDGE_BASE_IDLE_TIMEOUT_S", "AGY_BRIDGE_IDLE_TIMEOUT"), max(600.0, float(_CORE_IDLE_TIMEOUT_S)), 5.0, 86400.0)),
         watchdog_interval_s=_env_float("AGY_BRIDGE_WATCHDOG_INTERVAL_S", float(_CORE_WATCHDOG_INTERVAL_S), 0.5, 60.0),
         kill_term_grace_s=_env_float("AGY_BRIDGE_KILL_TERM_GRACE_S", 2.0, 0.1, 30.0),
         proc_exit_wait_s=_env_float("AGY_BRIDGE_PROC_EXIT_WAIT_S", 0.05, 0.01, 60.0),
@@ -3292,7 +3294,7 @@ def _lifecycle_cleanup() -> None:
         with _HYGIENE_LOCK:
             rt = _HYGIENE_RT
         if rt is not None:
-            rt.shutdown_cleanup()
+            slot_and_session.shutdown_hygiene_runtime(rt)
 
 
 _LIFECYCLE = SubbridgeLifecycle(
@@ -3318,7 +3320,7 @@ def _reset_sqlite_guards_for_tests() -> None:
     global _cfg_snapshot, _cfg_key, _cfg_checked_at, _image_flag_cache, _image_fallback_flag_cache
     with _HYGIENE_LOCK:
         if _HYGIENE_RT is not None:
-            _HYGIENE_RT.shutdown_cleanup()
+            slot_and_session.shutdown_hygiene_runtime(_HYGIENE_RT)
         _HYGIENE_RT = None
     with _cfg_lock:
         _cfg_snapshot = _COLD_FLAGS
@@ -3722,14 +3724,12 @@ def _breaker_report(probe_gen: int | None, selects_ok: int, failed: bool) -> Non
 
 
 def _retry_credit() -> None:
-    """Первичный запрос пополняет бюджет повторов (+0.2 токена, не выше ёмкости)."""
     global _retry_tenths
     with _sqlite_guard_lock:
         _retry_tenths = min(RETRY_CAPACITY_TENTHS, _retry_tenths + RETRY_CREDIT_TENTHS)
 
 
 def _retry_take() -> bool:
-    """Списать один повтор (1.0 токена); False — бюджет исчерпан."""
     global _retry_tenths
     with _sqlite_guard_lock:
         if _retry_tenths < RETRY_COST_TENTHS:
@@ -3738,8 +3738,17 @@ def _retry_take() -> bool:
         return True
 
 
+def _incident_retry_allowed(ctx: dict, out: dict, delivered: bool, total_s: float) -> bool:
+    status, headers = extract_upstream_error_meta(out)
+    tc = out.get("tool_calls")
+    tc_n = len(tc) if isinstance(tc, (list, tuple)) else tc
+    proof = build_replay_proof(1 if delivered else 0, out.get("response_started"), tc_n,
+                               out.get("fail_stage"), out.get("upstream_not_started"))
+    bounded = apply_budget_to_proof(proof, calculate_retry_budget(total_s, ctx.get("client_retry_budget")))
+    return classify_upstream_error(out.get("err"), status_code=status, headers=headers, replay_proof=bounded).retryable
+
+
 def _retry_pause_s(attempt: int, rng: Callable[[], float] | None = None) -> float:
-    """Full Jitter: U(0, min(2.0, 2.0 * 2^(attempt-1))) через инъецируемый RNG."""
     cap = min(RETRY_PAUSE_CAP_S, RETRY_PAUSE_CAP_S * float(1 << max(0, attempt - 1)))
     source = rng if rng is not None else _rng
     return _TURN_RESILIENCE.pause_s(attempt, source() * cap, cap)
@@ -4499,20 +4508,13 @@ class _TranscriptTail(InterruptionTailState):
 
     def _finish(self) -> None:
         """Закрыть соединение, вернуть исход breaker'у и снять владение cid (один раз)."""
-        if self._finished:
-            return
-        self._finished = True
-        with self._conn_lock:
-            conn = self._active_conn
-            self._active_conn = None
-            if conn is not None:
-                _sqlite_close(conn)
-        if (pool := _sqlite_ro_pool()) is not None:
-            pool.release_thread()
-        if self.plan.mode in ("LIVE", "SHADOW"):
-            _breaker_report(self.probe_gen, self.selects_ok, self.failed)
-        if self._owned_cid:
-            _cid_release(self._owned_cid, self.turn_id)
+        midstream_resilience.finish_transcript_tail(
+            self,
+            _sqlite_close,
+            _sqlite_ro_pool,
+            _breaker_report,
+            _cid_release,
+        )
 
     # ---- один проход ---------------------------------------------------------------
     def tick(self) -> None:
@@ -4917,9 +4919,11 @@ class _TranscriptTail(InterruptionTailState):
             self.last_poll = "error"
             self._on_sqlite_error(exc)
         except Exception as exc:
-            self.last_poll = "error"
-            _log(f"sqlite-error cid={self._cid8()} err={type(exc).__name__}")
-            self._sqlite_off("internal")
+            backoff = isinstance(exc, slot_and_session.SqliteRoPoolBackoffError)
+            self.last_poll = "skip" if backoff else "error"
+            if not backoff:
+                _log(f"sqlite-error cid={self._cid8()} err={type(exc).__name__}")
+                self._sqlite_off("internal")
         finally:
             with self._conn_lock:
                 self._active_conn = None
@@ -5279,7 +5283,7 @@ class JobRegistry:
 
     def publish(self, job: _Job, kind: str, payload: Any) -> bool:
         size = len(json.dumps((kind, payload), ensure_ascii=False).encode("utf-8"))
-        cancel = None
+        cancel, published, pgid = None, False, None
         with self.condition:
             if job.result is not None or job.cancelled.is_set():
                 return False
@@ -5290,11 +5294,14 @@ class JobRegistry:
             else:
                 job.events.append((kind, payload))
                 job.size_bytes += size
+                pgid = job.pgid if job.orphan and isinstance(job.pgid, int) and job.pgid > 0 else None
+                published = True
                 self.condition.notify_all()
-                return True
-        if cancel is not None:
+        if published and pgid:
+            slot_and_session.notify_orphan_progress(_hygiene_rt(), pgid)
+        elif cancel is not None:
             cancel()
-        return False
+        return published
 
     def finish(self, job: _Job, result: dict) -> None:
         with self.condition:
@@ -5306,17 +5313,17 @@ class JobRegistry:
                 job.size_bytes
                 + len(
                     json.dumps(
-                        {
-                            key: result.get(key)
-                            for key in ("text", "reasoning", "retained_events")
-                        },
+                        {key: result.get(key) for key in ("text", "reasoning", "retained_events")},
                         ensure_ascii=False,
                     ).encode("utf-8")
                 )
                 > self.max_buffer_bytes
             ):
                 result = {"state": "buffer_overflow", "text": "", "rc": 1}
+            pgid = job.pgid if isinstance(job.pgid, int) and job.pgid > 0 else None
             self._terminal(job, result)
+        if pgid and (rt := _HYGIENE_RT) is not None:
+            slot_and_session.release_detached_pgid(rt, pgid)
 
     def read(
         self, job: _Job, offset: int, timeout: float
@@ -6196,19 +6203,15 @@ class Run:
                     final_text = str(result.get("response") or "")
                     if str(result.get("status") or "").upper() == "ERROR":
                         self._note_capacity_line(str(result.get("error") or ""))
-                    self.q.put(
-                        (
-                            "result",
-                            {
-                                "conversation_id": result.get("conversation_id") or "",
-                                "status": str(result.get("status") or ""),
-                                "error": str(result.get("error") or ""),
-                                "duration_s": result.get("duration_seconds"),
-                                "num_turns": result.get("num_turns"),
-                                "usage": result.get("usage") or {},
-                            },
-                        )
-                    )
+                    up_status, up_headers = extract_upstream_error_meta(result)
+                    self.q.put(("result", {
+                        "conversation_id": result.get("conversation_id") or "", "status": str(result.get("status") or ""),
+                        "error": str(result.get("error") or ""), "duration_s": result.get("duration_seconds"),
+                        "num_turns": result.get("num_turns"), "usage": result.get("usage") or {},
+                        "upstream_status_code": up_status, "upstream_headers": up_headers,
+                        "upstream_not_started": result.get("upstream_not_started") is True,
+                        "fail_stage": result.get("fail_stage") if isinstance(result.get("fail_stage"), str) else "",
+                    }))
             rc: int | None
             try:
                 rc = self.proc.wait(timeout=PROC_EXIT_WAIT_S)
@@ -6412,7 +6415,7 @@ def _done_recovery_aliases_enabled() -> bool:
 @_LIFECYCLE.install
 class Handler(BaseHTTPRequestHandler):
     _registry_job: _Job | None = None
-    protocol_version = "HTTP/1.1"
+    protocol_version = "HTTP/1.1"; timeout = 1800
     server_version = "agy-bridge/1.0"
 
     def log_message(self, format: str, *args: Any) -> None:  # noqa: A003
@@ -6587,20 +6590,20 @@ class Handler(BaseHTTPRequestHandler):
         gone = [False]
 
         def state(name: str, rc: int, err: str = "") -> dict:
-            return {
-                "rc": rc,
-                "text": "".join(pieces),
-                "reasoning": "".join(reasoning_pieces),
-                "usage": usage,
-                "result": result_ev,
-                "state": name,
-                "err": err,
+            out = {
+                "rc": rc, "text": "".join(pieces),
+                "reasoning": "".join(reasoning_pieces), "usage": usage,
+                "result": result_ev, "state": name, "err": err,
                 "conversation_id": conversation_id,
-                "duration_s": result_ev.get("duration_s"),
-                "num_turns": result_ev.get("num_turns"),
-                "tool_events": tool_events,
-                "tool_calls": [],
+                "duration_s": result_ev.get("duration_s"), "num_turns": result_ev.get("num_turns"),
+                "tool_events": tool_events, "tool_calls": [],
+                "response_started": bool(pieces or reasoning_pieces or tool_events),
             }
+            status, headers = extract_upstream_error_meta(result_ev)
+            out.update(upstream_status_code=status, upstream_headers=headers)
+            if result_ev.get("upstream_not_started") is True: out["upstream_not_started"] = True  # noqa: E701
+            if isinstance(result_ev.get("fail_stage"), str): out["fail_stage"] = result_ev["fail_stage"]  # noqa: E701
+            return out
 
         def add_content(text: str) -> None:
             if gone[0] or not text:
@@ -7083,8 +7086,6 @@ class Handler(BaseHTTPRequestHandler):
             universal = bool(typed_ctx.get("universal_fallback"))
             if images and img_dir is not None:
                 if universal and not _is_image_input_enabled():
-                    # Staging выключили, пока ход ждал слот: media не отправляем,
-                    # ход идёт текстом (без mkdir и --add-dir).
                     _downgrade_to_text_in_run_once(
                         typed_ctx, "post_slot", "flag_disabled", 1, img_dir
                     )
@@ -7101,7 +7102,6 @@ class Handler(BaseHTTPRequestHandler):
                         rejected = _terminal_state("image_reject", gate.code)
                         self._log_done(cast(str, ctx["model"]), rejected, t_enter, cast(str, ctx["tag"]))
                         return rejected
-                    # Реестр активных каталогов ПЕРЕД mkdir: sweep не тронет живой ход.
                     with _active_lock:
                         _active_img_dirs.add(str(img_dir))
                     img_registered = True
@@ -7120,11 +7120,18 @@ class Handler(BaseHTTPRequestHandler):
                         img_dir = None
                         img_registered = False
             _retry_credit()
+            client_budget = calculate_retry_budget(T_REQ_BUDGET_S, ctx.get("client_retry_budget"))
             for attempt in (1, 2):
                 cancelled = (
                     self._registry_job is not None and self._registry_job.cancelled.is_set()
                 )
                 policy = None if cancelled else _build_timeout_policy(t_req_start)
+                if not cancelled and policy is None and client_budget.allow_retry and client_budget.attempt_s:
+                    policy = _TimeoutPolicy(t_req_start, min(IDLE_TIMEOUT_S, client_budget.attempt_s),
+                                            T_REQ_BUDGET_S, client_budget.attempt_s)
+                elif policy is not None and client_budget.allow_retry and client_budget.attempt_s:
+                    policy = _TimeoutPolicy(policy.t_req_start, policy.idle_timeout_s, policy.max_timeout_s,
+                                            min(policy.effective_max_timeout_s, client_budget.attempt_s), policy.can_start)
                 allowed, reason = should_allow_retry_attempt(
                     attempt=attempt, cancelled=cancelled, can_start=policy is None or policy.can_start
                 )
@@ -7209,8 +7216,6 @@ class Handler(BaseHTTPRequestHandler):
                         "agy_error",
                         "pump_error",
                     ):
-                        # Graceful-финал пишется ДО зачистки процесса: kill/reap не
-                        # съедает окно финальной записи. Внутренний state/rc не меняются.
                         try:
                             finalize(out)
                         except Exception as exc:  # noqa: BLE001
@@ -7222,10 +7227,7 @@ class Handler(BaseHTTPRequestHandler):
                 if out["state"] == "done":
                     break
                 if out["state"] == "capacity_exhausted":
-                    # Повтор бессмысленен: upstream без ёмкости.
                     break
-                # Выдача клиенту: текст, tool_calls или уже отданное в поток мышление.
-                # JSON-режим мышление клиенту ещё не отдавал — там повтор безопасен.
                 typed_out = cast("dict[str, object]", out)
                 delivered_reasoning = bool(
                     typed_out.get("delivered_reasoning")
@@ -7245,9 +7247,6 @@ class Handler(BaseHTTPRequestHandler):
                     and out["state"] not in ("done", "client_gone")
                     and not delivered
                 ):
-                    # Реальная image-попытка упала без выдачи: один text-only повтор
-                    # ДО обеих legacy-веток (hot continue и transient). Один токен
-                    # бюджета, если есть; иначе — разовый резерв деградации запроса.
                     _downgrade_to_text_in_run_once(
                         typed_ctx,
                         "runtime",
@@ -7267,15 +7266,12 @@ class Handler(BaseHTTPRequestHandler):
                     and AGY_BRIDGE_ENABLE_TRANSIENT_502_RECOVERY
                     and out["state"] in ("agy_error", "pump_error")
                     and not delivered
+                    and _incident_retry_allowed(ctx, out, delivered, T_REQ_BUDGET_S)
                     and _is_transient_upstream_error(out.get("err"))
                 ):
-                    # Сбой upstream (502/503/сеть), а не разговора: сессия не
-                    # инвалидируется, lease cid остаётся в _in_flight_cids до finally
-                    # HTTP-хендлера, повтор идёт в тот же conversation_id.
                     if attempt == 2 or not _TURN_RESILIENCE.take(ctx, out, _retry_take, _log):
                         if attempt != 2:
                             _log(f"retry-budget-exhausted state={out['state']} {tag}")
-                        # Повторы исчерпаны: сломанная сессия не достаётся следующим ходам.
                         _TURN_RESILIENCE.invalidate(ctx, out, _session_invalidate, _log)
                         break
                     _log(
@@ -7285,8 +7281,6 @@ class Handler(BaseHTTPRequestHandler):
                     time.sleep(_retry_pause_s(attempt))
                     continue
                 if ctx.get("hot_resumed") and out["state"] != "client_gone":
-                    # Горячая сессия сломалась: больше её не используем, а повтор
-                    # идёт холодным вызовом с полной историей.
                     _TURN_RESILIENCE.invalidate(ctx, out, _session_invalidate, _log)
                     _cid_release(
                         str(ctx["conversation_id"]), str(ctx.get("turn_id") or "")
@@ -7298,6 +7292,7 @@ class Handler(BaseHTTPRequestHandler):
                         out["state"] == "agy_error"
                         and not delivered
                         and not _is_cli_rejection_outcome(out)
+                        and _incident_retry_allowed(ctx, out, delivered, T_REQ_BUDGET_S)
                     ):
                         if not _retry_take():
                             _log(f"retry-budget-exhausted state={out['state']} {tag}")
@@ -7307,11 +7302,11 @@ class Handler(BaseHTTPRequestHandler):
                             f"cold fallback {tag}"
                         )
                         continue
-                # Транзиентный сбой до выдачи клиенту — один невидимый повтор.
                 transient = (
                     out["state"] in ("agy_error", "pump_error", "done")
                     and not delivered
                     and not _is_cli_rejection_outcome(out)
+                    and _incident_retry_allowed(ctx, out, delivered, T_REQ_BUDGET_S)
                 )
                 if not transient or attempt == 2:
                     break
@@ -7351,7 +7346,7 @@ class Handler(BaseHTTPRequestHandler):
                 )
             _slots.release()
             slot_and_session.release_admission_for_state(
-                _hygiene_rt().release, adm_dec.ticket_id, cast("dict[str, object]", out)
+                _hygiene_rt().release, adm_dec.ticket_id, cast("dict[str, object]", out), run=self._metric_run
             )
         self._log_done(
             cast(str, ctx["model"]),
@@ -7456,11 +7451,8 @@ class Handler(BaseHTTPRequestHandler):
         if st == "capacity_exhausted":
             return capacity_error_body(detail=out.get("err"))
         if st == "agy_error":
-            return {
-                "message": str(out.get("err") or "agy reported an error")[:500],
-                "type": "agy_error",
-                "code": 502,
-            }
+            status, headers = extract_upstream_error_meta(out)
+            return upstream_error_body(out.get("err"), out.get("request_id"), status, headers)
         if resilience is None:
             resilience = _new_flag("AGY_BRIDGE_STREAM_RESILIENCE_ENABLED", True)
         has_payload = bool(out.get("text"))
@@ -7968,6 +7960,7 @@ class Handler(BaseHTTPRequestHandler):
                 "registry_owned_cid": owned_cid,
                 "t_req_start": t_req_start,
                 "req_id": req_id,
+                "client_retry_budget": parse_retry_budget_header(self.headers),
                 "step_job_id": str(
                     self.headers.get("X-Idempotency-Key")
                     or req.get("step_job_id")
@@ -8189,17 +8182,20 @@ class Handler(BaseHTTPRequestHandler):
         retained_reasoning = retained_cache[0][1] if retained_cache else ""
         reasoning = str(out.get("reasoning") or "") + retained_reasoning
         reasoning += "".join(markers)
-        err = self._error_body(out, bool(ctx.get("stream_resilience_enabled", True)))
+        err = self._error_body(out | {"request_id": ctx.get("req_id")}, bool(ctx.get("stream_resilience_enabled", True)))
         if err is None and tool_turn is not None:
             tool_turn.finish()
             if tool_turn.error:
                 err = tool_turn.error_body()
         if err is not None:
+            status = cast(int, err.pop("_status", err["code"]))
+            headers = cast("dict[str, str] | None", err.pop("_headers", None))
             extra = sse_stream_helpers.retry_after_headers(out, err)
-            if extra:
-                self._send(err["code"], {"error": err}, extra)
+            merged = {**(extra or {}), **(headers or {})} or None
+            if merged:
+                self._send(status, {"error": err}, merged)
             else:
-                self._send(err["code"], {"error": err})
+                self._send(status, {"error": err})
             return
         reg = ctx.get("register_post_turn")
         if callable(reg):

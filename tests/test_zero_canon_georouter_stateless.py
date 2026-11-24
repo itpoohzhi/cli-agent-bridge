@@ -233,3 +233,45 @@ def test_header_boundary_positive_control_local_subbridge() -> None:
         wire = _wire(_adapter("/claude"))
     assert wire["x-review-profile"] == "zero-canon"
     assert wire["x-subagent-id"] == "coder-1"
+
+
+def test_resolve_post_route_zero_canon_callable_adapters_registry() -> None:
+    """Боевой AdapterRegistry/GatedRegistry отдаёт adapters() методом, а deepseek-direct стоит первым с weight=0."""
+    host = _make_host()
+    host.BACKENDS = _FakeBackends([*host.BACKENDS.adapters(), _FakeAdapter("deepseek-direct", "http://127.0.0.1:10830/sg-deepseek")])
+    host.FLEET["models"]["deepseek-v4.1-flash"]["routing"]["routes"] = [
+        {"route_id": "deepseek-direct", "backend": "deepseek-direct", "weight": 0, "priority": 20},
+        {"route_id": "neuralwatt", "backend": "neuralwatt", "weight": 60, "priority": 5},
+        {"route_id": "opencode-go", "backend": "opencode-go", "weight": 40, "priority": 10},
+    ]
+    handler = _FakeHandler(headers={"X-Review-Profile": ZC})
+    ctx = PostRequestContext(handler, host)  # type: ignore[arg-type]
+    ctx.prepare_route(b"{}", {"model": "deepseek-v4.1-flash"})
+    route = http_post_routing.resolve_post_route(ctx)
+    assert route is not None and not handler.rejects and not handler.replies
+    assert route.model["backend"] == "neuralwatt"
+    assert [r["backend"] for r in route.model["routing"]["routes"]] == ["neuralwatt", "opencode-go"]
+    assert route.model["routing"]["zero_canon_backend"] == "neuralwatt"
+
+
+def test_apply_filtered_routes_prefers_positive_weight_over_zero_weight_reserve() -> None:
+    """Даже если reserve-маршрут (weight=0) идёт первым в kept, выбирается активный маршрут с weight>0."""
+    from core.routing_weights_runtime import base_model_routing
+
+    routing: dict[str, Any] = {
+        "enabled": True,
+        "legacy_backend": "neuralwatt",
+        "disabled_backend": "neuralwatt",
+        "routes": [
+            {"route_id": "reserve-a", "backend": "reserve-a", "weight": 0, "priority": 20},
+            {"route_id": "neuralwatt", "backend": "neuralwatt", "weight": 60, "priority": 5},
+            {"route_id": "opencode-go", "backend": "opencode-go", "weight": 40, "priority": 10},
+        ],
+    }
+    route = SimpleNamespace(model={"id": "deepseek-v4.1-flash", "backend": "neuralwatt", "routing": routing})
+    http_post_routing._apply_filtered_routes(route, routing, list(routing["routes"]))  # type: ignore[arg-type]
+    assert route.model["backend"] == "neuralwatt"
+    assert route.model["routing"]["zero_canon_backend"] == "neuralwatt"
+    effective = base_model_routing(route.model)
+    assert effective is not None
+    assert [r["backend"] for r in effective["routes"]] == ["reserve-a", "neuralwatt", "opencode-go"]

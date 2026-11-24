@@ -7,18 +7,18 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from enum import Enum
 from typing import Final, Protocol
+from core.error_taxonomy import classify_upstream_error
+from core.replay_policy import quota_failover_eligibility
 from core.retry_control import MAX_TOTAL_ATTEMPTS_LIMIT
 from core.route_health_policy import AttemptDecision, RetryBudgetConfig, RetryReason, compute_attempt_decision, validate_retry_config
 from core.routing_contract import PreSendTransientError
 
-DEFAULT_ROUTE_FAILOVER_STATUSES = frozenset({401, 429, 503})
-# Статусы, которые провайдер вообще вправе объявить отказом слота (per-route opt-in).
+DEFAULT_ROUTE_FAILOVER_STATUSES = frozenset({401, 503})
 ALLOWED_FAILOVER_STATUSES = frozenset({401, 402, 403, 429, 503})
 ENV_POOL_EXHAUSTED_RETRY_AFTER_S = "BRIDGE_POOL_EXHAUSTED_RETRY_AFTER_S"
 DEFAULT_POOL_EXHAUSTED_RETRY_AFTER_S = 60
 # Маркеры исчерпания слота не зашиты в ядро: провайдер объявляет их декларативно
 # (`failover.message_markers` манифеста -> `failover_message_markers` бэкенда).
-# Безопасные причины для сводной ошибки: без quota-лексики и типов, маскируемых клиентом.
 _SAFE_REASONS = {
     401: "upstream rejected the slot key (HTTP 401)",
     402: "payment required by upstream (HTTP 402)",
@@ -51,9 +51,10 @@ def is_route_refusal_status(
     extra_error_types: Iterable[str] = (),
     message_markers: Iterable[str] = (),
 ) -> bool:
-    """Отказ слота: глобальные статусы или per-route расширение по телу ошибки.
+    """Отказ слота: defaults или явно настроенный статус маршрута.
 
-    Расширение действует только для статусов из `extra_statuses` конкретного
+    429 требует `extra_statuses`; квотный переход также требует opt-in и
+    разные непустые quota_group. Расширение действует для статусов конкретного
     маршрута. Если маршрут объявил `extra_error_types` и/или `message_markers`,
     отказом считается только совпадение типа ошибки или маркера в сообщении
     (без захардкоженных провайдерных эвристик ядра: 402 сам по себе и чужие
@@ -80,29 +81,21 @@ def effective_failover_statuses(
     allowed_statuses: Iterable[int] = DEFAULT_ROUTE_FAILOVER_STATUSES,
     extra_statuses: Iterable[int] = (),
 ) -> frozenset[int]:
-    """Итоговое множество replay-статусов: разрешённые вызывающим плюс opt-in провайдера.
-
-    Пересечение с `ALLOWED_FAILOVER_STATUSES` сохраняет инвариант: статусы
-    вроде 502, не доказывающие отсутствие исполнения, replay не разрешают.
-    """
+    """Итоговое множество replay-статусов с per-route opt-in провайдера."""
     return (frozenset(allowed_statuses) | frozenset(extra_statuses)) & ALLOWED_FAILOVER_STATUSES
 
 
 @dataclass(frozen=True, slots=True)
 class RouteFailover:
-    """Единый per-route контракт failover одного бэкенда/маршрута.
-
-    Вычисляется строго из конфига конкретного бэкенда и никогда не объединяется
-    по модели: non-opt-in сосед по модели не наследует чужие статусы/маркеры.
-    `pool`/`pool_label` задают принадлежность слота пулу сводной ошибки 429
-    независимо от `quota_group` учёта квот.
-    """
+    """Единый per-route контракт failover одного бэкенда/маршрута."""
 
     statuses: frozenset[int] = frozenset()
     error_types: frozenset[str] = frozenset()
     message_markers: tuple[str, ...] = ()
     pool: str = ""
     pool_label: str = ""
+    quota_group: str = ""
+    quota_failover_opt_in: bool = False
 
     @property
     def opt_in(self) -> bool:
@@ -128,13 +121,7 @@ class RouteFailover:
         )
 
     def is_refusal(self, status: int, body: bytes = b"") -> bool:
-        """Универсальный отказ слота, сужаемый только явным контрактом провайдера.
-
-        Любой не-2xx — кандидат на pre-commit failover. Провайдер вправе объявить,
-        что конкретный статус (например 403 у OpenCode Go) означает отказ слота
-        лишь при совпадении payload-подписи; остальные статусы остаются
-        универсальными, поэтому allowlist статусов не требуется.
-        """
+        """Любой не-2xx — pre-commit кандидат; payload-контракт может сузить статус."""
         if 200 <= status < 300:
             return False
         if status in self.statuses and (self.error_types or self.message_markers):
@@ -167,6 +154,8 @@ def failover_from_mapping(config: Mapping[str, object] | None) -> RouteFailover:
         ),
         pool=pool if isinstance(pool, str) else "",
         pool_label=pool_label if isinstance(pool_label, str) else "",
+        quota_group=config.get("quota_group") if isinstance(config.get("quota_group"), str) else "",
+        quota_failover_opt_in=config.get("quota_failover_opt_in") is True,
     )
 
 
@@ -395,8 +384,6 @@ class RouteAttemptRunner:
         self._last_state: AttemptState | None = None
         self._last_error: BaseException | None = None
         self._allowed_statuses = tuple(allowed_statuses)
-        # Плоский `extra_statuses` — только legacy-дефолт для бэкендов без записи
-        # в `failover_by_backend`; per-route контракт имеет приоритет по бэкенду.
         self._statuses = effective_failover_statuses(allowed_statuses, extra_statuses)
         self._failover_by_backend = dict(failover_by_backend or {})
         self._active_statuses = self._statuses
@@ -432,8 +419,6 @@ class RouteAttemptRunner:
                 return False, None
             attempt = self._context()
             self._attempts += 1
-            # Статусы переключаются только после оценки предыдущей попытки:
-            # её исход судит контракт её собственного бэкенда, не следующего.
             self._active_statuses = self._statuses_for(backend)
             attempt.advance(AttemptPhase.CONNECTING)
             return True, self._ports.execute(backend, attempt)
@@ -477,6 +462,15 @@ class RouteAttemptRunner:
         if lease is None:
             return False, None
         return self._execute(backend, lease)
+    def _quota_candidate_allowed(self, source: str, candidate: str) -> bool:
+        if not isinstance(self._last_error, RouteRefusal):
+            return True
+        kind, message = parse_upstream_error(self._last_error.response_body)
+        if classify_upstream_error(f"{kind} {message}").category != "QUOTA": return True  # noqa: E701
+        current = self._failover_by_backend.get(source, RouteFailover())
+        target = self._failover_by_backend.get(candidate, RouteFailover())
+        return quota_failover_eligibility(current.quota_group, (target.quota_group,),
+                                          current.quota_failover_opt_in).eligible
     def run(self) -> object:
         """Посещает backend один раз; только доказанный отказ допускает следующий."""
         if self._used:
@@ -489,9 +483,12 @@ class RouteAttemptRunner:
                 raise self._last_error from None
             raise
     def _run_routes(self) -> object:
+        previous = ""
         for backend in self._routes:
             self._check_cancelled()
             if backend in self._visited:
+                continue
+            if previous and not self._quota_candidate_allowed(previous, backend):
                 continue
             self._visited.add(backend)
             try:
@@ -500,6 +497,7 @@ class RouteAttemptRunner:
                 if not self._retryable_error(exc):
                     raise
                 self._last_error = exc
+                previous = backend
             else:
                 if completed:
                     return result

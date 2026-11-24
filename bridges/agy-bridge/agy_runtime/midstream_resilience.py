@@ -248,3 +248,28 @@ class AgyContinuation:
         return process
     def cleanup(self, process: Any) -> None:
         self.supervisor.kill_group(self._owned.pop(id(process)))
+
+
+def finish_transcript_tail(
+    tail: Any,
+    close_fn: Callable[[Any], None],
+    pool_fn: Callable[[], Any],
+    breaker_fn: Callable[..., None],
+    release_cid_fn: Callable[[str, str], None],
+) -> None:
+    if tail._finished:
+        return
+    tail._finished = True
+    try:
+        with tail._conn_lock:
+            conn = tail._active_conn
+            tail._active_conn = None
+            if conn is not None:
+                close_fn(conn)
+        if (pool := pool_fn()) is not None:
+            pool.release_thread()
+        if tail.plan.mode in ("LIVE", "SHADOW"):
+            breaker_fn(tail.probe_gen, tail.selects_ok, tail.failed)
+    finally:
+        if tail._owned_cid:
+            release_cid_fn(tail._owned_cid, tail.turn_id)

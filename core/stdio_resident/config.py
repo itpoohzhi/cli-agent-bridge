@@ -30,8 +30,8 @@ class StdioPoolConfig:
     max_slots_per_principal: int | None = None
     max_ephemeral_slots: int = 2
     handshake_timeout_s: float = 30.0
-    turn_idle_timeout_s: float = 180.0
-    turn_total_timeout_s: float = 600.0
+    turn_idle_timeout_s: float = 600.0
+    turn_total_timeout_s: float = 1800.0
     max_turn_output_bytes: int = 4194304
     rss_check_interval_s: float = 10.0
     leave_timeout_s: float = 2.0
@@ -63,10 +63,10 @@ class StdioPoolConfig:
             ("BRIDGE_STDIO_HANDSHAKE_TIMEOUT_S",), 30.0, 0.01, 3600.0
         ),
         "turn_idle_timeout_s": _S(
-            ("BRIDGE_STDIO_TURN_IDLE_TIMEOUT_S",), 180.0, 0.01, 86400.0
+            ("BRIDGE_STDIO_TURN_IDLE_TIMEOUT_S",), 600.0, 0.01, 86400.0
         ),
         "turn_total_timeout_s": _S(
-            ("BRIDGE_STDIO_TURN_TOTAL_TIMEOUT_S",), 600.0, 0.01, 86400.0
+            ("BRIDGE_STDIO_TURN_TOTAL_TIMEOUT_S",), 1800.0, 0.01, 86400.0
         ),
         "max_turn_output_bytes": _S(
             ("BRIDGE_STDIO_MAX_TURN_OUTPUT_BYTES",),

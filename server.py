@@ -486,14 +486,14 @@ _SANITIZE_LIMITS = {
 WORKSPACE = ROOT / "workspace"
 MAX_CONCURRENT = int(_bridge_env("MAX_CONCURRENT", "128"))
 QUEUE_TIMEOUT_S = float(_bridge_env("QUEUE_TIMEOUT_S", "900.0"))
-TIMEOUT_S = float(_bridge_env("TIMEOUT_S", "1800.0"))
+TIMEOUT_S = float(_bridge_env("TIMEOUT_S", "3600.0"))
 KEEPALIVE_S = float(_bridge_env("KEEPALIVE_S", "10.0"))
-IDLE_TIMEOUT_S = float(_bridge_env("IDLE_TIMEOUT_S", "120.0"))
+IDLE_TIMEOUT_S = float(_bridge_env("IDLE_TIMEOUT_S", "600.0"))
 SAFETY_CAP_S = WatchdogConfig.from_env().safety_cap_s
 UI_RESERVED_SLOTS = int(_bridge_env("UI_RESERVED_SLOTS", "2"))
 SUBAGENT_MAX_CONCURRENT = int(_bridge_env("SUBAGENT_MAX_CONCURRENT", "128"))
 SUBAGENT_QUEUE_TIMEOUT_S = float(_bridge_env("SUBAGENT_QUEUE_TIMEOUT_S", "120.0"))
-SUBAGENT_WATCHDOG_CAP_S = float(_bridge_env("SUBAGENT_WATCHDOG_CAP_S", "300.0"))
+SUBAGENT_WATCHDOG_CAP_S = float(_bridge_env("SUBAGENT_WATCHDOG_CAP_S", "1800.0"))
 
 
 # RW-009 в живом ходе: запись живого куска клиенту ограничена этим таймаутом (а не 300с
@@ -5327,7 +5327,7 @@ def release_turn_slot(handler: Any, t_held: bool, t_released: list[bool]) -> Non
 
 class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
-    timeout = 300
+    timeout = 3600
     _delivery_reserved = 0  # байты, взятые в _DELIVERY_BUDGET текущим запросом (RW-011)
     _client_write_dead = False  # RW-203: живая запись отвергнута — терминал не шлём
     _active_managed_turn: ManagedTurn | None = None

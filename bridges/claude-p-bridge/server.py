@@ -187,7 +187,7 @@ def _is_watchdog_enabled() -> bool:
 
 
 CLAUDE_P_BRIDGE_IDLE_TIMEOUT_S = _get_positive_float(
-    "CLAUDE_P_BRIDGE_IDLE_TIMEOUT_S", "BRIDGE_IDLE_TIMEOUT_S", 300.0
+    "CLAUDE_P_BRIDGE_IDLE_TIMEOUT_S", "BRIDGE_IDLE_TIMEOUT_S", 600.0
 )
 CLAUDE_P_BRIDGE_IO_WAIT_CAP_S = _get_positive_float(
     "CLAUDE_P_BRIDGE_IO_WAIT_CAP_S", "BRIDGE_IO_WAIT_CAP_S", 900.0
@@ -290,7 +290,7 @@ IO_CHUNK_BYTES = _env_positive_int("CLAUDE_P_BRIDGE_IO_CHUNK_BYTES", 64 * 1024)
 PROCESS_WAIT_S = float(os.environ.get("CLAUDE_P_BRIDGE_PROCESS_WAIT_S", "5"))
 POLL_INTERVAL_S = float(os.environ.get("CLAUDE_P_BRIDGE_POLL_INTERVAL_S", "1"))
 STDERR_DRAIN_S = float(os.environ.get("CLAUDE_P_BRIDGE_STDERR_DRAIN_S", "0.05"))
-HTTP_TIMEOUT_S = float(os.environ.get("CLAUDE_P_BRIDGE_HTTP_TIMEOUT_S", "300"))
+HTTP_TIMEOUT_S = float(os.environ.get("CLAUDE_P_BRIDGE_HTTP_TIMEOUT_S", "1800"))
 HTTP_BACKLOG = _env_positive_int("CLAUDE_P_BRIDGE_HTTP_BACKLOG", 64)
 # Лимиты изображений — env с безопасными значениями по умолчанию из core.
 MAX_IMAGES = _env_positive_int("CLAUDE_P_BRIDGE_MAX_IMAGES", DEFAULT_MAX_IMAGES)

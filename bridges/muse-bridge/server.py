@@ -186,7 +186,7 @@ PORT = _positive_int(os.environ.get("MUSE_BRIDGE_PORT"), 9886)
 AUTH_KEY = os.environ.get("MUSE_BRIDGE_KEY", "").strip()
 
 TIMEOUT_S = float(os.environ.get("MUSE_BRIDGE_TIMEOUT_S", "3600"))
-IDLE_TIMEOUT_S = float(os.environ.get("MUSE_BRIDGE_IDLE_TIMEOUT_S", "300"))
+IDLE_TIMEOUT_S = float(os.environ.get("MUSE_BRIDGE_IDLE_TIMEOUT_S", "600"))
 MAX_CONCURRENT = _positive_int(os.environ.get("MUSE_BRIDGE_MAX_CONCURRENT"), 32)
 
 MUSE_WRAPPER = os.environ.get(
@@ -1992,7 +1992,7 @@ class ServeRun:
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
-    timeout = 300
+    timeout = 1800
 
     def log_message(self, format: str, *args: Any) -> None:
         _log("http " + (format % args))
