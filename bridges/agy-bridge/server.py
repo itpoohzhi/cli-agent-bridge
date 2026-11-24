@@ -167,6 +167,7 @@ def _hygiene_rt() -> HygieneRuntime:
 
 from agy_runtime import history_compaction_adapter as _hca  # noqa: E402
 from agy_runtime.history_compaction_domain import json_text_bytes as _json_text_bytes, middle_prune_text as _middle_prune_text  # noqa: E402
+from agy_runtime.history_user_classifier import is_synthetic_user_block as _classify_synthetic_user_block  # noqa: E402
 from core.correlation_contract import extract_correlation, format_log_corr_suffix  # noqa: E402
 from core.error_taxonomy import classify_upstream_error, extract_upstream_error_meta, upstream_error_body  # noqa: E402
 from core.replay_policy import apply_budget_to_proof, build_replay_proof, calculate_retry_budget, parse_retry_budget_header  # noqa: E402
@@ -741,27 +742,6 @@ PROMPT_MAX_NDJSON_BYTES = _env_int(
 )
 # Минимум головы и хвоста якорного блока при пропорциональном сжатии (байты).
 PRUNE_EDGE_MIN_BYTES = _env_int("AGY_BRIDGE_PRUNE_EDGE_MIN_BYTES", 512, 512, 8192)
-# Завершённые напоминания и точные форматы снимка/уведомлений (ADR-0019).
-SYNTHETIC_REMINDER_RE = re.compile(
-    r"<system-reminder>(?:(?!</?system-reminder>).)*</system-reminder>", re.DOTALL
-)
-SYNTHETIC_RUNTIME_RE = re.compile(
-    r"Current runtime context\. This snapshot supersedes earlier "
-    r"(?:runtime-context )?snapshots\."
-    r'(?:\n\n?Current working directory: "[^"\n]+"\.)?'
-)
-SYNTHETIC_POLICY_RE = re.compile(
-    r'The approval policy changed from "[^"\n]+" to "[^"\n]+" '
-    r"\(changed by the user\)\."
-)
-# Служебное уведомление DSH об одобрении/отказе инструмента — синтетика только при
-# точном совпадении всего тела; любой иной текст `The user approved ...` — ввод
-# человека (ADR-0019, Cycle 4 F-001).
-SYNTHETIC_NOTICE_RE = re.compile(
-    r"The user (?:approved|rejected)(?: the)? (?:bash|command|tool)"
-    r"(?: command| call)?(?:\.)?",
-    re.IGNORECASE,
-)
 # Сверх этого числа реальных user текущего хода якорями остаются только
 # первый (исходная цель) и последние ANCHOR_USER_TAIL_COUNT (ADR-0019, Cycle 5 F-005).
 ANCHOR_USER_NO_ASSISTANT_MAX = _env_int(
@@ -2507,27 +2487,8 @@ def _join_prompt_parts(parts: list[str], tail_block: str = "") -> str:
 
 
 def _is_synthetic_user_block(rendered_text: str) -> bool:
-    """Синтетическое напоминание/снимок рантайма, а не ввод человека (ADR-0019).
-
-    Завершённые теги занимают всё тело без полезного текста снаружи. Уведомления
-    распознаются по полному известному формату; совпадения префикса недостаточно.
-    Неизвестные форматы остаются вводом человека, чтобы не потерять директиву.
-    """
-    lines = rendered_text.splitlines()
-    body = "\n".join(
-        lines[1:] if len(lines) > 1 and lines[0].startswith("### ") else lines
-    ).strip()
-    if not body:
-        return False
-    if (
-        SYNTHETIC_REMINDER_RE.search(body)
-        and not SYNTHETIC_REMINDER_RE.sub("", body).strip()
-    ):
-        return True
-    return any(
-        pattern.fullmatch(body) is not None
-        for pattern in (SYNTHETIC_RUNTIME_RE, SYNTHETIC_POLICY_RE, SYNTHETIC_NOTICE_RE)
-    )
+    """Классифицировать user-блок через единый runtime-контракт AD-001."""
+    return _classify_synthetic_user_block(rendered_text)
 
 
 def _prompt_anchor_indices(blocks: list[tuple[int, str, str]]) -> set[int]:
@@ -6358,7 +6319,8 @@ def _done_recovery_aliases_enabled() -> bool:
 @_LIFECYCLE.install
 class Handler(BaseHTTPRequestHandler):
     _registry_job: _Job | None = None
-    protocol_version = "HTTP/1.1"; timeout = 1800
+    protocol_version = "HTTP/1.1"
+    timeout = 1800
     server_version = "agy-bridge/1.0"
 
     def log_message(self, format: str, *args: Any) -> None:  # noqa: A003

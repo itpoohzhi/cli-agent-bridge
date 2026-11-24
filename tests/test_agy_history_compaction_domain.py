@@ -29,6 +29,7 @@ from agy_runtime.history_compaction_domain import (  # noqa: E402
     json_text_bytes,
     middle_prune_text,
 )
+import agy_runtime.history_compaction_domain as compaction_domain  # noqa: E402
 
 _CANARY = "CANARY_FACT_ALPHA_7391"
 _CODENAME = "LARCH-7391"
@@ -295,3 +296,165 @@ def test_anchor_without_user_stops_at_first_non_system() -> None:
     s0 = _block(0, "system", "S0")
     seq = [s0, _block(1, "tool", "T1"), _block(2, "system", "S2")]
     assert anchor_prefix_sha256(seq, "\n\n") == anchor_prefix_sha256([s0], "\n\n")
+
+
+def _synthetic(index: int, body: str) -> PromptBlock:
+    return _block(index, "user", body)
+
+
+def test_session_3a8cf9f1_real_user_is_anchor_and_hash_input() -> None:
+    approval = "The user approved the bash command."
+    real = "SESSION_REAL_USER\nmultiline request\n" + "r" * 6000 + " REAL_USER_END"
+    blocks = [
+        _block(0, "system", "s" * 65000),
+        _synthetic(1, approval),
+        _block(2, "user", real),
+        _synthetic(3, "<system-reminder>\nAGENTS.md\n" + "a" * 400 + "\n</system-reminder>"),
+        _synthetic(
+            4,
+            'Current runtime context. This snapshot supersedes earlier snapshots.\n\n'
+            'Current working directory: "/tmp/work".',
+        ),
+        _synthetic(5, "<system-reminder>\nskill-catalog\n" + "k" * 7000 + "\n</system-reminder>"),
+    ]
+    wide = compact_prompt_blocks(blocks, _cfg(72760))
+    shifted = compact_prompt_blocks(blocks, _cfg(72760 - 276))
+    changed = [*blocks[:2], _block(2, "user", real + " changed"), *blocks[3:]]
+    assert "REAL_USER_END" in wide.prompt and "REAL_USER_END" in shifted.prompt
+    assert wide.prompt.index(approval) < wide.prompt.index("SESSION_REAL_USER")
+    assert wide.prompt_prefix_sha256 == shifted.prompt_prefix_sha256
+    assert wide.prompt_prefix_sha256 != anchor_prefix_sha256(changed, "\n\n")
+
+
+def test_last_real_turn_survives_trailing_large_system_reminder() -> None:
+    blocks = [
+        _block(0, "system", "sys"),
+        _block(1, "user", "initial request"),
+        _block(2, "assistant", "old answer " + "o" * 8000),
+        _block(3, "user", "TURN_K_BEGIN\n" + "u" * 6000 + "\nTURN_K_END"),
+        _synthetic(
+            4,
+            "<system-reminder>\nTRAILING_SERVICE_BLOCK\n"
+            + "z" * 25000
+            + "\n</system-reminder>",
+        ),
+    ]
+    result = compact_prompt_blocks(blocks, _cfg(12000))
+    assert result.prompt_bytes <= 12000
+    assert "TURN_K_BEGIN" in result.prompt and "TURN_K_END" in result.prompt
+    assert "TRAILING_SERVICE_BLOCK" not in result.prompt
+
+
+def test_multiturn_tail_and_digest_remain_chronological() -> None:
+    blocks = [_block(0, "system", "sys"), _block(1, "user", "ANCHOR_U1")]
+    blocks.append(_block(2, "user", "TURN_U2"))
+    for turn in range(1, 21):
+        blocks.extend(
+            [
+                _block(2 * turn + 1, "assistant", f"[tool call c{turn}] run({turn})"),
+                _block(
+                    2 * turn + 2,
+                    "tool",
+                    f"[tool result c{turn}] RESULT_{turn:02d} " + "x" * 900,
+                ),
+            ]
+        )
+
+    result = compact_prompt_blocks(blocks, _cfg(6500))
+
+    assert result.prompt_bytes <= 6500
+    assert result.prompt.index("ANCHOR_U1") < result.prompt.index("[сжатая история")
+    assert "TURN_U2" not in result.prompt
+    assert "[сжатая история ходов 2.." in result.prompt
+    assert result.prompt.index("[сжатая история ходов 2..") < result.prompt.index("RESULT_19")
+    assert result.prompt.index("RESULT_19") < result.prompt.index("RESULT_20")
+    full_indices = [int(value) for value in re.findall(r"^### (\d+)\.", result.prompt, re.M)]
+    assert full_indices == sorted(full_indices)
+    digest_match = re.search(r"история ходов 2\.\.(\d+)", result.prompt)
+    assert digest_match is not None
+    digest_end = int(digest_match.group(1))
+    assert digest_end < full_indices[2]
+
+
+def test_active_turn_carrier_follows_only_earlier_digest() -> None:
+    blocks = [_block(0, "system", "sys"), _block(1, "user", "ANCHOR_U1")]
+    for turn in range(1, 11):
+        blocks.extend(
+            [
+                _block(2 * turn, "assistant", f"[tool call old{turn}] run({turn})"),
+                _block(
+                    2 * turn + 1,
+                    "tool",
+                    f"[tool result old{turn}] OLD_{turn:02d} " + "x" * 700,
+                ),
+            ]
+        )
+    blocks.extend(
+        [
+            _block(22, "user", "TURN_K_BEGIN\nline two\nTURN_K_END"),
+            _synthetic(23, "<system-reminder>AGENTS.md " + "a" * 3000 + "</system-reminder>"),
+            _synthetic(24, "<system-reminder>skill-catalog " + "k" * 25000 + "</system-reminder>"),
+        ]
+    )
+
+    result = compact_prompt_blocks(blocks, _cfg(7000))
+
+    assert result.prompt_bytes <= 7000
+    assert "TURN_K_BEGIN\nline two\nTURN_K_END" in result.prompt
+    assert "skill-catalog" not in result.prompt
+    assert result.prompt.index("ANCHOR_U1") < result.prompt.index("[сжатая история")
+    assert result.prompt.index("[сжатая история") < result.prompt.index("TURN_K_BEGIN")
+    assert "#22 user" not in result.prompt
+    full_indices = [int(value) for value in re.findall(r"^### (\d+)\.", result.prompt, re.M)]
+    assert full_indices == sorted(full_indices)
+
+
+def test_zero_minimum_tail_still_digests_long_middle() -> None:
+    blocks = [_block(0, "system", "sys"), _block(1, "user", "ANCHOR")]
+    for turn in range(12):
+        blocks.extend(_tool_turn(2 + turn * 3, turn, body_chars=1800))
+
+    result = compact_prompt_blocks(
+        blocks,
+        CompactionConfig(limit_bytes=5000, tail_min_groups=0),
+    )
+
+    assert result.prompt_bytes <= 5000
+    assert result.digested_count > 0
+    assert "[сжатая история" in result.prompt
+
+
+def test_all_synthetic_last_user_is_protected_carrier() -> None:
+    protected = "<system-reminder>\nLAST_SYNTHETIC_CARRIER\n</system-reminder>"
+    blocks = [
+        _block(0, "system", "sys"),
+        _synthetic(1, "The user approved the bash command."),
+        _block(2, "assistant", "older output " + "x" * 20000),
+        _synthetic(3, protected),
+    ]
+    result = compact_prompt_blocks(blocks, _cfg(5000))
+    assert result.prompt_bytes <= 5000
+    assert "LAST_SYNTHETIC_CARRIER" in result.prompt
+
+
+def test_overflow_marks_synthetic_users_but_not_fallback_carrier(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: list[tuple[str, str]] = []
+
+    def capture(items: object, _spec: object) -> str:
+        seen.extend(items)  # type: ignore[arg-type]
+        return ""
+
+    monkeypatch.setattr(compaction_domain, "shrink_overflow_parts", capture)
+    compact_prompt_blocks(
+        [
+            _block(0, "system", "s" * 5000),
+            _synthetic(1, "The user approved the bash command."),
+            _synthetic(2, "<system-reminder>\nPROTECTED\n</system-reminder>"),
+        ],
+        _cfg(100),
+    )
+    roles = {text: role for role, text in seen}
+    assert roles[next(text for text in roles if "approved" in text)] == "synthetic"
+    assert roles[next(text for text in roles if "PROTECTED" in text)] == "user"

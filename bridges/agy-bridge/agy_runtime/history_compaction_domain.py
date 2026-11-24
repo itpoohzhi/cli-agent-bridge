@@ -1,11 +1,4 @@
-"""Чистый домен структурированной компакции истории диалога (AD-001).
-
-Детерминированная экстрактивная компакция: якорная голова (system + первое
-сообщение пользователя) и хвост сохраняются дословно, середина заменяется
-одним структурированным дайджестом с жёстким байтовым бюджетом. Пары
-tool-call/tool-result неделимы. Без I/O, env, случайности и таймстампов.
-"""
-
+"""Чистый домен детерминированной компакции истории диалога (AD-001)."""
 from __future__ import annotations
 
 import hashlib
@@ -13,8 +6,8 @@ import json
 import re
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-
 from .history_overflow_policy import OverflowSpec, shrink_overflow_parts
+from .history_user_classifier import is_synthetic_user_block
 
 DEFAULT_MIDDLE_PRUNED_MARKER = (
     "\n[... часть содержимого сообщения опущена мостом для соблюдения лимита"
@@ -23,14 +16,10 @@ DEFAULT_MIDDLE_PRUNED_MARKER = (
 _TOOL_REF_RE = re.compile(r"\[tool (?:call|result) ([^\]]+)\]")
 DEFAULT_INPUT_GUARD_BYTES = 4 * 1024 * 1024
 
-
 def json_text_bytes(text: str) -> int:
     """Байты UTF-8 строки после JSON-экранирования, без обрамляющих кавычек."""
     return len(json.dumps(text, ensure_ascii=False).encode("utf-8")) - 2
-
-
 def _bsearch_max(high: int, fits: Callable[[int], bool]) -> int:
-    """Наибольшее ``k`` из ``[0, high]``, где монотонный ``fits(k)`` истинен."""
     low = 0
     while low < high:
         mid = (low + high + 1) // 2
@@ -39,19 +28,12 @@ def _bsearch_max(high: int, fits: Callable[[int], bool]) -> int:
         else:
             high = mid - 1
     return low
-
-
 def middle_prune_text(
     text: str,
     max_json_bytes: int,
     marker: str = DEFAULT_MIDDLE_PRUNED_MARKER,
 ) -> str:
-    """Вырезать середину ``text`` с маркером под экранированный бюджет.
-
-    Голова и хвост делятся поровну по символам; результат — наибольший,
-    чей JSON-экранированный размер <= ``max_json_bytes``. Побайтово
-    эквивалентна ``_middle_prune_text`` из ``server.py`` (VER-003).
-    """
+    """Вырезать середину текста под экранированный байтовый бюджет."""
     if json_text_bytes(text) <= max_json_bytes:
         return text
     if json_text_bytes(marker) > max_json_bytes:
@@ -59,31 +41,24 @@ def middle_prune_text(
             len(text), lambda n: json_text_bytes(text[:n]) <= max_json_bytes
         )
         return text[:keep]
-
     def build(keep: int) -> str:
         head = (keep + 1) // 2
         tail = keep // 2
         return text[:head] + marker + (text[-tail:] if tail else "")
-
     keep = _bsearch_max(
         len(text) - 1, lambda k: json_text_bytes(build(k)) <= max_json_bytes
     )
     return build(keep)
 
-
 @dataclass(frozen=True, slots=True)
 class PromptBlock:
     """Один отрендеренный блок промпта (``### N. role`` + тело)."""
-
     index: int
     role: str
     rendered: str
-
-
 @dataclass(frozen=True, slots=True)
 class CompactionConfig:
     """Бюджет и политики компакции; дефолты здесь — единственный SSOT."""
-
     limit_bytes: int
     digest_ratio: float = 0.20
     min_digest_bytes: int = 1024
@@ -91,12 +66,9 @@ class CompactionConfig:
     tail_min_groups: int = 1
     middle_pruned_marker: str = DEFAULT_MIDDLE_PRUNED_MARKER
     separator: str = "\n\n"
-
-
 @dataclass(frozen=True, slots=True)
 class CompactionResult:
     """Итог компакции: промпт, его размер, хэш префикса и счётчики."""
-
     prompt: str
     prompt_bytes: int
     limit_bytes: int
@@ -106,13 +78,9 @@ class CompactionResult:
     digested_count: int
     dropped_count: int
 
-
 def _joined(blocks: Sequence[PromptBlock], separator: str) -> str:
     return separator.join(block.rendered for block in blocks)
-
-
 def _group_blocks(blocks: Sequence[PromptBlock]) -> tuple[tuple[PromptBlock, ...], ...]:
-    """Атомарные группы: assistant с tool call + следующие tool-блоки."""
     groups: list[tuple[PromptBlock, ...]] = []
     pos = 0
     while pos < len(blocks):
@@ -128,11 +96,16 @@ def _group_blocks(blocks: Sequence[PromptBlock]) -> tuple[tuple[PromptBlock, ...
             pos += 1
     return tuple(groups)
 
-
 def _anchor_group_count(groups: Sequence[tuple[PromptBlock, ...]]) -> int:
-    """Группы якоря: все до первого user включительно, иначе ведущие system."""
+    """Якорь до первого реального user; при его отсутствии — до любого user."""
     leading = 0
     in_leading = True
+    for idx, group in enumerate(groups):
+        if any(
+            block.role == "user" and not is_synthetic_user_block(block.rendered)
+            for block in group
+        ):
+            return idx + 1
     for idx, group in enumerate(groups):
         roles = [block.role for block in group]
         if "user" in roles:
@@ -142,54 +115,35 @@ def _anchor_group_count(groups: Sequence[tuple[PromptBlock, ...]]) -> int:
         else:
             in_leading = False
     return leading
-
-
 def _flatten(groups: Sequence[tuple[PromptBlock, ...]]) -> tuple[PromptBlock, ...]:
     return tuple(block for group in groups for block in group)
-
-
 def _prefix_sha256(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
-
-
 def anchor_prefix_sha256(blocks: Sequence[PromptBlock], separator: str) -> str:
     """SHA-256 якорного префикса блоков (system* + первый user)."""
     groups = _group_blocks(blocks)
     anchor = _flatten(groups[: _anchor_group_count(groups)])
     return _prefix_sha256(_joined(anchor, separator))
 
-
 def _first_content_line(rendered: str, max_chars: int) -> str:
-    """Первая непустая строка тела без заголовка ``### N. role``."""
     lines = (line.strip() for line in rendered.splitlines())
     content = (s[:max_chars] for s in lines if s and not s.startswith("### "))
     return next(content, "")
-
-
 def _digest_line(block: PromptBlock, max_chars: int) -> str:
     ids = [m.group(1) for m in _TOOL_REF_RE.finditer(block.rendered)]
     line = f"- #{block.index} {block.role}: {_first_content_line(block.rendered, max_chars)}"
     if ids:
         line += " [tools: " + ", ".join(dict.fromkeys(ids)) + "]"
     return line
-
-
 def _digest_text(blocks: tuple[PromptBlock, ...], header: str, width: int) -> str:
-    """Дайджест одной ширины анонса; при ``width=0`` — только tool-блоки."""
     shown = [b for b in blocks if width or _TOOL_REF_RE.search(b.rendered)]
     return "\n".join([header] + [_digest_line(b, width) for b in shown])
-
-
 def _compact_digest(blocks: tuple[PromptBlock, ...], header: str) -> str:
-    """Минимальный дайджест: заголовок и все tool ids середины."""
     found = [[m.group(1) for m in _TOOL_REF_RE.finditer(b.rendered)] for b in blocks]
     all_ids = [i for ids in found for i in dict.fromkeys(ids)]
     suffix = "\n- tool ids: " + ", ".join(dict.fromkeys(all_ids)) if all_ids else ""
     return header + suffix
-
-
 def _build_digest(blocks: tuple[PromptBlock, ...], cfg: _DigestBudget) -> str:
-    """Структурированный дайджест середины в пределах байтового бюджета."""
     first, last = blocks[0].index, blocks[-1].index
     header = f"[сжатая история ходов {first}..{last}: {len(blocks)} сообщений]"
     compact = _compact_digest(blocks, header)
@@ -198,62 +152,103 @@ def _build_digest(blocks: tuple[PromptBlock, ...], cfg: _DigestBudget) -> str:
         if json_text_bytes(candidate) <= cfg.budget:
             return candidate
     return middle_prune_text(compact, max(cfg.budget, 0), cfg.marker)
-
-
 @dataclass(frozen=True, slots=True)
 class _DigestBudget:
     budget: int
     marker: str
-
-
 @dataclass(frozen=True, slots=True)
 class _Layout:
     anchor: tuple[tuple[PromptBlock, ...], ...]
     middle: tuple[tuple[PromptBlock, ...], ...]
     tail: tuple[tuple[PromptBlock, ...], ...]
-
-
+    carrier: tuple[PromptBlock, ...] | None
 def _digest_budget(config: CompactionConfig) -> int:
     raw = int(config.limit_bytes * config.digest_ratio)
     capped = min(config.max_digest_bytes, max(config.min_digest_bytes, raw))
     return max(0, min(capped, config.limit_bytes))
-
-
+def _has_user(group: tuple[PromptBlock, ...], real: bool = False) -> bool:
+    return any(
+        block.role == "user"
+        and (not real or not is_synthetic_user_block(block.rendered))
+        for block in group
+    )
+def _last_user_group(
+    groups: Sequence[tuple[PromptBlock, ...]], real: bool
+) -> tuple[PromptBlock, ...] | None:
+    return next((group for group in reversed(groups) if _has_user(group, real)), None)
+def _active_tail_carrier(
+    groups: tuple[tuple[PromptBlock, ...], ...], real: bool
+) -> tuple[PromptBlock, ...] | None:
+    candidate = _last_user_group(groups, real)
+    if candidate is None:
+        return None
+    suffix = groups[groups.index(candidate) + 1:]
+    only_synthetic = all(_has_user(group) and not _has_user(group, True) for group in suffix)
+    return candidate if only_synthetic else None
 def _layout(
     groups: tuple[tuple[PromptBlock, ...], ...], config: CompactionConfig
 ) -> _Layout:
-    """Разрезать группы на якорь, середину и максимально влезающий хвост."""
     anchor_n = _anchor_group_count(groups)
     anchor, rest = groups[:anchor_n], groups[anchor_n:]
+    has_real = _last_user_group(groups, True) is not None
+    carrier = _active_tail_carrier(rest, has_real)
     anchor_text = _joined(_flatten(anchor), config.separator)
     sep_bytes = json_text_bytes(config.separator)
     extra = _digest_budget(config) + 2 * sep_bytes if rest else 0
-    reserve = json_text_bytes(anchor_text) + extra
-    tail: list[tuple[PromptBlock, ...]] = []
-    used = reserve
-    for group in reversed(rest):
-        cost = json_text_bytes(_joined(group, config.separator))
-        cost += sep_bytes if tail else 0
-        if tail and used + cost > config.limit_bytes:
-            break
-        tail.append(group)
-        used += cost
     min_tail = min(max(config.tail_min_groups, 0), len(rest))
-    tail.extend(reversed(rest[len(rest) - min_tail : len(rest) - len(tail)]))
-    tail_t = tuple(reversed(tail))
-    return _Layout(anchor, rest[: len(rest) - len(tail_t)], tail_t)
-
-
+    selected = set(rest[-min_tail:]) if min_tail > 0 else set()
+    if carrier is not None:
+        selected.update(rest[rest.index(carrier):])
+    used = json_text_bytes(anchor_text) + extra
+    used += sum(json_text_bytes(_joined(group, config.separator)) + sep_bytes for group in selected)
+    for group in reversed(rest):
+        if group in selected:
+            continue
+        cost = json_text_bytes(_joined(group, config.separator))
+        if used + cost + sep_bytes <= config.limit_bytes:
+            selected.add(group)
+            used += cost + sep_bytes
+        else:
+            break
+    middle = tuple(group for group in rest if group not in selected)
+    tail = tuple(group for group in rest if group in selected)
+    return _Layout(anchor, middle, tail, carrier)
 def _assemble(layout: _Layout, config: CompactionConfig, digest: str) -> str:
     parts = [b.rendered for b in _flatten(layout.anchor)]
     if digest:
         parts.append(digest)
     parts += [b.rendered for b in _flatten(layout.tail)]
     return config.separator.join(parts)
-
-
+def _demotion_candidate(layout: _Layout) -> tuple[PromptBlock, ...] | None:
+    carrier = layout.carrier
+    trailing = [
+        group for group in layout.tail
+        if carrier and group[0].index > carrier[0].index and _has_user(group)
+    ]
+    if trailing:
+        return trailing[0]
+    first = layout.tail[0] if layout.tail else None
+    if first is None or first == carrier:
+        return None
+    return first if not any("[tool call " in block.rendered for block in first) else None
+def _demote(layout: _Layout, group: tuple[PromptBlock, ...]) -> _Layout:
+    drop = layout.carrier is not None and group[0].index > layout.carrier[0].index
+    middle = layout.middle if drop else (*layout.middle, group)
+    return _Layout(
+        layout.anchor,
+        middle,
+        tuple(item for item in layout.tail if item != group),
+        layout.carrier,
+    )
+def _overflow_role(block: PromptBlock, carrier: tuple[PromptBlock, ...] | None) -> str:
+    if (
+        block.role == "user"
+        and block not in (carrier or ())
+        and is_synthetic_user_block(block.rendered)
+    ):
+        return "synthetic"
+    return block.role
 def _shrink_to_limit(layout: _Layout, config: CompactionConfig) -> tuple[str, _Layout]:
-    """Собрать промпт и гарантировать ``<= limit`` управляемой деградацией."""
     budget = _digest_budget(config)
     if json_text_bytes(_assemble(layout, config, "")) > config.limit_bytes:
         budget = min(budget, max(config.min_digest_bytes, 512))
@@ -265,22 +260,24 @@ def _shrink_to_limit(layout: _Layout, config: CompactionConfig) -> tuple[str, _L
         prompt = _assemble(current, config, digest)
         if json_text_bytes(prompt) <= config.limit_bytes:
             return prompt, current
-        if len(current.tail) > 1:
-            current = _Layout(
-                current.anchor, current.middle + (current.tail[0],), current.tail[1:]
-            )
+        if candidate := _demotion_candidate(current):
+            current = _demote(current, candidate)
             continue
-        items = [(b.role, b.rendered) for b in _flatten(current.anchor)]
+        items = [
+            (_overflow_role(b, current.carrier), b.rendered)
+            for b in _flatten(current.anchor)
+        ]
         if digest:
             items.append(("digest", digest))
-        items += [(b.role, b.rendered) for b in _flatten(current.tail)]
+        items += [
+            (_overflow_role(b, current.carrier), b.rendered)
+            for b in _flatten(current.tail)
+        ]
         spec = OverflowSpec(
             max(config.limit_bytes, 0), config.separator, marker,
             json_text_bytes, middle_prune_text,
         )
         return shrink_overflow_parts(items, spec), current
-
-
 def compact_prompt_blocks(
     blocks: Sequence[PromptBlock], config: CompactionConfig
 ) -> CompactionResult:
@@ -294,6 +291,9 @@ def compact_prompt_blocks(
         prompt, final = _shrink_to_limit(layout, config)
         kept = len(_flatten(final.anchor)) + len(_flatten(final.tail))
         digested = len(_flatten(final.middle))
+        if final.carrier and len(final.tail) > 1 and any(b.rendered not in prompt for b in final.carrier):
+            carrier_n = len(final.carrier)
+            kept, digested = kept - carrier_n, digested + carrier_n
     size = json_text_bytes(prompt)
     return CompactionResult(
         prompt, size, config.limit_bytes, prefix_hash, "compact", kept, digested, 0

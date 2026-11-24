@@ -101,6 +101,10 @@ def shrink_overflow_parts(
     joined = _join(parts, spec)
     if spec.size_fn(joined) <= spec.limit_bytes:
         return joined
+    if (fitted := _shrink_role(parts, "synthetic", spec)) is not None:
+        return fitted
+    if (fitted := _evict_role(parts, "synthetic", spec)) is not None:
+        return fitted
     for role in SHRINK_ROLE_ORDER:
         if (fitted := _shrink_role(parts, role, spec)) is not None:
             return fitted
