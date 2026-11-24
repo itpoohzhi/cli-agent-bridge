@@ -1554,7 +1554,7 @@ class PassthroughAdapter(BackendAdapter):
             sanitize=sanitize,
             mode_spec=self._request_mode(request),
             tool_schemas=build_tool_schemas(request.get("tools")) if sanitize else None,
-            client_gone_fn=sink.client_gone,
+            client_gone_fn=getattr(sink, "client_gone", lambda: False),
         )
         content_type = (resp.getheader("Content-Type") or "").lower()
         aggregate = getattr(kw.get("window"), "internal_stream", False)
