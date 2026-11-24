@@ -30,7 +30,7 @@ _SECRET_RE: Final[re.Pattern[str]] = re.compile(
     r"(\\')((?:bearer|basic)\s+)?(?:(?!\\').)*(?:\\'|$)|"
     r'(")((?:bearer|basic)\s+)?(?:\\.|[^"\\])*(?:"|$)|'
     r"(')((?:bearer|basic)\s+)?(?:\\.|[^'\\])*(?:'|$)|"
-    r"((?:bearer|basic)\s+)?[^\s,;\"'\\]+)|"
+    r"((?:bearer|basic)\s+)?[^\s,;\"']+)|"
     r"(bearer\s+)[a-z0-9._~+/=-]+|"
     r"(?:sk-[a-z0-9_-]{8,}|ghp_[a-z0-9]{8,}|eyj[a-z0-9_-]+\.[a-z0-9_-]+\.[a-z0-9_-]+)",
     re.IGNORECASE,

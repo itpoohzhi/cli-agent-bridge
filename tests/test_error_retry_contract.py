@@ -279,6 +279,8 @@ def test_escaped_nested_json_and_truncated_unclosed_quote_redacted() -> None:
         (r'{\"password\": \"hunter2\"}', "hunter2"),
         (r'api_key=\"abc123opaque\"', "abc123opaque"),
         ('"token": "truncated_secret_value', "truncated_secret_value"),
+        (r"password=\hunter2", "hunter2"),
+        (r"password=abc\def", "def"),
     ):
         msg = classify_upstream_error(raw).message
         assert leak not in msg
