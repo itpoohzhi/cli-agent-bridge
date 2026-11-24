@@ -1024,9 +1024,8 @@ class Handler(BaseHTTPRequestHandler):
         err = self._error_body(out)
         if err is None:
             finish = "tool_calls" if out.get("tool_calls") else "stop"
-            # Как в OpenAI API: usage в финальном чанке — только по include_usage.
-            opts = req.get("stream_options")
-            wants_usage = isinstance(opts, dict) and opts.get("include_usage") is True
+            from usage_policy import should_emit_terminal_usage  # F-004: локальный импорт чистой политики
+            wants_usage = should_emit_terminal_usage(req.get("stream_options"))
             final_usage = _wire_usage(out.get("usage") or {}) if wants_usage else None
             self._emit(chunk({}, finish, final_usage))
         else:
