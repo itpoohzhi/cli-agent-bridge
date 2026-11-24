@@ -6,6 +6,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Protocol, cast
 
+from core.usage_normalizer import reconcile_turn_usage
 from core.usage_wire import normalize_prompt_cache_details
 
 
@@ -176,7 +177,13 @@ def _resolve_from_result(
     source, prompt = _resolve_result_prompt(use_cum, raw_in, cache_sum, window, divisor)
     reason = "over_window" if use_cum else _result_reason(conflict, missing, success, isinstance(window, int))
     details, inconsistent = normalize_prompt_cache_details(prompt, raw_cache)
-    fresh_comp = (raw_out if isinstance(raw_out, int) else 0) + (raw_th if isinstance(raw_th, int) else 0)
+    usage_obj = out.get("usage")
+    raw_map = cast("Mapping[str, object]", usage_obj) if isinstance(usage_obj, Mapping) else {}
+    raw_total = _count_or_none(raw_map.get("total_tokens"))
+    reconciled = reconcile_turn_usage(
+        raw_input=raw_in, raw_output=raw_out, raw_total=raw_total, raw_thinking=raw_th
+    )
+    fresh_comp = reconciled.completion_tokens
     completion = fresh_comp if all((not resume, not obs_steps)) else 0
     win_val = window if isinstance(window, int) else 0
     logs = (_cum_log(raw_meta, (win_val, divisor, prompt, turns, tools, obs_steps), inconsistent),) if use_cum else ()
@@ -201,6 +208,10 @@ def resolve_turn_usage(
     raw_out = _count_or_none(raw.get("output_tokens"))
     raw_th = _count_or_none(raw.get("thinking_tokens"))
     raw_cache, conflict = _raw_cache_tokens(raw)
+    raw_total = _count_or_none(raw.get("total_tokens"))
+    reconciled = reconcile_turn_usage(
+        raw_input=raw_in, raw_output=raw_out, raw_total=raw_total, raw_thinking=raw_th
+    )
     calc, logs = _resolve_from_result(out, snap, window, resume, (raw_in, raw_out, raw_th, raw_cache, conflict))
     if snap:
         if snap.last_step_usage:
@@ -208,6 +219,15 @@ def resolve_turn_usage(
     prompt = cast("int", calc["prompt"])
     completion = cast("int", calc["completion"])
     details = cast("dict[str, int] | None", calc["details"])
+    reasoning_tokens: int | None = reconciled.reasoning_tokens
+    reasoning_inconsistent = reconciled.reasoning_inconsistent
+    if snap and snap.last_step_usage and raw_th is not None:
+        if 0 < raw_th <= completion:
+            reasoning_tokens, reasoning_inconsistent = raw_th, False
+        elif raw_th > completion:
+            reasoning_tokens, reasoning_inconsistent = None, True
+    if reasoning_tokens is not None and reasoning_tokens > completion:
+        reasoning_tokens, reasoning_inconsistent = None, True
     wire: dict[str, object] = {
         "prompt_tokens": prompt,
         "completion_tokens": completion,
@@ -215,14 +235,17 @@ def resolve_turn_usage(
     }
     if isinstance(details, dict):
         wire["prompt_tokens_details"] = details
+    if reasoning_tokens is not None:
+        wire["completion_tokens_details"] = {"reasoning_tokens": reasoning_tokens}
     resolved: dict[str, object] = {
         "wire": wire, "source": calc["source"], "reason": calc["reason"],
         "step_idx": calc["step_idx"], "completeness": snap.completeness if snap else False,
         "inconsistent": calc["inconsistent"],
         "cached": details["cached_tokens"] if isinstance(details, dict) else None,
         "raw_in": raw_in, "raw_out": raw_out, "raw_thinking": raw_th,
-        "raw_total": _count_or_none(raw.get("total_tokens")), "raw_cache": raw_cache,
+        "raw_total": raw_total, "raw_cache": raw_cache,
         "emit_wire_usage": calc["emit_wire_usage"],
+        "reasoning": reasoning_tokens, "reasoning_inconsistent": reasoning_inconsistent,
     }
     return TurnUsageResolution(resolved=resolved, log_messages=logs)
 
