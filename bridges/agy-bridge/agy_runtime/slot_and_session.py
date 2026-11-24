@@ -5,7 +5,6 @@ from __future__ import annotations
 import hashlib
 import math
 import os
-import sqlite3
 import sys
 import threading
 import time
@@ -18,6 +17,7 @@ from core.adaptive_admission import OutcomeKind
 from core.chat_key import resolve_chat_key
 from core.session_continuity import session_key_for
 
+from . import sqlite_tail_lifecycle
 from .state_hygiene_policy import DisconnectOutcome, OrphanConfig, OrphanFsm
 
 SRC_HEADER_SUBAGENT_ID = "x-subagent-id"
@@ -210,16 +210,7 @@ class SqliteRoPoolBackoffError(RuntimeError):
 
 def is_cold_sqlite_wal_wait(exc: BaseException, db_path: Path | None) -> bool:
     """Распознаёт штатное ожидание появления холодного WAL при существующей читаемой БД."""
-    if not (
-        isinstance(exc, sqlite3.OperationalError)
-        and "unable to open database file" in str(exc).lower()
-        and db_path is not None
-    ):
-        return False
-    try:
-        return db_path.is_file() and os.access(db_path, os.R_OK) and not Path(f"{db_path}-wal").exists()
-    except OSError:
-        return False
+    return sqlite_tail_lifecycle.is_cold_wal_error(exc, db_path)
 
 
 def extract_run_ttfc_ms(run: object) -> float | None:
