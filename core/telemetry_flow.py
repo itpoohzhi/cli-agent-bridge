@@ -22,9 +22,10 @@ def _matches(node: Mapping[str, Any], row: Mapping[str, Any], ua: str) -> bool:
     """Узел tier1 совпал: роль сабагента, флаг subagent или подстрока User-Agent."""
     roles: Sequence[Any] = node.get("roles", ())
     markers: Sequence[Any] = node.get("ua", ())
+    role = as_str(row.get("subagent_role")).strip().lower()
     return any((
         all((bool(node.get("subagent")), row.get("client_kind") == "subagent")),
-        row.get("subagent_role") in roles,
+        bool(role) and role in {as_str(r).strip().lower() for r in roles},
         any(marker in ua for marker in markers),
     ))
 

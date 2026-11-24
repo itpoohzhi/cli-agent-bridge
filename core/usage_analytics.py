@@ -8,20 +8,17 @@ from statistics import median
 from time import gmtime, strftime
 from typing import Any
 
+from core.usage_schema import (
+    compute_uncached_prompt_tokens, normalize_status_code, normalize_usage_record_aliases, parse_ts_epoch,
+)
+
 __all__: tuple[str, ...] = (
-    "AnomalyThresholds",
-    "aggregate_records",
-    "compute_cache_hit_pct",
-    "detect_prompt_anomalies",
-    "enrich_with_cache_hit",
+    "AnomalyThresholds", "aggregate_records", "compute_cache_hit_pct", "compute_uncached_prompt_tokens",
+    "detect_prompt_anomalies", "enrich_with_cache_hit", "normalize_usage_record_aliases",
 )
 
 _TOKEN_FIELDS: tuple[str, ...] = (
-    "prompt_tokens",
-    "completion_tokens",
-    "cached_tokens",
-    "reasoning_tokens",
-    "total_tokens",
+    "prompt_tokens", "completion_tokens", "cached_tokens", "reasoning_tokens", "total_tokens",
 )
 
 
@@ -58,10 +55,23 @@ def compute_cache_hit_pct(cached_tokens: int | None, prompt_tokens: int | None) 
 
 
 def enrich_with_cache_hit(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
-    """Вернуть копии строк с добавленным вычисленным полем cache_hit_pct."""
+    """Вернуть копии строк с вычисленным полем cache_hit_pct."""
     return [
         {**r, "cache_hit_pct": compute_cache_hit_pct(r.get("cached_tokens"), r.get("prompt_tokens"))}
         for r in rows
+    ]
+
+
+def _with_uncached(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """Добавить cache_hit_pct и uncached_prompt_tokens к строкам агрегированных разрезов."""
+    return [
+        {
+            **r,
+            "uncached_prompt_tokens": compute_uncached_prompt_tokens(
+                r.get("prompt_tokens"), r.get("cached_tokens")
+            ),
+        }
+        for r in enrich_with_cache_hit(rows)
     ]
 
 
@@ -72,17 +82,17 @@ def _normalize_role(record: Mapping[str, Any]) -> str:
 
 
 def _extract_day(record: Mapping[str, Any]) -> str:
-    """Извлечь UTC-дату YYYY-MM-DD из полей day, ts_iso, ts или ts_epoch."""
-    for key in ("day", "ts_iso", "ts"):
-        val = record.get(key)
-        if isinstance(val, str) and len(val) >= 10 and val[4:5] == "-" and val[7:8] == "-":
-            return val[:10]
-    epoch = record.get("ts_epoch") if record.get("ts_epoch") is not None else record.get("ts")
-    if isinstance(epoch, (int, float)) and not isinstance(epoch, bool):
-        try:
-            return strftime("%Y-%m-%d", gmtime(float(epoch)))
-        except (OverflowError, OSError, ValueError):
-            return "unknown"
+    """Извлечь UTC-дату YYYY-MM-DD: явное поле day, затем ts-поля через parse_ts_epoch (bool отвергается)."""
+    day = record.get("day")
+    if isinstance(day, str) and len(day) >= 10 and day[4:5] == "-" and day[7:8] == "-":
+        return day[:10]
+    for key in ("ts_iso", "ts_epoch", "ts"):
+        epoch = parse_ts_epoch(record.get(key))
+        if epoch is not None:
+            try:
+                return strftime("%Y-%m-%d", gmtime(epoch))
+            except (OverflowError, OSError, ValueError):
+                return "unknown"
     return "unknown"
 
 
@@ -105,7 +115,7 @@ def _accumulate(
     if count_requests:
         bucket["requests"] += 1
     if with_status:
-        status = _opt_int(record.get("status_code"))
+        status = normalize_status_code(record)
         is_ok = status is not None and 200 <= status < 400
         bucket["ok_requests"] += int(is_ok)
         bucket["error_requests"] += int(not is_ok)
@@ -214,14 +224,9 @@ def aggregate_records(
         day = _extract_day(rec)
         _accumulate(by_day.setdefault(day, _new_bucket({"day": day}, with_status=True)), rec, with_status=True)
     summary["cache_hit_pct"] = compute_cache_hit_pct(summary["cached_tokens"], summary["prompt_tokens"])
-    models = sorted(
-        enrich_with_cache_hit(list(by_model.values())),
-        key=lambda x: (-x["requests"], -x["prompt_tokens"], x["model"], x["backend_id"]),
-    )
-    roles = sorted(
-        enrich_with_cache_hit(list(by_role.values())),
-        key=lambda x: (-x["prompt_tokens"], -x["requests"], x["subagent_role"], x["subagent_id"]),
-    )
-    days = sorted(enrich_with_cache_hit(list(by_day.values())), key=lambda x: x["day"])
+    summary["uncached_prompt_tokens"] = compute_uncached_prompt_tokens(summary["prompt_tokens"], summary["cached_tokens"])
+    models = sorted(_with_uncached(list(by_model.values())), key=lambda x: (-x["requests"], -x["prompt_tokens"], x["model"], x["backend_id"]))
+    roles = sorted(_with_uncached(list(by_role.values())), key=lambda x: (-x["prompt_tokens"], -x["requests"], x["subagent_role"], x["subagent_id"]))
+    days = sorted(_with_uncached(list(by_day.values())), key=lambda x: x["day"])
     anomalies = detect_prompt_anomalies(days, records, thresholds)
     return {"summary": summary, "by_model": models, "by_role": roles, "by_day": days, "prompt_anomalies": anomalies}

@@ -31,8 +31,8 @@ _CODEX_TOTAL = ("total_tokens", "totalTokens")
 _CODEX_V2_TURN_POLICY = UsageExtractPolicy(
     source="codex_app_server_v2",
     paths=(
+        ("params", "tokenUsage", "last"),
         ("params", "info", "last_token_usage"),
-        ("params", "tokenUsage"),
         ("params", "usage"),
         ("params", "turn", "usage"),
     ),
@@ -48,7 +48,10 @@ _CODEX_V2_TURN_POLICY = UsageExtractPolicy(
 
 _CODEX_V2_SESSION_POLICY = UsageExtractPolicy(
     source="codex_app_server_v2",
-    paths=(("params", "info", "total_token_usage"),),
+    paths=(
+        ("params", "info", "total_token_usage"),
+        ("params", "tokenUsage", "total"),
+    ),
     input_keys=_CODEX_IN,
     output_keys=_CODEX_OUT,
     cache_read_keys=_CODEX_CACHE_READ,

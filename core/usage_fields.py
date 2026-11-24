@@ -43,9 +43,9 @@ def _nested(raw: Mapping[str, Any], key: str) -> Mapping[str, Any]:
 
 
 def _usage_present(raw: Mapping[str, Any]) -> bool:
-    """Usage реально передан: явный usage_present=True или числовое поле среди известных ключей."""
-    if raw.get("usage_present") is True:
-        return True
+    """Usage реально передан: явный булев usage_present доминирует; иначе числовое поле среди известных ключей."""
+    if "usage_present" in raw and isinstance(raw["usage_present"], bool):
+        return raw["usage_present"]
     return any(_is_number(raw.get(key)) for key in _PRESENCE_KEYS)
 
 
@@ -68,6 +68,14 @@ def normalize_usage_fields(raw: Mapping[str, Any] | None) -> dict[str, Any]:
             "cache_read_tokens": None,
             "reasoning_tokens": None,
             "usage_present": None,
+        }
+    if raw.get("usage_present") is False:
+        return {
+            "input_tokens": None,
+            "output_tokens": None,
+            "cache_read_tokens": None,
+            "reasoning_tokens": None,
+            "usage_present": False,
         }
     return {
         "input_tokens": first(raw.get("input_tokens"), raw.get("prompt_tokens")),

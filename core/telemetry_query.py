@@ -35,8 +35,14 @@ from core.usage_analytics import (
 
 CONFIG_KEYS = ("queue_maxsize", "flush_interval_ms", "batch_size", "retention_days", "max_rows", "recent_limit",
                "prune_interval_s", "window_min_h", "window_max_h", "limit_max", "flush_max_batches", "prune_retry_s",
-               "max_field_len", "redact_scan_factor", "redact_scan_min",
+               "max_field_len", "redact_scan_factor", "redact_scan_min", "anomaly_max_candidates",
                "prompt_spike_ratio", "prompt_spike_min_turn", "prompt_spike_min_day")
+
+RECENT_NAMES = ", ".join(name for name in NAMES if name not in ("client_port", "auth_mode"))
+ANOMALY_CANDIDATES_SQL = (
+    "SELECT request_id, model, backend_id, subagent_role, subagent_id, prompt_tokens, cached_tokens, "
+    "ts_epoch, ts_iso FROM bridge_requests WHERE ts_epoch >= ? AND COALESCE(prompt_tokens, 0) >= ? "
+    "ORDER BY prompt_tokens DESC, ts_epoch ASC LIMIT ?")
 
 
 class TelemetryReader:
@@ -67,6 +73,10 @@ class TelemetryReader:
             min_day_prompt_tokens=as_int(self._c["prompt_spike_min_day"]),
         )
 
+    def _anomaly_cap(self) -> int:
+        """Верхняя граница полнооконных кандидатов аномалий (anomaly_max_candidates)."""
+        return max(1, as_int(self._c["anomaly_max_candidates"]))
+
     def _query(self, sql: str, params: Sequence[Any] = (), rate: bool = False) -> list[dict[str, Any]]:
         """SELECT под замком: строки приводятся к скалярам, агрегаты получают ok_rate_pct."""
         with self._db_lock:
@@ -93,19 +103,68 @@ class TelemetryReader:
             "summary": {**add_aliases(dict.fromkeys([*SUMMARY_COLS, "ok_rate_pct"], 0)), "cache_hit_pct": 0.0},
             "by_model": [], "by_backend": [], "by_client": [], "by_hour": [],
             "by_day": [], "by_role": [], "recent_requests": [],
-            "prompt_anomalies": [], "usage_log": self.usage_log_status(),
+            "prompt_anomalies": [], "anomalies_candidates_truncated": False, "usage_log": self.usage_log_status(),
         }
-        with self._db_lock:
-            since = payload["generated_at"] - payload["window_hours"] * 3600.0
-            active = all((live, self._ready))
-            callers = self._fill(payload, since, self._limit(limit)) if active else []
-        if active:
-            payload["prompt_anomalies"] = detect_prompt_anomalies(
-                payload["by_day"], payload["recent_requests"], self._thresholds()
-            )
+        since = payload["generated_at"] - payload["window_hours"] * 3600.0
+        with self._db_lock:  # F-006/F-021: один атомарный снимок — весь SQL в одном захвате db_lock
+            raw = self._fill(since, self._limit(limit)) if all((live, self._ready)) else None
+        if raw is not None:  # Python-обработка (enrich/аномалии/flow) строго снаружи db_lock
+            self._postprocess(payload, raw)
         payload["summary"]["dropped_events"] = stats["dropped_events"]  # KPI «движок БД» в UI читает summary
-        payload["architecture_flow"] = build_architecture_flow(payload["by_backend"], callers, payload["summary"])
+        payload["architecture_flow"] = build_architecture_flow(
+            payload["by_backend"], [] if raw is None else raw["callers"], payload["summary"])
         return payload
+
+    def _fill(self, since: float, limit: int) -> dict[str, Any]:
+        """Собрать сырые SQL-разрезы и полнооконных кандидатов аномалий (замок держит вызывающий)."""
+        return {
+            "summary": self._query(
+                f"SELECT {select_aggregates(SUMMARY_COLS)} FROM bridge_requests WHERE ts_epoch >= ?",
+                [since], True)[0],
+            "by_model": self._group("model, backend_id", MODEL_COLS, (since, limit)),
+            "by_backend": self._group("backend_id, route_mode, outbound_target, egress_proxy", BACKEND_COLS, (since, limit)),
+            "by_client": self._group(
+                "client_kind, subagent_role, subagent_id, user_agent, client_ip", CLIENT_COLS, (since, limit), False),
+            "by_hour": self._query(
+                f"SELECT substr(ts_iso, 1, 13) AS hour_bucket, {select_aggregates(HOUR_COLS)} FROM bridge_requests "
+                "WHERE ts_epoch >= ? GROUP BY substr(ts_iso, 1, 13) ORDER BY hour_bucket", [since]),
+            "by_day": self._query(
+                f"SELECT substr(ts_iso, 1, 10) AS day, {select_aggregates(DAY_COLS)} FROM bridge_requests "
+                "WHERE ts_epoch >= ? GROUP BY substr(ts_iso, 1, 10) ORDER BY day", [since], True),
+            "by_role": self._query(
+                f"SELECT subagent_role, subagent_id, {select_aggregates(ROLE_COLS)} FROM bridge_requests "
+                "WHERE ts_epoch >= ? GROUP BY subagent_role, subagent_id "
+                "ORDER BY prompt_tokens DESC, requests DESC LIMIT ?", [since, limit], True),
+            "recent": self._query(
+                f"SELECT {RECENT_NAMES} FROM bridge_requests WHERE ts_epoch >= ? ORDER BY ts_epoch DESC LIMIT ?",
+                [since, limit]),
+            "candidates": self._query(
+                ANOMALY_CANDIDATES_SQL,
+                [since, self._thresholds().min_turn_prompt_tokens, self._anomaly_cap() + 1]),
+            "callers": self._query(
+                "SELECT client_kind, subagent_role, user_agent, COUNT(*) AS requests FROM bridge_requests "
+                "WHERE ts_epoch >= ? GROUP BY client_kind, subagent_role, user_agent", [since]),
+        }
+
+    def _postprocess(self, payload: dict[str, Any], raw: Mapping[str, Any]) -> None:
+        """Чистая Python-обработка снимка вне db_lock: кэш-хиты, аномалии, дедуп turn-кандидатов."""
+        summary = raw["summary"]
+        summary["cache_hit_pct"] = compute_cache_hit_pct(summary.get("cached_tokens"), summary.get("prompt_tokens"))
+        payload["summary"] = summary
+        payload["by_model"] = enrich_with_cache_hit(raw["by_model"])
+        payload["by_backend"] = raw["by_backend"]
+        payload["by_client"] = raw["by_client"]
+        payload["by_hour"] = [{**row, "hour_bucket": f"{row['hour_bucket']}:00:00Z"} for row in raw["by_hour"]]
+        payload["by_day"] = enrich_with_cache_hit(raw["by_day"])
+        payload["by_role"] = enrich_with_cache_hit(raw["by_role"])
+        recent = [{**row, "stream": bool(row["stream"])} for row in raw["recent"]]
+        payload["recent_requests"] = recent
+        candidates = raw["candidates"]
+        payload["anomalies_candidates_truncated"] = len(candidates) > self._anomaly_cap()
+        turns: dict[str, Mapping[str, Any]] = {str(row.get("request_id")): row for row in candidates}
+        turns.update({str(row.get("request_id")): row for row in recent})
+        payload["prompt_anomalies"] = detect_prompt_anomalies(
+            payload["by_day"], list(turns.values()), self._thresholds())
 
     def _window(self, window_hours: float) -> float:
         """Окно в часах, зажатое в [window_min_h, window_max_h]; NaN и мусор -> 24 часа."""
@@ -116,34 +175,3 @@ class TelemetryReader:
     def _limit(self, limit: int) -> int:
         """Лимит строк recent, зажатый в [1, limit_max]; мусор -> recent_limit."""
         return max(1, min(as_int(self._c["limit_max"]), as_int(limit, self.recent_limit)))
-
-    def _fill(self, payload: dict[str, Any], since: float, limit: int) -> list[dict[str, Any]]:
-        """Заполнить разрезы снимка одним окном и вернуть строки для карты потока."""
-        summary = self._query(
-            f"SELECT {select_aggregates(SUMMARY_COLS)} FROM bridge_requests WHERE ts_epoch >= ?", [since], True)[0]
-        summary["cache_hit_pct"] = compute_cache_hit_pct(summary.get("cached_tokens"), summary.get("prompt_tokens"))
-        payload["summary"] = summary
-        payload["by_model"] = enrich_with_cache_hit(self._group("model, backend_id", MODEL_COLS, (since, limit)))
-        payload["by_backend"] = self._group("backend_id, route_mode, outbound_target, egress_proxy", BACKEND_COLS, (since, limit))
-        payload["by_client"] = self._group(
-            "client_kind, subagent_role, subagent_id, user_agent, client_ip", CLIENT_COLS, (since, limit), False)
-        hours = self._query(
-            f"SELECT substr(ts_iso, 1, 13) AS hour_bucket, {select_aggregates(HOUR_COLS)} FROM bridge_requests "
-            "WHERE ts_epoch >= ? GROUP BY substr(ts_iso, 1, 13) ORDER BY hour_bucket", [since])
-        payload["by_hour"] = [{**row, "hour_bucket": f"{row['hour_bucket']}:00:00Z"} for row in hours]
-        days = self._query(
-            f"SELECT substr(ts_iso, 1, 10) AS day, {select_aggregates(DAY_COLS)} FROM bridge_requests "
-            "WHERE ts_epoch >= ? GROUP BY substr(ts_iso, 1, 10) ORDER BY day", [since], True)
-        payload["by_day"] = enrich_with_cache_hit(days)
-        roles = self._query(
-            f"SELECT subagent_role, subagent_id, {select_aggregates(ROLE_COLS)} FROM bridge_requests "
-            "WHERE ts_epoch >= ? GROUP BY subagent_role, subagent_id "
-            "ORDER BY prompt_tokens DESC, requests DESC LIMIT ?", [since, limit], True)
-        payload["by_role"] = enrich_with_cache_hit(roles)
-        recent = [name for name in NAMES if name not in ("client_port", "auth_mode")]
-        rows = self._query(
-            f"SELECT {', '.join(recent)} FROM bridge_requests WHERE ts_epoch >= ? ORDER BY ts_epoch DESC LIMIT ?", [since, limit])
-        payload["recent_requests"] = [{**row, "stream": bool(row["stream"])} for row in rows]
-        return self._query(
-            "SELECT client_kind, subagent_role, user_agent, COUNT(*) AS requests FROM bridge_requests "
-            "WHERE ts_epoch >= ? GROUP BY client_kind, subagent_role, user_agent", [since])

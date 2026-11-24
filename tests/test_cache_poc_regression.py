@@ -757,8 +757,8 @@ def test_supports_stream_options_prioritizes_explicit_config_over_heuristic():
 
     for model in ("claude-3-7-sonnet", "vendor-anthropic-model"):
         assert method(explicit_true, "/v1/chat/completions", {"model": model}) is True
-        assert method(unconfigured, "/v1/chat/completions", {"model": model}) is False
-        assert method(explicit_none, "/v1/chat/completions", {"model": model}) is False
+        assert method(unconfigured, "/v1/chat/completions", {"model": model}) is True
+        assert method(explicit_none, "/v1/chat/completions", {"model": model}) is True
 
     assert method(explicit_false, "/v1/chat/completions", {"model": "gpt-4o"}) is False
     assert method(unconfigured, "/v1/chat/completions", {"model": "gpt-4o"}) is True

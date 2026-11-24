@@ -157,6 +157,15 @@ def _sanitize_result_calls(result: Any, turn: TurnContext, srv: Any) -> Any:
     return replace(result, tool_calls=tuple(calls), events=events)
 
 
+def _usage_snapshot(usage: Any) -> dict[str, Any]:
+    """Снимок usage без падения: dataclass -> asdict; прочий объект -> атрибуты; иначе пусто."""
+    try:
+        return dict(asdict(usage))
+    except TypeError:
+        attrs = getattr(usage, "__dict__", None)
+        return dict(attrs) if isinstance(attrs, dict) else {}
+
+
 def _format_turn_output(result: Any, backend_kind: str) -> dict[str, Any]:
     out: dict[str, Any] = {
         "state": result.state,
@@ -164,7 +173,7 @@ def _format_turn_output(result: Any, backend_kind: str) -> dict[str, Any]:
         "text": result.text,
         "reasoning": result.reasoning,
         "err": result.err,
-        "usage": asdict(result.usage),
+        "usage": _usage_snapshot(result.usage),
         "result": {},
         "tool_calls": [asdict(call) for call in result.tool_calls],
         "events": [
@@ -176,6 +185,10 @@ def _format_turn_output(result: Any, backend_kind: str) -> dict[str, Any]:
     if (turn_usage := turn_usage_of(result)) is not None:
         out["usage"] = enrich_turn_usage_dict(out["usage"], turn_usage)
         out["turn_usage"] = turn_usage
+    else:
+        u = out["usage"]
+        present = getattr(result.usage, "usage_present", None)
+        u["usage_present"] = present if isinstance(present, bool) else any((bool(u.get("input_tokens")), bool(u.get("output_tokens")), u.get("cache_read_tokens") is not None, u.get("cache_creation_tokens") is not None))
     return out
 
 
