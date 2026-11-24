@@ -161,7 +161,7 @@ def _hygiene_rt() -> HygieneRuntime:
         return rt
     with _HYGIENE_LOCK:
         if _HYGIENE_RT is None:
-            _HYGIENE_RT = HygieneRuntime(config_path=DYNAMIC_CONFIG_PATH)
+            _HYGIENE_RT = slot_and_session.start_orphan_reaper(HygieneRuntime(config_path=DYNAMIC_CONFIG_PATH))
         return _HYGIENE_RT
 
 
@@ -3294,7 +3294,7 @@ def _lifecycle_cleanup() -> None:
         with _HYGIENE_LOCK:
             rt = _HYGIENE_RT
         if rt is not None:
-            rt.shutdown_cleanup()
+            slot_and_session.shutdown_hygiene_runtime(rt)
 
 
 _LIFECYCLE = SubbridgeLifecycle(
@@ -3320,7 +3320,7 @@ def _reset_sqlite_guards_for_tests() -> None:
     global _cfg_snapshot, _cfg_key, _cfg_checked_at, _image_flag_cache, _image_fallback_flag_cache
     with _HYGIENE_LOCK:
         if _HYGIENE_RT is not None:
-            _HYGIENE_RT.shutdown_cleanup()
+            slot_and_session.shutdown_hygiene_runtime(_HYGIENE_RT)
         _HYGIENE_RT = None
     with _cfg_lock:
         _cfg_snapshot = _COLD_FLAGS
@@ -4926,9 +4926,11 @@ class _TranscriptTail(InterruptionTailState):
             self.last_poll = "error"
             self._on_sqlite_error(exc)
         except Exception as exc:
-            self.last_poll = "error"
-            _log(f"sqlite-error cid={self._cid8()} err={type(exc).__name__}")
-            self._sqlite_off("internal")
+            backoff = isinstance(exc, slot_and_session.SqliteRoPoolBackoffError)
+            self.last_poll = "skip" if backoff else "error"
+            if not backoff:
+                _log(f"sqlite-error cid={self._cid8()} err={type(exc).__name__}")
+                self._sqlite_off("internal")
         finally:
             with self._conn_lock:
                 self._active_conn = None
@@ -5288,7 +5290,7 @@ class JobRegistry:
 
     def publish(self, job: _Job, kind: str, payload: Any) -> bool:
         size = len(json.dumps((kind, payload), ensure_ascii=False).encode("utf-8"))
-        cancel = None
+        cancel, published, pgid = None, False, None
         with self.condition:
             if job.result is not None or job.cancelled.is_set():
                 return False
@@ -5299,11 +5301,14 @@ class JobRegistry:
             else:
                 job.events.append((kind, payload))
                 job.size_bytes += size
+                pgid = job.pgid if job.orphan and isinstance(job.pgid, int) and job.pgid > 0 else None
+                published = True
                 self.condition.notify_all()
-                return True
-        if cancel is not None:
+        if published and pgid:
+            slot_and_session.notify_orphan_progress(_hygiene_rt(), pgid)
+        elif cancel is not None:
             cancel()
-        return False
+        return published
 
     def finish(self, job: _Job, result: dict) -> None:
         with self.condition:
@@ -5315,17 +5320,17 @@ class JobRegistry:
                 job.size_bytes
                 + len(
                     json.dumps(
-                        {
-                            key: result.get(key)
-                            for key in ("text", "reasoning", "retained_events")
-                        },
+                        {key: result.get(key) for key in ("text", "reasoning", "retained_events")},
                         ensure_ascii=False,
                     ).encode("utf-8")
                 )
                 > self.max_buffer_bytes
             ):
                 result = {"state": "buffer_overflow", "text": "", "rc": 1}
+            pgid = job.pgid if isinstance(job.pgid, int) and job.pgid > 0 else None
             self._terminal(job, result)
+        if pgid and (rt := _HYGIENE_RT) is not None:
+            slot_and_session.release_detached_pgid(rt, pgid)
 
     def read(
         self, job: _Job, offset: int, timeout: float
@@ -7348,7 +7353,7 @@ class Handler(BaseHTTPRequestHandler):
                 )
             _slots.release()
             slot_and_session.release_admission_for_state(
-                _hygiene_rt().release, adm_dec.ticket_id, cast("dict[str, object]", out)
+                _hygiene_rt().release, adm_dec.ticket_id, cast("dict[str, object]", out), run=self._metric_run
             )
         self._log_done(
             cast(str, ctx["model"]),
