@@ -13,17 +13,7 @@ from typing import Any
 from core import defaults as D
 from core.runtime_env import flag_enabled
 from core.telemetry_sql import sanitize_scalar
-
-USAGE_LOG_FIELDS: tuple[str, ...] = (
-    "ts", "request_id", "model", "subagent_id", "subagent_role",
-    "route", "backend_id", "stream", "http_status", "elapsed_ms",
-    "prompt_tokens", "completion_tokens", "total_tokens",
-    "cached_tokens", "reasoning_tokens", "usage_present",
-)
-_SOURCE_KEYS: tuple[tuple[str, str], ...] = (
-    ("ts", "ts_iso"), ("route", "route_mode"),
-    ("http_status", "status_code"), ("elapsed_ms", "total_ms"),
-)
+from core.usage_schema import USAGE_LOG_FIELDS, resolve_usage_log_source_value
 
 
 @dataclass(frozen=True)
@@ -39,11 +29,8 @@ class UsageLogConfig:
 
 
 def _resolve_raw(row_map: Mapping[str, Any], field: str) -> Any:
-    """Извлекает значение поля из row_map с учётом имён колонок SQL-слоя."""
-    for target, primary in _SOURCE_KEYS:
-        if field == target and (val := row_map.get(primary)) is not None:
-            return val
-    return row_map.get(field)
+    """Извлекает значение поля из row_map, делегируя в usage-схему."""
+    return resolve_usage_log_source_value(row_map, field)
 
 
 def row_to_usage_record(row_map: Mapping[str, Any]) -> dict[str, Any]:

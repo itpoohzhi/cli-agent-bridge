@@ -128,6 +128,12 @@ BRIDGE_USAGE_LOG_ROTATE_DAILY: bool = True
 BRIDGE_TELEMETRY_PROMPT_SPIKE_RATIO: float = 2.0
 BRIDGE_TELEMETRY_PROMPT_SPIKE_MIN_TURN: int = 100000
 BRIDGE_TELEMETRY_PROMPT_SPIKE_MIN_DAY: int = 5000000
+# --- Passthrough stream usage / аномалии телеметрии / claude-p emit usage ---
+BRIDGE_PASSTHROUGH_STREAM_USAGE_ENABLED: bool = True  # kill-switch инъекции stream_options.include_usage (переопределяется env/GigaRC)
+BRIDGE_PASSTHROUGH_STREAM_OPTIONS_NEG_TTL_S: float = 900.0
+BRIDGE_PASSTHROUGH_STREAM_OPTIONS_NEG_CACHE_MAX: int = 256
+BRIDGE_TELEMETRY_ANOMALY_MAX_CANDIDATES: int = 10000  # hard cap кандидатов аномалий для /v1/telemetry
+BRIDGE_CLAUDE_P_EMIT_USAGE_DEFAULT: bool = False
 # Карта backend_id -> (outbound_target, egress_proxy); JSON-override:
 # BRIDGE_TELEMETRY_BACKEND_TOPOLOGY_JSON='{"agy": [":9887", "direct"]}'.
 BRIDGE_TELEMETRY_BACKEND_TOPOLOGY: dict[str, tuple[str, str]] = {
@@ -140,6 +146,10 @@ BRIDGE_TELEMETRY_BACKEND_TOPOLOGY: dict[str, tuple[str, str]] = {
     "codex": (":2455", ":10820 (xray SOCKS5)"),
     "georouter": (":10830", ":10820 (xray SOCKS5)"),
     "litellm": (":10830", ":10820 (xray SOCKS5)"),
+    "neuralwatt": (":10830", ":10820 (xray SOCKS5)"),
+    "neuralwatt-flex": (":10830", ":10820 (xray SOCKS5)"),
+    "opencode-go": (":10830", ":10820 (xray SOCKS5)"),
+    "opencode-go-claude": (":10830", ":10820 (xray SOCKS5)"),
 }
 # Трёхъярусная карта потока для architecture_flow; JSON-override:
 # BRIDGE_TELEMETRY_TOPOLOGY_JSON. Узлы tier1 сопоставляются первым совпадением
@@ -149,7 +159,8 @@ BRIDGE_TELEMETRY_TOPOLOGY: dict[str, dict] = {
         "layer": "L7 inbound callers",
         "description": "Клиенты и агенты, которые обращаются к хабу :9882 (Bearer BRIDGE_KEY).",
         "nodes": [
-            {"id": "council", "name": "launch_seat.py / Council", "roles": ["seat", "skeptic"]},
+            {"id": "council-panel", "name": "Council Panel", "roles": ["panel", "seat"]},
+            {"id": "council-skeptic", "name": "Answer Review Skeptic", "roles": ["skeptic"]},
             {"id": "subagents", "name": "Subagents (X-Subagent-Id)", "subagent": True},
             {"id": "claude-code", "name": "Claude Code", "ua": ["claude"]},
             {"id": "codex-cli", "name": "Codex CLI", "ua": ["codex"]},
@@ -170,7 +181,7 @@ BRIDGE_TELEMETRY_TOPOLOGY: dict[str, dict] = {
             {"id": "agy-9887", "name": "agy-bridge", "port": 9887, "backends": ["agy"]},
             {"id": "muse-9886", "name": "muse-bridge", "port": 9886, "backends": ["muse"]},
             {"id": "codex-2455", "name": "codex-lb", "port": 2455, "backends": ["codex"]},
-            {"id": "georouter-10830", "name": "eye-litellm / OpenCode Go", "port": 10830, "backends": ["georouter", "litellm"]},
+            {"id": "georouter-10830", "name": "eye-litellm / OpenCode Go", "port": 10830, "backends": ["georouter", "litellm", "neuralwatt", "neuralwatt-flex", "opencode-go", "opencode-go-claude"]},
         ],
     },
     "tier3_l4_egress_proxies": {
@@ -228,6 +239,11 @@ __all__ = [
     "BRIDGE_TELEMETRY_PROMPT_SPIKE_MIN_DAY",
     "BRIDGE_TELEMETRY_BACKEND_TOPOLOGY",
     "BRIDGE_TELEMETRY_TOPOLOGY",
+    "BRIDGE_PASSTHROUGH_STREAM_USAGE_ENABLED",
+    "BRIDGE_PASSTHROUGH_STREAM_OPTIONS_NEG_TTL_S",
+    "BRIDGE_PASSTHROUGH_STREAM_OPTIONS_NEG_CACHE_MAX",
+    "BRIDGE_TELEMETRY_ANOMALY_MAX_CANDIDATES",
+    "BRIDGE_CLAUDE_P_EMIT_USAGE_DEFAULT",
     "get_env_str",
     "get_env_int",
     "get_env_float",
