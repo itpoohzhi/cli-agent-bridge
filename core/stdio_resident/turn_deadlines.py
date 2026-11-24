@@ -27,9 +27,9 @@ __all__ = [
     "_resolve_deadlines",
 ]
 
-DEFAULT_FIRST_PROGRESS_TIMEOUT_S: Final[float] = 60.0
-DEFAULT_TURN_IDLE_TIMEOUT_S: Final[float] = 180.0
-DEFAULT_SAFETY_CAP_S: Final[float] = 900.0
+DEFAULT_FIRST_PROGRESS_TIMEOUT_S: Final[float] = 720.0
+DEFAULT_TURN_IDLE_TIMEOUT_S: Final[float] = 600.0
+DEFAULT_SAFETY_CAP_S: Final[float] = 1800.0
 _DEFAULT_POOL_TURN_IDLE_S: Final[float] = StdioPoolConfig.turn_idle_timeout_s
 _DEFAULT_POOL_TURN_TOTAL_S: Final[float] = StdioPoolConfig.turn_total_timeout_s
 _TIMEOUT_CODES: Final[dict[str, str]] = {

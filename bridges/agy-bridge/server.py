@@ -416,7 +416,7 @@ def _build_bridge_config() -> _BridgeConfig:
         timeout_s=_chain_int(("AGY_BRIDGE_TIMEOUT_S", "AGY_BRIDGE_TIMEOUT"), 1800, 1, 86400),
         keepalive_s=_chain_float(("AGY_BRIDGE_KEEPALIVE_S", "AGY_BRIDGE_KEEPALIVE"), 15.0, 0.5, 300.0),
         first_token_timeout_s=(ladder.effective_first_event_s if ladder.enabled else _chain_float(
-            ("AGY_BRIDGE_FIRST_TOKEN_TIMEOUT_S", "AGY_BRIDGE_FIRST_TOKEN_TIMEOUT"), 120.0, 5.0, 3600.0)),
+            ("AGY_BRIDGE_FIRST_TOKEN_TIMEOUT_S", "AGY_BRIDGE_FIRST_TOKEN_TIMEOUT"), 720.0, 5.0, 3600.0)),
         transcript_poll_s=_chain_float(
             ("AGY_BRIDGE_TRANSCRIPT_POLL_S", "AGY_BRIDGE_TRANSCRIPT_POLL"), 0.05, 0.01, 10.0),
         req_budget_s=(ladder.safety_cap_s if ladder.enabled else _env_float("AGY_BRIDGE_REQ_BUDGET_S", 3600.0, 10.0, 86400.0)),
@@ -426,7 +426,7 @@ def _build_bridge_config() -> _BridgeConfig:
         ext_idle_timeout_s=_chain_float(
             ("AGY_BRIDGE_IDLE_TIMEOUT_S", "AGY_IDLE_TIMEOUT_S", "AGY_BRIDGE_IDLE_TIMEOUT"), 1800.0, 5.0, 86400.0),
         idle_timeout_s=(ladder.effective_idle_s if ladder.enabled else _chain_float(
-            ("AGY_BRIDGE_BASE_IDLE_TIMEOUT_S", "AGY_BRIDGE_IDLE_TIMEOUT"), float(_CORE_IDLE_TIMEOUT_S), 5.0, 86400.0)),
+            ("AGY_BRIDGE_BASE_IDLE_TIMEOUT_S", "AGY_BRIDGE_IDLE_TIMEOUT"), max(600.0, float(_CORE_IDLE_TIMEOUT_S)), 5.0, 86400.0)),
         watchdog_interval_s=_env_float("AGY_BRIDGE_WATCHDOG_INTERVAL_S", float(_CORE_WATCHDOG_INTERVAL_S), 0.5, 60.0),
         kill_term_grace_s=_env_float("AGY_BRIDGE_KILL_TERM_GRACE_S", 2.0, 0.1, 30.0),
         proc_exit_wait_s=_env_float("AGY_BRIDGE_PROC_EXIT_WAIT_S", 0.05, 0.01, 60.0),
@@ -6422,7 +6422,7 @@ def _done_recovery_aliases_enabled() -> bool:
 @_LIFECYCLE.install
 class Handler(BaseHTTPRequestHandler):
     _registry_job: _Job | None = None
-    protocol_version = "HTTP/1.1"
+    protocol_version = "HTTP/1.1"; timeout = 1800
     server_version = "agy-bridge/1.0"
 
     def log_message(self, format: str, *args: Any) -> None:  # noqa: A003
