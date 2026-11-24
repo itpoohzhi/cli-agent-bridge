@@ -15,11 +15,15 @@ from dataclasses import dataclass, replace
 from functools import partial
 from typing import Any, NotRequired, Protocol, TypedDict, cast, final
 
-from core import passthrough_precommit
+from core import defaults as D, passthrough_precommit
 from core.backend_adapter import PreSendTransientError
 from core.liveness_signals import LivenessWindow, passthrough_window
 from core.nonstream_aggregator import internal_stream_body, request_deadlines
 from core.passthrough_sliding_window import FLAG_PASSTHROUGH_SLIDING_WINDOW, open_sliding_deadline
+from core.passthrough_stream_options import (
+    BoundedNegativeCache, model_scope_hash, prepare_stream_usage_body,
+    should_retry_stream_options, strip_stream_options,
+)
 from core.route_attempts import RouteRefusal, evaluate_presend_candidate, failover_from_mapping
 from core.runtime_env import flag_enabled
 from core.slot_acquire import acquire_slot_cancellable
@@ -66,10 +70,7 @@ class PassthroughRouteRefusal(RouteRefusal, PreSendTransientError):  # pyright: 
     """Отдельный HTTP-отказ с совместимостью старого catch PreSendTransientError."""
 
     def __init__(self, status: int, headers: tuple[tuple[str, str], ...], body: bytes) -> None:
-        PreSendTransientError.__init__(
-            self, "route_refused", status_code=status,
-            response_headers=headers, response_body=body,
-        )
+        PreSendTransientError.__init__(self, "route_refused", status_code=status, response_headers=headers, response_body=body)
 
 
 _FAIL_TOKEN_RE = re.compile(r"[A-Za-z0-9_.:@/-]{1,128}")
@@ -80,31 +81,17 @@ def _fail_token(value: Any) -> str:
     return value if isinstance(value, str) and _FAIL_TOKEN_RE.fullmatch(value) else "-"
 
 
-def fail_context(
-    request: Mapping[str, Any] | None,
-    headers: Mapping[str, str] | None,
-    host: Any = None,
-) -> tuple[str, str]:
-    """Безопасные (model, request_id) для строки `passthrough fail` без секретов.
-
-    Источники request_id повторяют приоритет атрибуции хаба: заголовок
-    (имя — из host.REQUEST_ID_HEADER, дефолт X-Request-Id), затем
-    extra_body.request_id, затем request_id тела.
-    """
+def fail_context(request: Mapping[str, Any] | None, headers: Mapping[str, str] | None, host: Any = None) -> tuple[str, str]:
+    """Безопасные (model, request_id) для `passthrough fail`: заголовок, extra_body, тело."""
     header_name = getattr(host, "REQUEST_ID_HEADER", None)
     if not isinstance(header_name, str) or not header_name:
         header_name = "X-Request-Id"
     request_map = request if isinstance(request, Mapping) else {}
-    lowered = (
-        {str(key).lower(): value for key, value in headers.items()}
-        if isinstance(headers, Mapping)
-        else {}
-    )
+    lowered = {str(key).lower(): value for key, value in headers.items()} if isinstance(headers, Mapping) else {}
     request_id: Any = lowered.get(header_name.lower())
-    if request_id is None:
-        extra = request_map.get("extra_body")
-        if isinstance(extra, Mapping):
-            request_id = extra.get("request_id")
+    extra = request_map.get("extra_body")
+    if request_id is None and isinstance(extra, Mapping):
+        request_id = extra.get("request_id")
     if request_id is None:
         request_id = request_map.get("request_id")
     return _fail_token(request_map.get("model")), _fail_token(request_id)
@@ -133,27 +120,35 @@ class _RequestRuntime:
     def __init__(self, adapter: Any, exchange: PassthroughRequest, options: RuntimeOptions) -> None:
         self.adapter = adapter
         raw = adapter._with_body_defaults(exchange.raw_body)
-        internal = internal_stream_body(exchange.path, exchange.request, raw)
+        supports_fn = getattr(adapter, "_supports_stream_options", None)
+        supports = bool(supports_fn(exchange.path, exchange.request)) if callable(supports_fn) else True
+        internal = internal_stream_body(exchange.path, exchange.request, raw, supports_stream_options=supports)
         self.internal = internal is not None
+        cache = getattr(adapter, "_stream_opt_neg_cache", None)
+        if cache is None:
+            cache = BoundedNegativeCache(ttl_s=D.BRIDGE_PASSTHROUGH_STREAM_OPTIONS_NEG_TTL_S, max_entries=D.BRIDGE_PASSTHROUGH_STREAM_OPTIONS_NEG_CACHE_MAX)
+            setattr(adapter, "_stream_opt_neg_cache", cache)
+        self._stream_opt_cache = cache
+        self._stream_opt_key = (str(getattr(adapter, "id", "")), str(getattr(adapter, "_port", "")), model_scope_hash(exchange.request.get("model")), str(exchange.path))
         window = exchange.window
-        if self.internal:
+        if internal is not None:
             window = window or passthrough_window(adapter.limits, exchange.path, exchange.request)
-        raw = internal if self.internal else raw
+            raw, self._stream_options_injected = internal, False
+        else:
+            enabled = flag_enabled("BRIDGE_PASSTHROUGH_STREAM_USAGE_ENABLED") if os.getenv("BRIDGE_PASSTHROUGH_STREAM_USAGE_ENABLED") is not None else D.BRIDGE_PASSTHROUGH_STREAM_USAGE_ENABLED
+            raw, self._stream_options_injected = prepare_stream_usage_body(
+                exchange.path, exchange.request, raw, enabled=enabled,
+                supports=supports, negative_hit=cache.is_rejected(self._stream_opt_key, time.monotonic()),
+            )
         self.affinity_info: dict[str, str] = {}
-        self.computed_upstream_headers = adapter._upstream_headers(
-            raw, exchange.headers, affinity_out=self.affinity_info
-        )
+        self.computed_upstream_headers = adapter._upstream_headers(raw, exchange.headers, affinity_out=self.affinity_info)
         self.deadline, self.open_deadline = options.deadlines_fn(adapter.limits, self.internal)
-        self.slide = open_sliding_deadline(
-            self.deadline, adapter.limits, self.internal,
-            exchange.request, options.sliding_enabled,
-        )
+        self.slide = open_sliding_deadline(self.deadline, adapter.limits, self.internal, exchange.request, options.sliding_enabled)
         window, self.slide = passthrough_precommit.request_window(window, self.slide)
         self.exchange = replace(exchange, raw_body=raw, window=window)
         self.connection: http.client.HTTPConnection | None = None
         self.response: http.client.HTTPResponse | None = None
-        self.successful = False
-        self.pooling = False
+        self.successful, self.pooling = False, False
         self._socket: socket.socket | None = None
         self._stop, self._aborted = threading.Event(), threading.Event()
         self._transport_lock = threading.Lock()
@@ -172,14 +167,8 @@ class _RequestRuntime:
                     return
 
     def _watch(self) -> None:
-        while not self._stop.wait(
-            min(
-                self.adapter.limits.poll_interval_s,
-                max(0.0, self.slide.deadline_s - time.monotonic()),
-            )
-        ):
-            expired = time.monotonic() >= self.slide.deadline_s
-            if expired or self.exchange.sink.client_gone():
+        while not self._stop.wait(min(self.adapter.limits.poll_interval_s, max(0.0, self.slide.deadline_s - time.monotonic()))):
+            if time.monotonic() >= self.slide.deadline_s or self.exchange.sink.client_gone():
                 self.abort()
                 return
 
@@ -212,19 +201,11 @@ class _RequestRuntime:
             if getattr(request.sink, "accepts_presend_errors", False):
                 raise
             model, request_id = fail_context(request.request, request.headers, adapter.host)
-            adapter._fail_io(
-                request.sink,
-                error.status_code == 504 or isinstance(error.__cause__, TimeoutError),
-                model=model,
-                request_id=request_id,
-            )
+            adapter._fail_io(request.sink, error.status_code == 504 or isinstance(error.__cause__, TimeoutError), model=model, request_id=request_id)
             return False
         except (OSError, http.client.HTTPException) as error:
             model, request_id = fail_context(request.request, request.headers, adapter.host)
-            adapter._fail_io(
-                request.sink, self._is_timeout_error(error),
-                model=model, request_id=request_id,
-            )
+            adapter._fail_io(request.sink, self._is_timeout_error(error), model=model, request_id=request_id)
             return False
         return True
 
@@ -249,31 +230,37 @@ class _RequestRuntime:
         self._check()
         self.connection = cast(http.client.HTTPConnection, adapter._open(
             request.path, request.raw_body, request.headers, deadline=self.open_deadline,
-            on_socket=self._on_socket,
-            presend_deadline=getattr(request.sink, "presend_deadline", None),
-            on_pooling=self._on_pooling,
-            fresh=True,
-            upstream_headers=self.computed_upstream_headers,
+            on_socket=self._on_socket, presend_deadline=getattr(request.sink, "presend_deadline", None),
+            on_pooling=self._on_pooling, fresh=True, upstream_headers=self.computed_upstream_headers,
         ))
-        self.response = cast(passthrough_precommit.PrecommitSink, request.sink).read_response(
-            self.connection, self.slide, adapter.limits.reader_join_timeout_s
-        )
+        self.response = cast(passthrough_precommit.PrecommitSink, request.sink).read_response(self.connection, self.slide, adapter.limits.reader_join_timeout_s)
         self.slide.relax_socket(self.connection.sock, adapter.limits.read_timeout_s, self.internal)
         self._check()
         return self.response
+
+    def _handle_stream_options_400(self, response: http.client.HTTPResponse) -> tuple[http.client.HTTPResponse, bool]:
+        body_400 = self.adapter._read_presend_body(response)
+        if should_retry_stream_options(status_code=400, body=body_400, committed_to_client=False, injected_by_hub=True, attempt_index=0):
+            self._stream_opt_cache.mark_rejected(self._stream_opt_key, time.monotonic())
+            self._stream_options_injected = False
+            self.exchange = replace(self.exchange, raw_body=strip_stream_options(self.exchange.raw_body))
+            return self._reopen_response(), False
+        self.successful = self.adapter._emit_response(response, self.exchange.sink, (body_400, False))
+        return response, True
 
     def respond(self) -> None:
         """Разрешает прежний nonstream retry только вне транспортного роутинга."""
         response, request, adapter = self.response, self.exchange, self.adapter
         if response is None:
             raise RuntimeError("missing_upstream_response")
+        if response.status == 400 and self._stream_options_injected:
+            response, emitted = self._handle_stream_options_400(response)
+            if emitted:
+                return
+            request = self.exchange
         failover = failover_from_mapping(getattr(adapter, "config", None))
-        if not 200 <= response.status < 300 and getattr(
-            request.sink, "accepts_presend_errors", False
-        ):
-            evaluation = evaluate_presend_candidate(
-                response.status, lambda: adapter._read_presend_body(response), failover,
-            )
+        if not 200 <= response.status < 300 and getattr(request.sink, "accepts_presend_errors", False):
+            evaluation = evaluate_presend_candidate(response.status, lambda: adapter._read_presend_body(response), failover)
             if evaluation.body is not None:
                 body = evaluation.body
                 headers = tuple(adapter._response_headers(response)) + (("Content-Length", str(len(body))),)
@@ -284,21 +271,12 @@ class _RequestRuntime:
                 # тело уже прочитано, поэтому ответ отдаётся дословно здесь.
                 self.successful = adapter._emit_response(response, request.sink, (body, False))
                 return
+        reopen = self._reopen_response if self.internal and not getattr(request.sink, "accepts_presend_errors", False) and not flag_enabled("BRIDGE_TRANSPORT_ROUTING_ENABLED") else None
         self.successful = adapter._respond(
-            response, request.request, request.sink, self.deadline,
-            on_timeout=self.abort,
-            window=request.window,
-            slide=self.slide,
-            headers=request.headers,
+            response, request.request, request.sink, self.deadline, on_timeout=self.abort,
+            window=request.window, slide=self.slide, headers=request.headers,
             affinity_uuid=self.affinity_info.get("affinity_uuid"),
-            affinity_scope=self.affinity_info.get("affinity_scope"),
-            reopen=(
-                self._reopen_response
-                if self.internal
-                and not getattr(request.sink, "accepts_presend_errors", False)
-                and not flag_enabled("BRIDGE_TRANSPORT_ROUTING_ENABLED")
-                else None
-            ),
+            affinity_scope=self.affinity_info.get("affinity_scope"), reopen=reopen,
         )
 
     def _can_reuse(self) -> bool:
@@ -321,10 +299,7 @@ class _RequestRuntime:
             connection, self.connection = self.connection, None
             if connection is not None:
                 adapter = self.adapter
-                reuse = self._can_reuse()
-                adapter._pool.release_connection(
-                    adapter._host, adapter._port, connection, can_reuse=reuse
-                )
+                adapter._pool.release_connection(adapter._host, adapter._port, connection, can_reuse=self._can_reuse())
 
 
 def handle_request(

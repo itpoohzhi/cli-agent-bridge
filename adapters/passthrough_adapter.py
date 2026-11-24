@@ -1257,16 +1257,8 @@ class PassthroughAdapter(BackendAdapter):
         return picked
 
     def _supports_stream_options(self, path: str, request: Mapping[str, Any]) -> bool:
-        if not str(path).startswith("/v1/chat/completions"):
-            return False
-        backend_cfg = getattr(self, "config", None) or {}
-        val = backend_cfg.get("supports_stream_options")
-        if val is not None:
-            return bool(val)
-        model = str(request.get("model", "")).lower()
-        if any(frag in model for frag in ("claude", "anthropic")):
-            return False
-        return True
+        from core.passthrough_stream_options import supports_stream_options
+        return supports_stream_options(path, getattr(self, "config", None))
 
     def _upstream_headers(
         self,
