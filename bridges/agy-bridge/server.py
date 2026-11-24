@@ -5290,7 +5290,7 @@ class JobRegistry:
 
     def publish(self, job: _Job, kind: str, payload: Any) -> bool:
         size = len(json.dumps((kind, payload), ensure_ascii=False).encode("utf-8"))
-        cancel, published = None, False
+        cancel, published, pgid = None, False, None
         with self.condition:
             if job.result is not None or job.cancelled.is_set():
                 return False
@@ -5329,8 +5329,8 @@ class JobRegistry:
                 result = {"state": "buffer_overflow", "text": "", "rc": 1}
             pgid = job.pgid if isinstance(job.pgid, int) and job.pgid > 0 else None
             self._terminal(job, result)
-        if pgid:
-            slot_and_session.release_detached_pgid(_hygiene_rt(), pgid)
+        if pgid and (rt := _HYGIENE_RT) is not None:
+            slot_and_session.release_detached_pgid(rt, pgid)
 
     def read(
         self, job: _Job, offset: int, timeout: float

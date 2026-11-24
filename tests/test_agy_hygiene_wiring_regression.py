@@ -560,3 +560,93 @@ def test_reaper_releases_runtime_after_completed_tick() -> None:
     assert runtime_ref() is None
     thread.join(timeout=0.5)
     assert not thread.is_alive()
+
+
+def test_is_cold_sqlite_wal_wait_returns_false_on_oserror(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "perm.db"
+    db_path.touch()
+    exc = sqlite3.OperationalError("unable to open database file")
+    orig_is_file = Path.is_file
+
+    def raising_is_file(self: Path) -> bool:
+        if self == db_path:
+            raise PermissionError("EACCES")
+        return orig_is_file(self)
+
+    monkeypatch.setattr(Path, "is_file", raising_is_file)
+    assert slot_and_session.is_cold_sqlite_wal_wait(exc, db_path) is False
+
+    inner = _InnerPool()
+    inner.error = exc
+    pool = ManagedSqliteRoPool(inner, hygiene_enabled=True)
+    with pytest.raises(sqlite3.OperationalError, match="unable to open"):
+        pool.run_ro(db_path, lambda _conn: (0, 0))
+    assert pool.health_tuple()[1] == 1
+    assert inner.release_calls == 1
+
+
+def test_reaper_stderr_includes_exception_type(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import time
+
+    class Runtime:
+        def sweep_orphans(self) -> None:
+            raise ValueError("bad reaper state")
+
+    runtime = Runtime()
+    slot_and_session.start_orphan_reaper(runtime, interval_s=0.005)
+    try:
+        deadline = time.monotonic() + 0.5
+        while not getattr(runtime, "_orphan_reaper_errors", 0) and time.monotonic() < deadline:
+            time.sleep(0.005)
+        assert getattr(runtime, "_orphan_reaper_errors", 0) >= 1
+    finally:
+        slot_and_session.shutdown_hygiene_runtime(runtime)
+    captured = capsys.readouterr()
+    assert "agy-orphan-reaper: sweep failed (ValueError)" in captured.err
+
+
+def test_job_finish_does_not_initialize_hygiene_runtime_when_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(server, "_HYGIENE_RT", None)
+    reaper_calls = 0
+
+    def fail_reaper(*_args: Any, **_kwargs: Any) -> Any:
+        nonlocal reaper_calls
+        reaper_calls += 1
+        raise AssertionError("orphan reaper must not start on finish when _HYGIENE_RT is None")
+
+    monkeypatch.setattr(slot_and_session, "start_orphan_reaper", fail_reaper)
+    reg = server.JobRegistry()
+    job, _owner = reg.attach("k-none-rt", "gemini-3.8-flash", "prompt")
+    job.pgid = 77
+    reg.finish(job, {"state": "done", "text": "ok", "rc": 0})
+    assert server._HYGIENE_RT is None
+    assert reaper_calls == 0
+
+
+def test_cold_wal_e2e_pool_to_poll_sqlite_keeps_sqlite_active_and_healthy(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "cold.db"
+    db_path.touch()
+    assert not Path(f"{db_path}-wal").exists()
+
+    inner = _InnerPool()
+    inner.error = sqlite3.OperationalError("unable to open database file")
+    pool = ManagedSqliteRoPool(inner, hygiene_enabled=True)
+    monkeypatch.setattr(server, "_sqlite_ro_pool", lambda: pool)
+    monkeypatch.setattr(server, "_log", lambda _message: None)
+
+    tail = _poll_tail(tmp_path)
+    assert tail._poll_sqlite() is None
+    assert tail.sqlite_active is True
+    assert tail._get_wal_wait_polls() == 1
+    assert pool.health_tuple()[1] == 0
+    assert pool.health_tuple()[2] == 0.0
