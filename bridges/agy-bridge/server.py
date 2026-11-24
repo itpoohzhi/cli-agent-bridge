@@ -4508,20 +4508,13 @@ class _TranscriptTail(InterruptionTailState):
 
     def _finish(self) -> None:
         """Закрыть соединение, вернуть исход breaker'у и снять владение cid (один раз)."""
-        if self._finished:
-            return
-        self._finished = True
-        with self._conn_lock:
-            conn = self._active_conn
-            self._active_conn = None
-            if conn is not None:
-                _sqlite_close(conn)
-        if (pool := _sqlite_ro_pool()) is not None:
-            pool.release_thread()
-        if self.plan.mode in ("LIVE", "SHADOW"):
-            _breaker_report(self.probe_gen, self.selects_ok, self.failed)
-        if self._owned_cid:
-            _cid_release(self._owned_cid, self.turn_id)
+        midstream_resilience.finish_transcript_tail(
+            self,
+            _sqlite_close,
+            _sqlite_ro_pool,
+            _breaker_report,
+            _cid_release,
+        )
 
     # ---- один проход ---------------------------------------------------------------
     def tick(self) -> None:
