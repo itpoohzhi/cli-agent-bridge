@@ -9,28 +9,16 @@ from time import gmtime, strftime
 from typing import Any
 
 from core.usage_schema import (
-    compute_uncached_prompt_tokens,
-    normalize_status_code,
-    normalize_usage_record_aliases,
-    parse_ts_epoch,
+    compute_uncached_prompt_tokens, normalize_status_code, normalize_usage_record_aliases, parse_ts_epoch,
 )
 
 __all__: tuple[str, ...] = (
-    "AnomalyThresholds",
-    "aggregate_records",
-    "compute_cache_hit_pct",
-    "compute_uncached_prompt_tokens",
-    "detect_prompt_anomalies",
-    "enrich_with_cache_hit",
-    "normalize_usage_record_aliases",
+    "AnomalyThresholds", "aggregate_records", "compute_cache_hit_pct", "compute_uncached_prompt_tokens",
+    "detect_prompt_anomalies", "enrich_with_cache_hit", "normalize_usage_record_aliases",
 )
 
 _TOKEN_FIELDS: tuple[str, ...] = (
-    "prompt_tokens",
-    "completion_tokens",
-    "cached_tokens",
-    "reasoning_tokens",
-    "total_tokens",
+    "prompt_tokens", "completion_tokens", "cached_tokens", "reasoning_tokens", "total_tokens",
 )
 
 
@@ -236,17 +224,9 @@ def aggregate_records(
         day = _extract_day(rec)
         _accumulate(by_day.setdefault(day, _new_bucket({"day": day}, with_status=True)), rec, with_status=True)
     summary["cache_hit_pct"] = compute_cache_hit_pct(summary["cached_tokens"], summary["prompt_tokens"])
-    summary["uncached_prompt_tokens"] = compute_uncached_prompt_tokens(
-        summary["prompt_tokens"], summary["cached_tokens"]
-    )
-    models = sorted(
-        _with_uncached(list(by_model.values())),
-        key=lambda x: (-x["requests"], -x["prompt_tokens"], x["model"], x["backend_id"]),
-    )
-    roles = sorted(
-        _with_uncached(list(by_role.values())),
-        key=lambda x: (-x["prompt_tokens"], -x["requests"], x["subagent_role"], x["subagent_id"]),
-    )
+    summary["uncached_prompt_tokens"] = compute_uncached_prompt_tokens(summary["prompt_tokens"], summary["cached_tokens"])
+    models = sorted(_with_uncached(list(by_model.values())), key=lambda x: (-x["requests"], -x["prompt_tokens"], x["model"], x["backend_id"]))
+    roles = sorted(_with_uncached(list(by_role.values())), key=lambda x: (-x["prompt_tokens"], -x["requests"], x["subagent_role"], x["subagent_id"]))
     days = sorted(_with_uncached(list(by_day.values())), key=lambda x: x["day"])
     anomalies = detect_prompt_anomalies(days, records, thresholds)
     return {"summary": summary, "by_model": models, "by_role": roles, "by_day": days, "prompt_anomalies": anomalies}

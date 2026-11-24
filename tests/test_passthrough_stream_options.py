@@ -4,9 +4,14 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import time
 from pathlib import Path
 from types import ModuleType
 from typing import Any
+
+import pytest
+
+from core.passthrough_adapter_runtime import PassthroughRequest, RuntimeOptions, _RequestRuntime
 
 from core.passthrough_stream_options import (
     BoundedNegativeCache,
@@ -225,3 +230,132 @@ def test_usage_policy_include_usage() -> None:
     assert emit({"include_usage": False}) is False
     assert emit(None, emit_when_unspecified=True) is True
     assert emit({}, emit_when_unspecified=True) is True
+
+
+class _FakeLimits:
+    poll_interval_s, reader_join_timeout_s, read_timeout_s = 0.05, 0.1, 30.0
+
+    def __getattr__(self, _name: str) -> float:
+        return 30.0
+
+
+class _FakeSink:
+    accepts_presend_errors = False
+
+    def client_gone(self) -> bool:
+        return False
+
+
+class _FakeResponse:
+    def __init__(self, status: int, body: bytes) -> None:
+        self.status, self.body = status, body
+
+
+class _FakeAdapter:
+    id, _port, config, limits = "b1", 8000, {}, _FakeLimits()
+
+    def __init__(self) -> None:
+        self.emit_calls: list[tuple[Any, Any, tuple[bytes, bool]]] = []
+        self.respond_calls: list[Any] = []
+
+    def _with_body_defaults(self, raw_body: bytes) -> bytes:
+        return raw_body
+
+    def _upstream_headers(self, raw_body: bytes, headers: Any, affinity_out: Any = None) -> dict[str, str]:
+        return {}
+
+    def _read_presend_body(self, response: Any) -> bytes:
+        return response.body
+
+    def _emit_response(self, response: Any, sink: Any, pre_read: tuple[bytes, bool]) -> bool:
+        self.emit_calls.append((response, sink, pre_read))
+        return True
+
+    def _respond(self, response: Any, *args: Any, **kwargs: Any) -> bool:
+        self.respond_calls.append(response)
+        return True
+
+
+def _make_runtime(adapter: _FakeAdapter, raw_body: bytes, req_map: dict[str, Any]) -> _RequestRuntime:
+    opts = RuntimeOptions(
+        sliding_enabled=lambda: False,
+        deadlines_fn=lambda _limits, _internal: (time.monotonic() + 30.0, time.monotonic() + 10.0),
+    )
+    req = PassthroughRequest(path="/v1/chat/completions", raw_body=raw_body, request=req_map, headers={}, sink=_FakeSink())
+    return _RequestRuntime(adapter, req, opts)
+
+
+def test_runtime_injects_stream_options_include_usage(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("BRIDGE_PASSTHROUGH_STREAM_USAGE_ENABLED", "1")
+    adapter = _FakeAdapter()
+    rt1 = _make_runtime(
+        adapter,
+        _body(model="m", stream=True, messages=[{"role": "user", "content": "hi"}]),
+        {"model": "m", "stream": True},
+    )
+    assert rt1._stream_options_injected is True
+    assert json.loads(rt1.exchange.raw_body)["stream_options"] == {"include_usage": True}
+    rt2 = _make_runtime(
+        adapter,
+        _body(model="m", stream=True, stream_options={"include_usage": False}),
+        {"model": "m", "stream": True, "stream_options": {"include_usage": False}},
+    )
+    assert rt2._stream_options_injected is False
+    assert json.loads(rt2.exchange.raw_body)["stream_options"] == {"include_usage": False}
+
+
+def test_runtime_retries_once_on_schema_400_and_caches(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("BRIDGE_PASSTHROUGH_STREAM_USAGE_ENABLED", "1")
+    adapter = _FakeAdapter()
+    rt1 = _make_runtime(
+        adapter,
+        _body(model="m", stream=True, messages=[{"role": "user", "content": "hi"}]),
+        {"model": "m", "stream": True},
+    )
+    rt1.response = _FakeResponse(400, b'{"error": {"message": "Unknown parameter: stream_options"}}')
+    reopen_bodies: list[bytes] = []
+
+    def fake_reopen() -> _FakeResponse:
+        reopen_bodies.append(rt1.exchange.raw_body)
+        ok = _FakeResponse(200, b"data: [DONE]\n\n")
+        rt1.response = ok
+        return ok
+
+    monkeypatch.setattr(rt1, "_reopen_response", fake_reopen)
+    rt1.respond()
+    assert len(reopen_bodies) == 1 and "stream_options" not in json.loads(reopen_bodies[0])
+    assert len(adapter.respond_calls) == 1 and adapter.respond_calls[0].status == 200
+    assert adapter.emit_calls == []
+    rt2 = _make_runtime(
+        adapter,
+        _body(model="m", stream=True, messages=[{"role": "user", "content": "next"}]),
+        {"model": "m", "stream": True},
+    )
+    assert rt2._stream_options_injected is False
+    assert "stream_options" not in json.loads(rt2.exchange.raw_body)
+
+
+def test_runtime_no_retry_on_context_length_400(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("BRIDGE_PASSTHROUGH_STREAM_USAGE_ENABLED", "1")
+    adapter = _FakeAdapter()
+    rt = _make_runtime(
+        adapter,
+        _body(model="m", stream=True, messages=[{"role": "user", "content": "hi"}]),
+        {"model": "m", "stream": True},
+    )
+    err_400 = b'{"error": {"message": "context_length_exceeded"}}'
+    rt.response = _FakeResponse(400, err_400)
+    reopen_calls = 0
+
+    def fake_reopen() -> _FakeResponse:
+        nonlocal reopen_calls
+        reopen_calls += 1
+        return _FakeResponse(200, b"")
+
+    monkeypatch.setattr(rt, "_reopen_response", fake_reopen)
+    rt.respond()
+    assert reopen_calls == 0
+    assert rt._stream_opt_cache.is_rejected(rt._stream_opt_key, time.monotonic()) is False
+    assert len(adapter.emit_calls) == 1
+    assert adapter.emit_calls[0][0].status == 400 and adapter.emit_calls[0][2] == (err_400, False)
+    assert adapter.respond_calls == []
