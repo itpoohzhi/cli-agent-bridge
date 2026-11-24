@@ -69,9 +69,13 @@ def test_select_route_min_priority_and_fleet_order_tie_break():
     assert zcr.select_zero_canon_route(tie) == "first"
 
 
-def test_select_route_all_zero_weight_fails_closed():
+def test_select_route_all_zero_weight_falls_back_by_priority_and_rejects_negative():
+    # В Zero-Canon для gpt-6.1-terra / claude-sonnet-5-5 остаются только резервные маршруты с weight=0.
     kept = [{"backend": "a", "priority": 2, "weight": 0}, {"backend": "b", "priority": 1, "weight": 0}]
-    assert zcr.select_zero_canon_route(kept) is None
+    assert zcr.select_zero_canon_route(kept) == "b"
+    # Отрицательные и невалидные веса по-прежнему отклоняются fail-closed.
+    bad = [{"backend": "a", "priority": 1, "weight": -1}, {"backend": "b", "priority": 2, "weight": float("nan")}]
+    assert zcr.select_zero_canon_route(bad) is None
 
 
 def test_select_route_non_numeric_priority_is_inf():

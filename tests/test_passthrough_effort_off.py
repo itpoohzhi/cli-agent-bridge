@@ -176,9 +176,10 @@ def test_resolve_provider_off_patch_external_url_vs_local_georouter():
 
 
 def test_drained_zero_canon_routes_reject_503_route_unavailable(monkeypatch):
-    """F-008/F-011: дренированный маршрут (weight <= 0) даёт None и 503 route_unavailable."""
-    drained = [{"backend": "drained", "weight": 0, "priority": 1}]
+    """Отрицательный/невалидный вес (weight < 0) даёт None и 503 route_unavailable; weight == 0 допустим как Zero-Canon fallback."""
+    drained = [{"backend": "drained", "weight": -1, "priority": 1}]
     assert select_zero_canon_route(drained) is None
+    assert select_zero_canon_route([{"backend": "codex", "weight": 0, "priority": 10}]) == "codex"
 
     monkeypatch.setattr(hpr, "filter_zero_canon_providers", lambda routes, *_args, **_kwargs: list(routes))
     rejects = []
@@ -301,3 +302,18 @@ def test_resolve_off_patch_params_default_field_partial_map_and_adapter_preceden
 
     a_adapter_wins = SimpleNamespace(id="opencode-go", config={})
     assert pem.resolve_provider_off_patch(a_adapter_wins, "neuralwatt") == {"thinking": {"type": "disabled"}}
+
+
+def test_apply_prepared_off_patch_overrides_clamped_high_for_neuralwatt_and_go():
+    nw = _Adapter("neuralwatt")
+    go = _Adapter("opencode-go")
+    prepared_after_clamp = {"model": "deepseek-v4.1-flash", "reasoning_effort": "high", "thinking": {"type": "disabled"}, "messages": []}
+    out_nw = pem.apply_prepared_off_patch(prepared_after_clamp, {"thinking": {"type": "disabled"}}, None, nw, "neuralwatt")
+    assert out_nw["reasoning_effort"] == "none"
+    assert "thinking" not in out_nw
+    out_go = pem.apply_prepared_off_patch(prepared_after_clamp, {"reasoning_effort": "off"}, None, go, "opencode-go")
+    assert out_go["thinking"] == {"type": "disabled"}
+    assert "reasoning_effort" not in out_go
+    # Для обычного effort=high патч не срабатывает.
+    out_high = pem.apply_prepared_off_patch({"model": "deepseek-v4.1-flash", "reasoning_effort": "high"}, {"reasoning_effort": "high"}, None, nw, "neuralwatt")
+    assert out_high == {"model": "deepseek-v4.1-flash", "reasoning_effort": "high"}

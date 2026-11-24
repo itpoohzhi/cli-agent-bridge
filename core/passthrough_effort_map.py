@@ -98,15 +98,25 @@ def resolve_provider_off_patch(adapter: Any, backend_id: str) -> dict[str, Any] 
     return _local_georouter_patch(base_url)
 
 
-def _is_logical_off(request: Mapping[str, Any]) -> bool:
+def _is_logical_off(request: Mapping[str, Any] | None) -> bool:
+    if not isinstance(request, Mapping):
+        return False
     explicit = request.get("reasoning_effort")
     if isinstance(explicit, str) and explicit.strip():
-        return explicit.strip().lower() == "off"
+        return explicit.strip().lower() in ("off", "none")
     return is_thinking_disabled(request)
 
 
+def _patch_dict(source: Mapping[str, Any], patch: Mapping[str, Any]) -> dict[str, Any]:
+    out = dict(source)
+    out.pop("reasoning_effort", None)
+    out.pop("thinking", None)
+    out.update(copy.deepcopy(dict(patch)))
+    return out
+
+
 def _wire_body(body: Any, patch: Mapping[str, Any]) -> Any:
-    """Тело запроса с теми же ключами патча; непарсимый body возвращается без мутации."""
+    """Тело bytes с ключами патча; PreparedPostBody патчится после prepare_route_request."""
     if not isinstance(body, (bytes, bytearray)) or not body:
         return body
     try:
@@ -115,11 +125,24 @@ def _wire_body(body: Any, patch: Mapping[str, Any]) -> Any:
         return body
     if not isinstance(parsed, dict):
         return body
-    source = dict(parsed)
-    source.pop("reasoning_effort", None)
-    source.pop("thinking", None)
-    source.update(copy.deepcopy(dict(patch)))
-    return json.dumps(source, ensure_ascii=False).encode("utf-8")
+    return json.dumps(_patch_dict(parsed, patch), ensure_ascii=False).encode("utf-8")
+
+
+def apply_prepared_off_patch(
+    prepared: Mapping[str, Any],
+    raw_request: Mapping[str, Any] | None,
+    route_request: Mapping[str, Any] | None,
+    adapter: Any,
+    backend: str,
+) -> dict[str, Any]:
+    """Применяет провайдерский wire-патч `off` поверх `prepared` (после `prepare_route_request`, без clamp)."""
+    out = dict(prepared)
+    if not (_is_logical_off(raw_request) or _is_logical_off(route_request)):
+        return out
+    patch = resolve_provider_off_patch(adapter, backend)
+    if not isinstance(patch, Mapping) or not patch:
+        return out
+    return _patch_dict(out, patch)
 
 
 def apply_attempt_effort_map(
