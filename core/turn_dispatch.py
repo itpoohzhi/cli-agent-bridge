@@ -157,6 +157,15 @@ def _sanitize_result_calls(result: Any, turn: TurnContext, srv: Any) -> Any:
     return replace(result, tool_calls=tuple(calls), events=events)
 
 
+def _usage_snapshot(usage: Any) -> dict[str, Any]:
+    """Снимок usage без падения: dataclass -> asdict; прочий объект -> атрибуты; иначе пусто."""
+    try:
+        return dict(asdict(usage))
+    except TypeError:
+        attrs = getattr(usage, "__dict__", None)
+        return dict(attrs) if isinstance(attrs, dict) else {}
+
+
 def _format_turn_output(result: Any, backend_kind: str) -> dict[str, Any]:
     out: dict[str, Any] = {
         "state": result.state,
@@ -164,7 +173,7 @@ def _format_turn_output(result: Any, backend_kind: str) -> dict[str, Any]:
         "text": result.text,
         "reasoning": result.reasoning,
         "err": result.err,
-        "usage": asdict(result.usage),
+        "usage": _usage_snapshot(result.usage),
         "result": {},
         "tool_calls": [asdict(call) for call in result.tool_calls],
         "events": [
