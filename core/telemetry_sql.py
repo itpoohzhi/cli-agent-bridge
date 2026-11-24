@@ -18,10 +18,11 @@ SCHEMA = (
     "route_mode VARCHAR, outbound_target VARCHAR, egress_proxy VARCHAR, stream BOOLEAN, "
     "status_code INTEGER, error_type VARCHAR, queue_ms DOUBLE, ttfb_ms DOUBLE, total_ms DOUBLE, "
     "stream_chunks INTEGER, prompt_tokens INTEGER, completion_tokens INTEGER, cached_tokens INTEGER, "
-    "total_tokens INTEGER, response_bytes BIGINT"
+    "total_tokens INTEGER, response_bytes BIGINT, reasoning_tokens INTEGER, usage_present BOOLEAN"
 )
 COLUMNS: tuple[tuple[str, str], ...] = tuple((n, t) for n, t in (part.split() for part in SCHEMA.split(", ")))
 NAMES = tuple(name for name, _ in COLUMNS)
+MIGRATION_COLUMNS: tuple[tuple[str, str], ...] = (("reasoning_tokens", "INTEGER"), ("usage_present", "BOOLEAN"))
 _OK = "(status_code >= 200 AND status_code < 400)"
 _Q = "quantile_cont({}, {})"
 _E = {  # SQL-выражения агрегатов; одни и те же для duckdb и sqlite3
@@ -37,21 +38,25 @@ _E = {  # SQL-выражения агрегатов; одни и те же дл�
     "avg_total_ms": "AVG(total_ms)",
     "max_total_ms": "MAX(total_ms)",
     "total_response_bytes": "COALESCE(SUM(response_bytes), 0)",
+    "usage_present_requests": "COALESCE(SUM(CASE WHEN usage_present THEN 1 ELSE 0 END), 0)",
     "last_seen_ts": "MAX(ts_epoch)",
     "outbound_target": "MAX(outbound_target)",
     "egress_proxy": "MAX(egress_proxy)",
     **{f"p{q}_{c}_ms": _Q.format(f"{c}_ms", q / 100) for q in (50, 95, 99) for c in ("ttfb", "total")},
-    **{t: f"COALESCE(SUM({t}), 0)" for t in ("prompt_tokens", "completion_tokens", "cached_tokens", "total_tokens")},
+    **{t: f"COALESCE(SUM({t}), 0)" for t in ("prompt_tokens", "completion_tokens", "cached_tokens", "reasoning_tokens", "total_tokens")},
 }
 SUMMARY_COLS = (
     "total_requests ok_requests error_requests stream_requests subagent_requests interactive_requests "
     "avg_queue_ms avg_ttfb_ms p50_ttfb_ms p95_ttfb_ms p99_ttfb_ms avg_total_ms p50_total_ms p95_total_ms "
-    "p99_total_ms max_total_ms prompt_tokens completion_tokens cached_tokens total_tokens total_response_bytes"
+    "p99_total_ms max_total_ms prompt_tokens completion_tokens cached_tokens reasoning_tokens total_tokens "
+    "total_response_bytes"
 ).split()
-MODEL_COLS = "outbound_target egress_proxy requests ok_requests error_requests avg_ttfb_ms p50_total_ms p95_total_ms avg_total_ms max_total_ms prompt_tokens completion_tokens cached_tokens total_tokens".split()
+MODEL_COLS = "outbound_target egress_proxy requests ok_requests error_requests avg_ttfb_ms p50_total_ms p95_total_ms avg_total_ms max_total_ms prompt_tokens completion_tokens cached_tokens reasoning_tokens total_tokens".split()
 BACKEND_COLS = "requests ok_requests error_requests avg_ttfb_ms p50_total_ms p95_total_ms avg_total_ms max_total_ms total_tokens".split()
-CLIENT_COLS = "requests ok_requests error_requests avg_total_ms total_tokens last_seen_ts".split()
+CLIENT_COLS = "requests ok_requests error_requests avg_total_ms total_tokens reasoning_tokens last_seen_ts".split()
 HOUR_COLS = "requests ok_requests error_requests total_tokens avg_total_ms".split()
+ROLE_COLS = "requests ok_requests error_requests prompt_tokens completion_tokens cached_tokens reasoning_tokens total_tokens avg_total_ms".split()
+DAY_COLS = ROLE_COLS
 
 
 class Quantile:
@@ -182,7 +187,21 @@ def make_row(event: Mapping[str, Any], max_len: int | None = None, scan_len: int
     vals["ts_epoch"], vals["ts_iso"] = ts, time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ts))
     vals["request_id"] = as_str(vals["request_id"])
     vals["auth_mode"] = first_truthy(vals["auth_mode"], "none")
+    present = vals["usage_present"]
+    vals["usage_present"] = None if present is None else bool(present)
     return tuple(_coerce(typ, vals[name]) for name, typ in COLUMNS)
+
+
+USAGE_LOG_FIELDS: tuple[str, ...] = (  # 16 скалярных полей JSONL-записи ротационного usage-лога (интерфейс W1-C)
+    "ts_iso", "ts_epoch", "request_id", "client_kind", "subagent_role", "model", "backend_id", "endpoint",
+    "status_code", "prompt_tokens", "completion_tokens", "cached_tokens", "reasoning_tokens", "total_tokens",
+    "usage_present", "total_ms",
+)
+
+
+def make_usage_log_record(row_dict: Mapping[str, Any]) -> dict[str, Any]:
+    """Санитизированная строка стора -> 16 полей JSONL-записи usage-лога (повторной regex-редакции нет)."""
+    return {name: row_dict.get(name) for name in USAGE_LOG_FIELDS}
 
 
 _ALIASES: dict[str, tuple[str, ...]] = {  # канонические имена моста -> имена, которые читает UI control_panel
@@ -205,4 +224,3 @@ def clean_row(row: dict[str, Any], rate: bool = False) -> dict[str, Any]:
         total = as_int(first_truthy(out.get("requests"), out.get("total_requests")))
         out["ok_rate_pct"] = round(100.0 * as_int(out.get("ok_requests")) / total, 2) if total else 0.0
     return add_aliases(out)
-

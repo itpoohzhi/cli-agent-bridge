@@ -20,6 +20,7 @@ from urllib.parse import parse_qs, urlparse
 from core import defaults as D
 from core.telemetry_usage import extract_usage, tail_limit
 from core.telemetry_util import as_int, as_str, first_truthy, header_value, origin_allowed
+from core.usage_fields import finalize_event_usage, telemetry_usage_updates
 
 _USAGE_KEYS = {"prompt_tokens": "input_tokens", "completion_tokens": "output_tokens", "cached_tokens": "cache_read_tokens"}
 _MODEL_PLACEHOLDERS = {"unknown": None}
@@ -181,9 +182,8 @@ class TelemetryHooksMixin:
         self._telemetry_meta(stream=bool(req.get("stream")), model=model if isinstance(model, str) else None)
 
     def _telemetry_usage(self, usage: dict[str, Any] | None) -> None:
-        """Токены из usage-блока ответа бэкенда (input/output/cache_read)."""
-        values = first_truthy(usage, default={})
-        self._telemetry_meta(**{dst: values.get(src) for dst, src in _USAGE_KEYS.items()})
+        """Токены из usage-блока ответа бэкенда (input/output/cache_read/reasoning/usage_present)."""
+        self._telemetry_meta(**telemetry_usage_updates(usage))
 
     def _telemetry_queue_start(self, backend_id: str) -> float:
         self._telemetry_meta(backend_id=backend_id)
@@ -234,8 +234,7 @@ class TelemetryHooksMixin:
         backend_id, route_mode = as_str(meta.get("backend_id")), as_str(meta.get("route_mode"))
         target, egress = resolve_backend_topology(srv.BACKENDS, backend_id, route_mode) if backend_id else (None, None)
         auth = as_str(header_value(headers, "Authorization"))
-        usage = {key: meta.pop(key, None) for key in _USAGE_KEYS}
-        usage["total_tokens"] = first_truthy(as_int(usage["prompt_tokens"]) + as_int(usage["completion_tokens"]), None)
+        usage = finalize_event_usage(meta)
         trace = getattr(self, "_trace", None)
         return {
             "request_id": trace.request_id if trace else None,
