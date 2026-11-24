@@ -29,6 +29,7 @@ from agy_runtime.history_compaction_domain import (  # noqa: E402
     json_text_bytes,
     middle_prune_text,
 )
+import agy_runtime.history_compaction_domain as compaction_domain  # noqa: E402
 
 _CANARY = "CANARY_FACT_ALPHA_7391"
 _CODENAME = "LARCH-7391"
@@ -295,3 +296,86 @@ def test_anchor_without_user_stops_at_first_non_system() -> None:
     s0 = _block(0, "system", "S0")
     seq = [s0, _block(1, "tool", "T1"), _block(2, "system", "S2")]
     assert anchor_prefix_sha256(seq, "\n\n") == anchor_prefix_sha256([s0], "\n\n")
+
+
+def _synthetic(index: int, body: str) -> PromptBlock:
+    return _block(index, "user", body)
+
+
+def test_session_3a8cf9f1_real_user_is_anchor_and_hash_input() -> None:
+    approval = "The user approved the bash command."
+    real = "SESSION_REAL_USER\nmultiline request\n" + "r" * 6000 + " REAL_USER_END"
+    blocks = [
+        _block(0, "system", "s" * 65000),
+        _synthetic(1, approval),
+        _block(2, "user", real),
+        _synthetic(3, "<system-reminder>\nAGENTS.md\n" + "a" * 400 + "\n</system-reminder>"),
+        _synthetic(
+            4,
+            'Current runtime context. This snapshot supersedes earlier snapshots.\n\n'
+            'Current working directory: "/tmp/work".',
+        ),
+        _synthetic(5, "<system-reminder>\nskill-catalog\n" + "k" * 7000 + "\n</system-reminder>"),
+    ]
+    wide = compact_prompt_blocks(blocks, _cfg(72760))
+    shifted = compact_prompt_blocks(blocks, _cfg(72760 - 276))
+    changed = [*blocks[:2], _block(2, "user", real + " changed"), *blocks[3:]]
+    assert "REAL_USER_END" in wide.prompt and "REAL_USER_END" in shifted.prompt
+    assert wide.prompt.index(approval) < wide.prompt.index("SESSION_REAL_USER")
+    assert wide.prompt_prefix_sha256 == shifted.prompt_prefix_sha256
+    assert wide.prompt_prefix_sha256 != anchor_prefix_sha256(changed, "\n\n")
+
+
+def test_last_real_turn_survives_trailing_large_system_reminder() -> None:
+    blocks = [
+        _block(0, "system", "sys"),
+        _block(1, "user", "initial request"),
+        _block(2, "assistant", "old answer " + "o" * 8000),
+        _block(3, "user", "TURN_K_BEGIN\n" + "u" * 6000 + "\nTURN_K_END"),
+        _synthetic(
+            4,
+            "<system-reminder>\nTRAILING_SERVICE_BLOCK\n"
+            + "z" * 25000
+            + "\n</system-reminder>",
+        ),
+    ]
+    result = compact_prompt_blocks(blocks, _cfg(12000))
+    assert result.prompt_bytes <= 12000
+    assert "TURN_K_BEGIN" in result.prompt and "TURN_K_END" in result.prompt
+    assert "TRAILING_SERVICE_BLOCK" not in result.prompt
+
+
+def test_all_synthetic_last_user_is_protected_carrier() -> None:
+    protected = "<system-reminder>\nLAST_SYNTHETIC_CARRIER\n</system-reminder>"
+    blocks = [
+        _block(0, "system", "sys"),
+        _synthetic(1, "The user approved the bash command."),
+        _synthetic(2, protected),
+        _block(3, "assistant", "trailing output " + "x" * 20000),
+    ]
+    result = compact_prompt_blocks(blocks, _cfg(5000))
+    assert result.prompt_bytes <= 5000
+    assert "LAST_SYNTHETIC_CARRIER" in result.prompt
+
+
+def test_overflow_marks_synthetic_users_but_not_fallback_carrier(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: list[tuple[str, str]] = []
+
+    def capture(items: object, _spec: object) -> str:
+        seen.extend(items)  # type: ignore[arg-type]
+        return ""
+
+    monkeypatch.setattr(compaction_domain, "shrink_overflow_parts", capture)
+    compact_prompt_blocks(
+        [
+            _block(0, "system", "s" * 5000),
+            _synthetic(1, "The user approved the bash command."),
+            _synthetic(2, "<system-reminder>\nPROTECTED\n</system-reminder>"),
+        ],
+        _cfg(100),
+    )
+    roles = {text: role for role, text in seen}
+    assert roles[next(text for text in roles if "approved" in text)] == "synthetic"
+    assert roles[next(text for text in roles if "PROTECTED" in text)] == "user"

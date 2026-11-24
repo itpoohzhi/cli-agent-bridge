@@ -124,6 +124,50 @@ def test_user_shrinks_after_short_tools_are_evicted() -> None:
     assert spy.calls == [(user, 180, "<cut>")]
 
 
+def test_synthetic_is_shrunk_and_evicted_before_protected_roles() -> None:
+    system = _block("SYSTEM", 58_000)
+    real_user = _block("REAL-USER", 6_000)
+    tool = _block("TOOL", 48_000)
+    synthetic = _block("SYNTHETIC", 30_000)
+    spy = PruneSpy()
+
+    prompt = _shrink(
+        [
+            ("system", system),
+            ("user", real_user),
+            ("tool", tool),
+            ("synthetic", synthetic),
+        ],
+        70_000,
+        spy,
+    )
+
+    assert json_text_bytes(prompt) == 70_000
+    assert system in prompt
+    assert real_user in prompt
+    assert synthetic not in prompt
+    assert spy.calls == [
+        (synthetic, 256, "<cut>"),
+        (tool, 5_998, "<cut>"),
+    ]
+
+
+def test_all_synthetic_carrier_with_user_role_is_not_evicted() -> None:
+    start, end = "<system-reminder>", "</system-reminder>"
+    carrier = f"{start}{'x' * (6_000 - len(start) - len(end))}{end}"
+    synthetic = _block("SYNTHETIC", 30_000)
+    spy = PruneSpy()
+
+    prompt = _shrink(
+        [("user", carrier), ("synthetic", synthetic)],
+        6_000,
+        spy,
+    )
+
+    assert prompt == carrier
+    assert spy.calls == [(synthetic, 256, "<cut>")]
+
+
 def test_low_priority_eviction_order_excludes_user() -> None:
     assert EVICT_ROLE_ORDER == ("tool", "digest", "assistant", "system")
 
