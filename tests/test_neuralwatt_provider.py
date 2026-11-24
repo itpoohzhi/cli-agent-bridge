@@ -21,14 +21,14 @@ def test_neuralwatt_standard_manifest_loaded_and_valid() -> None:
     assert m.kind == "passthrough"
     assert m.enabled is True
     assert m.priority == 5
-    assert m.routing.weight == 60
+    assert m.routing.weight == 100
     assert m.owned_by == "neuralwatt"
     assert m.limits.max_concurrent == 2
     assert m.limits.quota_group == "neuralwatt"
     assert m.limits.timeout_s == 300
-    # Единый активный OpenCode Go (40%) заменяет sub1/sub2
+    # Единый активный OpenCode Go остаётся включённым failover-резервом (weight 0)
     assert by_id["opencode-go"].enabled is True
-    assert by_id["opencode-go"].routing.weight == 40
+    assert by_id["opencode-go"].routing.weight == 0
     assert by_id["opencode-go-sub1"].enabled is False
     assert by_id["opencode-go-sub1"].routing.weight == 0
     assert by_id["opencode-go-sub2"].enabled is False
@@ -55,17 +55,13 @@ def test_neuralwatt_standard_100_percent_routing_and_failover_order() -> None:
 
     routes = {r["backend"]: (r["weight"], r["priority"]) for r in ds["routing"]["routes"]}
     assert routes == {
-        "neuralwatt": (60, 5),
-        "opencode-go": (40, 10),
+        "neuralwatt": (100, 5),
+        "opencode-go": (0, 10),
         "deepseek-direct": (0, 20),
     }
-    first_counts = {"neuralwatt": 0, "opencode-go": 0}
     for i in range(100):
         order = list(route_order("deepseek-v4.1-flash", ds, f"seed-{i}"))
-        assert set(order) == {"neuralwatt", "opencode-go", "deepseek-direct"}
-        assert order[-1] == "deepseek-direct"
-        first_counts[order[0]] += 1
-    assert first_counts["neuralwatt"] > 0 and first_counts["opencode-go"] > 0
+        assert order == ["neuralwatt", "opencode-go", "deepseek-direct"]
 
     # Новые модели NeuralWatt Standard и Flex
     assert models_by_id["glm-5.3-flash"]["backend"] == "neuralwatt"

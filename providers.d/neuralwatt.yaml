@@ -1,12 +1,12 @@
 # NeuralWatt Standard (deepseek-v4.1-flash, non-flex) через локальный model-georouter :10830/neuralwatt -> AI-group :10820.
-# Первичный маршрут 60% (priority 5, weight 60) для deepseek-v4.1-flash; 40% — единый opencode-go (priority 10, weight 40); резерв failover -> deepseek-direct (20).
+# Первичный маршрут 100% (priority 5, weight 100) для deepseek-v4.1-flash; резерв failover -> opencode-go (priority 10, weight 0) -> deepseek-direct (20).
 manifest_version: 1
 provider_id: neuralwatt
 kind: passthrough
 enabled: true
 required: false
 priority: 5
-routing: {weight: 60}
+routing: {weight: 100}
 owned_by: neuralwatt
 failover: {statuses: [402, 403, 429, 503], error_types: [permission_error, credit_exhausted, payment_required, rate_limit_error], message_markers: [credit, quota, payment, insufficient], pool: neuralwatt, pool_label: 'NeuralWatt'}
 transport:
