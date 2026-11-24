@@ -149,6 +149,9 @@ class ManagedSqliteRoPool:
     def close_all(self) -> None:
         if self._inner is not None:
             self._inner.close_all()
+    def release_thread(self) -> None:
+        if self._inner is not None:
+            self._inner.release_thread()
     def health_tuple(self) -> tuple[bool, int, float]:
         with self._lock:
             s = self._fsm.snapshot()
