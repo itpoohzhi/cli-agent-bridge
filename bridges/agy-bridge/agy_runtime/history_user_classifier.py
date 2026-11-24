@@ -25,6 +25,7 @@ _JOB_HEAD_RE = re.compile(
     r"background job [^\s()\r\n]+ \([^()\r\n]*\) finished "
     r"\[status: [^\]\r\n]+\]\."
 )
+_REPEATED_CALL_RE = re.compile(r"[A-Za-z0-9_.:/-]+\([^\n]*\)\.?", re.ASCII)
 _JOB_OUTPUT_MARKERS = (
     "\nOutput:\n",
     "\n\nOutput:\n",
@@ -45,18 +46,17 @@ _QUOTED_TRANSITIONS = (
 
 
 def _body(rendered_text: str) -> str:
-    text = rendered_text.strip()
+    text = rendered_text.replace("\r\n", "\n").replace("\r", "\n").strip()
     newline = text.find("\n")
     if newline < 0:
         return text
     header = text[:newline]
-    if header.endswith("\r"):
-        header = header[:-1]
     prefix, suffix = "### ", ". user"
     if not header.startswith(prefix) or not header.endswith(suffix):
         return text
     digits = header[len(prefix) : -len(suffix)]
-    return text[newline + 1 :].strip() if digits.isdigit() else text
+    valid = digits.isascii() and digits.isdigit()
+    return text[newline + 1 :].strip() if valid else text
 
 
 def _has_hard_exclusion(body: str) -> bool:
@@ -76,10 +76,10 @@ def _only_reminders(body: str) -> bool:
     folded = body.casefold()
     offset = 0
     found = False
-    while offset < len(body):
-        while offset < len(body) and body[offset].isspace():
+    while offset < len(folded):
+        while offset < len(folded) and folded[offset].isspace():
             offset += 1
-        if offset == len(body):
+        if offset == len(folded):
             return found
         if not folded.startswith(_REMINDER_OPEN, offset):
             return False
@@ -151,12 +151,13 @@ def _job_notice(body: str) -> bool:
 
 
 def _repeat_notice(body: str) -> bool:
-    if "\n\n" in body:
+    if "\n" in body:
         return False
-    if body.startswith("You are repeating the exact same tool call"):
-        return len(body) > len("You are repeating the exact same tool call")
     prefix = "Repeated tool call detected: "
-    return body.startswith(prefix) and len(body) > len(prefix)
+    if body.startswith(prefix):
+        return _REPEATED_CALL_RE.fullmatch(body[len(prefix) :]) is not None
+    repeated = "You are repeating the exact same tool call."
+    return body.startswith(repeated) and body.isascii() and body.endswith(".")
 
 
 def is_synthetic_user_block(rendered_text: str) -> bool:

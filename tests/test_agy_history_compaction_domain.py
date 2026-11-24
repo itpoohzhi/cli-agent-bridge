@@ -345,13 +345,92 @@ def test_last_real_turn_survives_trailing_large_system_reminder() -> None:
     assert "TRAILING_SERVICE_BLOCK" not in result.prompt
 
 
+def test_multiturn_tail_and_digest_remain_chronological() -> None:
+    blocks = [_block(0, "system", "sys"), _block(1, "user", "ANCHOR_U1")]
+    blocks.append(_block(2, "user", "TURN_U2"))
+    for turn in range(1, 21):
+        blocks.extend(
+            [
+                _block(2 * turn + 1, "assistant", f"[tool call c{turn}] run({turn})"),
+                _block(
+                    2 * turn + 2,
+                    "tool",
+                    f"[tool result c{turn}] RESULT_{turn:02d} " + "x" * 900,
+                ),
+            ]
+        )
+
+    result = compact_prompt_blocks(blocks, _cfg(6500))
+
+    assert result.prompt_bytes <= 6500
+    assert result.prompt.index("ANCHOR_U1") < result.prompt.index("[сжатая история")
+    assert "TURN_U2" not in result.prompt
+    assert "[сжатая история ходов 2.." in result.prompt
+    assert result.prompt.index("[сжатая история ходов 2..") < result.prompt.index("RESULT_19")
+    assert result.prompt.index("RESULT_19") < result.prompt.index("RESULT_20")
+    full_indices = [int(value) for value in re.findall(r"^### (\d+)\.", result.prompt, re.M)]
+    assert full_indices == sorted(full_indices)
+    digest_match = re.search(r"история ходов 2\.\.(\d+)", result.prompt)
+    assert digest_match is not None
+    digest_end = int(digest_match.group(1))
+    assert digest_end < full_indices[2]
+
+
+def test_active_turn_carrier_follows_only_earlier_digest() -> None:
+    blocks = [_block(0, "system", "sys"), _block(1, "user", "ANCHOR_U1")]
+    for turn in range(1, 11):
+        blocks.extend(
+            [
+                _block(2 * turn, "assistant", f"[tool call old{turn}] run({turn})"),
+                _block(
+                    2 * turn + 1,
+                    "tool",
+                    f"[tool result old{turn}] OLD_{turn:02d} " + "x" * 700,
+                ),
+            ]
+        )
+    blocks.extend(
+        [
+            _block(22, "user", "TURN_K_BEGIN\nline two\nTURN_K_END"),
+            _synthetic(23, "<system-reminder>AGENTS.md " + "a" * 3000 + "</system-reminder>"),
+            _synthetic(24, "<system-reminder>skill-catalog " + "k" * 25000 + "</system-reminder>"),
+        ]
+    )
+
+    result = compact_prompt_blocks(blocks, _cfg(7000))
+
+    assert result.prompt_bytes <= 7000
+    assert "TURN_K_BEGIN\nline two\nTURN_K_END" in result.prompt
+    assert "skill-catalog" not in result.prompt
+    assert result.prompt.index("ANCHOR_U1") < result.prompt.index("[сжатая история")
+    assert result.prompt.index("[сжатая история") < result.prompt.index("TURN_K_BEGIN")
+    assert "#22 user" not in result.prompt
+    full_indices = [int(value) for value in re.findall(r"^### (\d+)\.", result.prompt, re.M)]
+    assert full_indices == sorted(full_indices)
+
+
+def test_zero_minimum_tail_still_digests_long_middle() -> None:
+    blocks = [_block(0, "system", "sys"), _block(1, "user", "ANCHOR")]
+    for turn in range(12):
+        blocks.extend(_tool_turn(2 + turn * 3, turn, body_chars=1800))
+
+    result = compact_prompt_blocks(
+        blocks,
+        CompactionConfig(limit_bytes=5000, tail_min_groups=0),
+    )
+
+    assert result.prompt_bytes <= 5000
+    assert result.digested_count > 0
+    assert "[сжатая история" in result.prompt
+
+
 def test_all_synthetic_last_user_is_protected_carrier() -> None:
     protected = "<system-reminder>\nLAST_SYNTHETIC_CARRIER\n</system-reminder>"
     blocks = [
         _block(0, "system", "sys"),
         _synthetic(1, "The user approved the bash command."),
-        _synthetic(2, protected),
-        _block(3, "assistant", "trailing output " + "x" * 20000),
+        _block(2, "assistant", "older output " + "x" * 20000),
+        _synthetic(3, protected),
     ]
     result = compact_prompt_blocks(blocks, _cfg(5000))
     assert result.prompt_bytes <= 5000

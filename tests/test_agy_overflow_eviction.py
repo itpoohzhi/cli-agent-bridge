@@ -152,6 +152,20 @@ def test_synthetic_is_shrunk_and_evicted_before_protected_roles() -> None:
     ]
 
 
+def test_synthetic_shrink_returns_fitted_without_eviction() -> None:
+    synthetic = _block("SYNTHETIC", 600)
+    user = _block("USER", 300)
+    spy = PruneSpy()
+
+    prompt = _shrink([("user", user), ("synthetic", synthetic)], 700, spy)
+
+    assert json_text_bytes(prompt) == 700
+    assert user in prompt
+    assert "<SYNTHETIC>" in prompt
+    assert "<cut>" in prompt
+    assert spy.calls == [(synthetic, 399, "<cut>")]
+
+
 def test_all_synthetic_carrier_with_user_role_is_not_evicted() -> None:
     start, end = "<system-reminder>", "</system-reminder>"
     carrier = f"{start}{'x' * (6_000 - len(start) - len(end))}{end}"

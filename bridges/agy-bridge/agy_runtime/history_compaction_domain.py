@@ -1,5 +1,4 @@
 """Чистый домен детерминированной компакции истории диалога (AD-001)."""
-
 from __future__ import annotations
 
 import hashlib
@@ -7,7 +6,6 @@ import json
 import re
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-
 from .history_overflow_policy import OverflowSpec, shrink_overflow_parts
 from .history_user_classifier import is_synthetic_user_block
 
@@ -164,7 +162,6 @@ class _Layout:
     middle: tuple[tuple[PromptBlock, ...], ...]
     tail: tuple[tuple[PromptBlock, ...], ...]
     carrier: tuple[PromptBlock, ...] | None
-
 def _digest_budget(config: CompactionConfig) -> int:
     raw = int(config.limit_bytes * config.digest_ratio)
     capped = min(config.max_digest_bytes, max(config.min_digest_bytes, raw))
@@ -179,20 +176,29 @@ def _last_user_group(
     groups: Sequence[tuple[PromptBlock, ...]], real: bool
 ) -> tuple[PromptBlock, ...] | None:
     return next((group for group in reversed(groups) if _has_user(group, real)), None)
+def _active_tail_carrier(
+    groups: tuple[tuple[PromptBlock, ...], ...], real: bool
+) -> tuple[PromptBlock, ...] | None:
+    candidate = _last_user_group(groups, real)
+    if candidate is None:
+        return None
+    suffix = groups[groups.index(candidate) + 1:]
+    only_synthetic = all(_has_user(group) and not _has_user(group, True) for group in suffix)
+    return candidate if only_synthetic else None
 def _layout(
     groups: tuple[tuple[PromptBlock, ...], ...], config: CompactionConfig
 ) -> _Layout:
     anchor_n = _anchor_group_count(groups)
     anchor, rest = groups[:anchor_n], groups[anchor_n:]
     has_real = _last_user_group(groups, True) is not None
-    carrier = _last_user_group(rest, True) if has_real else _last_user_group(groups, False)
+    carrier = _active_tail_carrier(rest, has_real)
     anchor_text = _joined(_flatten(anchor), config.separator)
     sep_bytes = json_text_bytes(config.separator)
     extra = _digest_budget(config) + 2 * sep_bytes if rest else 0
     min_tail = min(max(config.tail_min_groups, 0), len(rest))
-    selected = set(rest[-min_tail:])
-    if carrier in rest:
-        selected.add(carrier)
+    selected = set(rest[-min_tail:]) if min_tail > 0 else set()
+    if carrier is not None:
+        selected.update(rest[rest.index(carrier):])
     used = json_text_bytes(anchor_text) + extra
     used += sum(json_text_bytes(_joined(group, config.separator)) + sep_bytes for group in selected)
     for group in reversed(rest):
@@ -213,25 +219,21 @@ def _assemble(layout: _Layout, config: CompactionConfig, digest: str) -> str:
         parts.append(digest)
     parts += [b.rendered for b in _flatten(layout.tail)]
     return config.separator.join(parts)
-
 def _demotion_candidate(layout: _Layout) -> tuple[PromptBlock, ...] | None:
-    movable = [group for group in layout.tail if group != layout.carrier]
-    synthetic = [
-        group
-        for group in movable
-        if any(
-            block.role == "user" and is_synthetic_user_block(block.rendered)
-            for block in group
-        )
+    carrier = layout.carrier
+    trailing = [
+        group for group in layout.tail
+        if carrier and group[0].index > carrier[0].index and _has_user(group)
     ]
-    ordinary = [
-        group
-        for group in movable
-        if not any("[tool call " in block.rendered for block in group)
-    ]
-    return next(iter(synthetic or ordinary), None)
+    if trailing:
+        return trailing[0]
+    first = layout.tail[0] if layout.tail else None
+    if first is None or first == carrier:
+        return None
+    return first if not any("[tool call " in block.rendered for block in first) else None
 def _demote(layout: _Layout, group: tuple[PromptBlock, ...]) -> _Layout:
-    middle = tuple(sorted((*layout.middle, group), key=lambda item: item[0].index))
+    drop = layout.carrier is not None and group[0].index > layout.carrier[0].index
+    middle = layout.middle if drop else (*layout.middle, group)
     return _Layout(
         layout.anchor,
         middle,
@@ -246,7 +248,6 @@ def _overflow_role(block: PromptBlock, carrier: tuple[PromptBlock, ...] | None) 
     ):
         return "synthetic"
     return block.role
-
 def _shrink_to_limit(layout: _Layout, config: CompactionConfig) -> tuple[str, _Layout]:
     budget = _digest_budget(config)
     if json_text_bytes(_assemble(layout, config, "")) > config.limit_bytes:
@@ -277,7 +278,6 @@ def _shrink_to_limit(layout: _Layout, config: CompactionConfig) -> tuple[str, _L
             json_text_bytes, middle_prune_text,
         )
         return shrink_overflow_parts(items, spec), current
-
 def compact_prompt_blocks(
     blocks: Sequence[PromptBlock], config: CompactionConfig
 ) -> CompactionResult:
