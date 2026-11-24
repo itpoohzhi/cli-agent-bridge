@@ -162,7 +162,7 @@ def test_pool_backoff_skips_tick_without_disabling_sqlite(
 ) -> None:
     monkeypatch.setattr(server, "_log", lambda _message: None)
 
-    backoff_pool = _FailingPool(RuntimeError("sqlite_ro_pool_backoff"))
+    backoff_pool = _FailingPool(slot_and_session.SqliteRoPoolBackoffError("sqlite_ro_pool_backoff"))
     monkeypatch.setattr(server, "_sqlite_ro_pool", lambda: backoff_pool)
     tail = _poll_tail(tmp_path)
 
@@ -360,3 +360,203 @@ def test_optional_orphan_hooks_accept_legacy_fake_runtime() -> None:
     assert slot_and_session.release_detached_pgid(runtime, 123) is False
     slot_and_session.start_orphan_reaper(runtime, interval_s=0.01)
     slot_and_session.shutdown_hygiene_runtime(runtime)
+
+
+class _ReleaseOnlyPool:
+    def __init__(self) -> None:
+        self.releases = 0
+
+    def release_thread(self) -> None:
+        self.releases += 1
+
+
+class _CountingPoolFsm:
+    def __init__(self) -> None:
+        self.error_streak = 0
+        self.backoff_until = 0.0
+
+    def can_checkout(self, _now_s: float) -> bool:
+        return True
+
+    def record_error(self, _now_s: float) -> None:
+        self.error_streak += 1
+
+    def record_success(self) -> None:
+        self.error_streak = 0
+        self.backoff_until = 0.0
+
+
+class _ExpiringPoolFsm(_CountingPoolFsm):
+    def can_checkout(self, now_s: float) -> bool:
+        return now_s >= self.backoff_until
+
+    def record_error(self, now_s: float) -> None:
+        self.error_streak += 1
+        self.backoff_until = now_s + 0.05
+
+
+
+def _managed_pool_for_regression(inner: object, fsm: object) -> object:
+    import threading
+
+    from agy_runtime.hygiene_runtime import ManagedSqliteRoPool
+
+    pool = object.__new__(ManagedSqliteRoPool)
+    pool._inner = inner
+    pool._enabled = True
+    pool._fsm = fsm
+    pool._lock = threading.Lock()
+    return pool
+
+
+def test_cold_wal_wait_requires_existing_readable_database(tmp_path) -> None:
+    import os
+    import sqlite3
+
+    import pytest
+
+    error = sqlite3.OperationalError("unable to open database file")
+    missing = tmp_path / "missing.db"
+    invalid = tmp_path / "no-dir" / "a.db"
+    assert slot_and_session.is_cold_sqlite_wal_wait(error, missing) is False
+    assert slot_and_session.is_cold_sqlite_wal_wait(error, invalid) is False
+
+    inner = _ReleaseOnlyPool()
+    fsm = _CountingPoolFsm()
+    pool = _managed_pool_for_regression(inner, fsm)
+
+    def fail(_inner: object) -> None:
+        raise error
+
+    for path in (missing, invalid):
+        with pytest.raises(sqlite3.OperationalError, match="unable to open database file"):
+            pool._exec(fail, path)
+    assert fsm.error_streak == 2
+
+    unreadable = tmp_path / "unreadable.db"
+    unreadable.write_bytes(b"")
+    unreadable.chmod(0)
+    try:
+        if not os.access(unreadable, os.R_OK):
+            assert slot_and_session.is_cold_sqlite_wal_wait(error, unreadable) is False
+            with pytest.raises(sqlite3.OperationalError, match="unable to open database file"):
+                pool._exec(fail, unreadable)
+            assert fsm.error_streak == 3
+    finally:
+        unreadable.chmod(0o600)
+
+
+def test_expired_backoff_cold_wal_wait_does_not_block_next_checkout(tmp_path) -> None:
+    import sqlite3
+    import time
+
+    import pytest
+
+    db_path = tmp_path / "cold.db"
+    db_path.write_bytes(b"")
+    inner = _ReleaseOnlyPool()
+    fsm = _ExpiringPoolFsm()
+    pool = _managed_pool_for_regression(inner, fsm)
+
+    def real_failure(_inner: object) -> None:
+        raise sqlite3.OperationalError("database disk image is malformed")
+
+    with pytest.raises(sqlite3.OperationalError, match="malformed"):
+        pool._exec(real_failure, db_path)
+    assert fsm.error_streak == 1
+    assert fsm.backoff_until > 0.0
+    with pytest.raises(slot_and_session.SqliteRoPoolBackoffError, match="sqlite_ro_pool_backoff"):
+        pool._exec(lambda _inner: None, db_path)
+
+    time.sleep(0.06)
+
+    def cold_wal_wait(_inner: object) -> None:
+        raise sqlite3.OperationalError("unable to open database file")
+
+    with pytest.raises(sqlite3.OperationalError, match="unable to open database file"):
+        pool._exec(cold_wal_wait, db_path)
+    assert fsm.error_streak == 1
+    assert pool._exec(lambda _inner: "healthy", db_path) == "healthy"
+    assert fsm.error_streak == 0
+    assert fsm.backoff_until == 0.0
+
+
+def test_registry_without_pgid_does_not_resolve_hygiene_runtime(monkeypatch) -> None:
+    import threading
+    from types import SimpleNamespace
+
+    registry = object.__new__(server.JobRegistry)
+    registry.condition = threading.Condition()
+    registry.max_buffer_bytes = 100_000
+
+    def terminal(job: object, result: dict) -> None:
+        job.result = result
+
+    monkeypatch.setattr(registry, "_terminal", terminal)
+    monkeypatch.setattr(
+        server,
+        "_hygiene_rt",
+        lambda: (_ for _ in ()).throw(AssertionError("hygiene runtime must not be resolved")),
+    )
+    job = SimpleNamespace(
+        result=None,
+        cancelled=threading.Event(),
+        size_bytes=0,
+        events=[],
+        orphan=False,
+        pgid=None,
+        cancel=lambda: None,
+        running=True,
+    )
+    assert registry.publish(job, "output", {"text": "ok"}) is True
+    registry.finish(job, {"state": "done", "text": "ok", "rc": 0})
+    assert job.result["state"] == "done"
+
+
+def test_reaper_reports_errors_and_joins_before_cleanup() -> None:
+    import time
+
+    class Runtime:
+        def sweep_orphans(self) -> None:
+            raise RuntimeError("boom")
+
+        def shutdown_cleanup(self) -> None:
+            self.cleanup_thread_alive = self._orphan_reaper_thread.is_alive()
+
+    runtime = Runtime()
+    slot_and_session.start_orphan_reaper(runtime, interval_s=0.005)
+    deadline = time.monotonic() + 0.5
+    while not getattr(runtime, "_orphan_reaper_errors", 0) and time.monotonic() < deadline:
+        time.sleep(0.005)
+    assert runtime._orphan_reaper_errors >= 1
+    thread = runtime._orphan_reaper_thread
+    slot_and_session.shutdown_hygiene_runtime(runtime)
+    assert not thread.is_alive()
+    assert runtime.cleanup_thread_alive is False
+
+
+def test_reaper_releases_runtime_after_completed_tick() -> None:
+    import gc
+    import threading
+    import time
+    import weakref
+
+    tick = threading.Event()
+
+    class Runtime:
+        def sweep_orphans(self) -> None:
+            tick.set()
+
+    runtime = Runtime()
+    slot_and_session.start_orphan_reaper(runtime, interval_s=0.005)
+    assert tick.wait(0.5)
+    thread = runtime._orphan_reaper_thread
+    runtime_ref = weakref.ref(runtime)
+    del runtime
+    deadline = time.monotonic() + 0.5
+    while runtime_ref() is not None and time.monotonic() < deadline:
+        gc.collect()
+        time.sleep(0.005)
+    assert runtime_ref() is None
+    thread.join(timeout=0.5)
+    assert not thread.is_alive()

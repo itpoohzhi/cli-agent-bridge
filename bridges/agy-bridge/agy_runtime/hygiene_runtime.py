@@ -18,6 +18,7 @@ if str(_REPO_ROOT) not in sys.path:
 from core.adaptive_admission import AdaptiveAdmissionRegistry, AdmissionDecision, AdmissionKey, OutcomeKind, canonical_key  # noqa: E402
 
 from . import long_session_config as _lsc  # noqa: E402
+from .slot_and_session import SqliteRoPoolBackoffError, is_cold_sqlite_wal_wait  # noqa: E402
 from .state_hygiene_policy import BoundedLruTtl, CachePolicyConfig, DisconnectOutcome, HygieneFlags, OrphanFsm, OrphanSweepAction, PoolHealthFSM, compute_epoch_delta, session_store_config, sha_cache_config  # noqa: E402
 
 _T = TypeVar("_T")
@@ -128,13 +129,12 @@ class ManagedSqliteRoPool:
         with self._lock:
             allowed = True if not self._enabled else self._fsm.can_checkout(time.monotonic())
         if not allowed:
-            raise RuntimeError("sqlite_ro_pool_backoff")
+            raise SqliteRoPoolBackoffError("sqlite_ro_pool_backoff")
         if self._inner is None:
             raise RuntimeError("sqlite_ro_pool_unavailable")
         try:
             res = call(self._inner)
         except Exception as exc:
-            from .slot_and_session import is_cold_sqlite_wal_wait
             if not is_cold_sqlite_wal_wait(exc, db_path):
                 with self._lock:
                     _ = self._fsm.record_error(time.monotonic()) if self._enabled else None

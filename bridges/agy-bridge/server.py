@@ -4926,7 +4926,7 @@ class _TranscriptTail(InterruptionTailState):
             self.last_poll = "error"
             self._on_sqlite_error(exc)
         except Exception as exc:
-            backoff = isinstance(exc, RuntimeError) and str(exc) == "sqlite_ro_pool_backoff"
+            backoff = isinstance(exc, slot_and_session.SqliteRoPoolBackoffError)
             self.last_poll = "skip" if backoff else "error"
             if not backoff:
                 _log(f"sqlite-error cid={self._cid8()} err={type(exc).__name__}")
@@ -5301,10 +5301,10 @@ class JobRegistry:
             else:
                 job.events.append((kind, payload))
                 job.size_bytes += size
-                pgid = job.pgid if job.orphan else None
+                pgid = job.pgid if job.orphan and isinstance(job.pgid, int) and job.pgid > 0 else None
                 published = True
                 self.condition.notify_all()
-        if published:
+        if published and pgid:
             slot_and_session.notify_orphan_progress(_hygiene_rt(), pgid)
         elif cancel is not None:
             cancel()
@@ -5320,18 +5320,17 @@ class JobRegistry:
                 job.size_bytes
                 + len(
                     json.dumps(
-                        {
-                            key: result.get(key)
-                            for key in ("text", "reasoning", "retained_events")
-                        },
+                        {key: result.get(key) for key in ("text", "reasoning", "retained_events")},
                         ensure_ascii=False,
                     ).encode("utf-8")
                 )
                 > self.max_buffer_bytes
             ):
                 result = {"state": "buffer_overflow", "text": "", "rc": 1}
+            pgid = job.pgid if isinstance(job.pgid, int) and job.pgid > 0 else None
             self._terminal(job, result)
-        slot_and_session.release_detached_pgid(_hygiene_rt(), job.pgid if job.pgid > 0 else None)
+        if pgid:
+            slot_and_session.release_detached_pgid(_hygiene_rt(), pgid)
 
     def read(
         self, job: _Job, offset: int, timeout: float

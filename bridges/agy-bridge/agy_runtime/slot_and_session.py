@@ -6,7 +6,9 @@ import hashlib
 import math
 import os
 import sqlite3
+import sys
 import threading
+import time
 import weakref
 from collections.abc import Callable, Mapping
 from pathlib import Path
@@ -202,12 +204,18 @@ def _finite_float(value: object) -> float | None:
     return number if math.isfinite(number) else None
 
 
+class SqliteRoPoolBackoffError(RuntimeError):
+    """Пул SQLite RO находится в окне временного backoff."""
+
+
 def is_cold_sqlite_wal_wait(exc: BaseException, db_path: Path | None) -> bool:
-    """Распознаёт штатное ожидание появления холодного WAL."""
+    """Распознаёт штатное ожидание появления холодного WAL при существующей читаемой БД."""
     return (
         isinstance(exc, sqlite3.OperationalError)
         and "unable to open database file" in str(exc).lower()
         and db_path is not None
+        and db_path.is_file()
+        and os.access(db_path, os.R_OK)
         and not Path(f"{db_path}-wal").exists()
     )
 
@@ -261,16 +269,26 @@ def start_orphan_reaper(runtime: Any, interval_s: float = 1.0) -> Any:
                 try:
                     sweep()
                 except Exception:
-                    pass
-            del current
+                    setattr(current, "_orphan_reaper_errors", int(getattr(current, "_orphan_reaper_errors", 0)) + 1)
+                    now = time.monotonic()
+                    last = float(getattr(current, "_orphan_reaper_last_error_s", now - 60.0))
+                    if now - last >= 60.0:
+                        print("agy-orphan-reaper: sweep failed", file=sys.stderr)
+                        setattr(current, "_orphan_reaper_last_error_s", now)
+            del sweep, current
 
-    threading.Thread(target=worker, name="agy-orphan-reaper", daemon=True).start()
+    thread = threading.Thread(target=worker, name="agy-orphan-reaper", daemon=True)
+    setattr(runtime, "_orphan_reaper_thread", thread)
+    thread.start()
     return runtime
 
 
-def stop_orphan_reaper(runtime: object) -> None:
+def stop_orphan_reaper(runtime: object, join_timeout_s: float = 1.0) -> None:
     if (stop := getattr(runtime, "_orphan_reaper_stop", None)) is not None:
         stop.set()
+        thr = getattr(runtime, "_orphan_reaper_thread", None)
+        if isinstance(thr, threading.Thread) and thr.is_alive() and thr is not threading.current_thread():
+            thr.join(timeout=join_timeout_s)
 
 
 def shutdown_hygiene_runtime(runtime: object) -> None:
@@ -288,4 +306,3 @@ def release_detached_pgid(runtime: object, pgid: int | None) -> bool:
     if pgid is None or not callable(release := getattr(runtime, "release_detached", None)):
         return False
     return bool(release(pgid))
-
