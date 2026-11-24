@@ -6,6 +6,12 @@ import json
 from collections.abc import Mapping
 from dataclasses import replace
 from typing import Any
+from urllib.parse import urlparse
+
+_LOCAL_GEOROUTER_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+_LOCAL_GEOROUTER_PORT = 10830
+_NEURALWATT_IDS = frozenset({"neuralwatt", "neuralwatt-flex"})
+_OPENCODE_GO_IDS = frozenset({"opencode-go"})
 
 
 def is_thinking_disabled(request: Mapping[str, Any] | None) -> bool:
@@ -38,49 +44,80 @@ def logical_effort(
     return ""
 
 
-def resolve_provider_off_patch(
-    adapter: Any, backend_id: str
-) -> tuple[str | None, Mapping[str, Any] | None]:
-    """Контракт `"off"`: явные params/effort_map конфига, иначе канон providers.d."""
+def _normalize_off_patch(raw_off: Any, effort_field: Any) -> dict[str, Any] | None:
+    if isinstance(raw_off, Mapping):
+        return copy.deepcopy(dict(raw_off))
+    if isinstance(raw_off, str) and raw_off.strip():
+        field = effort_field.strip() if isinstance(effort_field, str) else ""
+        if field and field.lower() != "none":
+            return {field: raw_off}
+    return None
+
+
+def _local_georouter_patch(base_url: str) -> dict[str, Any] | None:
+    if not base_url:
+        return None
+    parsed = urlparse(base_url.strip())
+    try:
+        port = parsed.port
+    except ValueError:
+        return None
+    if parsed.scheme != "http" or parsed.hostname not in _LOCAL_GEOROUTER_HOSTS or port != _LOCAL_GEOROUTER_PORT:
+        return None
+    segments = [seg for seg in parsed.path.split("/") if seg]
+    first_seg = segments[0].lower() if segments else ""
+    if first_seg == "neuralwatt":
+        return {"reasoning_effort": "none"}
+    if first_seg == "go":
+        return {"thinking": {"type": "disabled"}}
+    return None
+
+
+def resolve_provider_off_patch(adapter: Any, backend_id: str) -> dict[str, Any] | None:
+    """Контракт `"off"`: явный effort_map конфига, иначе точный provider id / локальный georouter."""
     config = getattr(adapter, "config", None) if adapter is not None else None
     if isinstance(config, Mapping):
         params = config.get("params")
         if isinstance(params, Mapping):
-            field_name, mapping = params.get("effort_field"), params.get("effort_map")
-            patch = mapping.get("off") if isinstance(mapping, Mapping) else None
-            if isinstance(field_name, str) and field_name and patch is not None:
-                return field_name, patch
-        mapping = config.get("effort_map")
-        patch = mapping.get("off") if isinstance(mapping, Mapping) else None
-        if patch is not None:
-            return str(config.get("effort_field") or "reasoning_effort"), patch
+            p_map = params.get("effort_map")
+            if isinstance(p_map, Mapping) and p_map:
+                p_field = params.get("effort_field") if "effort_field" in params else config.get("effort_field")
+                return _normalize_off_patch(p_map.get("off"), p_field)
+        c_map = config.get("effort_map")
+        if isinstance(c_map, Mapping) and c_map:
+            c_field = config.get("effort_field") if "effort_field" in config else "reasoning_effort"
+            return _normalize_off_patch(c_map.get("off"), c_field)
     backend = str(backend_id or "").strip().lower()
     adapter_id = str(getattr(adapter, "id", "") or "").strip().lower()
+    if backend in _NEURALWATT_IDS or adapter_id in _NEURALWATT_IDS:
+        return {"reasoning_effort": "none"}
+    if backend in _OPENCODE_GO_IDS or adapter_id in _OPENCODE_GO_IDS:
+        return {"thinking": {"type": "disabled"}}
     base_url = str(config.get("base_url") or "") if isinstance(config, Mapping) else ""
-    if backend.startswith("neuralwatt") or adapter_id.startswith("neuralwatt") or "/neuralwatt/" in base_url:
-        return "reasoning_effort", {"reasoning_effort": "none"}
-    if backend.startswith("opencode-go") or adapter_id.startswith("opencode-go") or "/go/" in base_url:
-        return "none", {"thinking": {"type": "disabled"}}
-    return None, None
+    return _local_georouter_patch(base_url)
 
 
 def _is_logical_off(request: Mapping[str, Any]) -> bool:
-    explicit = str(request.get("reasoning_effort", "")).strip().lower()
-    return explicit == "off" or is_thinking_disabled(request)
+    explicit = request.get("reasoning_effort")
+    if isinstance(explicit, str) and explicit.strip():
+        return explicit.strip().lower() == "off"
+    return is_thinking_disabled(request)
 
 
-def _wire_body(body: Any, request: Mapping[str, Any], patch: Mapping[str, Any]) -> bytes:
-    """Тело запроса с теми же ключами патча; прочие поля исходного body сохраняются."""
-    parsed = None
-    if isinstance(body, (bytes, bytearray)) and body:
-        try:
-            parsed = json.loads(body)
-        except ValueError:
-            parsed = None
-    source = dict(parsed) if isinstance(parsed, dict) else dict(request)
+def _wire_body(body: Any, request: Mapping[str, Any], patch: Mapping[str, Any]) -> Any:
+    """Тело запроса с теми же ключами патча; непарсимый body возвращается без мутации."""
+    if not isinstance(body, (bytes, bytearray)) or not body:
+        return body
+    try:
+        parsed = json.loads(body)
+    except (ValueError, TypeError):
+        return body
+    if not isinstance(parsed, dict):
+        return body
+    source = dict(parsed)
     source.pop("reasoning_effort", None)
     source.pop("thinking", None)
-    source.update(copy.deepcopy(patch))
+    source.update(copy.deepcopy(dict(patch)))
     return json.dumps(source, ensure_ascii=False).encode("utf-8")
 
 
@@ -93,13 +130,13 @@ def apply_attempt_effort_map(
         return selected, body
     model = getattr(selected, "model", None)
     backend = str(model.get("backend") or "") if isinstance(model, Mapping) else ""
-    _effort_field, patch = resolve_provider_off_patch(adapter, backend)
+    patch = resolve_provider_off_patch(adapter, backend)
     if not isinstance(patch, Mapping) or not patch:
         return selected, body
     patched = dict(request)
     patched.pop("reasoning_effort", None)
     patched.pop("thinking", None)
-    patched.update(copy.deepcopy(patch))
+    patched.update(copy.deepcopy(dict(patch)))
     new_body = _wire_body(body, request, patch)
     try:
         return replace(selected, request=patched), new_body

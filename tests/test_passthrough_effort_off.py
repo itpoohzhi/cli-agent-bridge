@@ -10,11 +10,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import pytest
 
+import core.http_post_routing as hpr
 import core.passthrough_effort_map as pem
 from core.passthrough_facade import _pin_effort
 from core.route_eligibility import EligibilityFacts, request_snapshot, route_eligible
 from core.routing_contract import ROUTING_ALGORITHM
 from core.transport_routing import route_order
+from core.zero_canon_http import ZERO_CANON_HEADER_VALUE
+from core.zero_canon_routing import select_zero_canon_route
 
 
 @dataclass(frozen=True)
@@ -24,9 +27,9 @@ class _Selected:
 
 
 class _Adapter:
-    def __init__(self, adapter_id):
+    def __init__(self, adapter_id, config=None):
         self.id = adapter_id
-        self.config = {}
+        self.config = {} if config is None else config
 
 
 _NW = _Adapter("neuralwatt-1")
@@ -119,6 +122,87 @@ def test_non_off_effort_passthrough(model_id):
     assert patched is selected
     assert wire_body is body
     assert pem.logical_effort(request, None, None) == "high"
+
+
+def test_explicit_high_with_disabled_thinking_not_overwritten():
+    """F-001/F-009: явный reasoning_effort='high' сильнее thinking.type='disabled'."""
+    request = {"model": "glm", "reasoning_effort": "high", "thinking": {"type": "disabled"}}
+    assert pem.logical_effort(request, None, None) == "high"
+    body = json.dumps(request).encode("utf-8")
+    for backend, adapter in (("neuralwatt", _NW), ("opencode-go", _GO)):
+        selected = _Selected(request=dict(request), model={"backend": backend})
+        patched, wire_body = pem.apply_attempt_effort_map(selected, adapter, body)
+        assert patched is selected
+        assert wire_body is body
+        assert patched.request["reasoning_effort"] == "high"
+        assert json.loads(wire_body)["reasoning_effort"] == "high"
+        assert "none" not in wire_body.decode("utf-8")
+
+
+def test_resolve_provider_off_patch_scalar_params_effort_map():
+    """F-010/F-013: скалярный params.effort_map['off'] + effort_field преобразуется в dict-патч."""
+    adapter = _Adapter(
+        "custom-1",
+        config={"params": {"effort_field": "reasoning_effort", "effort_map": {"off": "none"}}},
+    )
+    patch = pem.resolve_provider_off_patch(adapter, "custom-1")
+    assert patch == {"reasoning_effort": "none"}
+
+    request = {"model": "glm", "reasoning_effort": "off"}
+    body = json.dumps(request).encode("utf-8")
+    selected = _Selected(request=dict(request), model={"backend": "custom-1"})
+    patched, wire_body = pem.apply_attempt_effort_map(selected, adapter, body)
+    assert patched.request == {"model": "glm", "reasoning_effort": "none"}
+    assert json.loads(wire_body) == {"model": "glm", "reasoning_effort": "none"}
+
+
+def test_resolve_provider_off_patch_external_url_vs_local_georouter():
+    """F-012: внешний URL не классифицируется как opencode-go; локальный georouter :10830 распознаётся."""
+    ext = _Adapter("custom-ext", config={"base_url": "https://api.example.com/go/v1"})
+    assert pem.resolve_provider_off_patch(ext, "custom-ext") is None
+
+    request = {"model": "glm", "reasoning_effort": "off"}
+    body = json.dumps(request).encode("utf-8")
+    selected = _Selected(request=dict(request), model={"backend": "custom-ext"})
+    patched, wire_body = pem.apply_attempt_effort_map(selected, ext, body)
+    assert patched is selected
+    assert wire_body is body
+
+    local_go = _Adapter("custom-local-go", config={"base_url": "http://127.0.0.1:10830/go/v1"})
+    assert pem.resolve_provider_off_patch(local_go, "custom-ext") == {"thinking": {"type": "disabled"}}
+
+    local_nw = _Adapter("custom-local-nw", config={"base_url": "http://127.0.0.1:10830/neuralwatt/v1"})
+    assert pem.resolve_provider_off_patch(local_nw, "custom-ext") == {"reasoning_effort": "none"}
+
+
+def test_drained_zero_canon_routes_reject_503_route_unavailable(monkeypatch):
+    """F-008/F-011: дренированный маршрут (weight <= 0) даёт None и 503 route_unavailable."""
+    drained = [{"backend": "drained", "weight": 0, "priority": 1}]
+    assert select_zero_canon_route(drained) is None
+
+    monkeypatch.setattr(hpr, "filter_zero_canon_providers", lambda routes, *_args, **_kwargs: list(routes))
+    rejects = []
+    handler = SimpleNamespace(
+        headers={},
+        _review_profile=ZERO_CANON_HEADER_VALUE,
+        _telemetry_meta=lambda **_kwargs: None,
+        _reject=lambda status, kind, message, model_id, model_len: rejects.append(
+            (status, kind, message, model_id, model_len)
+        ),
+    )
+    host = SimpleNamespace(
+        _MODEL_NOTES_FILTER=SimpleNamespace(is_blocked=lambda _m: False),
+        FLEET={"models": {"m": {"backend": "drained", "routing": {"routes": drained}}}},
+        _auth_ok=lambda _h: True,
+        INTERNAL_MODEL_IDS=frozenset(),
+        _PENALTY_TRACKER=SimpleNamespace(get_model_status=lambda _m: {"is_penalized": False}),
+        flag_enabled=lambda _name: True,
+        BACKENDS=SimpleNamespace(adapters={}),
+    )
+    context = SimpleNamespace(host=host, handler=handler, request={"model": "m"}, provider_id=None)
+
+    assert hpr.resolve_post_route(context) is None
+    assert rejects == [(503, "route_unavailable", "no active Zero-Canon route with positive weight", "m", 1)]
 
 
 def _spec(backend):

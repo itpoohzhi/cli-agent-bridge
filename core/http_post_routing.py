@@ -214,8 +214,8 @@ def _backend_configs(host: Any) -> dict[str, Mapping[str, Any]]:
     return _zcr.backend_configs(host)
 
 
-def _apply_filtered_routes(route: PostRoute, routing: dict[str, Any], kept: list[Any]) -> None:
-    _zcr.apply_filtered_routes(route, routing, kept, routing_enabled=route.host.flag_enabled("BRIDGE_TRANSPORT_ROUTING_ENABLED"))
+def _apply_filtered_routes(route: PostRoute, routing: dict[str, Any], kept: list[Any]) -> str | None:
+    return _zcr.apply_filtered_routes(route, routing, kept, routing_enabled=route.host.flag_enabled("BRIDGE_TRANSPORT_ROUTING_ENABLED"))
 
 
 def _selected_backend_in_provider_scope(route: PostRoute, kept: list[Any] | None = None) -> bool:
@@ -250,7 +250,8 @@ def _zero_canon_route_allowed(route: PostRoute) -> bool:
     if not kept:
         return route.reject(503, "route_unavailable", "no Zero-Canon eligible provider is available")
     if isinstance(routing, dict) and isinstance(routes, list):
-        _apply_filtered_routes(route, routing, kept)
+        if _apply_filtered_routes(route, routing, kept) is None:
+            return route.reject(503, "route_unavailable", "no active Zero-Canon route with positive weight")
     return _selected_backend_in_provider_scope(route, kept)
 
 

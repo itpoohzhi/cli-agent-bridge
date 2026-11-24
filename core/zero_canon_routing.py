@@ -17,6 +17,10 @@ def _numeric(value: Any) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
+def _is_drained(item: Mapping[str, Any]) -> bool:
+    return "weight" in item and _numeric(item.get("weight")) and item["weight"] <= 0
+
+
 def backend_configs(host: Any) -> dict[str, dict[str, Any]]:
     """Собирает конфиги адаптеров из host.BACKENDS.adapters (Mapping или callable)."""
     backends = getattr(host, "BACKENDS", None)
@@ -40,28 +44,31 @@ def backend_configs(host: Any) -> dict[str, dict[str, Any]]:
     return configs
 
 
-def select_zero_canon_route(kept: list[Any], *, disabled_backend: str | None = None, routing_enabled: bool = True) -> str | None:
-    """Выбирает backend: disabled при выключенном routing, иначе min(priority) (меньше число = выше приоритет)."""
-    if not routing_enabled and _nonempty_str(disabled_backend):
-        for item in kept:
-            if isinstance(item, Mapping) and item.get("backend") == disabled_backend:
-                return disabled_backend
+def select_zero_canon_route(
+    kept: list[Any], *, disabled_backend: str | None = None, routing_enabled: bool = True
+) -> str | None:
+    """Выбирает backend среди недренированных: disabled при выключенном routing, иначе min(priority)."""
     candidates = [i for i in kept if isinstance(i, Mapping) and _nonempty_str(i.get("backend"))]
-    weighted = [i for i in candidates if _numeric(i.get("weight")) and i.get("weight") > 0]
-    pool = weighted or candidates
-    if not pool:
+    eligible = [i for i in candidates if not _is_drained(i)]
+    if not eligible:
         return None
-    best: Any = None
+    if not routing_enabled and _nonempty_str(disabled_backend):
+        for item in eligible:
+            if item.get("backend") == disabled_backend:
+                return disabled_backend
+    best: Mapping[str, Any] | None = None
     best_priority: float = float("inf")
-    for item in pool:
+    for item in eligible:
         raw_p = item.get("priority")
         priority = float(raw_p) if _numeric(raw_p) else float("inf")
         if best is None or priority < best_priority:
             best, best_priority = item, priority
-    return best.get("backend")
+    return best.get("backend") if best is not None else None
 
 
-def apply_filtered_routes(route: Any, routing: Mapping[str, Any], kept: list[Any], *, routing_enabled: bool = True) -> None:
+def apply_filtered_routes(
+    route: Any, routing: Mapping[str, Any], kept: list[Any], *, routing_enabled: bool = True
+) -> str | None:
     """Мутирует только route.model; переданный routing и host.FLEET не трогаем."""
     new_routing = copy.deepcopy(dict(routing))
     new_routing["routes"] = copy.deepcopy(kept)
@@ -70,7 +77,12 @@ def apply_filtered_routes(route: Any, routing: Mapping[str, Any], kept: list[Any
         disabled_backend=new_routing.get("disabled_backend"),
         routing_enabled=routing_enabled,
     )
-    route.model["routing"] = new_routing
     if chosen:
         route.model["backend"] = chosen
         new_routing["zero_canon_backend"] = chosen
+    else:
+        route.model["backend"] = ""
+        new_routing["routes"] = []
+        new_routing.pop("zero_canon_backend", None)
+    route.model["routing"] = new_routing
+    return chosen

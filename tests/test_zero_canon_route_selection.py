@@ -69,9 +69,9 @@ def test_select_route_min_priority_and_fleet_order_tie_break():
     assert zcr.select_zero_canon_route(tie) == "first"
 
 
-def test_select_route_all_zero_weight_fallback():
+def test_select_route_all_zero_weight_fails_closed():
     kept = [{"backend": "a", "priority": 2, "weight": 0}, {"backend": "b", "priority": 1, "weight": 0}]
-    assert zcr.select_zero_canon_route(kept) == "b"
+    assert zcr.select_zero_canon_route(kept) is None
 
 
 def test_select_route_non_numeric_priority_is_inf():
