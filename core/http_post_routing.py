@@ -212,15 +212,37 @@ def _lookup_backend(backends: Any, name: str | None) -> Any:
 def _backend_configs(host: Any) -> dict[str, Mapping[str, Any]]:
     backends = getattr(host, "BACKENDS", None)
     adapters = getattr(backends, "adapters", None)
-    return {name: getattr(adapter, "config", {}) for name, adapter in adapters.items() if hasattr(adapter, "config")} if isinstance(adapters, Mapping) else {}
+    if isinstance(adapters, Mapping):
+        return {name: getattr(adapter, "config", {}) for name, adapter in adapters.items() if hasattr(adapter, "config")}
+    if callable(adapters):
+        return {
+            str(adapter.id): getattr(adapter, "config", {})
+            for adapter in adapters()
+            if hasattr(adapter, "id") and hasattr(adapter, "config")
+        }
+    return {}
+
+
+def _pick_primary_backend(kept: list[Any], current: object) -> str | None:
+    dict_routes = [item for item in kept if isinstance(item, dict) and isinstance(item.get("backend"), str) and item.get("backend")]
+    if not dict_routes:
+        return None
+    positive = [item for item in dict_routes if (item.get("weight") or 0) > 0]
+    pool = positive or dict_routes
+    if isinstance(current, str) and any(item["backend"] == current for item in pool):
+        return current
+    best = min(pool, key=lambda item: (item.get("priority", 0), dict_routes.index(item)))
+    return str(best["backend"])
 
 
 def _apply_filtered_routes(route: PostRoute, routing: dict[str, Any], kept: list[Any]) -> None:
     routing["routes"] = kept
-    chosen = kept[0].get("backend") if isinstance(kept[0], dict) else None
+    chosen = _pick_primary_backend(kept, route.model.get("backend"))
     if isinstance(chosen, str) and chosen:
         route.model["backend"] = chosen
         routing["zero_canon_backend"] = chosen
+        if len(kept) > 1 and routing.get("legacy_backend") not in (None, chosen):
+            routing["legacy_backend"] = chosen
 
 
 def _selected_backend_in_provider_scope(route: PostRoute, kept: list[Any] | None = None) -> bool:

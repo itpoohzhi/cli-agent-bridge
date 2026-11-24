@@ -183,6 +183,7 @@ def test_managed_sqlite_ro_pool_cold_wal_missing_does_not_poison_fsm(
     tmp_path: Path,
 ) -> None:
     db_path = tmp_path / "cid.db"
+    db_path.touch()
     assert not Path(f"{db_path}-wal").exists()
     inner = _ColdWalPool()
     managed = ManagedSqliteRoPool(inner, hygiene_enabled=True)

@@ -17,7 +17,8 @@ if str(_REPO_ROOT) not in sys.path:
 
 from core.adaptive_admission import AdaptiveAdmissionRegistry, AdmissionDecision, AdmissionKey, OutcomeKind, canonical_key  # noqa: E402
 
-from . import long_session_config as _lsc, sqlite_tail_lifecycle as _stl  # noqa: E402
+from . import long_session_config as _lsc  # noqa: E402
+from .slot_and_session import SqliteRoPoolBackoffError, is_cold_sqlite_wal_wait  # noqa: E402
 from .state_hygiene_policy import BoundedLruTtl, CachePolicyConfig, DisconnectOutcome, HygieneFlags, OrphanFsm, OrphanSweepAction, PoolHealthFSM, compute_epoch_delta, session_store_config, sha_cache_config  # noqa: E402
 
 _T = TypeVar("_T")
@@ -126,13 +127,13 @@ class ManagedSqliteRoPool:
         with self._lock:
             allowed = True if not self._enabled else self._fsm.can_checkout(time.monotonic())
         if not allowed:
-            raise RuntimeError("sqlite_ro_pool_backoff")
+            raise SqliteRoPoolBackoffError("sqlite_ro_pool_backoff")
         if self._inner is None:
             raise RuntimeError("sqlite_ro_pool_unavailable")
         try:
             res = call(self._inner)
         except Exception as exc:
-            if not _stl.is_cold_wal_error(exc, db_path):
+            if not is_cold_sqlite_wal_wait(exc, db_path):
                 with self._lock:
                     _ = self._fsm.record_error(time.monotonic()) if self._enabled else None
             self.release_thread()
@@ -181,7 +182,6 @@ class HygieneRuntime:
     def _cur_flags(self) -> HygieneFlags:
         with self._flags_lock:
             return self._flags
-
     def snapshot_flags(self, config_path: Path | None = None) -> HygieneFlags:
         cp = config_path or self._config_path
         v = tuple(_lsc.read_bool_setting(dk, ek, False, config_path=cp) for dk, ek in _FLAG_SPECS)
@@ -198,7 +198,6 @@ class HygieneRuntime:
         with self._pool_lock:
             self._pool.set_enabled(nxt.sqlite_ro_hygiene_enabled)
         return nxt
-
     def upstream_held_count(self) -> int:
         with self._orphan_lock:
             return len(self._detached) + len(self._cancelling)
@@ -252,6 +251,9 @@ class HygieneRuntime:
         with self._orphan_lock:
             if (e := self._detached.get(pgid)) is not None:
                 self._detached[pgid] = (e[0], time.monotonic())
+    def release_detached(self, pgid: int) -> bool:
+        with self._orphan_lock:
+            return self._detached.pop(pgid, None) is not None
     def _drain_pgids(self, pgids: list[int], kill_fn: Callable[[int, int], None] | None, waiter: Callable[[int, float], bool] | None) -> int:
         for pgid in pgids:
             _bounded_teardown(pgid, kill_fn, waiter)
@@ -268,14 +270,12 @@ class HygieneRuntime:
         with self._orphan_lock:
             pgids = list(dict.fromkeys((*self._detached.keys(), *self._cancelling)))
         return self._drain_pgids(pgids, kill_fn, waiter)
-
     def sha_cache_get(self, key: str) -> str | None: return self._sha.get(key, self._cur_flags().bounded_state_enabled)
     def sha_cache_put(self, key: str, value: str) -> None: self._sha.put(key, value, self._cur_flags().bounded_state_enabled)
     def session_claim(self, key: str, value: str = "1") -> bool: return self._session.claim(key, value, self._cur_flags().bounded_state_enabled)
     def session_commit(self, key: str, value: str) -> None: self._session.put(key, value, self._cur_flags().bounded_state_enabled)
     def session_invalidate(self, key: str) -> None: self._session.remove(key)
     def session_prune(self) -> int: return self._session.clear_or_prune(False, self._cur_flags().bounded_state_enabled)
-
     def health_snapshot(self, config_path: Path | None = None) -> dict[str, object]:
         cp = config_path or self._config_path
         flags, now_s = (self.snapshot_flags(cp) if cp is not None else self._cur_flags()), time.monotonic()

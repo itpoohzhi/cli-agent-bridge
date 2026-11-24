@@ -142,7 +142,7 @@ def handle_poll_exception(
     tail: _PollTail, exc: BaseException, log: Callable[[str], None]
 ) -> None:
     if is_pool_backoff_error(exc):
-        tail.last_poll = "backoff"
+        tail.last_poll = "skip"
         logged = cast(bool, getattr(tail, "_sqlite_pool_backoff_logged", False))
         if not logged:
             setattr(tail, "_sqlite_pool_backoff_logged", True)
