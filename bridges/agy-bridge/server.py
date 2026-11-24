@@ -146,7 +146,7 @@ if str(_REPO_ROOT) not in sys.path:
 
 from agy_runtime import (  # noqa: E402
     long_session_config as _lsc, midstream_resilience, slot_and_session, sqlite_ro_pool as _ro_pool,
-    sse_body_runner, sse_stream_helpers, tool_turn_helpers, turn_usage_finalize as _u_fin, zero_canon_profile,
+    sqlite_tail_lifecycle, sse_body_runner, sse_stream_helpers, tool_turn_helpers, turn_usage_finalize as _u_fin, zero_canon_profile,
 )
 from agy_runtime.hygiene_runtime import HygieneRuntime, ManagedSqliteRoPool  # noqa: E402
 from core.adaptive_admission import AdmissionKey, OutcomeKind  # noqa: E402
@@ -183,7 +183,7 @@ from core.watchdog import (  # noqa: E402
     AdaptiveTimeoutController,
 )
 from core.runtime_build_info import UNKNOWN as BUILD_UNKNOWN, RuntimeBuildInfo  # noqa: E402
-from core import timeout_ladder as _tl, turn_resilience_facade as _TURN_RESILIENCE  # noqa: E402
+from core import resumed_tools_policy as _RESUMED_TOOLS, timeout_ladder as _tl, turn_resilience_facade as _TURN_RESILIENCE  # noqa: E402
 from core.log_redaction import mask_credential_context, mask_long_tokens, redact_log_text, safe_log_tokens  # noqa: E402
 from core.recovery_flags import (  # noqa: E402
     read_diagnostic_redact_margin_chars, read_diagnostic_window_chars, read_post_call_cutoff_enabled,
@@ -2365,6 +2365,7 @@ def _downgrade_to_text_in_run_once(
     ctx["conversation_id"] = ""
     ctx["images"] = []
     ctx["img_dir"] = None
+    ctx["tools_fp"] = ""
     ctx["prompt"] = stripped
     ctx["full_prompt"] = stripped
 
@@ -3036,12 +3037,17 @@ def _session_claim(sess_key: tuple[str, ...], turn_id: str = "") -> str:
             _persist_sessions()
 
 
+def _session_tools_fp(sess_key: tuple[str, ...]) -> str:
+    with _session_store_lock:
+        return str((_session_store.get(sess_key) or {}).get("tools_fp") or "")
+
+
+def _session_max_turns() -> int:
+    return _lsc.read_int_setting("session_max_turns", "AGY_BRIDGE_SESSION_MAX_TURNS", 30, (1, 1000), config_path=DYNAMIC_CONFIG_PATH)
+
+
 def _session_expired(entry: dict[str, Any], now: float) -> bool:
-    return (
-        now - entry["last_used"] > SESSION_IDLE_TTL_S
-        or now - entry["created"] > SESSION_MAX_TTL_S
-        or entry["turns"] >= SESSION_MAX_TURNS
-    )
+    return any((now - entry["last_used"] > SESSION_IDLE_TTL_S, now - entry["created"] > SESSION_MAX_TTL_S, entry["turns"] >= _session_max_turns()))
 
 
 def _session_invalidate(sess_key: tuple, cid: str) -> None:
@@ -3056,17 +3062,16 @@ def _session_invalidate(sess_key: tuple, cid: str) -> None:
         _persist_sessions()
 
 
-def _session_commit(sess_key: tuple[str, ...], cid: str) -> None:
+def _session_commit(sess_key: tuple[str, ...], cid: str, tools_fp: str = "") -> None:
     if not _session_key_valid(sess_key):
         return
     now = time.time()
     with _session_store_lock:
         entry = _session_store.get(sess_key)
         if entry is not None and entry["cid"] == cid:
-            entry["last_used"] = now
-            entry["turns"] += 1
+            entry.update(last_used=now, turns=entry["turns"] + 1, tools_fp=tools_fp)
         else:
-            _session_store[sess_key] = {"cid": cid, "last_used": now, "created": now, "turns": 1}
+            _session_store[sess_key] = {"cid": cid, "last_used": now, "created": now, "turns": 1, "tools_fp": tools_fp}
         _hygiene_rt().session_commit(str(sess_key), cid)
     _persist_sessions()
 
@@ -3127,12 +3132,10 @@ def _session_entry_from_json(item: object, now: float) -> dict[str, Any] | None:
     turns = data.get("turns")
     if isinstance(turns, bool) or not isinstance(turns, int) or turns < 0:
         return None
-    entry: dict[str, Any] = {
-        "cid": cid,
-        "created": stamps[0],
-        "last_used": stamps[1],
-        "turns": turns,
-    }
+    tools_fp = data.get("tools_fp", "")
+    if not isinstance(tools_fp, str) or (tools_fp and re.fullmatch(r"[0-9a-f]{64}", tools_fp) is None):
+        return None
+    entry: dict[str, Any] = {"cid": cid, "created": stamps[0], "last_used": stamps[1], "turns": turns, "tools_fp": tools_fp}
     if _session_expired(entry, now):
         return None
     return entry
@@ -3156,6 +3159,7 @@ def _atomic_write_sessions_json(
                 "created": entry["created"],
                 "last_used": entry["last_used"],
                 "turns": entry["turns"],
+                "tools_fp": entry.get("tools_fp", ""),
             }
             for key, entry in snapshot.items()
         ],
@@ -3429,6 +3433,7 @@ class _RuntimeFlags(NamedTuple):
     session_continuity_enabled: bool = False
     truncation_notice_enabled: bool = False
     history_compaction_enabled: bool = False
+    resumed_compact_tools_enabled: bool = True
 
 
 _NEW_FLAG_ENV = {
@@ -3445,6 +3450,7 @@ _NEW_FLAG_ENV = {
     "session_continuity_enabled": "AGY_SESSION_CONTINUITY_ENABLED",
     "truncation_notice_enabled": "AGY_TRUNCATION_NOTICE_ENABLED",
     "history_compaction_enabled": "AGY_HISTORY_COMPACTION_ENABLED",
+    "resumed_compact_tools_enabled": "AGY_BRIDGE_RESUMED_COMPACT_TOOLS_ENABLED",
 }
 _ENV_TRUE = frozenset({"1", "true", "yes", "on"})
 _ENV_FALSE = frozenset({"0", "false", "no", "off"})
@@ -4023,12 +4029,7 @@ def _sqlite_max_idx(db_path: Path) -> int | None:
     """Наибольший idx шага в БД (или -1); None — прочитать не удалось."""
     pool = _sqlite_ro_pool()
     if pool is not None:
-        try:
-            rows = pool.query_rows(db_path, "SELECT COALESCE(MAX(idx), -1) FROM steps")
-        except sqlite3.Error:
-            return None
-        value = rows[0][0] if rows else None
-        return value if isinstance(value, int) else None
+        return sqlite_tail_lifecycle.safe_sqlite_max_idx(pool, db_path, "SELECT COALESCE(MAX(idx), -1) FROM steps")
     conn: sqlite3.Connection | None = None
     try:
         conn = _sqlite_open_ro(db_path)
@@ -4508,20 +4509,7 @@ class _TranscriptTail(InterruptionTailState):
 
     def _finish(self) -> None:
         """Закрыть соединение, вернуть исход breaker'у и снять владение cid (один раз)."""
-        if self._finished:
-            return
-        self._finished = True
-        with self._conn_lock:
-            conn = self._active_conn
-            self._active_conn = None
-            if conn is not None:
-                _sqlite_close(conn)
-        if (pool := _sqlite_ro_pool()) is not None:
-            pool.release_thread()
-        if self.plan.mode in ("LIVE", "SHADOW"):
-            _breaker_report(self.probe_gen, self.selects_ok, self.failed)
-        if self._owned_cid:
-            _cid_release(self._owned_cid, self.turn_id)
+        sqlite_tail_lifecycle.finish_transcript_tail(self, _sqlite_close, _sqlite_ro_pool, _breaker_report, _cid_release)
 
     # ---- один проход ---------------------------------------------------------------
     def tick(self) -> None:
@@ -4926,9 +4914,7 @@ class _TranscriptTail(InterruptionTailState):
             self.last_poll = "error"
             self._on_sqlite_error(exc)
         except Exception as exc:
-            self.last_poll = "error"
-            _log(f"sqlite-error cid={self._cid8()} err={type(exc).__name__}")
-            self._sqlite_off("internal")
+            sqlite_tail_lifecycle.handle_poll_exception(self, exc, _log)
         finally:
             with self._conn_lock:
                 self._active_conn = None
@@ -7327,7 +7313,7 @@ class Handler(BaseHTTPRequestHandler):
                 cid_valid=bool(_CID_RE.fullmatch(out_cid)),
             )
             if all((dict(commit=True).get(commit_act, False), bool(ctx.get("sess_key")))):
-                _session_commit(ctx["sess_key"], out_cid)
+                _session_commit(ctx["sess_key"], out_cid, str(ctx.get("tools_fp") or ""))
             elif all((dict(invalidate=True).get(commit_act, False), bool(ctx.get("hot_resumed")), bool(ctx.get("sess_key")))):
                 _session_invalidate(ctx["sess_key"], str(ctx["conversation_id"]))
             if out.get("state") != "client_gone":
@@ -7815,11 +7801,12 @@ class Handler(BaseHTTPRequestHandler):
                 )
                 return wrapped
 
+            full_attached = all((bool(images), not force_cold))
             full_mat, stripped_mat = _lsc.build_lazy_prompt_pair(
                 stripped_base,
                 lambda: _messages_to_prompt(render_messages, images, reserve_bytes=reserve),
                 _wrap_proto,
-                (any((force_cold, not images)), all((bool(images), not force_cold))),
+                (any((force_cold, not images)), full_attached),
             )
             extra = (
                 req.get("extra_body") if isinstance(req.get("extra_body"), dict) else {}
@@ -7927,6 +7914,7 @@ class Handler(BaseHTTPRequestHandler):
                 conversation_id = ""
             is_resumed = False
             prompt = ""
+            tools_fp = ""
             if force_cold:
                 # Media убраны из истории, либо malformed/unowned CID:
                 # ход идёт холодным text-only с полной историей.
@@ -7941,15 +7929,19 @@ class Handler(BaseHTTPRequestHandler):
             elif use_session_store and sess_key is not None:
                 use_cid = _session_claim(sess_key, turn_id)
                 if use_cid:
+                    stored_fp = _session_tools_fp(sess_key)
                     conversation_id = use_cid
                     is_resumed = True
                     prompt, resumed_attached = _resumed_turn_prompt(
                         render_messages, images, reserve
                     )
-                    prompt = _wrap_proto(prompt, resumed_attached)
+                    tools_fp = _RESUMED_TOOLS.compute_tools_fingerprint(tools, tool_choice, has_attachments=resumed_attached, attachment_tool=_attachment_tool() if resumed_attached else None) if emulate_tools else ""
+                    compact_tools = _RESUMED_TOOLS.should_use_compact_tools(is_resumed, stored_fp, tools_fp, _new_flag("resumed_compact_tools_enabled", True))
+                    prompt = _RESUMED_TOOLS.wrap_resumed_tools_prompt(prompt, list(build_tool_schemas(tools)), tool_choice) if compact_tools else _wrap_proto(prompt, resumed_attached)
             lazy_on = _lsc.lazy_prompt_enabled(config_path=DYNAMIC_CONFIG_PATH)
             if not is_resumed:
                 prompt = full_mat.get()
+                tools_fp = _RESUMED_TOOLS.compute_tools_fingerprint(tools, tool_choice, has_attachments=full_attached, attachment_tool=_attachment_tool() if full_attached else None) if emulate_tools else ""
             full_prompt_val: object = full_mat if all((is_resumed, lazy_on)) else full_mat.get()
             stripped_val: object = stripped_mat if all((is_resumed, lazy_on)) else stripped_mat.get()
             req_id, sub_id = extract_correlation(
@@ -7972,6 +7964,7 @@ class Handler(BaseHTTPRequestHandler):
                 "agy_mode": "emulate" if emulate_tools else resolve_agy_mode(req),
                 "emulate_tools": emulate_tools,
                 "tools": tools,
+                "tools_fp": tools_fp,
                 "turn_id": turn_id,
                 "sess_key": sess_key,
                 "hot_resumed": is_resumed,

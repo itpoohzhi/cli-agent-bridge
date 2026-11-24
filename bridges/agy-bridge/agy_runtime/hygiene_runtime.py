@@ -9,7 +9,7 @@ import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
-from typing import Final, Protocol, TypeVar, final
+from typing import Final, Protocol, TypeVar, cast, final
 
 _REPO_ROOT: Final[Path] = Path(__file__).resolve().parents[3]
 if str(_REPO_ROOT) not in sys.path:
@@ -17,7 +17,7 @@ if str(_REPO_ROOT) not in sys.path:
 
 from core.adaptive_admission import AdaptiveAdmissionRegistry, AdmissionDecision, AdmissionKey, OutcomeKind, canonical_key  # noqa: E402
 
-from . import long_session_config as _lsc  # noqa: E402
+from . import long_session_config as _lsc, sqlite_tail_lifecycle as _stl  # noqa: E402
 from .state_hygiene_policy import BoundedLruTtl, CachePolicyConfig, DisconnectOutcome, HygieneFlags, OrphanFsm, OrphanSweepAction, PoolHealthFSM, compute_epoch_delta, session_store_config, sha_cache_config  # noqa: E402
 
 _T = TypeVar("_T")
@@ -56,7 +56,6 @@ def _safe_kill(pgid: int, sig: int) -> None:
         except OSError:
             pass
 
-
 def _default_waiter(pgid: int, timeout_s: float) -> bool:
     deadline = time.monotonic() + max(0.0, timeout_s)
     while time.monotonic() < deadline:
@@ -68,7 +67,6 @@ def _default_waiter(pgid: int, timeout_s: float) -> bool:
             return True
         time.sleep(0.01)
     return False
-
 
 def _bounded_teardown(pgid: int, kill_fn: Callable[[int, int], None] | None, waiter: Callable[[int, float], bool] | None) -> None:
     if _invalid_pgid(pgid):
@@ -124,7 +122,7 @@ class ManagedSqliteRoPool:
             if self._enabled and not enabled:
                 self._fsm.reset()
             self._enabled = enabled
-    def _exec(self, call: Callable[[PoolLike], _T]) -> _T:
+    def _exec(self, call: Callable[[PoolLike], _T], db_path: Path | None = None) -> _T:
         with self._lock:
             allowed = True if not self._enabled else self._fsm.can_checkout(time.monotonic())
         if not allowed:
@@ -133,19 +131,28 @@ class ManagedSqliteRoPool:
             raise RuntimeError("sqlite_ro_pool_unavailable")
         try:
             res = call(self._inner)
-        except Exception:
-            with self._lock:
-                _ = self._fsm.record_error(time.monotonic()) if self._enabled else None
-            self._inner.release_thread()
+        except Exception as exc:
+            if not _stl.is_cold_wal_error(exc, db_path):
+                with self._lock:
+                    _ = self._fsm.record_error(time.monotonic()) if self._enabled else None
+            self.release_thread()
             raise
         with self._lock:
             _ = self._fsm.record_success() if self._enabled else None
         return res
-    def query_rows(self, db_path: Path | str, sql: str) -> object:
-        return self._exec(lambda p: p.query_rows(Path(db_path) if isinstance(db_path, str) else db_path, sql))
+    def query_rows(self, db_path: Path | str, sql: str, params: tuple[object, ...] = ()) -> list[tuple[object, ...]]:
+        path = Path(db_path) if isinstance(db_path, str) else db_path
+        return cast("list[tuple[object, ...]]", self._exec(lambda p: p.query_rows(path, sql) if not params else cast("Callable[[Path, str, tuple[object, ...]], object]", p.query_rows)(path, sql, params), path))
     def run_ro(self, db_path: Path | str, fn: Callable[..., _T], on_conn: Callable[..., None] | None = None) -> _T:
         p = Path(db_path) if isinstance(db_path, str) else db_path
-        return self._exec(lambda pool: pool.run_ro(p, fn) if on_conn is None else pool.run_ro(p, fn, on_conn=on_conn))
+        return self._exec(lambda pool: pool.run_ro(p, fn) if on_conn is None else pool.run_ro(p, fn, on_conn=on_conn), p)
+    def release_thread(self) -> None:
+        release = cast("Callable[[], None] | None", getattr(self._inner, "release_thread", None))
+        if release is not None:
+            release()
+    def snapshot_metrics(self) -> dict[str, int]:
+        snapshot = cast("Callable[[], dict[str, int]] | None", getattr(self._inner, "snapshot_metrics", None))
+        return snapshot() if snapshot is not None else {}
     def close_all(self) -> None:
         if self._inner is not None:
             self._inner.close_all()
