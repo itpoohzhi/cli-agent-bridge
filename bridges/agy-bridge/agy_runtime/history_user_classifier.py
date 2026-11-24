@@ -25,7 +25,15 @@ _JOB_HEAD_RE = re.compile(
     r"background job [^\s()\r\n]+ \([^()\r\n]*\) finished "
     r"\[status: [^\]\r\n]+\]\."
 )
-_REPEATED_CALL_RE = re.compile(r"[A-Za-z0-9_.:/-]+\([^\n]*\)\.?", re.ASCII)
+_REPEATED_CALL_NAME_RE = re.compile(r"[A-Za-z0-9_.:/-]+", re.ASCII)
+_REPEATED_CALL_ARG_RE = re.compile(
+    r"[A-Za-z0-9_.-]+=(?:[A-Za-z0-9_./:@-]+|\"[^\"()]*\"|'[^'()]*')", re.ASCII)
+_EXACT_REPEAT_NOTICES = (
+    "You are repeating the exact same tool call with identical arguments. "
+    "Carefully analyze the previous result before calling again: if the task is not "
+    "complete, try a different approach or different arguments instead of repeating the call.",
+    "You are repeating the exact same tool call. Reconsider your approach.",
+)
 _JOB_OUTPUT_MARKERS = (
     "\nOutput:\n",
     "\n\nOutput:\n",
@@ -150,14 +158,30 @@ def _job_notice(body: str) -> bool:
     return bool(output) and "\n\n" not in output
 
 
-def _repeat_notice(body: str) -> bool:
-    if "\n" in body:
+def _repeated_call_signature(body: str) -> bool:
+    if "\n" in body or not body.isascii():
         return False
     prefix = "Repeated tool call detected: "
-    if body.startswith(prefix):
-        return _REPEATED_CALL_RE.fullmatch(body[len(prefix) :]) is not None
-    repeated = "You are repeating the exact same tool call."
-    return body.startswith(repeated) and body.isascii() and body.endswith(".")
+    if not body.startswith(prefix):
+        return False
+    call = body[len(prefix) :].removesuffix(".")
+    if not call.endswith(")"):
+        return False
+    name, sep, rest = call[:-1].partition("(")
+    if sep != "(" or _REPEATED_CALL_NAME_RE.fullmatch(name) is None:
+        return False
+    if "(" in rest or ")" in rest:
+        return False
+    if not rest:
+        return True
+    return all(
+        _REPEATED_CALL_ARG_RE.fullmatch(item.strip(" ")) is not None
+        for item in rest.split(",")
+    )
+
+
+def _repeat_notice(body: str) -> bool:
+    return body in _EXACT_REPEAT_NOTICES or _repeated_call_signature(body)
 
 
 def is_synthetic_user_block(rendered_text: str) -> bool:

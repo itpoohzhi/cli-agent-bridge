@@ -40,6 +40,11 @@ DSH_CASES = (
     "You are repeating the exact same tool call. Reconsider your approach.",
     "Repeated tool call detected: read_file(path=README.md)",
 )
+EXACT_DSH_REPEAT_NOTICE = (
+    "You are repeating the exact same tool call with identical arguments. "
+    "Carefully analyze the previous result before calling again: if the task is not "
+    "complete, try a different approach or different arguments instead of repeating the call."
+)
 
 
 @pytest.mark.parametrize("body", (REMINDER, *LEGACY_CASES, *DSH_CASES))
@@ -89,6 +94,36 @@ def test_repeat_notice_requires_complete_service_shape() -> None:
     assert not is_synthetic_user_block(
         "You are repeating the exact same tool call, explain why?"
     )
+
+
+@pytest.mark.parametrize(
+    "body",
+    (
+        EXACT_DSH_REPEAT_NOTICE,
+        "You are repeating the exact same tool call. Reconsider your approach.",
+        "Repeated tool call detected: read_file(path=README.md)",
+        "Repeated tool call detected: read_file()",
+        "Repeated tool call detected: read_file(path=a.py, line=10).",
+        'Repeated tool call detected: read_file(path="a b.py").',
+    ),
+)
+def test_exact_repeat_notices_and_strict_call_signatures_are_synthetic(body: str) -> None:
+    assert is_synthetic_user_block(body)
+
+
+@pytest.mark.parametrize(
+    "body",
+    (
+        "You are repeating the exact same tool call. Please also fix bug X in module Y.",
+        "You are repeating the exact same tool call. Why does it loop? Please check config.py.",
+        "Repeated tool call detected: x(сделай то-то)",
+        "Repeated tool call detected: read_file(a.py) — почему цикл? (см. лог).",
+        "Repeated tool call detected: foo(bar baz qux)",
+        "Repeated tool call detected: read_file(path=a.py, extra=(1))",
+    ),
+)
+def test_repeat_notice_attack_cases_remain_real(body: str) -> None:
+    assert not is_synthetic_user_block(body)
 
 
 @pytest.mark.parametrize(
@@ -176,6 +211,13 @@ def test_empty_and_inexact_headers_are_not_synthetic(text: str) -> None:
 
 def test_four_mib_adversarial_input_is_linear_time() -> None:
     text = "<system-reminder>" * ((4 * 1024 * 1024) // 17)
+    started = perf_counter()
+    assert not is_synthetic_user_block(text)
+    assert perf_counter() - started < 0.5
+
+
+def test_four_mib_repeated_call_adversarial_input_is_linear_time() -> None:
+    text = "Repeated tool call detected: read_file(" + "k=v," * (1024 * 1024)
     started = perf_counter()
     assert not is_synthetic_user_block(text)
     assert perf_counter() - started < 0.5
