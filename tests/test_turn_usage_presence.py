@@ -9,6 +9,7 @@ from typing import Any
 from adapters.droid_adapter import DroidAdapter
 from core.backend_adapter import TurnResult, Usage
 from core.turn_dispatch import _format_turn_output
+from core.usage_normalizer import Usage as NormalizerUsage
 from core.usage_fields import (
     enrich_turn_usage_dict,
     normalize_usage_fields,
@@ -81,7 +82,7 @@ def test_format_turn_output_usage_absent() -> None:
 
 
 def test_format_turn_output_usage_zero_counters_present() -> None:
-    out = _format_turn_output(TurnResult(text="hi", usage=Usage(0, 0)), "cli")
+    out = _format_turn_output(TurnResult(text="hi", usage=NormalizerUsage(0, 0)), "cli")
     assert out["usage"]["usage_present"] is True
 
 
@@ -150,26 +151,26 @@ def test_droid_adapter_empty_usage_means_absent() -> None:
     result = _droid_turn({"state": "done", "rc": 0, "text": "ok", "usage": {}})
     assert result.state == "done"
     assert result.text == "ok"
-    assert result.usage.usage_present is False
+    assert _format_turn_output(result, "droid")["usage"]["usage_present"] is False
 
 
 def test_droid_adapter_missing_usage_key_means_absent() -> None:
     result = _droid_turn({"state": "done", "rc": 0, "text": "ok"})
-    assert result.usage.usage_present is False
+    assert _format_turn_output(result, "droid")["usage"]["usage_present"] is False
 
 
 def test_droid_adapter_usage_without_numeric_keys_means_absent() -> None:
     result = _droid_turn(
         {"state": "done", "rc": 0, "text": "ok", "usage": {"source": "none"}}
     )
-    assert result.usage.usage_present is False
+    assert _format_turn_output(result, "droid")["usage"]["usage_present"] is False
 
 
 def test_droid_adapter_real_usage_is_present() -> None:
     result = _droid_turn(
         {"state": "done", "rc": 0, "text": "ok", "usage": {"input_tokens": 5, "output_tokens": 7}}
     )
-    assert result.usage.usage_present is True
+    assert _format_turn_output(result, "droid")["usage"]["usage_present"] is True
     assert result.usage.input_tokens == 5
     assert result.usage.output_tokens == 7
 
@@ -178,5 +179,5 @@ def test_droid_adapter_partial_usage_is_present() -> None:
     result = _droid_turn(
         {"state": "done", "rc": 0, "text": "ok", "usage": {"cache_read_tokens": 4}}
     )
-    assert result.usage.usage_present is True
+    assert _format_turn_output(result, "droid")["usage"]["usage_present"] is True
     assert result.usage.cache_read_tokens == 4

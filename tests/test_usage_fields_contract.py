@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import asdict
 
-from core.backend_adapter import Usage
+from core.usage_normalizer import Usage
 from core.usage_fields import finalize_event_usage, normalize_usage_fields, telemetry_usage_updates
 
 

@@ -8934,7 +8934,7 @@ class StepScopedUsageLedgerTests(unittest.TestCase):
                     "prompt_tokens": 59286,
                     "completion_tokens": 54601,
                     "total_tokens": 113887,
-                    "prompt_tokens_details": {"cached_tokens": 56849},
+                    "prompt_tokens_details": {"cached_tokens": 56849}, "completion_tokens_details": {"reasoning_tokens": 500},
                 },
             )
             self.assertEqual(resolved["source"], "last_step")
@@ -9393,7 +9393,7 @@ class StepScopedUsageFallbackTests(unittest.TestCase):
                 if resume:  # область cumulative output неизвестна: 0 = unknown
                     self.assertEqual(wire["completion_tokens"], 0)
                 else:
-                    self.assertEqual(wire["completion_tokens"], 191762 + 500)
+                    self.assertEqual(wire["completion_tokens"], 191762)
                 self.assertEqual(
                     usage["input_tokens"], usage_over.get("input_tokens", 1552662)
                 )
@@ -9656,7 +9656,7 @@ class StepScopedUsageHttpTests(unittest.TestCase):
                 "prompt_tokens": 59286,
                 "completion_tokens": _USAGE_TURN_SUM,
                 "total_tokens": 59286 + _USAGE_TURN_SUM,
-                "prompt_tokens_details": {"cached_tokens": 56849},
+                "prompt_tokens_details": {"cached_tokens": 56849}, "completion_tokens_details": {"reasoning_tokens": 500},
             }
             (code, body), json_log = cast(
                 "tuple[tuple[int, dict[str, object]], str]",
