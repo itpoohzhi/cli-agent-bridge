@@ -12,6 +12,10 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, cast
 
+from adapters.stdio_drivers.muse_mcp_wire import (
+    MUSE_INITIALIZE_CAPABILITIES,
+    apply_scope_to_session_start,
+)
 from core.stdio_resident.protocol_driver import DecodedChunk
 from core.stdio_resident.usage_extract import extract_muse_usage
 
@@ -123,7 +127,11 @@ def _encode_rpc(
 
 def build_initialize_msg(request_id: int | str = 1) -> bytes:
     """Build an MSP v1 ``initialize`` JSON-RPC request line."""
-    return _encode_rpc("initialize", {"clientInfo": {"name": "cli_agent_bridge", "version": "1.0.0"}}, request_id)
+    params = {
+        "clientInfo": {"name": "cli_agent_bridge", "version": "1.0.0"},
+        "capabilities": MUSE_INITIALIZE_CAPABILITIES,
+    }
+    return _encode_rpc("initialize", params, request_id)
 
 
 def build_initialized_msg() -> bytes:
@@ -147,8 +155,7 @@ def build_session_start_msg(
         "modelId": model_id,
         "approvalMode": approval_mode,
     }
-    if clear_developer_prompt:
-        params["config"] = {"developerPrompt": None}
+    _ = apply_scope_to_session_start(params, clear_developer_prompt=clear_developer_prompt)
     return _encode_rpc("session/start", params, request_id)
 
 
