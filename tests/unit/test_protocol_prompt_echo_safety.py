@@ -95,14 +95,22 @@ def _run(text: str, mode: str, cutoff: bool, repair: bool) -> StreamNormalizer:
 _MODES = ("whole", "1B", "7B", *(f"seed{seed}" for seed in _SEEDS))
 
 
+def _assert_no_markers(text: str, name: str) -> None:
+    assert _TOOL_CALL_MARKER_RE.search(text) is None, name
+    for forbidden in (_OPEN, _CLOSE, "<tool_name>", "<json>"):
+        assert forbidden not in text, name
+
+
+def _assert_contract_tokens(text: str, name: str) -> None:
+    for token in ("tool_call", '"name"', '"arguments"', TOOL_CALL_FORMAT_LINE):
+        assert token in text, name
+
+
 @pytest.mark.parametrize("choice", _CHOICES, ids=repr)
 def test_rendered_protocol_has_no_tool_call_markers(choice: object) -> None:
     for name, text in _renders(choice).items():
-        assert _TOOL_CALL_MARKER_RE.search(text) is None, name
-        assert _OPEN not in text and _CLOSE not in text, name
-        assert "<tool_name>" not in text and "<json>" not in text, name
-        assert "tool_call" in text and '"name"' in text and '"arguments"' in text, name
-        assert TOOL_CALL_FORMAT_LINE in text, name
+        _assert_no_markers(text, name)
+        _assert_contract_tokens(text, name)
 
 
 def test_format_line_is_marker_free() -> None:

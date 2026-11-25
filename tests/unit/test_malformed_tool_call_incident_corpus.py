@@ -12,14 +12,17 @@ import codecs
 import json
 import random
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
+from core import resumed_tools_policy
 from core.resumed_tools_policy import build_compact_tools_reminder
 from core.tool_emulation import LiveParserError, StreamNormalizer
 from core.tool_mode import NormalizerSinks, ToolMode, ToollessTagPolicy, build_mode_spec
 from core.tool_post_call_policy import PostCallPolicy
+from scripts import qa_incident_cases
 
 OPEN = "<tool_" + "call>"
 CLOSE = "</tool_" + "call>"
@@ -151,3 +154,23 @@ def test_semicolon_multibyte_arguments_preserved() -> None:
     (sem, _aux) = _run(CASES[-1], [CASES[-1].raw.encode("utf-8")])
     assert sem[0] == (("bash", canonical_json({"command": 'echo Привет\nмир "ё"'})),)
     assert sem[1] == ""
+
+
+def test_incident_5_qa_case_all_checks_pass_and_detect_regressions(monkeypatch: pytest.MonkeyPatch) -> None:
+    keys = {
+        "incident_5_resumed_reminder_echo_safe",
+        "incident_5_single_semicolon_recovered",
+        "incident_5_double_semicolon_fail_closed",
+    }
+    checks = qa_incident_cases._check_incident_5_resumed_and_semicolon(7)  # pyright: ignore[reportPrivateUsage]
+    assert set(checks) == keys and len(checks) == 3
+    assert all(value is True for value in checks.values())
+    monkeypatch.setattr(resumed_tools_policy, "build_compact_tools_reminder", lambda *_a, **_k: "use {<json>}")
+    old = qa_incident_cases._check_incident_5_resumed_and_semicolon(7)  # pyright: ignore[reportPrivateUsage]
+    assert old["incident_5_resumed_reminder_echo_safe"] is False
+    monkeypatch.undo()
+    stub = SimpleNamespace(tool_calls=[])
+    monkeypatch.setattr(qa_incident_cases, "_parse_with_repair", lambda *_a, **_k: stub)
+    broken = qa_incident_cases._check_incident_5_resumed_and_semicolon(7)  # pyright: ignore[reportPrivateUsage]
+    assert broken["incident_5_single_semicolon_recovered"] is False
+    assert broken["incident_5_double_semicolon_fail_closed"] is False
