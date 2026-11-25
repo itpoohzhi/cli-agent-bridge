@@ -96,6 +96,11 @@ KB_CWD = os.path.expanduser("~/Мой диск/Работа/Sber/knowledge-base"
 WA_CWD = os.path.expanduser("~/Мой диск/src/saluteeye/gigabus/gigawebaccess/webaccess")
 AB_CWD = os.path.expanduser("~/Мой диск/Workshop/aibunker-workshop")
 DW_CWD = os.path.expanduser("~/Documents/deepseek-harness/default-workspace")
+try:
+    from tools import canon_delivery
+except ImportError:
+    import canon_delivery
+
 UG_PATH = os.path.expanduser("~/.dsh/AGENTS.md")
 PROFILES_DIR = os.path.expanduser("~/.dsh/profiles")
 PROFILE_FILE = "cordis.patch.yml"
@@ -107,6 +112,8 @@ DEFAULT_CWDS: Tuple[Tuple[str, str], ...] = (
 )
 
 UG_DISPLAY = "~/.dsh/AGENTS.md"
+CANON_ANCHOR_PATH = os.path.expanduser("~/.dsh/canon/AGENTS.md")
+CANON_ANCHOR_DISPLAY = "~/.dsh/canon/AGENTS.md"
 FRAME_BASE = 272  # обёртка system-reminder, intro и т.п. (калибровка F-703/F-709)
 SECTION_FIXED = 23  # заголовок `Instructions from: ` и разделители без самого пути
 MARKER_PREFIX = "Workspace instruction budget "
@@ -927,22 +934,10 @@ def run_check(
 
 
 def _user_global_problem(canon_real: str, canon_bytes: bytes) -> Optional[str]:
-    """Причина, по которой настоящий user-global файл не равен канону (None - равен).
-
-    Рендер DSH берёт именно файл `UG_PATH`, а не канон: удалённый, подменённый по содержимому или
-    перенацеленный симлинк означают, что канон в запросе пропал или заменён. Обычный файл допустим
-    только как байтовая копия канона; симлинк - только на сам канон.
-    """
-    try:
-        with open(UG_PATH, "rb") as handle:
-            data = handle.read()
-    except OSError:
-        return "файл отсутствует или нечитаем"
-    if os.path.islink(UG_PATH) and os.path.realpath(UG_PATH) != canon_real:
-        return "симлинк указывает не на канон"
-    if data != canon_bytes:
-        return "содержимое отличается от канона"
-    return None
+    """Тонкий фасад домена `canon_delivery` (None - доставка канона в порядке)."""
+    return canon_delivery.diagnose_delivery_error(
+        canon_bytes, canon_real, CANON_ANCHOR_PATH, UG_PATH
+    )
 
 
 def check_installed(
@@ -953,10 +948,8 @@ def check_installed(
 ) -> Optional[Result]:
     """Тот же прогноз, что `run_check`, но без печати (для автоматического контура моста).
 
-    None - канон не найден (CANON_LOST). Результат с exit_code 2 и причиной CANON_LOST - настоящий
-    user-global `UG_PATH` удалён, изменён или указывает не на канон. REQ-003 строгий, как в рабочем CLI;
-    предел блока `limit` - параметр, None - из окружения (`resolve_block_limit`).
-    Файлы читаются только для хеша и точной длины строки журнала; содержимое наружу не отдаётся.
+    None - канон не найден; exit_code 2 c CANON_LOST / DUPLICATE_RETURNED - сломана доставка канона
+    (якорь или user-global, см. `canon_delivery`); предел блока `limit` - параметр или окружение.
     """
     try:
         with open(canon_path, "rb") as handle:
@@ -967,9 +960,7 @@ def check_installed(
     canon_real = os.path.realpath(canon_path)
     problem = _user_global_problem(canon_real, canon_bytes)
     if problem is not None:
-        return Result(
-            2, ["CANON_LOST user-global %s: %s" % (UG_DISPLAY, problem)], 0, None, None
-        )
+        return Result(2, [problem], 0, None, None)
     cwd_files: Dict[str, Sequence[FileEntry]] = {}
     texts: Dict[str, Dict[str, str]] = {}
     for label, path in cwds:
@@ -1101,7 +1092,14 @@ def run_profiles(
             worst = 2
             continue
         _say("profile=%s path=%s maxBytes=%d" % (name, path, maxbytes))
-        worst = max(worst, run_check(maxbytes, cwds, canon_path))
+        res = check_installed(maxbytes, cwds, canon_path)
+        if res is None:
+            _say("CANON_LOST: канон нечитаем %s" % canon_path)
+            worst = 2
+            continue
+        for reason in res.reasons:
+            _say("reason: %s" % reason)
+        worst = max(worst, res.exit_code)
     _say("profiles exit=%d" % worst)
     return worst
 
