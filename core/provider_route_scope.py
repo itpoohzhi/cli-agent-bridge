@@ -51,6 +51,14 @@ def _adapter_matches(adapter: object, allowed: Collection[str]) -> bool:
     )
 
 
+def _normalize_allowed(raw: object) -> frozenset[str]:
+    if isinstance(raw, str):
+        return frozenset((raw,)) if raw else frozenset()
+    if isinstance(raw, Collection) and not isinstance(raw, (bytes, bytearray)):
+        return frozenset(x for x in raw if isinstance(x, str) and x)
+    return frozenset()
+
+
 def backend_matches_provider(
     backend_id: str,
     provider_id: str | None,
@@ -60,16 +68,20 @@ def backend_matches_provider(
     """Fail-closed проверка принадлежности бэкенда разрешённой области провайдера."""
     if provider_id is None:
         return True
-    if provider_id not in provider_scopes:
+    if not backend_id or provider_id not in provider_scopes:
         return False
-    raw_allowed = provider_scopes[provider_id]
-    allowed: Collection[str] = (
-        (raw_allowed,) if isinstance(raw_allowed, str) else raw_allowed
-    )
-    if backend_id == provider_id or backend_id in allowed:
+    allowed = _normalize_allowed(provider_scopes[provider_id])
+    if not allowed:
+        return False
+    if backend_id in allowed:
         return True
     adapter = backends.get(backend_id) if backends is not None else None
-    return adapter is not None and _adapter_matches(adapter, allowed)
+    if adapter is not None and (
+        getattr(adapter, "owned_by", None) is not None
+        or isinstance(getattr(adapter, "config", None), Mapping)
+    ):
+        return _adapter_matches(adapter, allowed)
+    return backend_id == provider_id
 
 
 def scope_routes(
@@ -121,6 +133,14 @@ def _route_scope_context(
     return provider_id, scopes, backends
 
 
+def _reject_provider_scope(route: _RouteLike, provider_id: str) -> None:
+    _ = route.reject(
+        503,
+        "provider_route_unavailable",
+        f"no eligible transport for provider '{provider_id}'",
+    )
+
+
 def single_route_provider_allowed(route: _RouteLike, backend: object = _UNSET) -> bool:
     """Проверяет допустимость одиночного маршрута для provider_id; при отказе 503."""
     target = route.model.get("backend") if backend is _UNSET else backend
@@ -128,11 +148,7 @@ def single_route_provider_allowed(route: _RouteLike, backend: object = _UNSET) -
     if provider_id is None:
         return True
     if not backend_matches_provider(str(target or ""), provider_id, scopes, backends):
-        _ = route.reject(
-            503,
-            "provider_route_unavailable",
-            f"backend '{target}' is outside provider '{provider_id}' scope",
-        )
+        _reject_provider_scope(route, provider_id)
         return False
     return True
 
@@ -150,10 +166,13 @@ def dispatch_scoped_single(
         or routing.get("disabled_backend")
         or route.model.get("backend")
     )
-    if not single_route_provider_allowed(route, backend):
+    provider_id, scopes, backends = _route_scope_context(route)
+    if provider_id is not None and not backend_matches_provider(
+        str(backend or ""), provider_id, scopes, backends
+    ):
+        _reject_provider_scope(route, provider_id)
         return
     route.model["backend"] = backend
-    _, _, backends = _route_scope_context(route)
     adapter = backends.get(str(backend or "")) if backends is not None else None
     scoped_route, wire = apply_effort_fn(route, adapter, prepare_body_fn(route))
     _ = dispatch_fn(scoped_route, wire)

@@ -46,7 +46,7 @@ def _resident_error(
         else (
             payload
             if isinstance(payload, str)
-            else json.dumps(payload, ensure_ascii=False)
+            else json.dumps(payload, ensure_ascii=False, default=str)
         )
     )
     sse = "data: " + sse_payload + "\n\n" + DONE_FRAME
@@ -145,6 +145,17 @@ def test_should_defer_sse_headers_matrix() -> None:
     assert should_defer_sse_headers(non_routed, {}) is False
     sent = _FakeHandler(attempt=_attempt(), headers_sent=True)
     assert should_defer_sse_headers(sent, {}) is False
+    committed = _FakeHandler(attempt=_attempt(committed=True), headers_sent=False)
+    assert should_defer_sse_headers(committed, {}) is False
+
+
+def test_cli_resident_refusal_supports_httpstatus_and_unserializable_body() -> None:
+    from http import HTTPStatus
+
+    exc_enum = _resident_error(HTTPStatus.SERVICE_UNAVAILABLE, "busy", body={"obj": object()})
+    refusal = cli_resident_refusal(exc_enum)
+    assert refusal.status_code == 503
+    assert b"object" in refusal.response_body
 
 
 def test_handle_json_resident_error_precommit_raises_refusal() -> None:

@@ -36,15 +36,23 @@ def is_precommit(handler: object, live_sent: int = 0) -> bool:
 
 def cli_resident_refusal(exc: ResidentTurnError) -> RouteRefusal:
     """Преобразует ResidentTurnError в RouteRefusal для роутера попыток."""
-    raw_status: object = exc.status
-    status_code = raw_status if type(raw_status) is int and raw_status >= 400 else 502
+    raw_status: object = getattr(exc, "status", 502)
+    status_code = (
+        int(raw_status)
+        if isinstance(raw_status, int)
+        and not isinstance(raw_status, bool)
+        and raw_status >= 400
+        else 502
+    )
     raw_body: object = exc.response.body
     if isinstance(raw_body, bytes):
         response_body = raw_body
     elif isinstance(raw_body, str):
         response_body = raw_body.encode("utf-8")
     else:
-        response_body = json.dumps(raw_body, ensure_ascii=False).encode("utf-8")
+        response_body = json.dumps(
+            raw_body, ensure_ascii=False, default=str
+        ).encode("utf-8")
     return RouteRefusal(
         status_code=status_code,
         response_headers=_JSON_HEADERS,
@@ -53,12 +61,10 @@ def cli_resident_refusal(exc: ResidentTurnError) -> RouteRefusal:
 
 
 def should_defer_sse_headers(handler: object, ctx: Mapping[str, object]) -> bool:
-    """Откладывает SSE-заголовки только для свежей routed CLI-попытки до первого чанка."""
+    """Откладывает SSE-заголовки только для свежей pre-commit routed CLI-попытки."""
     if bool(ctx.get("attached_existing")):
         return False
-    if getattr(handler, "_transport_attempt", None) is None:
-        return False
-    return not bool(getattr(handler, "_headers_already_sent", False))
+    return is_precommit(handler, live_sent=0)
 
 
 def handle_json_resident_error(
@@ -70,7 +76,7 @@ def handle_json_resident_error(
     """Pre-commit отдаёт RouteRefusal роутеру; post-commit логирует и отвечает клиенту."""
     if is_precommit(handler, live_sent=0):
         lease.record_failure(exc)
-        raise cli_resident_refusal(exc)
+        raise cli_resident_refusal(exc) from exc
     safe_err = sanitize_log_text(exc.response.message, extra_code=exc.response.code)
     log_fn(
         f"json_resident_error status={exc.status} code={exc.response.code} err={safe_err!r}"
@@ -90,4 +96,4 @@ def maybe_raise_sse_precommit_refusal(
         handler, live_sent=live_sent
     ):
         lease.record_failure(exc)
-        raise cli_resident_refusal(exc)
+        raise cli_resident_refusal(exc) from exc

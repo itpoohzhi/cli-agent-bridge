@@ -222,6 +222,10 @@ def test_unit_backend_matches_provider_scopes_and_fail_closed() -> None:
     assert backend_matches_provider("claude-p", "agy", scopes, backends) is False
     assert backend_matches_provider("claude-p", "claude-p", scopes, backends) is False
     assert backend_matches_provider("", "", scopes, backends) is False
+    assert backend_matches_provider("agy", "agy", {"agy": ()}, backends) is False
+    assert backend_matches_provider("", "agy", {"agy": ""}, backends) is False
+    assert backend_matches_provider("agy", "agy", {"agy": None}, backends) is False  # type: ignore[dict-item]
+    assert backend_matches_provider("claude-p", "claude-p", {"claude-p": ("agy",)}, backends) is False
 
 
 def test_unit_scope_routes_preserves_unscoped_and_fails_closed() -> None:
