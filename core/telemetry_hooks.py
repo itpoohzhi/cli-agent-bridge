@@ -72,6 +72,12 @@ def telemetry_tail(handler: Any, data: bytes) -> None:
         tail(data)
 
 
+def telemetry_usage(handler: Any, usage: Any) -> None:
+    """Проброс usage passthrough в миксин обработчика."""
+    if usage is not None and callable(hook := getattr(handler, "_telemetry_usage", None)):
+        hook(usage)
+
+
 def _always_on() -> bool:
     return True
 
@@ -290,4 +296,5 @@ __all__ = [
     "resolve_backend_topology",
     "telemetry_note",
     "telemetry_tail",
+    "telemetry_usage",
 ]

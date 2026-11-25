@@ -1949,6 +1949,7 @@ class _HandlerSink(ResponseSink):
 
     def write(self, data: bytes) -> None:
         """Отправить чанк сразу, включая сброс буфера wfile для SSE."""
+        telemetry_tail(self._handler, data)
         try:
             self._handler.wfile.write(data)
             self._handler.wfile.flush()
@@ -1958,7 +1959,6 @@ class _HandlerSink(ResponseSink):
         if self.status == 200 or self.status >= 400 or b'"error"' in data:
             self._capture_error(data)
         telemetry_note(self._handler, len(data), chunk=True)
-        telemetry_tail(self._handler, data)
 
 
 def _owner_token_hash(handler: BaseHTTPRequestHandler) -> str:
