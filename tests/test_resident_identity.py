@@ -152,6 +152,96 @@ def test_turn_context_ignores_spoofed_owner(monkeypatch: pytest.MonkeyPatch) -> 
     assert not route.rejections
 
 
+class _PostRouteShape:
+    def __init__(self, host: object, headers: dict[str, str]) -> None:
+        self.host = host
+        self.handler = SimpleNamespace(headers=headers)
+        self.request: dict[str, object] = {"session_id": "chat-1"}
+        self.rejections: list[tuple[int, str, str]] = []
+
+    def reject(self, status: int, code: str, message: str) -> None:
+        self.rejections.append((status, code, message))
+
+
+class _FallbackOwnerHost:
+    def __init__(self, owner: str = "handler-owner") -> None:
+        self.owner = owner
+        self.received: object = None
+
+    def _owner_token_hash(self, handler: object) -> str:
+        self.received = handler
+        headers = getattr(handler, "headers")
+        assert callable(getattr(headers, "get", None))
+        return self.owner
+
+    def validate_turn_id(self, value: object) -> bool:
+        return isinstance(value, str)
+
+
+def test_post_route_handler_headers_resolve_fallback_owner(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(identity_module, "resolve_chat_key", _chat_resolution)
+    host = _FallbackOwnerHost()
+    route = _PostRouteShape(host, {"X-Turn-Owner-Token": "owner-token"})
+    ctx: dict[str, Any] = {}
+    ok = turn_ids_and_resident_ctx(route, ctx, {}, adapter=_Adapter())
+    assert ok
+    assert host.received is route.handler
+    assert ctx["owner_hash"] == "handler-owner"
+    assert ctx["resident_identity"].principal_hash == "handler-owner"
+    assert not ctx["resident_identity"].ephemeral
+
+
+@pytest.mark.parametrize(
+    "headers",
+    [
+        {"Authorization": "Bearer bearer-owner"},
+        {"X-Turn-Owner-Token": "explicit-owner"},
+    ],
+)
+def test_post_route_real_server_owner_hash(
+    monkeypatch: pytest.MonkeyPatch,
+    headers: dict[str, str],
+) -> None:
+    import server
+
+    monkeypatch.setattr(identity_module, "resolve_chat_key", _chat_resolution)
+    host = SimpleNamespace(
+        _owner_token_hash=server._owner_token_hash,
+        validate_turn_id=lambda value: isinstance(value, str),
+    )
+    route = _PostRouteShape(host, headers)
+    expected = server._owner_token_hash(route.handler)
+    ctx: dict[str, Any] = {}
+    ok = turn_ids_and_resident_ctx(route, ctx, {}, adapter=_Adapter())
+    assert ok
+    assert expected
+    assert ctx["owner_hash"] == expected
+    assert ctx["resident_identity"].principal_hash == expected
+    assert not ctx["resident_identity"].ephemeral
+
+
+def test_post_route_missing_auth_rejects(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(identity_module, "resolve_chat_key", _chat_resolution)
+    route = _PostRouteShape(_FallbackOwnerHost(""), {})
+    ctx: dict[str, Any] = {}
+    ok = turn_ids_and_resident_ctx(route, ctx, {}, adapter=_Adapter())
+    assert not ok
+    assert route.rejections == [(401, "auth_required", "")]
+
+
+def test_legacy_route_fallback_owner_receives_headers_object(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(identity_module, "resolve_chat_key", _chat_resolution)
+    host = _FallbackOwnerHost("legacy-owner")
+    route: Any = _Route()
+    route.host = host
+    route.headers = {"X-Turn-Owner-Token": "legacy-token"}
+    ctx: dict[str, Any] = {}
+    ok = turn_ids_and_resident_ctx(route, ctx, {}, adapter=_Adapter())
+    assert ok
+    assert getattr(host.received, "headers") is route.headers
+    assert ctx["owner_hash"] == "legacy-owner"
+    assert not ctx["resident_identity"].ephemeral
+
 
 def test_turn_error_sse_auth_and_permission_types() -> None:
     from core.stdio_resident.turn_error_sse import build_turn_error
