@@ -3,9 +3,24 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Any, TypeGuard
+from typing import Any
 
 from core.telemetry_util import first, present
+from core.usage_event_fields import (  # noqa: F401
+    _COUNTER_KEYS,
+    _SOURCE_PAIRS,
+    VALID_USAGE_MISSING_REASONS,
+    VALID_USAGE_SOURCES,
+    _absent_reason,
+    _is_counter,
+    _is_number,
+    _is_positive,
+    _mark_usage_absent,
+    _resolve_missing_reason,
+    _resolve_usage_source,
+    _total_tokens,
+    finalize_event_usage,
+)
 
 _PRESENCE_KEYS: tuple[str, ...] = (
     "input_tokens",
@@ -26,27 +41,30 @@ _TURN_USAGE_FIELDS: tuple[tuple[str, str], ...] = (
 )
 
 
-def _is_counter(value: Any) -> TypeGuard[int]:
-    """Целочисленный неотрицательный счётчик токенов: int без bool и без отрицательных значений."""
-    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
-
-
-def _is_number(value: Any) -> TypeGuard[int | float]:
-    """Числовое поле usage для признака usage_present: int/float, но не bool."""
-    return isinstance(value, (int, float)) and not isinstance(value, bool)
-
-
 def _nested(raw: Mapping[str, Any], key: str) -> Mapping[str, Any]:
     """Вложенный mapping из usage по ключу; отсутствие или не-mapping дают пустой словарь."""
     value = raw.get(key)
     return value if isinstance(value, Mapping) else {}
 
 
+def _extract_raw_counters(raw: Mapping[str, Any]) -> tuple[Any, Any, Any, Any, Any]:
+    prompt = first(raw.get("input_tokens"), raw.get("prompt_tokens"))
+    completion = first(raw.get("output_tokens"), raw.get("completion_tokens"))
+    cached = first(
+        raw.get("cache_read_tokens"),
+        raw.get("cache_read_input_tokens"),
+        raw.get("cached_tokens"),
+        _nested(raw, "prompt_tokens_details").get("cached_tokens"),
+    )
+    reasoning = extract_reasoning_tokens(raw)
+    return prompt, completion, cached, reasoning, raw.get("total_tokens")
+
+
 def _usage_present(raw: Mapping[str, Any]) -> bool:
-    """Usage реально передан: явный булев usage_present доминирует; иначе числовое поле среди известных ключей."""
-    if "usage_present" in raw and isinstance(raw["usage_present"], bool):
-        return raw["usage_present"]
-    return any(_is_number(raw.get(key)) for key in _PRESENCE_KEYS)
+    """Usage реально передан: явный False доминирует; иначе требуется хотя бы один положительный счётчик."""
+    if raw.get("usage_present") is False:
+        return False
+    return any(_is_positive(value) for value in _extract_raw_counters(raw))
 
 
 def extract_reasoning_tokens(raw: Mapping[str, Any]) -> int | None:
@@ -63,82 +81,74 @@ def normalize_usage_fields(raw: Mapping[str, Any] | None) -> dict[str, Any]:
     """Плоские нормализованные поля usage: input/output/cache_read/reasoning + usage_present (None -> все None)."""
     if raw is None:
         return {
-            "input_tokens": None,
-            "output_tokens": None,
-            "cache_read_tokens": None,
-            "reasoning_tokens": None,
-            "usage_present": None,
+            "input_tokens": None, "output_tokens": None, "cache_read_tokens": None,
+            "reasoning_tokens": None, "usage_present": None,
+            "usage_source": None, "usage_missing_reason": None,
         }
-    if raw.get("usage_present") is False:
+    counters = _extract_raw_counters(raw)
+    prompt, completion, cached, reasoning, total = counters
+    has_positive = any(_is_positive(value) for value in counters)
+    explicit_false = raw.get("usage_present") is False
+    if explicit_false or not has_positive:
+        has_zero_num = any(_is_number(value) for value in counters) and not has_positive
+        reason = _absent_reason(raw.get("usage_missing_reason"), has_zero_num, explicit_false)
         return {
-            "input_tokens": None,
-            "output_tokens": None,
-            "cache_read_tokens": None,
-            "reasoning_tokens": None,
-            "usage_present": False,
+            "input_tokens": None, "output_tokens": None, "cache_read_tokens": None,
+            "reasoning_tokens": None, "usage_present": False,
+            "usage_source": None, "usage_missing_reason": reason,
         }
+    source = _resolve_usage_source(raw.get("usage_source")) or _resolve_usage_source(raw.get("source")) or "upstream_report"
     return {
-        "input_tokens": first(raw.get("input_tokens"), raw.get("prompt_tokens")),
-        "output_tokens": first(raw.get("output_tokens"), raw.get("completion_tokens")),
-        "cache_read_tokens": first(
-            raw.get("cache_read_tokens"),
-            raw.get("cache_read_input_tokens"),
-            raw.get("cached_tokens"),
-            _nested(raw, "prompt_tokens_details").get("cached_tokens"),
-        ),
-        "reasoning_tokens": extract_reasoning_tokens(raw),
-        "usage_present": _usage_present(raw),
+        "input_tokens": prompt, "output_tokens": completion, "cache_read_tokens": cached,
+        "reasoning_tokens": reasoning, "usage_present": True,
+        "usage_source": source, "usage_missing_reason": None,
     }
 
 
-def enrich_turn_usage_dict(base_usage: Mapping[str, Any], turn_usage: Any) -> dict[str, Any]:
-    """Копия базового usage хода, дополненная полями TurnUsage (None не перезаписывает базу); usage_present=True."""
-    enriched = dict(base_usage)
+def _merge_turn_usage_fields(enriched: dict[str, Any], turn_usage: Any) -> None:
+    if turn_usage is None:
+        return
     for key, attr in _TURN_USAGE_FIELDS:
         value = getattr(turn_usage, attr, None)
         if value is not None:
             enriched[key] = value
+
+
+def _resolve_turn_source(enriched: Mapping[str, Any], turn_usage: Any) -> str:
+    source = _resolve_usage_source(enriched.get("usage_source"))
+    if source is not None:
+        return source
+    return _resolve_usage_source(getattr(turn_usage, "source", None)) or "upstream_report"
+
+
+def enrich_turn_usage_dict(base_usage: Mapping[str, Any], turn_usage: Any) -> dict[str, Any]:
+    """Копия базового usage хода, дополненная полями TurnUsage (None не перезаписывает базу); без воскрешения нулей."""
+    enriched = dict(base_usage)
+    _merge_turn_usage_fields(enriched, turn_usage)
+    counters = tuple(enriched.get(key) for key in _COUNTER_KEYS)
+    has_positive = any(_is_positive(value) for value in counters)
+    explicit_false = turn_usage is None and enriched.get("usage_present") is False
+    if explicit_false or not has_positive:
+        return _mark_usage_absent(enriched, counters, has_positive, explicit_false)
     enriched["usage_present"] = True
+    enriched["usage_source"] = _resolve_turn_source(enriched, turn_usage)
+    enriched["usage_missing_reason"] = None
     return enriched
 
 
 def telemetry_usage_updates(usage: Mapping[str, Any] | None) -> dict[str, Any]:
     """Поля usage -> метаданные телеметрии события: prompt/completion/cached/reasoning + usage_present."""
+    if usage is None:
+        return {"usage_present": False, "usage_source": None, "usage_missing_reason": "usage_missing_in_stream"}
     fields = normalize_usage_fields(usage)
-    updates = present(
-        {
-            "prompt_tokens": fields["input_tokens"],
-            "completion_tokens": fields["output_tokens"],
-            "cached_tokens": fields["cache_read_tokens"],
-            "reasoning_tokens": fields["reasoning_tokens"],
-        }
-    )
-    updates["usage_present"] = fields["usage_present"]
+    updates = present({
+        "prompt_tokens": fields["input_tokens"], "completion_tokens": fields["output_tokens"],
+        "cached_tokens": fields["cache_read_tokens"], "reasoning_tokens": fields["reasoning_tokens"],
+    })
+    reported_total = usage.get("total_tokens")
+    if fields["usage_present"] and _is_counter(reported_total) and reported_total > 0:
+        updates["total_tokens"] = reported_total
+    updates["usage_present"] = bool(fields["usage_present"])
+    updates["usage_source"] = fields["usage_source"]
+    updates["usage_missing_reason"] = fields["usage_missing_reason"]
     return updates
-
-
-def _total_tokens(prompt: Any, completion: Any) -> int | None:
-    """total_tokens = prompt + completion при положительной сумме; иначе None (обратная совместимость)."""
-    if not (_is_number(prompt) or _is_number(completion)):
-        return None
-    total = (int(prompt) if _is_number(prompt) else 0) + (int(completion) if _is_number(completion) else 0)
-    return total if total > 0 else None
-
-
-def finalize_event_usage(meta: dict[str, Any]) -> dict[str, Any]:
-    """Блок usage события: pop полей из meta, total_tokens и вывод usage_present по наличию токенов."""
-    prompt = meta.pop("prompt_tokens", None)
-    completion = meta.pop("completion_tokens", None)
-    cached = meta.pop("cached_tokens", None)
-    reasoning = meta.pop("reasoning_tokens", None)
-    usage_present = meta.pop("usage_present", None)
-    if usage_present is None:
-        usage_present = any(value is not None for value in (prompt, completion, cached, reasoning))
-    return {
-        "prompt_tokens": prompt,
-        "completion_tokens": completion,
-        "cached_tokens": cached,
-        "reasoning_tokens": reasoning,
-        "total_tokens": _total_tokens(prompt, completion),
-        "usage_present": usage_present,
-    }
