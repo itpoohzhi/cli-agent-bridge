@@ -139,3 +139,35 @@ def test_combined_odd_quote_and_invalid_escape_stage_2b() -> None:
     parsed = loads_tolerant_json(raw, json_repair_enabled=True)
     assert isinstance(parsed, dict)
     assert parsed["arguments"]["command"] == r'echo "odd \x27hi\x27 \s+ end'
+
+
+def test_tolerant_json_strips_single_trailing_semicolon_only_when_repair_enabled() -> None:
+    raw = '{"name":"read","arguments":{"limit":200,"offset":1}};'
+    parsed = loads_tolerant_json(raw, json_repair_enabled=True)
+    assert isinstance(parsed, dict)
+    assert parsed["name"] == "read"
+    assert parsed["arguments"] == {"limit": 200, "offset": 1}
+
+    with pytest.raises(ValueError):
+        _ = loads_tolerant_json(raw, json_repair_enabled=False)
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        ";;",
+        "{<json>}",
+        '{"a":1}";',
+        '{"a":1};"',
+        '{"a":"\\q"};',
+        '{"a":1,};',
+        '{"a":1}}};',
+        '{"a":1,"a":2};',
+        '{"a":NaN};',
+        "[1,2];",
+        '{"a":"raw\nnewline"};',
+    ],
+)
+def test_tolerant_json_combined_suffix_negatives_fail_closed(raw: str) -> None:
+    with pytest.raises(ValueError):
+        _ = loads_tolerant_json(raw, json_repair_enabled=True)
