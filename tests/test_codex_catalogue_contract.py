@@ -24,11 +24,16 @@ from scripts import sync_codex_catalog  # noqa: E402
 import test_passthrough_adapter as passthrough_seam  # noqa: E402
 import test_passthrough_upstream_params as upstream_params  # noqa: E402
 
-CODEX_IDS = frozenset({rcc.SOL_MODEL_ID, rcc.TERRA_MODEL_ID})
+CODEX_IDS = frozenset({rcc.SOL_MODEL_ID, rcc.SOL62_MODEL_ID, rcc.TERRA_MODEL_ID})
 DEEPSEEK = "deepseek-v4.1-flash"
-EXPECTED_CONTEXT = {rcc.SOL_MODEL_ID: 272_000, rcc.TERRA_MODEL_ID: 500_000}
+EXPECTED_CONTEXT = {
+    rcc.SOL_MODEL_ID: 272_000,
+    rcc.SOL62_MODEL_ID: 272_000,
+    rcc.TERRA_MODEL_ID: 500_000,
+}
 EXPECTED_EFFORTS = {
     rcc.SOL_MODEL_ID: list(rcc.SOL_EFFORTS),
+    rcc.SOL62_MODEL_ID: list(rcc.SOL_EFFORTS),
     rcc.TERRA_MODEL_ID: list(rcc.TERRA_EFFORTS),
 }
 
@@ -38,22 +43,20 @@ def root_fleet() -> dict[str, Any]:
 
 
 def test_codex_backend_is_stdio_resident_with_v2_route_in_fleet() -> None:
-    """ADR-001 Catalogue: codex backend is stdio_resident with codex-app-server-v2 routes."""
+    """ADR-001 Catalogue: codex backend is sole enabled stdio_resident primary for Codex models."""
     data = root_fleet()
     codex = data["backends"]["codex"]
     assert codex["kind"] == rcc.BACKEND_KIND_STDIO_RESIDENT
     assert codex["wrapper"] == "codex app-server"
     assert codex["enabled"] is True
     assert "base_url" not in codex
-    assert not {m["id"] for m in data["models"] if m["backend"] == "codex"}
+    assert data["backends"]["openai-key-3"]["enabled"] is False
+    assert {m["id"] for m in data["models"] if m["backend"] == "codex"} == CODEX_IDS
     rcc.validate_no_forbidden_aliases(data["aliases"])
     models = {m["id"]: m for m in data["models"]}
     for model_id in sorted(CODEX_IDS):
         model = models[model_id]
-        routes = {route["backend"]: route for route in model["routing"]["routes"]}
-        assert routes["codex"]["route_id"] == rcc.CODEX_V2_ROUTE_ID
-        assert routes["codex"]["weight"] == 0
-        assert model["routing"]["disabled_backend"] == "codex"
+        assert model["backend"] == "codex"
         assert model["efforts"] == EXPECTED_EFFORTS[model_id]
         assert model["context_window"] == EXPECTED_CONTEXT[model_id]
         assert model["max_tokens"] == 128_000
@@ -111,7 +114,7 @@ def test_sync_codex_catalog_matches_fleet_and_separates_transports() -> None:
     assert result.updated_models == tuple(sorted(CODEX_IDS))
     assert [r.route_id for r in result.contract.resident_v2_routes] == [rcc.CODEX_V2_ROUTE_ID]
     http_ids = {r.route_id for r in result.contract.passthrough_routes}
-    assert {rcc.CODEX_PASSTHROUGH_ROUTE_ID, "openai-key-3"} <= http_ids
+    assert rcc.CODEX_PASSTHROUGH_ROUTE_ID in http_ids
 
 
 @pytest.mark.parametrize("model_id", sorted(CODEX_IDS))
@@ -119,9 +122,8 @@ def test_root_openai_models_have_direct_canonical_owner(model_id: str) -> None:
     data = root_fleet()
     models = {model["id"]: model for model in data["models"]}
     catalog = build_catalog(data, ADAPTER_KINDS)
-    assert models[model_id]["backend"] == "openai-key-3"
-    assert models[model_id]["routing"]["legacy_backend"] == "openai-key-3"
-    assert catalog["models"][model_id]["backend"] == "openai-key-3"
+    assert models[model_id]["backend"] == "codex"
+    assert catalog["models"][model_id]["backend"] == "codex"
 
 
 @pytest.mark.parametrize("enabled", [False, True])
@@ -134,16 +136,29 @@ def test_codex_explicit_route_membership_follows_backend_flag(enabled: bool) -> 
         members = {model.id for adapter, model in registry.models() if adapter.id == "codex"}
         assert members == (CODEX_IDS if enabled else set())
         published = {model.id for _, model in registry.models()}
-        assert published & CODEX_IDS == CODEX_IDS
-        for model_id in CODEX_IDS:
-            assert registry.adapter_for_model(model_id).id == "openai-key-3"
+        assert published & CODEX_IDS == (CODEX_IDS if enabled else set())
+        if enabled:
+            for model_id in CODEX_IDS:
+                assert registry.adapter_for_model(model_id).id == "codex"
     finally:
         registry.shutdown()
 
 
 @pytest.mark.parametrize("model_id", sorted(CODEX_IDS))
 def test_codex_is_only_drawn_after_positive_weight_routes(model_id: str) -> None:
-    model = next(model for model in root_fleet()["models"] if model["id"] == model_id)
+    model = {
+        "id": model_id,
+        "backend": "openai-key-3",
+        "routing": {
+            "algorithm": "weighted-sha256-v1",
+            "catalog_hash": "0" * 64,
+            "enabled": True,
+            "routes": [
+                {"route_id": "codex", "backend": "codex", "weight": 0, "priority": 10},
+                {"route_id": "openai-key-3", "backend": "openai-key-3", "weight": 50, "priority": 20},
+            ],
+        },
+    }
     before = copy.deepcopy(model)
     for seed in ("first", "second", "third"):
         order = list(route_order(model_id, model, seed))
@@ -160,9 +175,8 @@ def test_flag_off_retains_native_codex_order(
     monkeypatch.delenv(ROUTING_FLAG, raising=False)
     assert routing_enabled() is False
     model = next(model for model in root_fleet()["models"] if model["id"] == model_id)
-    model["routing"]["enabled"] = False
     assert list(route_order(model_id, model, "flag-off")) == ["codex"]
-    assert model["backend"] == "openai-key-3"
+    assert model["backend"] == "codex"
 
 
 @pytest.mark.parametrize("enabled", [False, True])
@@ -171,7 +185,7 @@ def test_native_codex_models_still_follow_backend_flag(enabled: bool) -> None:
     for model in data["models"]:
         if model["id"] in CODEX_IDS:
             model["backend"] = "codex"
-            model.pop("routing")
+            model.pop("routing", None)
     data["backends"]["codex"]["enabled"] = enabled
     catalog = build_catalog(data, ADAPTER_KINDS)
     registry = AdapterRegistry.from_fleet(catalog, ADAPTER_KINDS, lambda: catalog)
