@@ -77,7 +77,7 @@ class ResidentBridgeRuntime:
         """Execute one turn under bounded single-flight lock with atomic slot lifecycle."""
         cancelled = bool(options.cancel_event.is_set()) if options.cancel_event else False
         _fail_if(cancelled, ResidentCancelledError("resident turn cancelled"))
-        _fail_if(all((envelope.identity.ephemeral, bool(options.require_auth))), ResidentAuthError(401, "auth_required"))
+        _fail_if(all((not str(envelope.identity.principal_hash or "").strip(), bool(options.require_auth))), ResidentAuthError(401, "auth_required"))
         with self._admit_turn(envelope) as (current, session_key), zero_canon_isolation(self._driver, current.review_profile) as iso:
             committed, plan, affinity_key, eph = self._plan_and_reset_stale(current, session_key)
             argv, cwd, spawn_env = prepare_runtime_spec(self._driver, current, options.argv_builder(), iso)

@@ -294,3 +294,23 @@ def test_runtime_output_byte_limit_and_keepalive(monkeypatch: pytest.MonkeyPatch
     bad_env = ResidentTurnEnvelope(identity=_env().identity, backend_id="b", model="m", effort="low", cwd_norm="/w", secret=_SECRET, rpc=_env().rpc, full_prompt="over")
     with pytest.raises(ResourceLimitError, match="output_limit_exceeded"):
         list(rt.execute_turn(bad_env, ResidentTurnOptions(argv_builder=lambda: ["c"], max_output_bytes=4)))
+
+
+def test_require_auth_allows_authenticated_ephemeral_and_blocks_missing_principal() -> None:
+    held = _slot("s-eph")
+    pool = _FakePool([held], max_slots=1)
+
+    class _Done:
+        def stream_turn(self, _h: Any, _e: Any) -> Any:
+            yield DecodedChunk(text="ok", is_terminal=True)
+
+    rt = ResidentBridgeRuntime(pool, _Done())
+    auth_eph = _env(ephemeral=True, cid="")
+    chunks = list(rt.execute_turn(auth_eph, ResidentTurnOptions(argv_builder=lambda: ["cmd"], require_auth=True)))
+    assert [c.text for c in chunks] == ["ok"] and held.acquired_ephemeral is True
+
+    unauth_id = ResidentIdentity("", "", True, "", "t1", "", "", "sess-none", "unauthenticated_ephemeral")
+    unauth_env = ResidentTurnEnvelope(identity=unauth_id, backend_id="b", model="m", effort="low", cwd_norm="/w", secret=_SECRET, rpc=_env().rpc, full_prompt="hi")
+    with pytest.raises(ResidentAuthError) as exc_info:
+        list(rt.execute_turn(unauth_env, ResidentTurnOptions(argv_builder=lambda: ["cmd"], require_auth=True)))
+    assert exc_info.value.http_status == 401 and exc_info.value.code == "auth_required"
