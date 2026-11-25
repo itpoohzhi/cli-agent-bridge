@@ -55,8 +55,8 @@ class RouteCB:
     def _owns(self, flag: bool, state: _TupleState | _ProviderState | None, lease: RouteProbeLease) -> bool:
         return bool(flag and state and self._probes.get(id(state), (0.0, None))[1] is lease)
 
-    def _active_lease(self, lease: RouteProbeLease | None, key: RouteTupleKey | None = None) -> RouteProbeLease | None:
-        if not lease or lease.done or (key is not None and lease.key != key):
+    def _active_lease(self, lease: RouteProbeLease | None, key: RouteTupleKey) -> RouteProbeLease | None:
+        if not lease or lease.done or lease.key != key:
             return None
         t_ok = self._owns(lease.tuple_lease, self._tuples.get(lease.key), lease)
         p_ok = self._owns(lease.provider_lease, self._providers.get(lease.key[0]), lease)
@@ -78,13 +78,17 @@ class RouteCB:
         with self._lock:
             if not lease or lease.done:
                 return False
-            self._clear_probe_flags(self._active_lease(lease))
+            self._clear_probe_flags(self._active_lease(lease, lease.key))
             lease.done = True
             return True
 
     @staticmethod
     def _can_reset(st: _TupleState | _ProviderState, lease: RouteProbeLease | None, eff: RouteProbeLease | None, attr: str) -> bool:
-        return st.open_until is None or lease is None or bool(getattr(eff, attr, False))
+        return st.open_until is None or not lease or bool(getattr(eff, attr, False))
+
+    @staticmethod
+    def _mark_done(lease: RouteProbeLease | None, key: RouteTupleKey) -> None:
+        if lease and lease.key == key: lease.done = True
 
     @staticmethod
     def _prune_unproven(p: _ProviderState, key: RouteTupleKey) -> None:
@@ -104,7 +108,7 @@ class RouteCB:
                     p.open_until, p.probe_in_flight = None, False
                     p.unproven.clear()
                     self._probes.pop(id(p), None)
-            if lease and lease.key == key: lease.done = True
+            self._mark_done(lease, key)
 
     def record_failure(self, key: RouteTupleKey, outcome: FailureOutcome | None = None, lease: RouteProbeLease | None = None, now: float | None = None) -> str:
         """Classify outcome and update tuple/provider state; never logs credentials."""
@@ -120,7 +124,7 @@ class RouteCB:
                 if getattr(eff_lease, "provider_lease", False): self._open_provider_wide(key[0], ts)
                 res = "route_fail"
             self._clear_probe_flags(eff_lease)
-            if lease and lease.key == key: lease.done = True
+            self._mark_done(lease, key)
             return res
 
     def retry_after_s(self, keys: Iterable[RouteTupleKey], now: float | None = None) -> int:
