@@ -143,7 +143,7 @@ if str(_REPO_ROOT) not in sys.path:
 
 from agy_runtime import (  # noqa: E402
     long_session_config as _lsc, midstream_resilience, slot_and_session, sqlite_ro_pool as _ro_pool,
-    sqlite_tail_lifecycle, sse_body_runner, sse_stream_helpers, tool_turn_helpers, turn_usage_finalize as _u_fin, zero_canon_profile,
+    sqlite_tail_lifecycle, sse_body_runner, sse_stream_helpers, tool_turn_helpers, turn_usage_finalize as _u_fin, zc_static_cwd, zero_canon_profile,
 )
 from agy_runtime.explicit_turn_commit import abort_explicit_turn_safe, finalize_deferred_explicit_turn  # noqa: E402
 from agy_runtime.hygiene_runtime import HygieneRuntime, ManagedSqliteRoPool  # noqa: E402
@@ -7448,7 +7448,7 @@ class Handler(BaseHTTPRequestHandler):
         use_cid = ""
         owned_cid = ""
         ctx: dict[str, object] = {}
-        zc_turn_cwd: Path | None = None
+        zc_turn_cwd: zc_static_cwd.ZeroCanonTurnCwd | None = None
         explicit_state: ExplicitTurnState | None = None
         turn_id = uuid.uuid4().hex
         try:
@@ -7667,8 +7667,8 @@ class Handler(BaseHTTPRequestHandler):
                 force_cold = True
             zc_plan = zero_canon_profile.resolve_turn_plan(self.headers, DYNAMIC_CONFIG_PATH)
             if zc_plan.use_empty_cwd:
-                zc_turn_cwd = _zc_manager().create_turn_zc_cwd()
-                cwd, cwd_invalid = str(zc_turn_cwd), False
+                zc_turn_cwd = zc_static_cwd.acquire_turn_cwd(_zc_manager(), DYNAMIC_CONFIG_PATH)
+                cwd, cwd_invalid = str(zc_turn_cwd.path), False
             raw_cid = extra.get("conversation_id") if "conversation_id" in extra else (req.get("conversation_id") if isinstance(req, dict) else None)
             cid_clean, cid_bad = validate_clean_cid(raw_cid, _CID_RE, _log)
             if cid_bad:
@@ -7801,7 +7801,7 @@ class Handler(BaseHTTPRequestHandler):
             if reserved and budget is not None:
                 budget.release(reserved)
             if zc_turn_cwd is not None and not ctx.get("job_owns_cid"):
-                zero_canon_profile.AgyZeroCanonProfileManager.cleanup_turn_zc_cwd(zc_turn_cwd)
+                zc_turn_cwd.release()
             abort_explicit_turn_safe(_explicit_adapter(), explicit_state, post_spawn=True)
 
     @staticmethod
