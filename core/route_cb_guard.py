@@ -122,10 +122,10 @@ def acquire_cb_guard(breakers: tuple[RouteCB | None, RouteCircuitBreaker | None]
     route_cb, legacy = breakers
     if route_cb is not None:
         lease = route_cb.try_acquire(key, now)
-        return CBAttemptGuard(candidate=candidate, key=key, route_cb=route_cb, lease=lease, blocked_key=key if lease is None else None)
+        return CBAttemptGuard(candidate=candidate, key=key, route_cb=route_cb, lease=lease, blocked_key=key if lease is None else None, done=lease is None)
     probe = legacy.try_acquire(candidate, now)
     if probe is not None:
         return CBAttemptGuard(candidate=candidate, key=key, legacy=legacy, probe=probe)
     blocked, remaining_s, _reason = legacy.quota_block_info(candidate, now)
     refusal = RouteRefusal(429, (("Retry-After", str(max(60, int(remaining_s)))),), b'{"error":{"type":"rate_limit_error","message":"slot in quota cooldown"}}') if blocked else None
-    return CBAttemptGuard(candidate=candidate, key=key, legacy=legacy, quota_refusal=refusal, blocked_key=key)
+    return CBAttemptGuard(candidate=candidate, key=key, legacy=legacy, quota_refusal=refusal, blocked_key=key, done=True)

@@ -30,7 +30,8 @@ def test_b7_get_route_cb_and_guard_blocked() -> None:
         g.record_exception(TimeoutError("ignored_after_done"))
         g.release()
     blocked_g = acquire_cb_guard((cb_reinit, None), cand, k1, t0 + 1.0)
-    assert (blocked_g.blocked, blocked_g.blocked_key) == (True, k1)
+    blocked_g.succeed(t0 + 1.0)
+    assert (blocked_g.blocked, blocked_g.done, blocked_g.blocked_key, cb_reinit.try_acquire(k1, t0 + 1.0) is None) == (True, True, k1, True)
     g2 = acquire_cb_guard((cb_reinit, None), cand, ("p1", "m2", "b1"), t0 + 1.0)
     g2.succeed(t0 + 2.0)
     g2.succeed(t0 + 3.0)
@@ -58,7 +59,8 @@ def test_b7_guard_new_error_and_legacy_paths() -> None:
     gl_exc.record_exception(TimeoutError("x"))
     gl_err = acquire_cb_guard((None, leg), cand, k, 203.0)
     assert gl_err.record_error(RouteRefusal(500, (), b"err"), SimpleNamespace(), RouteFailover(), QuotaRules.from_config()).status_code == 500
-    assert acquire_cb_guard((None, leg), cand, k, 204.0).blocked is True
+    blocked_leg = acquire_cb_guard((None, leg), cand, k, 204.0)
+    assert (blocked_leg.blocked, blocked_leg.done) == (True, True)
 
 
 def test_b7_legacy_error_matrix() -> None:
