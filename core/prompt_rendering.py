@@ -8,11 +8,16 @@ from typing import cast
 
 __all__ = (
     "_append_attachments", "_render_assistant", "_render_message", "_render_tool_call",
-    "_render_tool_schema", "_render_tools_section", "escape_role_delimiters", "render_tool_call", "render_tools_section",
+    "_render_tool_schema", "_render_tools_section", "TOOL_CALL_FORMAT_LINE", "escape_role_delimiters", "render_tool_call", "render_tools_section",
 )
 
 _TOOL_CALL_OPEN = "<tool_call>"
 _TOOL_CALL_CLOSE = "</tool_call>"
+TOOL_CALL_FORMAT_LINE = (
+    "Wrap each call in a tool_call XML element (angle-bracket opening tag tool_call, "
+    "closing tag /tool_call) whose entire body is one JSON object with a string \"name\" "
+    "and an object \"arguments\"; nothing may follow the object inside the element."
+)
 _SPOOFED_ROLE_LINE_RE = re.compile(
     r"(?im)^([ \t]*)\[(system|user|assistant|developer|tool(?:\s+result[^\n\]]*)?|attachments)\]"
 )
@@ -23,7 +28,7 @@ _TOOLS_PROTOCOL_LINES: tuple[str, ...] = (
     "# Tool calling protocol",
     "You may call the external tools listed below.",
     "When you need a tool, output ONLY blocks exactly in this form:",
-    f'{_TOOL_CALL_OPEN}{{"name": "<tool_name>", "arguments": {{<json>}}}}{_TOOL_CALL_CLOSE}',
+    TOOL_CALL_FORMAT_LINE,
     "You may output several such blocks in a row. Do not narrate around them.",
     "Tool results arrive later as lines like [tool result <id>] with the result text.",
     "If no tool is needed, reply normally in plain text.",

@@ -17,6 +17,10 @@ from unittest.mock import Mock, patch
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import core.tool_emulation as core_emulation  # noqa: E402
+from core.prompt_rendering import (  # noqa: E402
+    _TOOL_CALL_MARKER_RE,  # pyright: ignore[reportPrivateUsage]
+    TOOL_CALL_FORMAT_LINE,
+)
 from server import (  # noqa: E402
     TOOL_CALL_CLOSE,
     TOOL_CALL_OPEN,
@@ -1093,12 +1097,10 @@ class TestToolsSection(unittest.TestCase):
     def test_protocol_and_schema_present(self):
         section = _tools_section(TOOLS, None)
         self.assertIn("# Tool calling protocol", section)
-        self.assertIn(
-            TOOL_CALL_OPEN
-            + '{"name": "<tool_name>", "arguments": {<json>}}'
-            + TOOL_CALL_CLOSE,
-            section,
-        )
+        self.assertIn(TOOL_CALL_FORMAT_LINE, section)
+        self.assertNotIn("<tool_name>", section)
+        self.assertNotIn("<json>", section)
+        self.assertIsNone(_TOOL_CALL_MARKER_RE.search(section))
         self.assertIn("- get_weather: Get current weather", section)
         self.assertIn('"city"', section)
         self.assertNotIn("You MUST", section)

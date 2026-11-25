@@ -6,11 +6,7 @@ import hashlib
 import json
 from typing import cast
 
-from core.prompt_rendering import escape_role_delimiters
-
-_TOOL_CALL_EXAMPLE = (
-    '<tool_call>{"name":"<tool_name>","arguments":{<json>}}</tool_call>'
-)
+from core.prompt_rendering import TOOL_CALL_FORMAT_LINE, escape_role_delimiters
 
 
 def compute_tools_fingerprint(
@@ -98,7 +94,7 @@ def build_compact_tools_reminder(
         "Full tool schemas are already present in the conversation context.",
         f"Available tool names: {safe_names}",
         "When calling a tool, output ONLY one or more blocks exactly in this form:",
-        _TOOL_CALL_EXAMPLE,
+        TOOL_CALL_FORMAT_LINE,
         "Do not narrate around tool-call blocks or use tools outside the list.",
         "Tool results arrive later as [tool result <id>] followed by result text.",
         _choice_instruction(tool_choice),
