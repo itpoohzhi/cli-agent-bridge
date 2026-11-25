@@ -6,6 +6,7 @@ import json
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 from typing import Any, cast
 
 from core.chat_key import SOURCES_SESSION_ID, resolve_chat_key
@@ -140,17 +141,25 @@ def _identity_config(adapter: Any) -> tuple[bytes, str, bool, bool]:
     return res
 
 
-def _trusted_owner(route: Any, headers: Any) -> Any:
+def _route_headers(route: Any) -> tuple[Any, Any]:
+    handler = getattr(route, "handler", None)
+    headers = getattr(handler, "headers", None) if handler is not None else getattr(route, "headers", None)
+    return handler, headers
+
+
+def _trusted_owner(route: Any, handler: Any, headers: Any) -> Any:
     host = getattr(route, "host", None)
     owner_fn = getattr(host, "owner_token_hash", None)
-    if not callable(owner_fn):
-        owner_fn = getattr(host, "_owner_token_hash", None)
+    legacy_owner_fn = getattr(host, "_owner_token_hash", None)
     out: Any = ""
-    if callable(owner_fn):
-        try:
+    try:
+        if callable(owner_fn):
             out = owner_fn(headers)
-        except Exception:
-            out = ""
+        elif callable(legacy_owner_fn):
+            owner_handler = handler if handler is not None else SimpleNamespace(headers=headers)
+            out = legacy_owner_fn(owner_handler)
+    except Exception:
+        out = ""
     return out
 
 
@@ -173,8 +182,8 @@ def _nz(val: Any, default: Any) -> Any:
 
 
 def populate_resident_ctx(route: Any, ctx: dict[str, Any], extra: Mapping[str, Any], *, adapter: Any = None) -> None:
-    headers = getattr(route, "headers", None)
-    raw_owner = _trusted_owner(route, headers)
+    handler, headers = _route_headers(route)
+    raw_owner = _trusted_owner(route, handler, headers)
     secret, protocol, require_auth, config_ok = _identity_config(adapter)
     scope, subagent_id, force_ephemeral = _identity_extras(extra)
     identity = resolve_resident_identity(
@@ -207,8 +216,7 @@ def _turn_ids_valid(route: Any, values: tuple[str, str]) -> bool:
 
 
 def _header_val(route: Any, name: str) -> str:
-    handler = getattr(route, "handler", None)
-    headers = getattr(handler, "headers", None) if handler else getattr(route, "headers", None)
+    _, headers = _route_headers(route)
     res = str(_nz(headers.get(name), "")) if callable(getattr(headers, "get", None)) else ""
     return res
 
