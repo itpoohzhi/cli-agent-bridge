@@ -41,7 +41,7 @@ from tests._codex_l5_helpers import (  # noqa: E402
 
 
 def _assert_gpt62_rejected(stand: IsolatedL5Stand) -> None:
-    assert "gpt-6.2-sol" in rcc.UNAVAILABLE_MODEL_IDS
+    assert "gpt-6.2-sol" in rcc.FORBIDDEN_ALIAS_MODEL_IDS
     rcc.validate_no_forbidden_aliases(json.loads((ROOT / "fleet.json").read_text(encoding="utf-8"))["aliases"])
     with pytest.raises(CodexZeroCanonPolicyError, match="Unsupported Codex model"):
         _ = validate_codex_model_effort("gpt-6.2-sol", "high")

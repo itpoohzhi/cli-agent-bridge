@@ -653,7 +653,7 @@
     },
     "openai-key-3": {
       "kind": "passthrough",
-      "enabled": true,
+      "enabled": false,
       "owned_by": "openai-direct",
       "max_concurrent": 1,
       "base_url": "http://127.0.0.1:10830/sg-openai",
@@ -1013,6 +1013,58 @@
       }
     },
     {
+      "id": "gpt-6.1-sol",
+      "backend": "codex",
+      "name": "GPT-6.1 Sol (Codex resident)",
+      "efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "default_effort": "high",
+      "context_window": 272000,
+      "max_tokens": 128000,
+      "images": {
+        "status": "unverified"
+      }
+    },
+    {
+      "id": "gpt-6.1-terra",
+      "backend": "codex",
+      "name": "GPT-6.1 Terra (Codex resident)",
+      "efforts": [
+        "low",
+        "medium",
+        "high"
+      ],
+      "default_effort": "high",
+      "context_window": 500000,
+      "max_tokens": 128000,
+      "images": {
+        "status": "unverified"
+      }
+    },
+    {
+      "id": "gpt-6.2-sol",
+      "backend": "codex",
+      "name": "GPT-6.2 Sol (Codex resident)",
+      "efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "default_effort": "high",
+      "context_window": 272000,
+      "max_tokens": 128000,
+      "images": {
+        "status": "unverified"
+      }
+    },
+    {
       "id": "muse-ember-1.0",
       "backend": "muse",
       "name": "Muse Ember 1.0 (Muse Meta bridge)",
@@ -1209,81 +1261,6 @@
             "backend": "opencode-go-claude",
             "weight": 100,
             "priority": 15
-          }
-        ]
-      }
-    },
-    {
-      "id": "gpt-6.1-sol",
-      "backend": "openai-key-3",
-      "name": "GPT-6.1 Sol (OpenAI key 3)",
-      "efforts": [
-        "low",
-        "medium",
-        "high",
-        "max"
-      ],
-      "default_effort": "high",
-      "context_window": 272000,
-      "max_tokens": 128000,
-      "images": {
-        "status": "unverified"
-      },
-      "routing": {
-        "algorithm": "weighted-sha256-v1",
-        "enabled": true,
-        "catalog_hash": "011e3c7b9e80f90576c71d7c378742b88b3d6416298d820ad9a255b9517fef22",
-        "legacy_backend": "openai-key-3",
-        "disabled_backend": "codex",
-        "routes": [
-          {
-            "route_id": "codex",
-            "backend": "codex",
-            "weight": 0,
-            "priority": 10
-          },
-          {
-            "route_id": "openai-key-3",
-            "backend": "openai-key-3",
-            "weight": 50,
-            "priority": 20
-          }
-        ]
-      }
-    },
-    {
-      "id": "gpt-6.1-terra",
-      "backend": "openai-key-3",
-      "name": "GPT-6.1 Terra (OpenAI key 3)",
-      "efforts": [
-        "low",
-        "medium",
-        "high"
-      ],
-      "default_effort": "high",
-      "context_window": 500000,
-      "max_tokens": 128000,
-      "images": {
-        "status": "unverified"
-      },
-      "routing": {
-        "algorithm": "weighted-sha256-v1",
-        "enabled": true,
-        "catalog_hash": "011e3c7b9e80f90576c71d7c378742b88b3d6416298d820ad9a255b9517fef22",
-        "legacy_backend": "openai-key-3",
-        "disabled_backend": "codex",
-        "routes": [
-          {
-            "route_id": "codex",
-            "backend": "codex",
-            "weight": 0,
-            "priority": 10
-          },
-          {
-            "route_id": "openai-key-3",
-            "backend": "openai-key-3",
-            "weight": 50,
-            "priority": 20
           }
         ]
       }

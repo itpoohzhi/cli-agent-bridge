@@ -28,45 +28,47 @@ import threading
 import time
 from typing import Any
 
+from core.drain_policy import (
+    DEFAULT_DRAIN_TIMEOUT_S,
+    DEFAULT_RETRY_AFTER_S,
+    DEFAULT_SUBAGENT_RETRY_AFTER_S,
+    effective_hub_drain_timeout_s,
+    parse_exit_timeout_s,
+    resolve_drain_hold_timeout_s,
+)
+from core.drain_response import build_drain_http_response, format_drain_event
 from core.turn_session_manager import (
     SNAPSHOT_SCHEMA_VERSION,
     TurnSessionManager,
     _atomic_write_json_0600,
 )
 
-DRAIN_TIMEOUT_S: float = 110.0
+DRAIN_TIMEOUT_S: float = DEFAULT_DRAIN_TIMEOUT_S
 DEFAULT_DRAIN_SECONDS: float = DRAIN_TIMEOUT_S
 DEFAULT_DRAIN_QOS_GRACE_S: float = 15.0
 
 
-def _drain_grace_from_env() -> float:
-    """Возвращает окно grace для ожидающих интерактивных запросов при drain.
-
-    Значение `0`/`0.0` — валидная настройка (немедленный отказ), поэтому проверка
-    идёт на `None`, а не через `or`: иначе `0.0 or 15.0` даёт дефолт. Нечисло и
-    отрицательное значение откатываются к `DEFAULT_DRAIN_QOS_GRACE_S`.
-    """
-    raw = os.environ.get("BRIDGE_DRAIN_QOS_GRACE_S")
+def _safe_env_float(key: str, default: float, *, allow_zero: bool = False) -> float:
+    raw = os.environ.get(key)
     if raw is None or not str(raw).strip():
-        return DEFAULT_DRAIN_QOS_GRACE_S
+        return default
     try:
         value = float(raw)
     except (TypeError, ValueError):
-        return DEFAULT_DRAIN_QOS_GRACE_S
-    if value < 0:
-        return DEFAULT_DRAIN_QOS_GRACE_S
-    return value
+        return default
+    ok = value >= 0.0 if allow_zero else value > 0.0
+    return value if math.isfinite(value) and ok else default
 
 
-RETRY_AFTER_S: int = int(os.environ.get("BRIDGE_RETRY_AFTER_S", "5"))
-ORPHAN_SIGTERM_GRACE_S: float = float(os.environ.get("BRIDGE_ORPHAN_SIGTERM_GRACE_S", "1.0"))
+def _drain_grace_from_env() -> float:
+    """Возвращает окно grace для ожидающих интерактивных запросов при drain."""
+    return _safe_env_float("BRIDGE_DRAIN_QOS_GRACE_S", DEFAULT_DRAIN_QOS_GRACE_S, allow_zero=True)
+
+
+RETRY_AFTER_S: int = DEFAULT_RETRY_AFTER_S
+ORPHAN_SIGTERM_GRACE_S: float = _safe_env_float("BRIDGE_ORPHAN_SIGTERM_GRACE_S", 1.0)
 MAX_KEEPALIVE_INTERVAL_S: float = 10.0
-DEFAULT_DRAIN_SUBAGENT_GRACE_S: float = float(
-    os.environ.get("BRIDGE_DRAIN_SUBAGENT_GRACE_S", "5.0")
-)
-DEFAULT_SUBAGENT_RETRY_AFTER_S: int = int(
-    os.environ.get("BRIDGE_SUBAGENT_RETRY_AFTER_S", "3")
-)
+DEFAULT_DRAIN_SUBAGENT_GRACE_S: float = _safe_env_float("BRIDGE_DRAIN_SUBAGENT_GRACE_S", 5.0)
 KEEPALIVE_INTERVAL_S: float = 5.0
 RESERVED_INTERACTIVE_SLOTS: int = 2
 QUEUE_TIMEOUT_S: float = 15.0
@@ -432,11 +434,7 @@ class HubLifecycleManager:
         self._active_turns_fn = active_turns_fn
         self._last_active_count: int = 0
         if drain_timeout_s is None:
-            try:
-                configured = float(os.environ.get("BRIDGE_DRAIN_TIMEOUT_S", "").strip())
-            except ValueError:
-                configured = DEFAULT_DRAIN_SECONDS
-            drain_timeout_s = configured if math.isfinite(configured) and configured > 0 else DEFAULT_DRAIN_SECONDS
+            drain_timeout_s = _safe_env_float("BRIDGE_DRAIN_TIMEOUT_S", DEFAULT_DRAIN_SECONDS)
         self.drain_timeout_s = float(drain_timeout_s)
         self.retry_after_s = int(retry_after_s)
         self.orphan_grace_s = float(orphan_grace_s)
@@ -447,7 +445,6 @@ class HubLifecycleManager:
         self._log_fn = log_fn
         self._on_shutdown_complete = on_shutdown_complete or force_kill_fn
         self._on_drain_start_fn = on_drain_start_fn
-
 
         self.shutdown_requested = threading.Event()
         self.drain_started = threading.Event()
@@ -477,6 +474,22 @@ class HubLifecycleManager:
             if (sd / "children.json").exists() or not (sd / "state").is_dir():
                 return sd / "children.json"
         return self.workspace / "state" / "children.json"
+
+    def accepting(self) -> bool:
+        """Возвращает `True` только пока хаб в `READY` и shutdown не запрошен."""
+        return self.state == DrainState.READY and not self.shutdown_requested.is_set()
+
+    def _effective_drain_budget(self) -> tuple[float, bool, float | None]:
+        if self.drain_timeout_s <= 0.0:
+            return (0.0, False, None)
+        exit_timeout_s = parse_exit_timeout_s(os.environ)
+        eff_s, clamped = effective_hub_drain_timeout_s(self.drain_timeout_s, exit_timeout_s)
+        return (eff_s, clamped, exit_timeout_s)
+
+    @property
+    def effective_drain_timeout_s(self) -> float:
+        """Эффективный бюджет drain, зажатый под `BRIDGE_EXIT_TIMEOUT_S`."""
+        return self._effective_drain_budget()[0]
 
     def is_draining(self) -> bool:
         return (
@@ -571,12 +584,19 @@ class HubLifecycleManager:
         try:
             if self._on_drain_start_fn is not None:
                 self._on_drain_start_fn()
-            eff_timeout = self.drain_timeout_s if self.is_drain_enabled() else 0.0
-            active_before = self._safe_active_count()
-            self._log(
-                f"drain_started signal={self.last_signal or 0} "
-                f"active_turns={active_before} timeout_s={eff_timeout:.1f}"
+            eff_timeout, clamped, exit_timeout_s = (
+                self._effective_drain_budget() if self.is_drain_enabled() else (0.0, False, None)
             )
+            active_before = self._safe_active_count()
+            self._log(format_drain_event(
+                "drain_started", signal=self.last_signal or 0,
+                active_turns=active_before, timeout_s=eff_timeout, clamped=clamped or None,
+            ))
+            if clamped:
+                self._log(format_drain_event(
+                    "drain_timeout_clamped", configured_timeout_s=self.drain_timeout_s,
+                    effective_timeout_s=eff_timeout, exit_timeout_s=exit_timeout_s, clamped=True,
+                ))
 
             remaining = []
             deadline = time.monotonic() + max(0.0, eff_timeout)
@@ -661,13 +681,10 @@ class HubLifecycleManager:
 
     def wait_for_drain_hold(self, *, is_subagent: bool = False) -> bool:
         """Удерживает интерактивный запрос при DRAINING на BRIDGE_DRAIN_HOLD_TIMEOUT_S."""
-        try:
-            hold_s = float(os.environ.get("BRIDGE_DRAIN_HOLD_TIMEOUT_S", "0.0") or 0.0)
-        except ValueError:
-            hold_s = 0.0
+        hold_s = resolve_drain_hold_timeout_s(os.environ)
         if not is_subagent and self.is_draining() and hold_s > 0:
-            self.drain_completed.wait(timeout=min(hold_s, 30.0))
-        return not self.is_draining()
+            _ = self.drain_completed.wait(timeout=hold_s)
+        return self.accepting()
 
     def draining_response(
         self,
@@ -675,33 +692,15 @@ class HubLifecycleManager:
         retry_after_s: int | None = None,
     ) -> tuple[int, dict[str, str], dict[str, Any]]:
         """Возвращает `(status_code, headers, body)` для отказа новым запросам при `DRAINING`."""
-        if retry_after_s is not None:
-            retry = int(retry_after_s)
-        else:
-            try:
-                retry = int(
-                    os.environ.get("BRIDGE_RETRY_AFTER_S", str(self.retry_after_s))
-                )
-            except (TypeError, ValueError):
-                retry = int(self.retry_after_s)
-        if (
-            retry_after_s is None
-            and is_subagent
-            and "BRIDGE_RETRY_AFTER_S" not in os.environ
-        ):
-            retry = DEFAULT_SUBAGENT_RETRY_AFTER_S
-        headers = {
-            "Retry-After": str(retry),
-            "X-Bridge-Draining": "true",
-        }
-        body = {
-            "error": {
-                "message": "bridge is draining for restart",
-                "type": "overloaded",
-                "code": 503,
-            }
-        }
-        return 503, headers, body
+        status, headers, body = build_drain_http_response(
+            os.environ, is_subagent=is_subagent,
+            retry_after_s=retry_after_s, legacy_default=self.retry_after_s,
+        )
+        self._log(format_drain_event(
+            "drain_reject", status=status, state=self.state,
+            is_subagent=is_subagent, retry_after_s=headers.get("Retry-After"),
+        ))
+        return status, headers, body
 
     def health_headers(self) -> dict[str, str]:
         """Возвращает дополнительные HTTP-заголовки для `/health` в режиме `DRAINING`."""

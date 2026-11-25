@@ -1,0 +1,16 @@
+repos:
+  - repo: local
+    hooks:
+      - id: ruff-check
+        name: ruff-check
+        entry: python3 -m ruff check
+        language: system
+        types: [python]
+        pass_filenames: true
+
+      - id: drain-contract-tests
+        name: drain-contract-tests
+        entry: python3 -m pytest tests/test_drain_policy.py tests/test_drain_contract_http.py tests/test_drain_launchd_consistency.py -q
+        language: system
+        pass_filenames: false
+        files: ^(core/lifecycle\.py|core/drain_[^/]*\.py|core/subbridge_lifecycle\.py|server\.py|deploy/launchd/.*|tests/test_drain_[^/]*\.py)$

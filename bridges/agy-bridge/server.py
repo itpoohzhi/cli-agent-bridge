@@ -100,7 +100,6 @@ import socket
 import sqlite3
 import subprocess
 import sys
-import tempfile
 import threading
 import time
 import uuid
@@ -115,7 +114,8 @@ _BRIDGE_DIR = str(Path(__file__).resolve().parent)
 if _BRIDGE_DIR not in sys.path:
     sys.path.insert(0, _BRIDGE_DIR)
 
-import anthropic_runtime as _ant_rt, stat_sha_cache as _stat_sha_cache  # noqa: E402
+import anthropic_runtime as _ant_rt  # noqa: E402
+import stat_sha_cache as _stat_sha_cache  # noqa: E402
 
 _ANTHROPIC_PROBE = _ant_rt.AgyAnthropicProbe()
 
@@ -146,7 +146,15 @@ from agy_runtime import (  # noqa: E402
     sqlite_tail_lifecycle, sse_body_runner, sse_stream_helpers, tool_turn_helpers, turn_usage_finalize as _u_fin, zero_canon_profile,
 )
 from agy_runtime.hygiene_runtime import HygieneRuntime, ManagedSqliteRoPool  # noqa: E402
+from agy_runtime.legacy_session_helpers import (  # noqa: E402
+    LegacyLoadSpec, atomic_write_sessions_json, load_sessions_json_entries, normalize_request_cwd,
+    session_entry_from_json, session_key_from_json, session_key_to_json, session_key_valid, validate_clean_cid,
+)
+from agy_runtime.session_resume_adapter import (  # noqa: E402
+    ExplicitResumeAdapter, ExplicitTurnState, TurnHttpMeta, TurnPayloadMeta, get_explicit_adapter,
+)
 from core.adaptive_admission import AdmissionKey, OutcomeKind  # noqa: E402
+from core.prompt_rendering import render_tools_section  # noqa: E402
 
 _HYGIENE_RT: HygieneRuntime | None = None
 _HYGIENE_LOCK = threading.Lock()
@@ -2021,11 +2029,12 @@ def _image_gate_universal(model_id: str, effort: str | None) -> ImageReject | No
 # [Refactored] Media normalization moved to agy_runtime.media_normalizer
 
 
-def _messages_to_stripped_prompt(messages: object, reserve_bytes: int = 0) -> str:
+def _messages_to_stripped_prompt(messages: object, reserve_bytes: int = 0, *, sort_keys: bool = False) -> str:
     """Промпт всей истории без media: нет `[image N]`, `[attachments]`, путей и payload."""
     return _messages_to_prompt(
         cast("list[object]", _strip_media_from_messages(messages)),
         reserve_bytes=reserve_bytes,
+        sort_keys=sort_keys,
     )
 
 
@@ -2326,6 +2335,9 @@ def _downgrade_to_text_in_run_once(
         _cleanup_img_dir(img_dir)
     old_cid = str(ctx.get("conversation_id") or "")
     if old_cid:
+        if isinstance((exp_st := ctx.get("explicit_state")), ExplicitTurnState) and exp_st.handled:
+            _explicit_adapter().on_hot_failure(exp_st, post_spawn=True)
+            exp_st.allow_commit = False
         sess_key = ctx.get("sess_key")
         if sess_key:
             _session_invalidate(cast(tuple, sess_key), old_cid)
@@ -2372,7 +2384,7 @@ def _attachments_block(images: list[dict[str, object]]) -> str:
 
 
 def _render_message(
-    msg: Any, counter: list, img_counter: list[int] | None = None
+    msg: Any, counter: list, img_counter: list[int] | None = None, *, sort_keys: bool = False
 ) -> str:
     """Сообщение OpenAI в текстовый блок промпта (роли не теряются)."""
     if not isinstance(msg, dict):
@@ -2391,9 +2403,14 @@ def _render_message(
             fname = str(fn.get("name") or "unknown")
             fargs = fn.get("arguments")
             if not isinstance(fargs, str):
-                fargs = (
-                    json.dumps(fargs, ensure_ascii=False) if fargs is not None else "{}"
-                )
+                fargs = json.dumps(fargs, ensure_ascii=False, sort_keys=sort_keys) if fargs is not None else "{}"
+            elif sort_keys:
+                try:
+                    parsed = json.loads(fargs)
+                except ValueError:
+                    parsed = None
+                if isinstance(parsed, dict):
+                    fargs = json.dumps(parsed, ensure_ascii=False, sort_keys=True)
             lines.append(
                 "[tool call %s] %s(%s)" % (call.get("id") or "call", fname, fargs)
             )
@@ -2446,6 +2463,8 @@ def _messages_to_prompt(
     images: list[dict[str, object]] | None = None,
     img_start: int = 0,
     reserve_bytes: int = 0,
+    *,
+    sort_keys: bool = False,
 ) -> str:
     """Собрать единый текстовый промпт хода.
 
@@ -2458,7 +2477,7 @@ def _messages_to_prompt(
     img_counter = [img_start]
     blocks: list[tuple[int, str, str]] = []
     for index, msg in enumerate(messages):
-        rendered = _render_message(msg, counter, img_counter)
+        rendered = _render_message(msg, counter, img_counter, sort_keys=sort_keys)
         if rendered:
             role = str(msg.get("role") or "user") if isinstance(msg, dict) else ""
             blocks.append((index, role, rendered))
@@ -2886,6 +2905,8 @@ def _resumed_turn_prompt(
     messages: list,
     images: list[dict[str, object]] | None = None,
     reserve_bytes: int = 0,
+    *,
+    sort_keys: bool = False,
 ) -> tuple[str, bool]:
     """`(промпт, есть_вложения)`: признак вложений берётся из структуры `images`, не из текста."""
     last_asst = -1
@@ -2903,10 +2924,10 @@ def _resumed_turn_prompt(
             for img in (images or [])
             if cast(int, img.get("msg_index", 0)) > last_asst
         ]
-        prompt = _messages_to_prompt(new_msgs, delta, skipped, reserve_bytes)
+        prompt = _messages_to_prompt(new_msgs, delta, skipped, reserve_bytes, sort_keys=sort_keys)
         if prompt:
             return prompt, bool(delta)
-    return _messages_to_prompt(messages, images, reserve_bytes=reserve_bytes), bool(
+    return _messages_to_prompt(messages, images, reserve_bytes=reserve_bytes, sort_keys=sort_keys), bool(
         images
     )
 
@@ -2952,11 +2973,7 @@ def _request_chat_id(
 
 def _session_key_valid(sess_key: tuple[str, ...]) -> bool:
     """Стор принимает только ключ с непустым токеном чата или cwd."""
-    if len(sess_key) == 4:
-        return bool(sess_key[0].strip())
-    if len(sess_key) == 3:
-        return bool(sess_key[1].strip())
-    return False
+    return session_key_valid(sess_key)
 
 
 def _session_claim(sess_key: tuple[str, ...], turn_id: str = "") -> str:
@@ -3042,108 +3059,24 @@ def _sessions_file_path() -> Path:
 
 
 def _session_key_to_json(key: tuple) -> list[str]:
-    return [str(part) for part in key]
+    return session_key_to_json(key)
 
 
 def _session_key_from_json(raw: object) -> tuple[str, ...] | None:
     """Строковый ключ с токеном чата или cwd; вырожденный ключ -> None."""
-    if not isinstance(raw, list) or len(raw) not in (3, 4):
-        return None
-    items = cast("list[object]", raw)
-    if not all(isinstance(part, str) for part in items):
-        return None
-    parts = cast("list[str]", items)
-    if len(parts) == 4 and not parts[0].strip():
-        return None
-    cwd_index = 2 if len(parts) == 4 else 1
-    cwd = parts[cwd_index].strip()
-    if cwd:
-        if not os.path.isabs(cwd):
-            return None
-        parts[cwd_index] = os.path.normpath(cwd)
-    elif len(parts) == 4:
-        parts[cwd_index] = ""
-    else:
-        return None
-    key = tuple(parts)
-    if not _session_key_valid(key):
-        return None
-    return key
+    return session_key_from_json(raw)
 
 
 def _session_entry_from_json(item: object, now: float) -> dict[str, Any] | None:
     """Проверенная живая запись стора из JSON; битая или протухшая -> None."""
-    if not isinstance(item, dict):
-        return None
-    data = cast("dict[str, object]", item)
-    cid = data.get("cid")
-    if not isinstance(cid, str) or _CID_RE.fullmatch(cid) is None:
-        return None
-    stamps: list[float] = []
-    for name in ("created", "last_used"):
-        value = data.get(name)
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
-            return None
-        if not math.isfinite(value):
-            return None
-        stamps.append(float(value))
-    turns = data.get("turns")
-    if isinstance(turns, bool) or not isinstance(turns, int) or turns < 0:
-        return None
-    tools_fp = data.get("tools_fp", "")
-    if not isinstance(tools_fp, str) or (tools_fp and re.fullmatch(r"[0-9a-f]{64}", tools_fp) is None):
-        return None
-    entry: dict[str, Any] = {"cid": cid, "created": stamps[0], "last_used": stamps[1], "turns": turns, "tools_fp": tools_fp}
-    if _session_expired(entry, now):
-        return None
-    return entry
+    return session_entry_from_json(item, now, _CID_RE, _session_expired)
 
 
 def _atomic_write_sessions_json(
     snapshot: dict[tuple[str, ...], dict[str, Any]],
 ) -> None:
-    """Атомарно записать снимок стора: temp в том же каталоге + fsync + os.replace.
-
-    Файл 0600, каталог 0700. Ошибка I/O только логируется (fail-open): горячие
-    сессии в памяти продолжают работать.
-    """
-    path = _sessions_file_path()
-    payload = {
-        "version": SESSIONS_FILE_VERSION,
-        "sessions": [
-            {
-                "key": _session_key_to_json(key),
-                "cid": entry["cid"],
-                "created": entry["created"],
-                "last_used": entry["last_used"],
-                "turns": entry["turns"],
-                "tools_fp": entry.get("tools_fp", ""),
-            }
-            for key, entry in snapshot.items()
-        ],
-    }
-    data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-    tmp_name = ""
-    try:
-        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        with tempfile.NamedTemporaryFile(
-            dir=str(path.parent), prefix=".sessions-", suffix=".tmp", delete=False
-        ) as fh:
-            tmp_name = fh.name
-            _ = fh.write(data)
-            fh.flush()
-            os.fsync(fh.fileno())
-        os.chmod(tmp_name, 0o600)
-        os.replace(tmp_name, str(path))
-        tmp_name = ""
-    except OSError as exc:
-        _log(f"sessions-persist-error err={type(exc).__name__}")
-    finally:
-        if tmp_name:
-            try:
-                os.unlink(tmp_name)
-            except OSError:
-                pass
+    """Атомарно записать снимок стора: temp в том же каталоге + fsync + os.replace."""
+    atomic_write_sessions_json(_sessions_file_path(), SESSIONS_FILE_VERSION, snapshot, _log)
 
 
 def _persist_sessions() -> None:
@@ -3157,39 +3090,14 @@ def _persist_sessions() -> None:
 
 
 def _load_persisted_sessions(now: float | None = None) -> int:
-    """Восстановить горячие сессии из sessions.json и включить запись на диск.
-
-    Битый файл не мешает старту (fail-open); протухшие по TTL/turns записи
-    отбрасываются, файл переписывается актуальным снимком. Возвращает число
-    восстановленных сессий.
-    """
+    """Восстановить горячие сессии из sessions.json и включить запись на диск."""
     global _sessions_persist_ready
     if not AGY_BRIDGE_ENABLE_SESSION_PERSISTENCE:
         return 0
-    moment = time.time() if now is None else now
     path = _sessions_file_path()
-    restored: dict[tuple[str, ...], dict[str, Any]] = {}
+    spec = LegacyLoadSpec(SESSIONS_FILE_VERSION, time.time() if now is None else now, _CID_RE, _session_expired)
     with _sessions_file_lock:
-        data: object = None
-        try:
-            data = json.loads(path.read_bytes())
-        except FileNotFoundError:
-            data = None
-        except (OSError, ValueError) as exc:
-            _log(f"sessions-load-error err={type(exc).__name__} (fail-open)")
-        items: object = None
-        if isinstance(data, dict):
-            doc = cast("dict[str, object]", data)
-            if doc.get("version") == SESSIONS_FILE_VERSION:
-                items = doc.get("sessions")
-        if isinstance(items, list):
-            for item in cast("list[object]", items):
-                if not isinstance(item, dict):
-                    continue
-                key = _session_key_from_json(cast("dict[str, object]", item).get("key"))
-                entry = _session_entry_from_json(item, moment)
-                if key is not None and entry is not None:
-                    restored[key] = entry
+        restored = load_sessions_json_entries(path, spec, _log)
         with _session_store_lock:
             for key, entry in restored.items():
                 _ = _session_store.setdefault(key, entry)
@@ -3197,6 +3105,19 @@ def _load_persisted_sessions(now: float | None = None) -> int:
     _persist_sessions()
     _log(f"sessions restored={len(restored)} path={path}")
     return len(restored)
+
+
+def _explicit_adapter() -> ExplicitResumeAdapter:
+    return get_explicit_adapter(Path(WORKSPACE) / "state", config_path=DYNAMIC_CONFIG_PATH)
+
+
+def _explicit_commit_out(ctx: Mapping[str, object], out: Mapping[str, object]) -> Mapping[str, object]:
+    if out.get("tool_calls"):
+        return out
+    owner = getattr(ctx.get("tool_stop"), "__self__", None)
+    tt = getattr(getattr(owner, "stop", None), "__self__", owner)
+    calls = getattr(tt, "calls", None)
+    return {**out, "text": getattr(tt, "content", out.get("text") or ""), "tool_calls": calls} if calls else out
 
 
 # Только явные HTTP-статусы 502/503 и сетевой сброс: свободный текст модели
@@ -3287,10 +3208,13 @@ def _reset_sqlite_guards_for_tests() -> None:
     with _cfg_lock:
         _cfg_snapshot = _COLD_FLAGS
         _cfg_key = _cfg_checked_at = None
-    with _image_flag_lock: _image_flag_cache = (0.0, False)
-    with _image_fallback_flag_lock: _image_fallback_flag_cache = (0.0, False)
+    with _image_flag_lock:
+        _image_flag_cache = (0.0, False)
+    with _image_fallback_flag_lock:
+        _image_fallback_flag_cache = (0.0, False)
     with _sha_cache_lock:
-        _sha_cache.clear(); _stat_sha_cache.DEFAULT_STAT_SHA_CACHE.clear()
+        _sha_cache.clear()
+        _stat_sha_cache.DEFAULT_STAT_SHA_CACHE.clear()
     with _sqlite_guard_lock:
         _breaker_state = "CLOSED"
         _breaker_failures = 0
@@ -5287,14 +5211,19 @@ def _with_pure_text_protocol(prompt: str, has_attachments: bool = False) -> str:
 
 
 def _with_tools_protocol(
-    prompt: str, tools: list, tool_choice: object, has_attachments: bool = False
+    prompt: str, tools: list, tool_choice: object, has_attachments: bool = False, *, sort_keys: bool = False
 ) -> str:
     """Промпт хода эмуляции: секция протокола `<tool_call>` ядра перед историей agy."""
-    section = slot_and_session.append_anti_plan_directive(
-        tools_protocol_section(
+    raw_sec = (
+        render_tools_section(
+            tools, tool_choice, has_attachments=has_attachments, attachment_tool=_attachment_tool(), sort_keys=True
+        )
+        if sort_keys
+        else tools_protocol_section(
             tools, tool_choice, has_attachments=has_attachments, attachment_tool=_attachment_tool()
         )
     )
+    section = slot_and_session.append_anti_plan_directive(raw_sec)
     return f"{section}\n\n{prompt}" if prompt else section
 
 
@@ -7171,7 +7100,10 @@ class Handler(BaseHTTPRequestHandler):
                     if attempt == 2 or not _TURN_RESILIENCE.take(ctx, out, _retry_take, _log):
                         if attempt != 2:
                             _log(f"retry-budget-exhausted state={out['state']} {tag}")
-                        _TURN_RESILIENCE.invalidate(ctx, out, _session_invalidate, _log)
+                        if isinstance((exp_st := ctx.get("explicit_state")), ExplicitTurnState) and exp_st.handled:
+                            _explicit_adapter().on_hot_failure(exp_st, post_spawn=True)
+                        else:
+                            _TURN_RESILIENCE.invalidate(ctx, out, _session_invalidate, _log)
                         break
                     _log(
                         f"transient upstream err={_err_summary(out.get('err'), 120)!r}, "
@@ -7180,7 +7112,10 @@ class Handler(BaseHTTPRequestHandler):
                     time.sleep(_retry_pause_s(attempt))
                     continue
                 if ctx.get("hot_resumed") and out["state"] != "client_gone":
-                    _TURN_RESILIENCE.invalidate(ctx, out, _session_invalidate, _log)
+                    if isinstance((exp_st := ctx.get("explicit_state")), ExplicitTurnState) and exp_st.handled:
+                        _explicit_adapter().on_hot_failure(exp_st, post_spawn=True)
+                    else:
+                        _TURN_RESILIENCE.invalidate(ctx, out, _session_invalidate, _log)
                     _cid_release(
                         str(ctx["conversation_id"]), str(ctx.get("turn_id") or "")
                     )
@@ -7223,7 +7158,9 @@ class Handler(BaseHTTPRequestHandler):
                 tool_turn_stop=bool(out.get("tool_turn_stop")), conversation_id=out_cid,
                 cid_valid=bool(_CID_RE.fullmatch(out_cid)),
             )
-            if all((dict(commit=True).get(commit_act, False), bool(ctx.get("sess_key")))):
+            if isinstance((exp_st := ctx.get("explicit_state")), ExplicitTurnState) and exp_st.handled:
+                _ = _explicit_adapter().finalize_turn(exp_st, _explicit_commit_out(ctx, out), commit_act, _CID_RE)
+            elif all((dict(commit=True).get(commit_act, False), bool(ctx.get("sess_key")))):
                 _session_commit(ctx["sess_key"], out_cid, str(ctx.get("tools_fp") or ""))
             elif all((dict(invalidate=True).get(commit_act, False), bool(ctx.get("hot_resumed")), bool(ctx.get("sess_key")))):
                 _session_invalidate(ctx["sess_key"], str(ctx["conversation_id"]))
@@ -7234,6 +7171,8 @@ class Handler(BaseHTTPRequestHandler):
                     else 0.0
                 )
         finally:
+            if isinstance((exp_st := ctx.get("explicit_state")), ExplicitTurnState) and exp_st.handled:
+                _explicit_adapter().release_if_unfinalized(exp_st, post_spawn=bool(out.get("response_started")))
             # Каталог изображений живёт весь ход (все попытки) и уходит до слота.
             if img_registered and img_dir is not None:
                 emitted = ctx.get("tool_calls_emitted")
@@ -7631,13 +7570,14 @@ class Handler(BaseHTTPRequestHandler):
             render_messages: list[object] = messages
             stripped_base: LazyPromptMaterializer | None = None
             force_cold = False
+            sort_keys = False
             if universal:
                 # Рендер без raw dict-content и неперечисленных ключей — всегда,
                 # в т. ч. когда media нет: его читают и cold, и hot-resume путь.
                 render_messages = _universal_render_messages(messages)
                 image_parts, other_media = _media_part_counts(messages)
                 stripped_base = LazyPromptMaterializer(
-                    lambda: _messages_to_stripped_prompt(messages, reserve)
+                    lambda: _messages_to_stripped_prompt(messages, reserve, sort_keys=sort_keys)
                 )
                 if image_parts or other_media:
                     if not _is_image_input_enabled():
@@ -7706,7 +7646,7 @@ class Handler(BaseHTTPRequestHandler):
                 return
             def _wrap_proto(text: str, attached: bool) -> str:
                 wrapped = (
-                    _with_tools_protocol(text, tools, tool_choice, has_attachments=attached)
+                    _with_tools_protocol(text, tools, tool_choice, has_attachments=attached, sort_keys=sort_keys)
                     if emulate_tools
                     else _with_pure_text_protocol(text, has_attachments=attached)
                 )
@@ -7715,144 +7655,94 @@ class Handler(BaseHTTPRequestHandler):
             full_attached = all((bool(images), not force_cold))
             full_mat, stripped_mat = _lsc.build_lazy_prompt_pair(
                 stripped_base,
-                lambda: _messages_to_prompt(render_messages, images, reserve_bytes=reserve),
+                lambda: _messages_to_prompt(render_messages, images, reserve_bytes=reserve, sort_keys=sort_keys),
                 _wrap_proto,
                 (any((force_cold, not images)), full_attached),
             )
             extra = (
                 req.get("extra_body") if isinstance(req.get("extra_body"), dict) else {}
             )
-            raw_cwd = extra.get("cwd")
-            cwd = ""
-            cwd_invalid = False
-            # Штатное отсутствие cwd (None/"") и явно невалидный cwd различаются:
-            # невалидный деградирует не молча в "", а в fail-closed холодный ход.
-            # Длина и запрещённые символы проверяются на сырой строке ДО normpath:
-            # иначе "/"*N + "tmp" схлопывается в "/tmp", обходя лимит и аллоцируя O(N).
-            if raw_cwd is not None:
-                if isinstance(raw_cwd, str):
-                    val = raw_cwd.strip()
-                    if val:
-                        if (
-                            len(val) > CWD_MAX_LEN
-                            or not os.path.isabs(val)
-                            or "\x00" in val
-                            or any(
-                                ord(c) < 32
-                                or ord(c) == 127
-                                or 0xD800 <= ord(c) <= 0xDFFF
-                                for c in val
-                            )
-                        ):
-                            _log(f"cwd-invalid-rejected cwd={val[:32]!r}")
-                            cwd_invalid = True
-                            force_cold = True
-                        else:
-                            cwd = os.path.normpath(val)
-                else:
-                    _log(f"cwd-nonstring-rejected type={type(raw_cwd).__name__}")
-                    cwd_invalid = True
-                    force_cold = True
+            cwd, cwd_invalid = normalize_request_cwd(extra.get("cwd"), CWD_MAX_LEN, _log)
+            if cwd_invalid:
+                force_cold = True
             zc_plan = zero_canon_profile.resolve_turn_plan(self.headers, DYNAMIC_CONFIG_PATH)
             if zc_plan.use_empty_cwd:
                 zc_turn_cwd = _zc_manager().create_turn_zc_cwd()
-                cwd = str(zc_turn_cwd)
-                cwd_invalid = False
-            # Kill-switch изоляции читается на каждом запросе: без рестарта моста.
-            isolation_enabled = _is_session_isolation_enabled()
-            # Горячие сессии — только агентным запросам с инструментами. Фоновые и
-            # plain-запросы (в т. ч. генерация заголовка DSH, tools=0) стор не читают
-            # и не пишут: ни claim, ни commit, ни invalidate.
-            chat_id, chat_id_invalid, continuity_scope = _resolve_chat_context(
-                self.headers, cast(dict, extra), req if isinstance(req, dict) else None, review_profile=zc_plan.profile_tag
-            )
-            sess_key: tuple[str, ...] | None = (
-                _session_key_for(
-                    cast(str, model_id),
-                    cwd,
-                    cast(str, effort),
-                    chat_id,
-                    review_profile=zc_plan.profile_tag,
-                )
-                if tools_count > 0 and isolation_enabled and not cwd_invalid
-                else None
-            )
-            if chat_id_invalid:
-                _log("chat-id-invalid-rejected")
-                sess_key = None
+                cwd, cwd_invalid = str(zc_turn_cwd), False
+            raw_cid = extra.get("conversation_id") if "conversation_id" in extra else (req.get("conversation_id") if isinstance(req, dict) else None)
+            cid_clean, cid_bad = validate_clean_cid(raw_cid, _CID_RE, _log)
+            if cid_bad:
                 force_cold = True
-            if cwd_invalid or not isolation_enabled:
-                sess_key = None
-                force_cold = True
-            if sess_key is not None and not _session_key_valid(sess_key):
-                sess_key = None
-            use_session_store = (
-                tools_count > 0 and sess_key is not None and isolation_enabled
+            addr = getattr(self, "client_address", None)
+            explicit_state = _explicit_adapter().prepare_turn(
+                TurnHttpMeta(self.headers, str(addr[0]) if isinstance(addr, (tuple, list)) and addr else "", zc_plan.profile_tag, raw_cid),
+                TurnPayloadMeta(req, cast(dict, extra), cast(str, model_id), cast(str, effort), cwd, cwd_invalid, tools, tool_choice, force_cold),
             )
-            raw_cid = (
-                extra.get("conversation_id")
-                if "conversation_id" in extra
-                else (req.get("conversation_id") if isinstance(req, dict) else None)
-            )
-            cid_clean = ""
-            if raw_cid is not None:
-                if isinstance(raw_cid, str):
-                    val = raw_cid.strip()
-                    if val:
-                        if _CID_RE.fullmatch(val):
-                            cid_clean = val
-                        else:
-                            _log(f"cid-malformed-rejected cid={val[:16]!r}")
-                            force_cold = True
-                else:
-                    _log(f"cid-nonstring-rejected type={type(raw_cid).__name__}")
-                    force_cold = True
-
-            # Явный CID разрешён только при доказанном владении ключом этого чата.
-            if cid_clean:
-                is_owned = False
-                if use_session_store and sess_key is not None:
-                    with _session_store_lock:
-                        entry = _session_store.get(sess_key)
-                        is_owned = entry is not None and entry.get("cid") == cid_clean
-                if not is_owned:
-                    _log(f"cid-unowned-blocked cid={cid_clean[:8]}")
-                    conversation_id = ""
-                    force_cold = True
-                else:
-                    conversation_id = cid_clean
+            sort_keys = explicit_state.sort_keys
+            is_resumed, conversation_id, prompt, tools_fp = explicit_state.is_resumed, explicit_state.conversation_id, "", ""
+            if explicit_state.handled:
+                sess_key, use_session_store, chat_id, continuity_scope = None, False, "", ""
             else:
-                conversation_id = ""
-            is_resumed = False
-            prompt = ""
-            tools_fp = ""
-            if force_cold:
-                # Media убраны из истории, либо malformed/unowned CID:
-                # ход идёт холодным text-only с полной историей.
-                conversation_id = ""
-            elif conversation_id:
-                if _cid_acquire(conversation_id, turn_id):
-                    owned_cid = conversation_id
-                else:
-                    # cid занят другим активным ходом: два хода не делят один разговор.
-                    _log(f"cid-busy-fresh cid={conversation_id[:8]}")
-                    conversation_id = ""
-            elif use_session_store and sess_key is not None:
-                use_cid = _session_claim(sess_key, turn_id)
-                if use_cid:
-                    stored_fp = _session_tools_fp(sess_key)
-                    conversation_id = use_cid
-                    is_resumed = True
-                    prompt, resumed_attached = _resumed_turn_prompt(
-                        render_messages, images, reserve
+                # Kill-switch изоляции читается на каждом запросе: без рестарта моста.
+                isolation_enabled = _is_session_isolation_enabled()
+                chat_id, chat_id_invalid, continuity_scope = _resolve_chat_context(
+                    self.headers, cast(dict, extra), req if isinstance(req, dict) else None, review_profile=zc_plan.profile_tag
+                )
+                sess_key = (
+                    _session_key_for(
+                        cast(str, model_id),
+                        cwd,
+                        cast(str, effort),
+                        chat_id,
+                        review_profile=zc_plan.profile_tag,
                     )
-                    tools_fp = _RESUMED_TOOLS.compute_tools_fingerprint(tools, tool_choice, has_attachments=resumed_attached, attachment_tool=_attachment_tool() if resumed_attached else None) if emulate_tools else ""
-                    compact_tools = _RESUMED_TOOLS.should_use_compact_tools(is_resumed, stored_fp, tools_fp, _new_flag("resumed_compact_tools_enabled", True))
-                    prompt = _RESUMED_TOOLS.wrap_resumed_tools_prompt(prompt, list(build_tool_schemas(tools)), tool_choice) if compact_tools else _wrap_proto(prompt, resumed_attached)
+                    if tools_count > 0 and isolation_enabled and not cwd_invalid
+                    else None
+                )
+                if chat_id_invalid:
+                    _log("chat-id-invalid-rejected")
+                    sess_key, force_cold = None, True
+                if cwd_invalid or not isolation_enabled:
+                    sess_key, force_cold = None, True
+                if sess_key is not None and not _session_key_valid(sess_key):
+                    sess_key = None
+                use_session_store = (
+                    tools_count > 0 and sess_key is not None and isolation_enabled
+                )
+                if cid_clean:
+                    is_owned = False
+                    if use_session_store and sess_key is not None:
+                        with _session_store_lock:
+                            entry = _session_store.get(sess_key)
+                            is_owned = entry is not None and entry.get("cid") == cid_clean
+                    if not is_owned:
+                        _log(f"cid-unowned-blocked cid={cid_clean[:8]}")
+                        conversation_id, force_cold = "", True
+                    else:
+                        conversation_id = cid_clean
+                if force_cold:
+                    conversation_id = ""
+                elif conversation_id:
+                    if _cid_acquire(conversation_id, turn_id):
+                        owned_cid = conversation_id
+                    else:
+                        _log(f"cid-busy-fresh cid={conversation_id[:8]}")
+                        conversation_id = ""
+                elif use_session_store and sess_key is not None:
+                    use_cid = _session_claim(sess_key, turn_id)
+                    if use_cid:
+                        conversation_id, is_resumed = use_cid, True
+            if is_resumed:
+                stored_fp = "" if explicit_state.handled else _session_tools_fp(cast(tuple, sess_key))
+                prompt, resumed_attached = _resumed_turn_prompt(render_messages, images, reserve, sort_keys=sort_keys)
+                tools_fp = "" if explicit_state.handled else (_RESUMED_TOOLS.compute_tools_fingerprint(tools, tool_choice, has_attachments=resumed_attached, attachment_tool=_attachment_tool() if resumed_attached else None) if emulate_tools else "")
+                compact_tools = (emulate_tools and _new_flag("resumed_compact_tools_enabled", True)) if explicit_state.handled else _RESUMED_TOOLS.should_use_compact_tools(is_resumed, stored_fp, tools_fp, _new_flag("resumed_compact_tools_enabled", True))
+                names = sorted(build_tool_schemas(tools)) if sort_keys else list(build_tool_schemas(tools))
+                prompt = _RESUMED_TOOLS.wrap_resumed_tools_prompt(prompt, names, tool_choice) if compact_tools else _wrap_proto(prompt, resumed_attached)
             lazy_on = _lsc.lazy_prompt_enabled(config_path=DYNAMIC_CONFIG_PATH)
             if not is_resumed:
                 prompt = full_mat.get()
-                tools_fp = _RESUMED_TOOLS.compute_tools_fingerprint(tools, tool_choice, has_attachments=full_attached, attachment_tool=_attachment_tool() if full_attached else None) if emulate_tools else ""
+                tools_fp = "" if explicit_state.handled else (_RESUMED_TOOLS.compute_tools_fingerprint(tools, tool_choice, has_attachments=full_attached, attachment_tool=_attachment_tool() if full_attached else None) if emulate_tools else "")
             full_prompt_val: object = full_mat if all((is_resumed, lazy_on)) else full_mat.get()
             stripped_val: object = stripped_mat if all((is_resumed, lazy_on)) else stripped_mat.get()
             req_id, sub_id = extract_correlation(
@@ -7861,6 +7751,7 @@ class Handler(BaseHTTPRequestHandler):
             req_id = self._request_id
             _anchor_meta = (messages, continuity_scope, chat_id, _CID_RE)
             ctx = {
+                "explicit_state": explicit_state,
                 "registry_use_cid": use_cid,
                 "registry_owned_cid": owned_cid,
                 "t_req_start": t_req_start,

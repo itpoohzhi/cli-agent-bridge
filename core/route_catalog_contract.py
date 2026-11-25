@@ -15,7 +15,8 @@ BACKEND_KIND_STDIO_RESIDENT, BACKEND_KIND_PASSTHROUGH = "stdio_resident", "passt
 ALLOWED_BACKEND_KINDS = frozenset({BACKEND_KIND_STDIO_RESIDENT, BACKEND_KIND_PASSTHROUGH})
 CODEX_APP_SERVER_V2_CONTRACT, CODEX_APP_SERVER_V2_PREFIX = "codex.app-server.v2@codex-cli-0.171.0-alpha.13", "codex.app-server.v2@"
 TRANSPORT_FAMILY_RESIDENT_V2, TRANSPORT_FAMILY_RESIDENT_LEGACY, TRANSPORT_FAMILY_PASSTHROUGH_HTTP = "resident_v2", "resident_legacy", "passthrough_http"
-SOL_MODEL_ID, TERRA_MODEL_ID, UNAVAILABLE_MODEL_IDS = "gpt-6.1-sol", "gpt-6.1-terra", frozenset({"gpt-6.2-sol"})
+SOL_MODEL_ID, SOL62_MODEL_ID, TERRA_MODEL_ID = "gpt-6.1-sol", "gpt-6.2-sol", "gpt-6.1-terra"
+FORBIDDEN_ALIAS_MODEL_IDS, UNAVAILABLE_MODEL_IDS = frozenset({SOL62_MODEL_ID}), frozenset()
 SOL_EFFORTS, TERRA_EFFORTS = ("low", "medium", "high", "xhigh", "max"), ("low", "medium", "high")
 
 _CONTRACT_PREFIXES = (
@@ -279,16 +280,18 @@ def separate_routes_by_transport(entries: Iterable[RouteInput]) -> tuple[tuple[V
 
 
 def validate_no_forbidden_aliases(aliases: Mapping[str, Mapping[str, object]]) -> None:
+    forbidden = FORBIDDEN_ALIAS_MODEL_IDS | UNAVAILABLE_MODEL_IDS
     for name, target in aliases.items():
         bid = str(target.get("backend_id", ""))
-        if name in UNAVAILABLE_MODEL_IDS or bid in UNAVAILABLE_MODEL_IDS:
+        if name in forbidden or bid in forbidden:
             _fail("forbidden_model_alias", f"{name}->{bid}")
 
 
 def build_codex_v2_primary_route(*, enabled: bool = True) -> VersionedRouteEntry:
     sol = ModelCapability(SOL_MODEL_ID, SOL_EFFORTS, "high", 272_000, 200_000, 128_000)
+    sol62 = ModelCapability(SOL62_MODEL_ID, SOL_EFFORTS, "high", 272_000, 200_000, 128_000)
     terra = ModelCapability(TERRA_MODEL_ID, TERRA_EFFORTS, "high", 500_000, 340_000, 128_000)
-    return VersionedRouteEntry(CODEX_V2_ROUTE_ID, CODEX_LEGACY_ROUTE_ID, BACKEND_KIND_STDIO_RESIDENT, CODEX_APP_SERVER_V2_CONTRACT, enabled, (sol, terra), True)
+    return VersionedRouteEntry(CODEX_V2_ROUTE_ID, CODEX_LEGACY_ROUTE_ID, BACKEND_KIND_STDIO_RESIDENT, CODEX_APP_SERVER_V2_CONTRACT, enabled, (sol, sol62, terra), True)
 
 
 def build_codex_passthrough_route(*, contract_version: str = "unverified", enabled: bool = False) -> VersionedRouteEntry:
