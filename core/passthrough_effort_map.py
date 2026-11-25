@@ -136,7 +136,7 @@ def apply_prepared_off_patch(
     backend: str,
 ) -> dict[str, Any]:
     """Применяет провайдерский wire-патч `off` поверх `prepared` (после `prepare_route_request`, без clamp)."""
-    out = dict(prepared)
+    out = copy.deepcopy(dict(prepared))
     if not (_is_logical_off(raw_request) or _is_logical_off(route_request)):
         return out
     patch = resolve_provider_off_patch(adapter, backend)
@@ -157,7 +157,7 @@ def apply_attempt_effort_map(
     patch = resolve_provider_off_patch(adapter, backend)
     if not isinstance(patch, Mapping) or not patch:
         return selected, body
-    patched = dict(request)
+    patched = copy.deepcopy(dict(request))
     patched.pop("reasoning_effort", None)
     patched.pop("thinking", None)
     patched.update(copy.deepcopy(dict(patch)))
@@ -168,3 +168,36 @@ def apply_attempt_effort_map(
         clone = copy.copy(selected)
         clone.request = patched
         return clone, new_body
+
+
+def _norm_ident(value: Any) -> str:
+    return str(value).strip().lower() if value else ""
+
+
+def _is_georouter_effort_route(adapter: Any) -> bool:
+    config = getattr(adapter, "config", None)
+    if not isinstance(config, Mapping):
+        return False
+    base_url = config.get("base_url")
+    patch = _local_georouter_patch(str(base_url) if base_url else "")
+    return isinstance(patch, Mapping) and "reasoning_effort" in patch
+
+
+def drops_thinking_route(adapter: Any, backend: str) -> bool:
+    """OpenAI/NeuralWatt маршруты не принимают ``thinking`` — остаётся effort."""
+    for ident in (_norm_ident(getattr(adapter, "id", "")), _norm_ident(backend)):
+        if ident in _NEURALWATT_IDS or ident.startswith("openai"):
+            return True
+    return _is_georouter_effort_route(adapter)
+
+
+def drop_thinking_keep_effort(body: Mapping[str, Any]) -> dict[str, Any]:
+    """Снять ``thinking`` (OpenAI/NeuralWatt), сохранив reasoning_effort.
+
+    Явный ``reasoning_effort`` не трогается — в том числе уровень, смапленный
+    из ``thinking``: снимается только ключ ``thinking``. Вход не мутируется
+    (pristine-копия для каждого хопа/ретрая).
+    """
+    out = copy.deepcopy(dict(body))
+    out.pop("thinking", None)
+    return out

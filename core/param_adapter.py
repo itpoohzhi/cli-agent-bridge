@@ -29,17 +29,7 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import (
-    Any,
-    Callable,
-    Dict,
-    Iterable,
-    Mapping,
-    Optional,
-    Sequence,
-    Tuple,
-    Union,
-)
+from typing import Any, Callable, Dict, Iterable, Mapping, Optional, Sequence, Tuple, Union
 
 GLOBAL_WHITELIST: Tuple[str, ...] = (
     "reasoning_effort",
@@ -93,9 +83,7 @@ def _env(env: Optional[Mapping[str, str]]) -> Mapping[str, str]:
     return os.environ if env is None else env
 
 
-def _env_float(
-    name: str, default: float, env: Optional[Mapping[str, str]] = None
-) -> float:
+def _env_float(name: str, default: float, env: Optional[Mapping[str, str]] = None) -> float:
     raw = _env(env).get(name)
     if raw is None or not str(raw).strip():
         return default
@@ -193,12 +181,9 @@ def _body_text(body: Union[bytes, bytearray, str, Mapping[str, Any], None]) -> s
         return str(body)
 
 
-def find_culprit(
-    body: Union[bytes, bytearray, str, Mapping[str, Any], None],
-    sent: Mapping[str, Any],
-    whitelist: Sequence[str],
-    env: Optional[Mapping[str, str]] = None,
-) -> Optional[str]:
+def find_culprit(body: Union[bytes, bytearray, str, Mapping[str, Any], None],
+                 sent: Mapping[str, Any], whitelist: Sequence[str],
+                 env: Optional[Mapping[str, str]] = None) -> Optional[str]:
     """Однозначно названный в теле ошибки параметр из whitelist ∩ keys(sent).
 
     Возвращает None, если назван ни один либо больше одного параметра.
@@ -211,9 +196,7 @@ def find_culprit(
     allowed = [p for p in whitelist if p in GLOBAL_WHITELIST and p in sent]
     named = []
     for param in allowed:
-        pattern = re.compile(
-            r"(?<![A-Za-z0-9_])" + re.escape(param) + r"(?![A-Za-z0-9_])", re.IGNORECASE
-        )
+        pattern = re.compile(r"(?<![A-Za-z0-9_])" + re.escape(param) + r"(?![A-Za-z0-9_])", re.IGNORECASE)
         for match in pattern.finditer(text):
             window = text[max(0, match.start() - near) : match.end() + near]
             if marker.search(window):
@@ -255,27 +238,19 @@ def is_quorum_call(
     prefixes: Optional[Iterable[str]] = None,
 ) -> bool:
     """Роль = часть ``X-Subagent-Id`` до первого ``-``; второй признак — Zero-Canon."""
-    if (
-        review_profile
-        and str(review_profile).strip().lower() == REVIEW_PROFILE_HEADER_VALUE
-    ):
+    if review_profile and str(review_profile).strip().lower() == REVIEW_PROFILE_HEADER_VALUE:
         return True
     if not subagent_id:
         return False
     role = str(subagent_id).strip().split("-", 1)[0].lower()
     if not role:
         return False
-    pool = (
-        resolve_quorum_prefixes()
-        if prefixes is None
-        else tuple(str(p).strip().lower() for p in prefixes)
-    )
+    pool = (resolve_quorum_prefixes() if prefixes is None else
+            tuple(str(p).strip().lower() for p in prefixes))
     return role in pool
 
 
-def degraded_response(
-    param: str, model: str
-) -> Tuple[int, Dict[str, Any], Dict[str, str]]:
+def degraded_response(param: str, model: str) -> Tuple[int, Dict[str, Any], Dict[str, str]]:
     body = {"error": {"type": "param_degraded", "param": param, "model": model}}
     return 422, body, {HEADER_DEGRADED: param}
 
@@ -312,15 +287,9 @@ class ParamProfileStore:
     Запись атомарна (tmp -> fsync -> os.replace). Часы инъектируемы для тестов.
     """
 
-    def __init__(
-        self,
-        path: Optional[Union[str, Path]] = None,
-        ttl_s: Optional[float] = None,
-        clock: Callable[[], float] = time.time,
-    ) -> None:
-        self._path = (
-            Path(path) if path is not None else resolve_state_dir() / PROFILE_FILENAME
-        )
+    def __init__(self, path: Optional[Union[str, Path]] = None, ttl_s: Optional[float] = None,
+                 clock: Callable[[], float] = time.time) -> None:
+        self._path = Path(path) if path is not None else resolve_state_dir() / PROFILE_FILENAME
         self._ttl_s = float(ttl_s) if ttl_s is not None else resolve_profile_ttl_s()
         self._clock = clock
         self._lock = threading.Lock()
@@ -339,15 +308,8 @@ class ParamProfileStore:
 
     def _write(self, profiles: Dict[str, Dict[str, Any]]) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        payload = json.dumps(
-            {"version": 1, "profiles": profiles},
-            ensure_ascii=False,
-            indent=2,
-            sort_keys=True,
-        )
-        fd, tmp = tempfile.mkstemp(
-            dir=str(self._path.parent), prefix=".param-profiles.", suffix=".tmp"
-        )
+        payload = json.dumps({"version": 1, "profiles": profiles}, ensure_ascii=False, indent=2, sort_keys=True)
+        fd, tmp = tempfile.mkstemp(dir=str(self._path.parent), prefix=".param-profiles.", suffix=".tmp")
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as handle:
                 handle.write(payload)
@@ -361,52 +323,35 @@ class ParamProfileStore:
                 pass
             raise
 
-    def get(
-        self, provider_id: str, model_id: str, fingerprint_sha256: str
-    ) -> ParamProfile:
+    def get(self, provider_id: str, model_id: str,
+            fingerprint_sha256: str) -> ParamProfile:
         now = self._clock()
         with self._lock:
-            entry = self._load().get(
-                profile_key(provider_id, model_id, fingerprint_sha256)
-            )
+            entry = self._load().get(profile_key(provider_id, model_id, fingerprint_sha256))
         if not isinstance(entry, dict):
             return ParamProfile()
         alive = []
         for param, meta in entry.items():
             if not isinstance(meta, dict) or meta.get("action") != "drop":
                 continue
-            try:
-                expires_at = float(meta.get("expires_at", 0))
-            except (TypeError, ValueError):
-                continue
-            if expires_at > now:
+            if _alive(meta, now):
                 alive.append(param)
         return ParamProfile(dropped=tuple(sorted(alive)))
 
-    def record_drop(
-        self, provider_id: str, model_id: str, fingerprint_sha256: str, param: str
-    ) -> ParamProfile:
+    def record_drop(self, provider_id: str, model_id: str,
+                    fingerprint_sha256: str, param: str) -> ParamProfile:
         now = self._clock()
         key = profile_key(provider_id, model_id, fingerprint_sha256)
         with self._lock:
             profiles = self._load()
             entry = profiles.get(key)
             entry = dict(entry) if isinstance(entry, dict) else {}
-            entry[param] = {
-                "action": "drop",
-                "learned_at": now,
-                "expires_at": now + self._ttl_s,
-            }
+            entry[param] = {"action": "drop", "learned_at": now, "expires_at": now + self._ttl_s}
             profiles[key] = entry
             # Попутно вычищаем истёкшее, чтобы файл не рос.
             for k in list(profiles):
-                kept = {
-                    p: m
-                    for p, m in (
-                        profiles[k].items() if isinstance(profiles[k], dict) else []
-                    )
-                    if isinstance(m, dict) and _alive(m, now)
-                }
+                items = profiles[k].items() if isinstance(profiles[k], dict) else []
+                kept = {p: m for p, m in items if isinstance(m, dict) and _alive(m, now)}
                 if kept:
                     profiles[k] = kept
                 else:
@@ -427,14 +372,14 @@ def apply_profile(
 ) -> Dict[str, Any]:
     """Копия тела без выученно-снятых параметров."""
     if not profile:
-        return dict(body)
+        return pristine_body(body)
     return strip_always(body, profile.dropped)
 
 
 def strip_always(body: Mapping[str, Any], params: Iterable[str]) -> Dict[str, Any]:
     """Копия тела без перечисленных параметров (вход не мутируется)."""
     drop = set(params)
-    return {k: v for k, v in body.items() if k not in drop}
+    return {k: copy.deepcopy(v) for k, v in body.items() if k not in drop}
 
 
 # --------------------------------------------------------------------------
@@ -466,14 +411,9 @@ def _to_positive_int(value: Any) -> Optional[int]:
     return int(num)
 
 
-def normalize_params(
-    body: Mapping[str, Any],
-    *,
-    effort_field: str,
-    effort_map: Optional[Mapping[str, Any]] = None,
-    strip: Iterable[str] = (),
-    env: Optional[Mapping[str, str]] = None,
-) -> Dict[str, Any]:
+def normalize_params(body: Mapping[str, Any], *, effort_field: str,
+                     effort_map: Optional[Mapping[str, Any]] = None, strip: Iterable[str] = (),
+                     env: Optional[Mapping[str, str]] = None) -> Dict[str, Any]:
     """Привести параметры запроса к диалекту бэкенда. Чистая, вход не мутируется."""
     field = effort_field if effort_field in _EFFORT_FIELDS else "none"
     emap = effort_map or {}
@@ -539,4 +479,64 @@ def normalize_params(
 
     for key in strip:
         out.pop(key, None)
+    return out
+
+
+# Pristine-копия хопа и LAST-step клэмп thinking (F-007/RW-011).
+
+
+class ThinkingBudgetConfigError(ValueError):
+    """Явная config-ошибка 400: бюджет thinking невозможен строго ниже max."""
+
+    status = 400
+
+
+def pristine_body(body: Mapping[str, Any]) -> Dict[str, Any]:
+    """Pristine-копия оригинального тела для каждого хопа/ретрая."""
+    return copy.deepcopy(dict(body))
+
+
+def adapted_max_tokens(body: Mapping[str, Any]) -> Optional[int]:
+    """Адаптированный max_tokens / max_completion_tokens (положительный int)."""
+    for key in ("max_tokens", "max_completion_tokens"):
+        number = _to_positive_int(body[key]) if key in body else None
+        if number is not None:
+            return number
+    return None
+
+
+def clamp_thinking_budget(body: Mapping[str, Any]) -> Dict[str, Any]:
+    """LAST-step post-route клэмп: budget_tokens строго меньше adapted max.
+
+    Только thinking.type == "enabled" (disabled/adaptive не трогаются),
+    thinking не добавляется, если его нет. Некорректный budget_tokens
+    (не int / bool / <= 0) снимается; adapted max отсутствует => thinking
+    снимается; budget >= adapted max => budget = adapted_max - 1
+    (adapted >= 3), иначе thinking снимается. Явная 400 config-ошибка,
+    если валидный budget_tokens (>= 1024) нельзя разместить строго ниже
+    adapted max (<= 1024). Вход не мутируется.
+    """
+    out = pristine_body(body)
+    thinking = out.get("thinking")
+    if not (isinstance(thinking, dict) and thinking.get("type") == "enabled"):
+        return out
+    budget = thinking.get("budget_tokens")
+    if isinstance(budget, bool) or not isinstance(budget, int) or budget <= 0:
+        thinking.pop("budget_tokens", None)
+        return out
+    adapted = adapted_max_tokens(out)
+    if adapted is None:
+        del out["thinking"]
+        return out
+    if budget < adapted:
+        return out
+    if adapted >= 3:
+        if budget >= 1024 >= adapted:
+            raise ThinkingBudgetConfigError(
+                "thinking.budget_tokens=%d cannot be strictly below "
+                "adapted_max_tokens=%d" % (budget, adapted)
+            )
+        thinking["budget_tokens"] = adapted - 1
+        return out
+    del out["thinking"]
     return out
