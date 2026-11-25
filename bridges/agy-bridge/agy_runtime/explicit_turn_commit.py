@@ -39,17 +39,20 @@ def finalize_deferred_explicit_turn(
     tool_turn: Any | None = None,
     err: Any | None = None,
     commit_act: str = "commit",
-    cid_re: re.Pattern[str],
+    cid_re: re.Pattern[str] | None = None,
 ) -> bool:
     """Финализация explicit-хода после finish(): commit очищенного out либо безопасный abort.
 
     Никогда не коммитит слот при ошибке парсера (LiveParserError), tool_turn.error,
-    ok=False или commit_act != "commit" — в этих случаях слот освобождается через abort.
+    ok=False, cid_re is None или commit_act != "commit" — освобождает слот через abort.
     """
     if adapter is None or state is None or not getattr(state, "handled", False) or getattr(state, "finalized", False):
         return False
+    if cid_re is None:
+        abort_explicit_turn_safe(adapter, state, post_spawn=True)
+        return False
     turn_failed = tool_turn is not None and (bool(getattr(tool_turn, "error", None)) or not bool(getattr(tool_turn, "ok", True)))
-    if err is not None or turn_failed or commit_act != "commit":
+    if bool(err) or turn_failed or commit_act != "commit":
         _ = adapter.finalize_turn(state, out, "abort", cid_re)
         return False
     commit_out = build_explicit_commit_out(out, tool_turn)

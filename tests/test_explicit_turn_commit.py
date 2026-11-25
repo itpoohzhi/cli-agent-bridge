@@ -127,6 +127,23 @@ def test_finalize_non_commit_act_aborts() -> None:
     assert ok is False and ad.calls[0][0] == "abort"
 
 
+def test_finalize_cid_re_none_aborts_without_calling_finalize_turn() -> None:
+    ad, st = _Adapter(), _State()
+    ok = finalize_deferred_explicit_turn(ad, st, _mk_out(text="ok"), tool_turn=_ToolTurn(content="ok"), commit_act="commit", cid_re=None)
+    assert ok is False
+    assert st.finalized is True
+    assert ad.calls == [("release", "", {"post_spawn": True})]
+
+
+def test_finalize_str_err_aborted_aborts_and_empty_dict_commits() -> None:
+    ad_err, st_err = _Adapter(), _State()
+    assert finalize_deferred_explicit_turn(ad_err, st_err, _mk_out(text="x"), err="aborted", cid_re=_CID_RE) is False
+    assert [c[0] for c in ad_err.calls] == ["abort"]
+    ad_empty, st_empty = _Adapter(), _State()
+    assert finalize_deferred_explicit_turn(ad_empty, st_empty, _mk_out(text="ok"), err={}, cid_re=_CID_RE) is True
+    assert [c[0] for c in ad_empty.calls] == ["commit"]
+
+
 def test_finalize_plain_without_tool_turn_preserves_exact_whitespace() -> None:
     ad, st = _Adapter(), _State()
     ok = finalize_deferred_explicit_turn(ad, st, _mk_out(text="  exact  ws \n"), cid_re=_CID_RE)

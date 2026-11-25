@@ -262,7 +262,7 @@ class _SseBodyRunner:
             elif s.tool_turn.calls:
                 reason = "tool_calls"
         if s.ctx.get("defer_explicit_finalize"):
-            _ = finalize_deferred_explicit_turn(s.ctx.get("explicit_adapter"), s.ctx.get("explicit_state"), out, tool_turn=s.tool_turn, err=err if err or not proceed else None, commit_act=str(s.ctx.get("explicit_commit_act") or "commit"), cid_re=s.ctx.get("explicit_cid_re") or s.ctx.get("cid_re"))
+            _ = finalize_deferred_explicit_turn(s.ctx.get("explicit_adapter"), s.ctx.get("explicit_state"), out, tool_turn=s.tool_turn, err=err if is_present(err) and bool(err) else (None if proceed else "aborted"), commit_act=str(s.ctx.get("explicit_commit_act") or "abort") if proceed else "abort", cid_re=s.ctx.get("explicit_cid_re") or s.ctx.get("cid_re"))
         if not is_present(err) and proceed and callable(reg := s.ctx.get("register_post_turn")):
             reg(out)
         if proceed:

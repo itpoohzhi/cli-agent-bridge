@@ -7750,7 +7750,7 @@ class Handler(BaseHTTPRequestHandler):
             _anchor_meta = (messages, continuity_scope, chat_id, _CID_RE)
             ctx = {
                 "explicit_state": explicit_state,
-                "defer_explicit_finalize": explicit_state.handled,
+                "defer_explicit_finalize": bool(explicit_state and explicit_state.handled),
                 "explicit_adapter": _explicit_adapter(),
                 "explicit_cid_re": _CID_RE,
                 "registry_use_cid": use_cid,
@@ -7977,7 +7977,7 @@ class Handler(BaseHTTPRequestHandler):
             if tool_turn.error:
                 err = tool_turn.error_body()
         if ctx.get("defer_explicit_finalize"):
-            _ = finalize_deferred_explicit_turn(_explicit_adapter(), ctx.get("explicit_state"), out, tool_turn=tool_turn, err=err, commit_act=str(ctx.get("explicit_commit_act") or "commit"), cid_re=_CID_RE)
+            _ = finalize_deferred_explicit_turn(_explicit_adapter(), ctx.get("explicit_state"), out, tool_turn=tool_turn, err=err or None, commit_act=str(ctx.get("explicit_commit_act") or "abort"), cid_re=_CID_RE)
         if err is not None:
             status = cast(int, err.pop("_status", err["code"]))
             headers = cast("dict[str, str] | None", err.pop("_headers", None))

@@ -497,3 +497,61 @@ def test_bug_b2_zc_resume_prespawn_plan_uses_agy_home_zc(tmp_path: Path, monkeyp
     assert getattr(plan_zc, "anchored") is True and getattr(plan_zc, "base_idx") == 3
     assert str(zc_home) in str(getattr(plan_zc, "transcript_path"))
     assert getattr(plan_std, "anchored") is False
+
+
+def test_sse_body_runner_proceed_false_and_missing_commit_act_fail_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("BRIDGE_HOT_EXPLICIT_PLAIN_ENABLED", "1")
+    monkeypatch.setenv("BRIDGE_HOT_ZC_AGENTIC_ENABLED", "1")
+    serve_sse_body = cast("Callable[..., None]", getattr(importlib.import_module("agy_runtime.sse_body_runner"), "serve_sse_body"))
+    ad = _AdapterCtor(tmp_path / "sse_fail_closed", _empty_cfg(tmp_path))
+    try:
+        class _FakeToolTurn:
+            calls: list[dict[str, object]] = []
+            error: object = None
+            ok: bool = False
+            content: str = "partial"
+            turn_complete: Callable[[], bool] = staticmethod(lambda: False)
+            def feed(self, _v: str) -> bool: return True
+            def feed_reasoning(self, _v: str) -> bool: return True
+            def finish(self) -> None: return None
+            def notify_activity(self) -> None: return None
+            def error_body(self) -> dict[str, object]: return {"type": "unexpected"}
+
+        def _make_handler(out_cid: str) -> SimpleNamespace:
+            return SimpleNamespace(
+                wfile=io.BytesIO(), _stream_relay=None, close_connection=False,
+                _error_body=lambda _out, _res: None,
+                _usage_payload=lambda *_a: {},
+                _run_once=lambda *_a: {"state": "done", "rc": 0, "text": "ok", "conversation_id": out_cid, "usage": {}},
+                _emit=lambda _chunk: True, _send=_noop, send_response=_noop, send_header=_noop, end_headers=_noop,
+                _arm_flush_window=_noop, _client_tag=_const("test"),
+            )
+
+        hooks = (lambda _k, default=False: default, _noop, _const("stop"), lambda *_a: _FakeToolTurn())
+
+        st1 = _prep(ad, [{"role": "user", "content": "proceed-false"}], profile="zero-canon", chat_id="sse-f1", tools=_UNSORTED_TOOLS)
+        assert st1.handled is True and st1.allow_commit is True
+        st_store = _req_store(ad)
+        ctx1: dict[str, object] = {
+            "model": "gemini-3.8-flash", "emulate_tools": True, "tools": _UNSORTED_TOOLS,
+            "defer_explicit_finalize": True, "explicit_adapter": ad, "explicit_state": st1,
+            "explicit_cid_re": _CID_RE, "explicit_commit_act": "commit",
+        }
+        serve_sse_body(_make_handler(_CID_1), ctx1, hooks)
+        assert st_store.flush_now(timeout_s=2.0) is True
+        assert getattr(st1, "finalized", False) is True
+        assert st_store.peek(st1.session_key, 0.0)[0].state == SlotState.EMPTY
+
+        st2 = _prep(ad, [{"role": "user", "content": "missing-act"}], chat_id="sse-f2")
+        assert st2.handled is True and st2.allow_commit is True
+        ctx2: dict[str, object] = {
+            "model": "gemini-3.8-flash", "emulate_tools": False,
+            "defer_explicit_finalize": True, "explicit_adapter": ad, "explicit_state": st2,
+            "explicit_cid_re": _CID_RE,
+        }
+        serve_sse_body(_make_handler(_CID_2), ctx2, hooks)
+        assert st_store.flush_now(timeout_s=2.0) is True
+        assert getattr(st2, "finalized", False) is True
+        assert st_store.peek(st2.session_key, 0.0)[0].state == SlotState.EMPTY
+    finally:
+        ad.close()
