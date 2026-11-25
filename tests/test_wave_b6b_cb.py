@@ -106,3 +106,18 @@ def test_b6b_concurrent_half_open() -> None:
     with concurrent.futures.ThreadPoolExecutor(max_workers=4) as ex:
         got = list(ex.map(lambda _: cb.try_acquire(k1), range(4)))
     assert sum(1 for x in got if x is not None) == 1
+
+
+def test_b6b_abandoned_provider_probe() -> None:
+    now, cb = _clock_cb()
+    k1, k2, k3 = ("p4", "m1", "b1"), ("p4", "m2", "b1"), ("p4", "m3", "b1")
+    cb.record_failure(k1, FailureOutcome(status=401, detail="invalid_api_key"))
+    now[0] += 90.0
+    abandoned = cb.try_acquire(k2)
+    assert abandoned is not None and abandoned.provider_lease is True
+    now[0] += 90.0
+    reclaimed = cb.try_acquire(k3)
+    assert (reclaimed is not None, cb.release_lease(abandoned), cb.try_acquire(k2) is None) == (True, True, True)
+    cb.record_success(k3, reclaimed)
+    assert cb.record_failure(k2, FailureOutcome(status=500), lease=abandoned) == "route_fail"
+    assert cb.try_acquire(k3) is not None
