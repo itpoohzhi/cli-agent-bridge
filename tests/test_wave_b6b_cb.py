@@ -55,7 +55,10 @@ def test_b6b_provider_half_open_probe_and_reopen() -> None:
     assert (lease is not None, lease.provider_lease if lease else False, cb.try_acquire(k3) is None) == (True, True, True)
     assert cb.record_failure(k2, FailureOutcome(status=403, detail="model_not_found"), lease=lease) == "route_local"
     lease3 = cb.try_acquire(k3)
-    assert (lease3 is not None, cb.record_failure(k3, FailureOutcome(status=500), lease=lease3)) == (True, "route_fail")
+    assert (lease3 is not None, cb.record_failure(k3, FailureOutcome(status=500), lease=lease3), cb.try_acquire(("pa", "m4", "b1")) is None) == (True, "route_fail", True)
+    cb.record_success(k1)
+    assert cb.try_acquire(("pa", "m4", "b1")) is not None
+    cb.record_failure(k1, FailureOutcome(status=401, detail="invalid_api_key"))
     now[0] += 90.0
     cb.record_success(k3, cb.try_acquire(k3))
     assert cb.try_acquire(k1) is not None
