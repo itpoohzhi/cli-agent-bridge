@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 import hashlib
+import json
+import re
 import threading
+from collections.abc import Sequence
 from collections import OrderedDict
 from dataclasses import dataclass, replace
 from typing import cast
 
 from core.backend_routing_models import TranscriptItem
 from core.resident_canonical import _fail_if
-from core.resident_turn_envelope import ResidentTurnEnvelope
+from core.resident_turn_envelope import ResidentTurnEnvelope, is_warm_delta_integrity_enabled
 from core.stdio_resident.types import SlotBinding
 from core.tool_emulation import _render_message
 
@@ -39,9 +42,65 @@ class HistoryPlan:
     reason: str
 
 
+_TOOL_RESULT_MARKER_RE = re.compile(r"\[tool result[ \]]")
+_TOOL_CALL_BLOCK_RE = re.compile(r"(?<!\\)<tool_call>(.*?)</tool_call>", re.DOTALL)
+
+
+def _sorted_json(value: object) -> str:
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def _canonical_arguments(raw: object) -> object:
+    parsed: object = raw
+    if isinstance(raw, str):
+        try:
+            parsed = cast(object, json.loads(raw.strip()))
+        except ValueError:
+            return raw
+    return _sorted_json(parsed) if isinstance(parsed, dict) else raw
+
+
+def _canonical_call(call: object) -> object:
+    if not isinstance(call, dict):
+        return call
+    clone = dict(cast(dict[str, object], call))
+    function = clone.get("function")
+    if isinstance(function, dict):
+        function = dict(cast(dict[str, object], function))
+        if "arguments" in function:
+            function["arguments"] = _canonical_arguments(function["arguments"])
+        clone["function"] = function
+    if "arguments" in clone:
+        clone["arguments"] = _canonical_arguments(clone["arguments"])
+    return clone
+
+
+def _canonical_block(match: re.Match[str]) -> str:
+    try:
+        payload = cast(object, json.loads(match.group(1)))
+    except ValueError:
+        return match.group(0)
+    arguments = cast(dict[str, object], payload).get("arguments") if isinstance(payload, dict) else None
+    if not isinstance(arguments, dict):
+        return match.group(0)
+    cast(dict[str, object], payload)["arguments"] = cast(object, json.loads(_sorted_json(arguments)))
+    return f"<tool_call>{json.dumps(payload, ensure_ascii=False)}</tool_call>"
+
+
+def _canonical_item_digest(item: TranscriptItem) -> str:
+    """Digest входящего assistant-item, инвариантный к порядку ключей `arguments`."""
+    if item.role == "assistant":
+        canon = _TOOL_CALL_BLOCK_RE.sub(_canonical_block, item.text)
+        if canon != item.text:
+            return hashlib.sha256(f"[assistant]\n{canon}".encode("utf-8")).hexdigest()
+    return item.digest
+
+
 def build_assistant_transcript_item(text: str, tool_calls: list[dict[str, object]] | None = None) -> TranscriptItem | None:
-    calls = tool_calls if tool_calls else []
-    rendered = _render_message({"role": "assistant", "content": text, "tool_calls": calls})
+    calls: Sequence[object] = tool_calls if tool_calls else []
+    if calls and is_warm_delta_integrity_enabled():
+        calls = [_canonical_call(call) for call in calls]
+    rendered = _render_message({"role": "assistant", "content": text, "tool_calls": list(calls)})
     item: TranscriptItem | None = None
     if rendered:
         digest = hashlib.sha256(rendered.encode("utf-8")).hexdigest()
@@ -49,14 +108,20 @@ def build_assistant_transcript_item(text: str, tool_calls: list[dict[str, object
     return item
 
 
+def _render_delta_item(item: TranscriptItem, bare_tool_results: bool) -> str:
+    bare = bare_tool_results and item.role == "user" and _TOOL_RESULT_MARKER_RE.match(item.text) is not None
+    return item.text if bare or item.role not in ("user", "assistant") else f"[{item.role}]\n{item.text}"
+
+
 def render_delta_prompt(items: tuple[TranscriptItem, ...]) -> str:
-    chat_roles = frozenset({"user", "assistant"})
-    rendered = (f"[{item.role}]\n{item.text}" if bool({item.role} & chat_roles) else item.text for item in items)
-    return "\n\n".join(rendered)
+    bare_tool_results = is_warm_delta_integrity_enabled()
+    return "\n\n".join(_render_delta_item(item, bare_tool_results) for item in items)
 
 
 def _base_state(envelope: ResidentTurnEnvelope) -> CommittedSessionState:
     items = envelope.rpc.items if envelope.rpc else ()
+    integrity = is_warm_delta_integrity_enabled()
+    digests = (_canonical_item_digest(item) if integrity else item.digest for item in items)
     return CommittedSessionState(
         "",
         0,
@@ -69,7 +134,7 @@ def _base_state(envelope: ResidentTurnEnvelope) -> CommittedSessionState:
         envelope.effort,
         envelope.cwd_norm,
         envelope.review_profile,
-        tuple(item.digest for item in items),
+        tuple(digests),
     )
 
 
