@@ -120,12 +120,29 @@ def _inject_codex_source_header(result: dict[str, Any], source_tag: str | None) 
     codex_lb["http_headers"] = hdrs
 
 
+def _strip_denied_in_value(value: Any, denied: set[str]) -> Any:
+    if isinstance(value, Mapping):
+        return {str(k): _strip_denied_in_value(v, denied) for k, v in value.items() if k not in denied}
+    if isinstance(value, list | tuple):
+        return [_strip_denied_in_value(item, denied) for item in value]
+    return value
+
+
+def _strip_denied_in_profiles(profiles: Mapping[str, Any], denied: set[str]) -> dict[str, Any]:
+    """Рекурсивно убирает запрещённые ключи и `project_doc_max_bytes` из `profiles.*` (любая глубина)."""
+    drop = {*denied, *CODEX_CONFIG_FORCED}
+    return {str(name): _strip_denied_in_value(profile, drop) for name, profile in profiles.items()}
+
+
 def filter_codex_config(raw: Mapping[str, Any], source_tag: str | None = None) -> dict[str, Any]:
-    """Копия config.toml без `mcp_servers`/`plugins`/`notify`/хуков и без AGENTS.md."""
+    """Копия config.toml без `mcp_servers`/`plugins`/`notify`/хуков (в т.ч. в `profiles.*`) и без AGENTS.md."""
     if not isinstance(raw, Mapping):
         raise TypeError(f"Expected a mapping, got {type(raw).__name__}")
     denied = {*CODEX_CONFIG_DENY_SECTIONS, *CODEX_CONFIG_DENY_EXTRA}
     result = {str(key): _clone(item) for key, item in raw.items() if key not in denied}
+    profiles = result.get("profiles")
+    if isinstance(profiles, Mapping):
+        result["profiles"] = _strip_denied_in_profiles(profiles, denied)
     result.update(CODEX_CONFIG_FORCED)
     _inject_codex_source_header(result, source_tag)
     return result
