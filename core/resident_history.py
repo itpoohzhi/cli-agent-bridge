@@ -165,6 +165,7 @@ class ResidentHistoryTracker:
         self._lock = threading.Lock()
         self._states: OrderedDict[str, CommittedSessionState] = OrderedDict()
         self._pin_counts: dict[str, int] = {}
+        self._has_assistant: dict[str, bool] = {}
 
     def pin(self, key: str) -> None:
         with self._lock:
@@ -192,6 +193,8 @@ class ResidentHistoryTracker:
             mismatch = all((not isinstance(expected_slot_id, type(None)), bool(state), sid != expected_slot_id))
             pop = all((bool(state), not mismatch))
             res = self._states.pop(key) if pop else None
+            if pop:
+                _ = self._has_assistant.pop(key, None)
             return res
 
     def _evict_locked(self) -> list[tuple[str, SlotBinding]]:
@@ -201,6 +204,7 @@ class ResidentHistoryTracker:
             if not candidate:
                 break
             state = self._states.pop(candidate)
+            _ = self._has_assistant.pop(candidate, None)
             evicted.append((candidate, SlotBinding(state.slot_id, state.generation)))
         return evicted
 
@@ -219,6 +223,26 @@ class ResidentHistoryTracker:
                 digests = state.item_digests + extra
                 if digests:
                     self._states[key] = replace(state, slot_id=slot_binding.slot_id, generation=slot_binding.generation, item_digests=digests)
+                    self._has_assistant[key] = bool(assistant_item)
                     self._states.move_to_end(key)
                     evicted = self._evict_locked()
             return evicted
+
+    def rebind_assistant_item(
+        self,
+        key: str,
+        slot_binding: SlotBinding,
+        assistant_item: TranscriptItem,
+    ) -> bool:
+        with self._lock:
+            state = self._states.get(key)
+            if state is None or (state.slot_id, state.generation) != (slot_binding.slot_id, slot_binding.generation):
+                return False
+            if self._has_assistant.get(key) and state.item_digests:
+                new_digests = state.item_digests[:-1] + (assistant_item.digest,)
+            else:
+                new_digests = state.item_digests + (assistant_item.digest,)
+            self._states[key] = replace(state, item_digests=new_digests)
+            self._has_assistant[key] = True
+            self._states.move_to_end(key)
+            return True

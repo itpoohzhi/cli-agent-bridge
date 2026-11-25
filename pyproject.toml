@@ -1,0 +1,31 @@
+[project]
+name = "cli-agent-bridge"
+version = "0.1.0"
+description = "Unified OpenAI-compatible gateway bridging CLI agents and LLM providers"
+requires-python = ">=3.13"
+dependencies = [
+    "PyYAML==6.0.3",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest==9.2.0",
+    "pytest-asyncio==1.4.1.post1",
+    "pytest-timeout==2.4.0",
+    "ruff==0.17.5",
+    "basedpyright==1.40.2",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+timeout = 60
+markers = [
+    "strict_leak_check: fail-fast if test leaks singletons, env or resources",
+    "semantic_red(defect): expected W0 defect marker",
+    "red_repro: regression reproduction test before fix",
+    "drain: graceful drain contract tests",
+    "live_stand: live stand integration tests",
+]

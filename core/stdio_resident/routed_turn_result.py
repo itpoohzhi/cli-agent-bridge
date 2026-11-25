@@ -1,4 +1,5 @@
 """Typed RoutedTurnResult, loopback Zero-Canon proxy, and routed turn execution."""
+# pyright: reportExplicitAny=false, reportAny=false, reportImplicitOverride=false
 
 from __future__ import annotations
 
@@ -8,7 +9,7 @@ import urllib.error
 import urllib.request
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass, replace
-from typing import Any
+from typing import Any, cast
 
 from core.stdio_resident.turn_error_sse import (
     DONE_FRAME,
@@ -22,7 +23,7 @@ from core.subbridge_zero_canon import (
     is_zero_canon_profile,
 )
 from core.turn_usage import TurnUsage
-from core.usage_wire import build_turn_wire_usage, positive_wire_usage, turn_usage_from_wire
+from core.usage_wire import build_turn_wire_usage, positive_wire_usage, turn_usage_from_wire  # pyright: ignore[reportUnknownVariableType]
 
 KIND_RESIDENT, KIND_BRIDGE, KIND_EPHEMERAL = "resident", "bridge", "ephemeral"
 
@@ -34,6 +35,7 @@ class RoutedTurnResult:
     text: str
     reasoning: str
     usage: TurnUsage | None = None
+    tool_calls: tuple[dict[str, Any], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,18 +83,21 @@ def _build_proxy_headers(headers: Mapping[str, str] | None) -> dict[str, str]:
 def _parse_proxy_response(parsed: object, usage_enabled: bool) -> RoutedTurnResult:
     if not isinstance(parsed, dict):
         return RoutedTurnResult("", "", None)
-    usage = (
-        turn_usage_from_wire(parsed.get("usage"), "claude_zero_canon_bridge")
-        if usage_enabled
-        else None
-    )
-    choices = parsed.get("choices")
-    first = choices[0] if isinstance(choices, list) and choices else None
-    msg = first.get("message") if isinstance(first, dict) else None
+    data = cast(dict[str, Any], parsed)
+    usage = turn_usage_from_wire(data.get("usage"), "claude_zero_canon_bridge") if usage_enabled else None
+    choices = data.get("choices")
+    first: object = cast(list[object], choices)[0] if isinstance(choices, list) and choices else None
+    msg = cast(dict[str, Any], first).get("message") if isinstance(first, dict) else None
     if not isinstance(msg, dict):
         return RoutedTurnResult("", "", usage)
+    msg_map = cast(dict[str, Any], msg)
+    raw_tc = msg_map.get("tool_calls")
+    tool_calls = (
+        tuple(cast(dict[str, Any], c) for c in cast(list[object], raw_tc) if isinstance(c, dict))
+        if isinstance(raw_tc, list) else ()
+    )
     return RoutedTurnResult(
-        str(msg.get("content") or ""), str(msg.get("reasoning_content") or ""), usage
+        str(msg_map.get("content") or ""), str(msg_map.get("reasoning_content") or ""), usage, tool_calls
     )
 
 
@@ -133,9 +138,9 @@ def _attach_error_usage(
 ) -> ResidentTurnError:
     resp = err
     if usage is not None and live_sent > 0:
-        wire = positive_wire_usage(build_turn_wire_usage(usage))
+        wire = cast(dict[str, Any] | None, positive_wire_usage(build_turn_wire_usage(usage)))
         if wire is not None:
-            body = {**err.body, "usage": wire}
+            body: dict[str, Any] = {**err.body, "usage": wire}
             sse = "data: " + json.dumps(body, ensure_ascii=False) + "\n\n" + DONE_FRAME
             resp = replace(err, body=body, sse=sse)
     wrapped = ResidentTurnError(resp)
@@ -180,12 +185,13 @@ def _run_bridge_route(
     return RoutedTurnResult(
         "".join(parts["content"]), "".join(parts["reasoning_content"]),
         proxied.usage if options.usage_enabled else None,
+        proxied.tool_calls,
     )
 
 
 def _extract_chunk_usage(chunk: Mapping[str, Any], enabled: bool) -> TurnUsage | None:
     if enabled and isinstance(raw_u := chunk.get("usage"), Mapping):
-        return turn_usage_from_wire(raw_u, "stdio_resident_chat")
+        return turn_usage_from_wire(cast(Mapping[str, Any], raw_u), "stdio_resident_chat")
     return None
 
 
@@ -197,15 +203,28 @@ def _pick_last_usage(
     return sink[-1] if sink else fallback
 
 
+def _collect_delta_tool_calls(
+    delta: Mapping[str, Any], tool_calls_out: list[dict[str, Any]]
+) -> None:
+    raw_calls = delta.get("tool_calls")
+    if isinstance(raw_calls, list):
+        tool_calls_out.extend(
+            cast(dict[str, Any], c) for c in cast(list[object], raw_calls) if isinstance(c, dict)
+        )
+
+
 def _consume_delta(
     delta: Mapping[str, Any],
     parts: dict[str, list[str]],
     sse_writer: Callable[[str, str], Any] | None,
     live_sent: int,
+    tool_calls_out: list[dict[str, Any]] | None = None,
 ) -> int:
     for field_name in ("content", "reasoning_content"):
         if isinstance(val := delta.get(field_name), str):
             live_sent = _emit_part(field_name, val, parts, sse_writer, live_sent)
+    if tool_calls_out is not None:
+        _collect_delta_tool_calls(delta, tool_calls_out)
     return live_sent
 
 
@@ -218,7 +237,9 @@ def execute_routed_turn_result(
 ) -> RoutedTurnResult:
     """Execute routed turn preserving lossless TurnUsage on success and mid-stream error."""
     parts: dict[str, list[str]] = {"content": [], "reasoning_content": []}
-    live_sent, usage_sink, wire_fallback = 0, [], None
+    tool_calls: list[dict[str, Any]] = []
+    usage_sink: list[TurnUsage] = []
+    live_sent, wire_fallback = 0, None
     try:
         if route.kind == KIND_BRIDGE:
             return _run_bridge_route(route, request, sse_writer, options)
@@ -233,9 +254,13 @@ def execute_routed_turn_result(
         for chunk in execute_chat(routed_req):
             if (parsed_u := _extract_chunk_usage(chunk, options.usage_enabled)) is not None:
                 wire_fallback = parsed_u
-            live_sent = _consume_delta(chunk["choices"][0]["delta"], parts, sse_writer, live_sent)
+            delta = chunk["choices"][0]["delta"]
+            live_sent = _consume_delta(delta, parts, sse_writer, live_sent)
+            _collect_delta_tool_calls(delta, tool_calls)
     except Exception as exc:
         last_u = _pick_last_usage(usage_sink, wire_fallback, options.usage_enabled)
         raise _attach_error_usage(build_routed_turn_error(exc, live_sent), last_u, live_sent) from exc
     final_u = _pick_last_usage(usage_sink, wire_fallback, options.usage_enabled)
-    return RoutedTurnResult("".join(parts["content"]), "".join(parts["reasoning_content"]), final_u)
+    return RoutedTurnResult(
+        "".join(parts["content"]), "".join(parts["reasoning_content"]), final_u, tuple(tool_calls)
+    )
