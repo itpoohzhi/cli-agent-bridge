@@ -37,16 +37,17 @@ from core.subbridge_zero_canon import (
     is_zero_canon_profile,
 )
 from core.timeout_ladder import FLAG_TIMEOUT_LADDER, TimeoutLadderConfig, load_timeout_ladder_config
+from core.zc_static_cwd_and_source import (
+    CODEX_BACKEND_IDS as CODEX_BACKEND_IDS,
+    CODEX_PROTOCOLS as CODEX_PROTOCOLS,
+    resolve_zero_canon_cwd,
+)
 from core.zero_canon_fs import read_gigarc_bool, resolve_hub_dynamic_config
 
 CLAUDE_BRIDGE_URL_ENV = "HUB_ZERO_CANON_CLAUDE_BRIDGE_URL"
 DEFAULT_CLAUDE_BRIDGE_URL = "http://127.0.0.1:9881/v1"
 CLAUDE_PROTOCOLS = frozenset({"claude-stream-json", "claude_stream_json"})
 CLAUDE_BACKEND_IDS = frozenset({"claude", "claude-p", "claude_p"})
-CODEX_PROTOCOLS = frozenset(
-    {"codex-app-server", "codex-app-server-v2", "codex_app_server", "codex_app_server_v2"}
-)
-CODEX_BACKEND_IDS = frozenset({"codex", "codex-app-server", "codex-app-server-v2"})
 KIND_RESIDENT, KIND_BRIDGE, KIND_EPHEMERAL = "resident", "bridge", "ephemeral"
 WARM_MSP_STDIO_FLAG = "MUSE_WARM_MSP_STDIO_ENABLED"
 SOCKET_HANDSHAKE_UNSUPPORTED = "MUSE_SOCKET_HANDSHAKE_UNSUPPORTED"
@@ -103,9 +104,11 @@ def decide_zero_canon_route(
 class ZeroCanonIsolation:
     """Изолированный корень HOME на один ход; `active` — строго KIND_EPHEMERAL без sharing со standard."""
 
-    def __init__(self, driver: object, root: str | None) -> None:
+    def __init__(self, driver: object, root: str | None, *, cwd: str | None = None) -> None:
         self.root: str | None = root
-        self.cwd: str | None = os.path.join(root, "cwd") if root is not None else None
+        self.cwd: str | None = (
+            cwd if cwd is not None else (resolve_zero_canon_cwd(driver, root) if root is not None else None)
+        )
         self._env: Callable[..., dict[str, str]] | None = getattr(driver, "build_zero_canon_env", None)
         self._argv: Callable[..., list[str]] | None = getattr(driver, "build_zero_canon_argv", None)
 
@@ -153,10 +156,11 @@ def zero_canon_isolation(driver: Any, review_profile: str | None) -> Iterator[Ze
     root = tempfile.mkdtemp(prefix="zc-")
     try:
         os.chmod(root, 0o700)
-        cwd_dir = os.path.join(root, "cwd")
-        os.makedirs(cwd_dir, mode=0o700, exist_ok=True)
-        os.chmod(cwd_dir, 0o700)
-        yield ZeroCanonIsolation(driver, root)
+        cwd_dir = resolve_zero_canon_cwd(driver, root)
+        if cwd_dir == os.path.join(root, "cwd"):
+            os.makedirs(cwd_dir, mode=0o700, exist_ok=True)
+            os.chmod(cwd_dir, 0o700)
+        yield ZeroCanonIsolation(driver, root, cwd=cwd_dir)
     finally:
         shutil.rmtree(root, ignore_errors=True)
 
