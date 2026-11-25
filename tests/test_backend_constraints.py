@@ -58,6 +58,7 @@ def test_muse_max_concurrent_above_one_accepted(max_concurrent: int) -> None:
 
 def test_muse_without_pin_rejected_in_both_branches() -> None:
     entry = copy.deepcopy(FLEET["backends"]["muse"])
+    entry["kind"] = "muse"
     entry.pop("technical_ref")
     assert error(entry, constraints=False) == error(entry, constraints=True)
     assert error(entry, constraints=True) == "backend_technical_ref_missing"
@@ -75,6 +76,7 @@ def test_options_on_passthrough_rejected_in_both_branches() -> None:
 
 def test_bad_streaming_mode_same_slug() -> None:
     entry = copy.deepcopy(FLEET["backends"]["muse"])
+    entry["kind"] = "muse"
     entry["options"] = {"streaming_mode": "warp"}
     assert error(entry, constraints=False) == error(entry, constraints=True)
     assert error(entry, constraints=True) == "backend_streaming_mode_invalid"
