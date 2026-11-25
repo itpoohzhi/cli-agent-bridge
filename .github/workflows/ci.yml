@@ -1,0 +1,140 @@
+name: CI
+
+on:
+  pull_request:
+    branches:
+      - dev
+      - main
+  push:
+    branches:
+      - dev
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint-types-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      CI: "true"
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: "pip"
+          cache-dependency-path: "pyproject.toml"
+
+      - name: Install dependencies from pyproject.toml
+        run: |
+          python -m pip install --upgrade pip
+          python -c "import pathlib, subprocess, sys, tomllib; p = tomllib.loads(pathlib.Path('pyproject.toml').read_text(encoding='utf-8'))['project']; deps = [*p.get('dependencies', []), *p.get('optional-dependencies', {}).get('dev', [])]; subprocess.check_call([sys.executable, '-m', 'pip', 'install', *deps])"
+
+      - name: Run ruff lint (PR diff + core drain/CI)
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          BASE_REF="${PR_BASE_SHA:-HEAD~1}"
+          CHANGED=""
+          if git rev-parse --verify "${BASE_REF}^{commit}" >/dev/null 2>&1; then
+            CHANGED="$(git diff --name-only --diff-filter=ACMR "$BASE_REF" HEAD -- '*.py' || true)"
+          fi
+          BASE_FILES=(
+            core/drain_policy.py
+            core/drain_response.py
+            core/lifecycle.py
+            core/subbridge_lifecycle.py
+            server.py
+            scripts/check_branch_protection.py
+            tests/test_drain_policy.py
+            tests/test_drain_contract_http.py
+            tests/test_drain_launchd_consistency.py
+            tests/test_drain_multistep_restart.py
+            tests/test_subbridge_graceful_drain.py
+          )
+          FILES=()
+          while IFS= read -r f; do
+            if [ -f "$f" ]; then
+              FILES+=("$f")
+            fi
+          done < <(printf '%s\n' "${BASE_FILES[@]}" "$CHANGED" | awk 'NF && !seen[$0]++')
+          python -m ruff check "${FILES[@]}"
+
+      - name: Run basedpyright type check (core drain/CI)
+        run: |
+          python -m basedpyright core/drain_policy.py core/drain_response.py scripts/check_branch_protection.py
+          python -m basedpyright --level error core/lifecycle.py core/subbridge_lifecycle.py
+
+      - name: Run drain, lifecycle, and PR test suite
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          BASE_REF="${PR_BASE_SHA:-HEAD~1}"
+          CHANGED=""
+          if git rev-parse --verify "${BASE_REF}^{commit}" >/dev/null 2>&1; then
+            CHANGED="$(git diff --name-only --diff-filter=ACMR "$BASE_REF" HEAD -- 'tests/test_*.py' || true)"
+          fi
+          BASE_TESTS=(
+            tests/test_drain_policy.py
+            tests/test_drain_contract_http.py
+            tests/test_drain_launchd_consistency.py
+            tests/test_drain_multistep_restart.py
+            tests/test_graceful_shutdown_drain.py
+            tests/test_subbridge_graceful_drain.py
+            tests/test_subbridge_lifecycle.py
+            tests/test_stream_drain_finish_reason.py
+            tests/test_bridge_stream_lifecycle.py
+            tests/test_rpc_lifecycle.py
+            tests/test_model_lifecycle.py
+          )
+          FILES=()
+          while IFS= read -r f; do
+            if [ -f "$f" ]; then
+              FILES+=("$f")
+            fi
+          done < <(printf '%s\n' "${BASE_TESTS[@]}" "$CHANGED" | awk 'NF && !seen[$0]++')
+          python -m pytest "${FILES[@]}" -q
+
+      - name: Run drain policy kill-switch verification
+        run: BRIDGE_DRAIN_POLICY_ENABLED=0 python -m pytest tests/test_drain_contract_http.py -q -k kill_switch
+
+  drain-macos:
+    runs-on: macos-latest
+    timeout-minutes: 15
+    env:
+      CI: "true"
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: "pip"
+          cache-dependency-path: "pyproject.toml"
+
+      - name: Install dependencies from pyproject.toml
+        run: |
+          python -m pip install --upgrade pip
+          python -c "import pathlib, subprocess, sys, tomllib; p = tomllib.loads(pathlib.Path('pyproject.toml').read_text(encoding='utf-8'))['project']; deps = [*p.get('dependencies', []), *p.get('optional-dependencies', {}).get('dev', [])]; subprocess.check_call([sys.executable, '-m', 'pip', 'install', *deps])"
+
+      - name: Run drain, lifecycle, launchd, and stream drain tests
+        run: python -m pytest tests/test_drain_policy.py tests/test_drain_contract_http.py tests/test_drain_launchd_consistency.py tests/test_drain_multistep_restart.py tests/test_graceful_shutdown_drain.py tests/test_subbridge_graceful_drain.py tests/test_subbridge_lifecycle.py tests/test_stream_drain_finish_reason.py -q
+
+      - name: Run drain policy kill-switch verification
+        run: BRIDGE_DRAIN_POLICY_ENABLED=0 python -m pytest tests/test_drain_contract_http.py -q -k kill_switch

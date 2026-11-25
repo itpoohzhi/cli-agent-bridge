@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any
 
 from core.dataclass_compat import DC_SLOTS
+from core.drain_policy import DEFAULT_RETRY_AFTER_S, resolve_retry_after_s
 from core.lifecycle import DrainState, HubLifecycleManager
 from core.proc_groups import (
     child_process_groups,
@@ -130,16 +131,15 @@ class SubbridgeLifecycle(HubLifecycleManager):
     def admission_rejection(self, path: str) -> Rejection | None:
         if not self.is_draining() or path.split("?", 1)[0].endswith("/cancel"):
             return None
-        headers = {
-            "Retry-After": str(self.config.retry_after_s),
-            "X-Bridge-Draining": "true",
-        }
-        message = "Bridge is draining for restart, please retry"
-        return (
-            503,
-            headers,
-            {"error": {"message": message, "type": "overloaded", "code": 503}},
+        cfg_retry = self.config.retry_after_s
+        use_env = "BRIDGE_RETRY_AFTER_S" in os.environ or cfg_retry == DEFAULT_RETRY_AFTER_S
+        retry_s = resolve_retry_after_s(
+            os.environ, explicit=None if use_env else cfg_retry,
+            is_subagent=False, legacy_default=cfg_retry,
         )
+        headers = {"Retry-After": str(retry_s), "X-Bridge-Draining": "true"}
+        msg = "Bridge is draining for restart, please retry"
+        return 503, headers, {"error": {"message": msg, "type": "overloaded", "code": 503}}
 
     def _log(self, message: str) -> None:
         if self.hooks.log_fn is not None:

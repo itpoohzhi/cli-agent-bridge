@@ -539,7 +539,8 @@ class BridgeProc:
     def __init__(
         self, script: Path, env: dict[str, str], port: int, wait: bool = True
     ) -> None:
-        full = {**os.environ, **env, "PYTHONUNBUFFERED": "1"}
+        py_path = f"{REPO}{os.pathsep}{os.environ['PYTHONPATH']}" if os.environ.get("PYTHONPATH") else str(REPO)
+        full = {**os.environ, **env, "PYTHONUNBUFFERED": "1", "PYTHONPATH": py_path}
         self.port = port
         self.proc = subprocess.Popen(
             [sys.executable, str(script)],
@@ -803,30 +804,28 @@ def test_bridge_handler_is_wired_to_lifecycle(
         httpd.server_close()
 
 
-def test_opencode_zen_registers_live_process_groups_for_drain(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """F-002 (Seat 1): `procs_fn` отдаёт живые группы, а не полагается на поиск через `ps`."""
-    from core.proc_groups import spawn_registered
+def test_opencode_zen_registers_live_process_groups_for_drain(monkeypatch: pytest.MonkeyPatch) -> None:
+    """F-002 (Seat 1): `procs_fn` отдаёт живые группы и делегирует spawn в `core.proc_groups`."""
+    import core.proc_groups as pg
 
-    module = load_bridge(
-        "opencode-zen-bridge", {"OPENCODE_ZEN_BRIDGE_KEY": KEY}, monkeypatch
-    )
+    module = load_bridge("opencode-zen-bridge", {"OPENCODE_ZEN_BRIDGE_KEY": KEY}, monkeypatch)
     assert module._LIFECYCLE.hooks.procs_fn is module.live_proc_groups
-    assert (
-        module.spawn_registered is spawn_registered
-    )  # запуск потомков идёт через ядро
-    proc = spawn_registered(
-        [sys.executable, "-c", "import time; time.sleep(30)"], start_new_session=True
-    )
+    orig_spawn, calls = pg.spawn_registered, 0
+
+    def spy_spawn(*args: Any, **kwargs: Any) -> subprocess.Popen[Any]:
+        nonlocal calls
+        calls += 1
+        return orig_spawn(*args, **kwargs)
+
+    assert getattr(module.spawn_registered, "set_blocked") is getattr(orig_spawn, "set_blocked")
+    monkeypatch.setattr(pg, "spawn_registered", spy_spawn)
+    proc = module.spawn_registered([sys.executable, "-c", "import time; time.sleep(30)"], start_new_session=True)
     try:
-        assert proc.pid in [p.pid for p in module._LIFECYCLE.hooks.procs_fn()]
+        assert calls == 1 and proc.pid in [p.pid for p in module._LIFECYCLE.hooks.procs_fn()]
     finally:
         proc.kill()
         proc.wait(3)
-    assert proc.pid not in [
-        p.pid for p in module.live_proc_groups()
-    ]  # завершённый выбывает
+    assert proc.pid not in [p.pid for p in module.live_proc_groups()]
 
 
 class _FakeProc:

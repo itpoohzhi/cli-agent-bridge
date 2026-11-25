@@ -156,6 +156,7 @@ from core.tool_emulation import (  # noqa: E402,F401  - общая эмуляц�
     finalize_turn,
     sanitize_tool_call,
 )
+from core.drain_response import build_drain_http_response, build_drain_sse_error  # noqa: E402
 from core.stream_framing import (  # noqa: E402
     build_stream_error_chunk,
     format_stream_error_sse,
@@ -7182,8 +7183,8 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
         )
         self._telemetry_queue_done(queue_started)
         if not qos_ok:
+            self.close_connection = True
             if qos_reason == "client_gone":
-                self.close_connection = True
                 self._record_telemetry(client_gone=True)
                 return
             qos_msg = (
@@ -7193,30 +7194,24 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
             )
             if headers_sent[0]:
                 self._record_telemetry(status_code=503, error_type="overloaded_error")
-                sse_err = format_stream_error_sse(
-                    message=qos_msg,
-                    model=str((req or {}).get("model") or ""),
-                    code=503,
-                    error_type="overloaded_error",
+                model_name = str((req or {}).get("model") or "")
+                sse_err = (
+                    build_drain_sse_error(os.environ, model=model_name, message=qos_msg, is_subagent=not is_interactive)
+                    if qos_reason == "draining"
+                    else format_stream_error_sse(message=qos_msg, model=model_name, code=503, error_type="overloaded_error")
                 )
                 try:
                     self.wfile.write(sse_err.encode("utf-8"))
                     self.wfile.flush()
                 except Exception:
                     pass
-                self.close_connection = True
                 return
-
-            self.close_connection = True
-            retry_s = _env_int_nonneg("BRIDGE_RETRY_AFTER_S", 3)
-            extra_headers = {"Retry-After": str(retry_s)}
             if qos_reason == "draining":
-                extra_headers["X-Bridge-Draining"] = "true"
-            self._send(
-                503,
-                {"error": {"message": qos_msg, "type": "overloaded", "code": 503}},
-                extra_headers=extra_headers,
-            )
+                status, extra_headers, body = build_drain_http_response(os.environ, is_subagent=not is_interactive, message=qos_msg)
+            else:
+                status, extra_headers = 503, {"Retry-After": str(_env_int_nonneg("BRIDGE_RETRY_AFTER_S", 3))}
+                body = {"error": {"message": qos_msg, "type": "overloaded", "code": 503}}
+            self._send(status, body, extra_headers=extra_headers)
             return
 
         try:
