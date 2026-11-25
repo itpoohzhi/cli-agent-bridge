@@ -85,13 +85,14 @@ def test_relay_preserves_usage_after_disconnect_or_large_tail(
     assert handler.saved == USAGE
 
 
-def test_empty_tail_does_not_clear_recorded_usage() -> None:
+@pytest.mark.parametrize("req_tail", [b"", b"x" * 5000 + b"data: [DONE]\n\n"])
+def test_empty_tail_does_not_clear_recorded_usage(req_tail: bytes) -> None:
     recorded: list[dict[str, Any]] = []
     handler = TelemetryHooksMixin()
     handler._req_meta = {"endpoint": "/v1/chat/completions", "route_mode": "passthrough"}
     handler._req_started_mono = 1.0
     handler._req_tracking = True
-    handler._req_tail = b""
+    handler._req_tail = req_tail
     handler._record_telemetry = lambda **kw: recorded.append({**(handler._req_meta or {}), **kw})  # type: ignore[method-assign]
     handler._telemetry_usage(USAGE)
 
