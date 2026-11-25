@@ -87,17 +87,17 @@ def build_snapshot_fs(root, canon=CANON, canon_line=120):
 
 
 def run_cli_snapshot(fs, argv, env=None):
-    """`bg.main` на снимке: пути по умолчанию и KB-метка REQ-003 патчатся на временные каталоги."""
-    cwds = fs["cwds"]
-    default = tuple((label, str(cwds[label])) for label in ("KB", "WA", "AB", "DW"))
+    """`bg.main` на снимке: пути по умолчанию, KB-метка REQ-003 и якорь AD-002 патчатся на временные каталоги."""
+    default = tuple((label, str(fs["cwds"][label])) for label in ("KB", "WA", "AB", "DW"))
+    if not (anchor := fs["canon"].parent / "canon-anchor.md").exists():
+        anchor.symlink_to(fs["canon"])  # AD-002: якорь доставки канона
     out = io.StringIO()
     with (
         mock.patch.dict(os.environ, clean_env(**(env or {})), clear=True),
-        mock.patch.object(bg, "KB_CWD", str(cwds["KB"])),
-        mock.patch.object(bg, "DEFAULT_CWDS", default),
+        mock.patch.multiple(bg, KB_CWD=str(fs["cwds"]["KB"]), DEFAULT_CWDS=default, CANON_ANCHOR_PATH=str(anchor), UG_PATH=str(fs["canon"].parent / "no-ug.md")),
+        redirect_stdout(out), redirect_stderr(out),
     ):
-        with redirect_stdout(out), redirect_stderr(out):
-            code = bg.main(list(argv) + ["--canon", str(fs["canon"])])
+        code = bg.main(list(argv) + ["--canon", str(fs["canon"])])
     return code, out.getvalue()
 
 
@@ -816,11 +816,11 @@ class TestBlockLimitConfig(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             fs = build_snapshot_fs(Path(tmp), canon=CANON_NOW_CEILING)
             cwds = tuple((label, str(fs["cwds"][label])) for label in ("KB", "WA", "AB", "DW"))
-            ug = Path(tmp) / "ug.md"
-            ug.symlink_to(fs["canon"])
+            (anchor := Path(tmp) / "anchor.md").symlink_to(fs["canon"])  # AD-002: якорь доставки канона
             with (
                 mock.patch.object(bg, "KB_CWD", str(fs["cwds"]["KB"])),
-                mock.patch.object(bg, "UG_PATH", str(ug)),
+                mock.patch.object(bg, "CANON_ANCHOR_PATH", str(anchor)),
+                mock.patch.object(bg, "UG_PATH", str(Path(tmp) / "no-ug.md")),
                 mock.patch.dict(os.environ, clean_env(), clear=True),
             ):
                 def run(**kw):

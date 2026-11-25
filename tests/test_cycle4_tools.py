@@ -40,9 +40,10 @@ class TestRw010UserGlobal(unittest.TestCase):
         self.root = Path(self._tmp.name)  # pyright: ignore[reportUninitializedInstanceVariable]  # состояние создаётся в setUp
         self.fs: dict[str, Any] = build_snapshot_fs(self.root)  # pyright: ignore[reportUninitializedInstanceVariable]  # состояние создаётся в setUp
         self.canon = self.fs["canon"]  # pyright: ignore[reportUninitializedInstanceVariable]  # состояние создаётся в setUp
-        self.ug = self.root / "dsh-home" / "AGENTS.md"  # pyright: ignore[reportUninitializedInstanceVariable]  # состояние создаётся в setUp
-        self.ug.parent.mkdir()
-        self.ug.symlink_to(self.canon)
+        self.anchor = self.root / "dsh-canon" / "AGENTS.md"  # pyright: ignore[reportUninitializedInstanceVariable]  # состояние создаётся в setUp
+        self.anchor.parent.mkdir()
+        self.anchor.symlink_to(self.canon)  # AD-002: якорь доставки канона
+        self.ug = self.root / "user-global-AGENTS.md"  # pyright: ignore[reportUninitializedInstanceVariable]  # AD-002: файл отсутствует
         cwds = self.fs["cwds"]
         self.default = tuple(  # pyright: ignore[reportUninitializedInstanceVariable]  # состояние создаётся в setUp
             (label, str(cwds[label])) for label in ("KB", "WA", "AB", "DW")
@@ -51,6 +52,7 @@ class TestRw010UserGlobal(unittest.TestCase):
             mock.patch.object(bg, "KB_CWD", str(cwds["KB"])),
             mock.patch.object(bg, "DEFAULT_CWDS", self.default),
             mock.patch.object(bg, "UG_PATH", str(self.ug)),
+            mock.patch.object(bg, "CANON_ANCHOR_PATH", str(self.anchor)),
         ):
             patcher.start()
             self.addCleanup(patcher.stop)
@@ -58,37 +60,33 @@ class TestRw010UserGlobal(unittest.TestCase):
     def check(self, cwds=None):
         return bg.check_installed(106496, cwds or bg.DEFAULT_CWDS, str(self.canon))
 
-    def assert_canon_lost(self, result):
-        """Сервер считает небезопасным `None` либо exit_code == 2; причина обязана назвать user-global."""
+    def assert_reason(self, result, code, needle):
+        self.assertEqual(result.exit_code, code, result.reasons)
+        self.assertIn(needle, " ".join(result.reasons))
+
+    def assert_canon_lost(self, result, where="~/.dsh/AGENTS.md"):
+        """Сервер считает небезопасным `None` либо exit_code == 2; причина обязана назвать источник."""
         if result is None:
             return
-        self.assertEqual(result.exit_code, 2, result)
-        joined = " ".join(result.reasons)
-        self.assertIn("CANON_LOST", joined)
-        self.assertIn("~/.dsh/AGENTS.md", joined)
+        self.assert_reason(result, 2, "CANON_LOST")
+        self.assert_reason(result, 2, where)
 
-    def test_rw010_symlink_to_canon_is_ok(self):
-        """RW-010: контроль - user-global симлинк на канон даёт безопасный результат (exit 0)."""
+    def test_rw010_anchor_without_user_global_is_ok(self):
+        """RW-010: контроль - валидный якорь и отсутствующий ~/.dsh/AGENTS.md (AD-002) дают exit 0."""
         result = self.check()
         self.assertIsNotNone(result)
         self.assertEqual(result.exit_code, 0, result.reasons)
 
-    def test_rw010_identical_regular_copy_is_ok(self):
-        """RW-010: контроль - обычный файл с байт-в-байт тем же содержимым допустим."""
+    def test_rw010_symlink_to_canon_is_duplicate(self):
+        """RW-010: вернувшийся ~/.dsh/AGENTS.md (симлинк или байт-в-байт копия) - вернулся дубль (exit 2)."""
+        self.ug.symlink_to(self.canon)
+        self.assert_reason(self.check(), 2, "DUPLICATE_RETURNED")
         self.ug.unlink()
         self.ug.write_bytes(self.canon.read_bytes())
-        result = self.check()
-        self.assertIsNotNone(result)
-        self.assertEqual(result.exit_code, 0, result.reasons)
-
-    def test_rw010_deleted_user_global_is_canon_lost(self):
-        """RW-010: ~/.dsh/AGENTS.md удалён -> CANON_LOST, а не синтезированная копия канона."""
-        self.ug.unlink()
-        self.assert_canon_lost(self.check())
+        self.assert_reason(self.check(), 2, "DUPLICATE_RETURNED")
 
     def test_rw010_modified_content_is_canon_lost(self):
         """RW-010: содержимое user-global отличается от канона -> CANON_LOST."""
-        self.ug.unlink()
         self.ug.write_text("чужое содержимое\n", encoding="utf-8")
         self.assert_canon_lost(self.check())
 
@@ -96,20 +94,22 @@ class TestRw010UserGlobal(unittest.TestCase):
         """RW-010: симлинк перенацелен на другой файл с тем же содержимым -> CANON_LOST (цель симлинка важна)."""
         other = self.root / "other-canon.md"
         other.write_bytes(self.canon.read_bytes())
-        self.ug.unlink()
         self.ug.symlink_to(other)
         self.assert_canon_lost(self.check())
 
-    def test_rw010_cwd_without_project_canon_and_without_user_global_is_not_ok(self):
-        """RW-010: cwd без проектной копии канона и без user-global не даёт guard=ok."""
-        self.ug.unlink()
+    def test_rw010_cwd_without_project_canon_and_missing_anchor_is_not_ok(self):
+        """RW-010: cwd без проектной копии канона и без якоря не даёт guard=ok."""
+        self.anchor.unlink()
         result = self.check([("DW", str(self.fs["cwds"]["DW"]))])
-        self.assert_canon_lost(result)
-        self.assertTrue(result is None or result.exit_code != 0)
+        self.assert_canon_lost(result, "~/.dsh/canon/AGENTS.md")
+
+    def test_rw010_deleted_anchor_is_canon_lost(self):
+        """RW-010: удалённый якорь ~/.dsh/canon/AGENTS.md -> CANON_LOST."""
+        self.anchor.unlink()
+        self.assert_canon_lost(self.check(), "~/.dsh/canon/AGENTS.md")
 
     def test_rw010_dangling_symlink_is_canon_lost(self):
         """RW-010: висячий симлинк user-global (цель удалена) -> CANON_LOST."""
-        self.ug.unlink()
         self.ug.symlink_to(self.root / "no-such-file.md")
         self.assert_canon_lost(self.check())
 

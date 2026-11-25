@@ -56,13 +56,13 @@ class GuardCase(RpcCase):
         self.fs = build_snapshot_fs(self.root)
         cwds = self.fs["cwds"]
         default = tuple((label, str(cwds[label])) for label in ("KB", "WA", "AB", "DW"))
-        user_global = self.root / "user-global-AGENTS.md"
-        user_global.symlink_to(
-            self.fs["canon"]
-        )  # как на стенде владельца: ~/.dsh/AGENTS.md -> канон
+        canon_anchor = self.root / "canon-AGENTS.md"
+        canon_anchor.symlink_to(self.fs["canon"])  # AD-002: якорь ~/.dsh/canon/AGENTS.md
+        user_global = self.root / "user-global-AGENTS.md"  # AD-002: дубль удалён, файл отсутствует
         for patcher in (
             mock.patch.object(b_guard, "KB_CWD", str(cwds["KB"])),
             mock.patch.object(b_guard, "UG_PATH", str(user_global)),
+            mock.patch.object(b_guard, "CANON_ANCHOR_PATH", str(canon_anchor)),
             mock.patch.object(b_guard, "DEFAULT_CWDS", default),
         ):
             patcher.start()
