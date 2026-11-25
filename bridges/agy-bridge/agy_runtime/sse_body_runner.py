@@ -6,6 +6,7 @@ import json
 import threading
 from typing import Any, Callable, final
 from agy_runtime import activity_runtime
+from agy_runtime.explicit_turn_commit import abort_explicit_turn_safe, finalize_deferred_explicit_turn
 from agy_runtime.midstream_resilience import AgyToolTraceCollector, _owner_time
 from agy_runtime.sse_stream_helpers import SseStreamSession, retry_after_headers
 from core.route_health_policy import redact_diagnostic_text
@@ -188,8 +189,7 @@ class _SseBodyRunner:
         valid = all( ( bool(cid.strip()), any((not self.cid, cid == self.cid)),
                 is_uncommitted_step(active, ledger.last_committed_step_idx),
                 not terminal, snapshot == ledger.snapshot(), ) )
-        if valid:
-            valid = can_safely_replay_turn(snapshot, ledger.last_committed_step_idx)
+        valid = valid and can_safely_replay_turn(snapshot, ledger.last_committed_step_idx)
         if not valid:
             ledger.trace_complete = False
         self.cid = cid
@@ -216,12 +216,12 @@ class _SseBodyRunner:
         s, ctx = self.s, self.s.ctx
         self.buffering = any((s.config.flag_enabled("midstream_retry_enabled"), s.config.flag_enabled("tool_rollback_enabled")))
         try:
-            allowed = True
-            if not any((s.resilience, ctx.get("step_job_id"))):
-                allowed = s.commit()
+            allowed = True if any((s.resilience, ctx.get("step_job_id"))) else s.commit()
             if allowed:
                 self._run_body()
         finally:
+            if ctx.get("defer_explicit_finalize"):
+                abort_explicit_turn_safe(ctx.get("explicit_adapter"), ctx.get("explicit_state"), post_spawn=True)
             ctx["finalize_timeout"] = s.finalize_stream
             s.coordinator.close()
             s.relay.close()
@@ -261,10 +261,10 @@ class _SseBodyRunner:
                 err = s.tool_turn.error_body()
             elif s.tool_turn.calls:
                 reason = "tool_calls"
-        reg = s.ctx.get("register_post_turn")
-        if all((not is_present(err), proceed)):
-            if callable(reg):
-                reg(out)
+        if s.ctx.get("defer_explicit_finalize"):
+            _ = finalize_deferred_explicit_turn(s.ctx.get("explicit_adapter"), s.ctx.get("explicit_state"), out, tool_turn=s.tool_turn, err=err if is_present(err) and bool(err) else (None if proceed else "aborted"), commit_act=str(s.ctx.get("explicit_commit_act") or "abort") if proceed else "abort", cid_re=s.ctx.get("explicit_cid_re") or s.ctx.get("cid_re"))
+        if not is_present(err) and proceed and callable(reg := s.ctx.get("register_post_turn")):
+            reg(out)
         if proceed:
             self._finish_response(out, err, reason)
     def _finish_response(self, out: dict[str, Any], err: Any, reason: str) -> None:

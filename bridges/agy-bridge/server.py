@@ -145,6 +145,7 @@ from agy_runtime import (  # noqa: E402
     long_session_config as _lsc, midstream_resilience, slot_and_session, sqlite_ro_pool as _ro_pool,
     sqlite_tail_lifecycle, sse_body_runner, sse_stream_helpers, tool_turn_helpers, turn_usage_finalize as _u_fin, zero_canon_profile,
 )
+from agy_runtime.explicit_turn_commit import abort_explicit_turn_safe, finalize_deferred_explicit_turn  # noqa: E402
 from agy_runtime.hygiene_runtime import HygieneRuntime, ManagedSqliteRoPool  # noqa: E402
 from agy_runtime.legacy_session_helpers import (  # noqa: E402
     LegacyLoadSpec, atomic_write_sessions_json, load_sessions_json_entries, normalize_request_cwd,
@@ -153,6 +154,7 @@ from agy_runtime.legacy_session_helpers import (  # noqa: E402
 from agy_runtime.session_resume_adapter import (  # noqa: E402
     ExplicitResumeAdapter, ExplicitTurnState, TurnHttpMeta, TurnPayloadMeta, get_explicit_adapter,
 )
+from agy_runtime.zc_runtime_paths import collect_protected_zc_cids, resolve_agy_runtime_dirs  # noqa: E402
 from core.adaptive_admission import AdmissionKey, OutcomeKind  # noqa: E402
 from core.prompt_rendering import render_tools_section  # noqa: E402
 
@@ -1723,7 +1725,7 @@ def _launch_env(zero_canon: bool = False, req_id: str = "", extra_env: Mapping[s
     env.pop("AGY_BRIDGE_KEY", None)
     clean_home = str(_zc_manager().prepare_zc_home() if zero_canon else _prepare_agy_home())
     with _session_store_lock:
-        active_cids = frozenset(_in_flight_cids)
+        active_cids = collect_protected_zc_cids(tuple(_in_flight_cids), _explicit_adapter())
     zero_canon_profile.maybe_rotate_agy_runtime_artifacts(Path(clean_home), active_cids=active_cids, config_path=DYNAMIC_CONFIG_PATH)
     if zero_canon:
         from core.zero_canon_fs import sanitize_zero_canon_env
@@ -3111,15 +3113,6 @@ def _explicit_adapter() -> ExplicitResumeAdapter:
     return get_explicit_adapter(Path(WORKSPACE) / "state", config_path=DYNAMIC_CONFIG_PATH)
 
 
-def _explicit_commit_out(ctx: Mapping[str, object], out: Mapping[str, object]) -> Mapping[str, object]:
-    if out.get("tool_calls"):
-        return out
-    owner = getattr(ctx.get("tool_stop"), "__self__", None)
-    tt = getattr(getattr(owner, "stop", None), "__self__", owner)
-    calls = getattr(tt, "calls", None)
-    return {**out, "text": getattr(tt, "content", out.get("text") or ""), "tool_calls": calls} if calls else out
-
-
 # Только явные HTTP-статусы 502/503 и сетевой сброс: свободный текст модели
 # («Bad Gateway is a term», «timed out») транзиентным сбоем не считается.
 _TRANSIENT_UPSTREAM_RE = re.compile(
@@ -3769,13 +3762,14 @@ def _cid_release(cid: str, turn_id: str) -> None:
 # ---- Чтение SQLite разговора agy: только на чтение, без побочных эффектов --------
 
 
-def _db_path_for(cid: str) -> Path | None:
-    """Путь к <cid>.db строго внутри CONV_DIR; невалидный cid -> None."""
+def _db_path_for(cid: str, *, conv_dir: Path | None = None) -> Path | None:
+    """Путь к <cid>.db строго внутри conv_dir (по умолчанию CONV_DIR); невалидный cid -> None."""
     if _CID_RE.fullmatch(cid) is None:
         return None
-    path = CONV_DIR / (cid + ".db")
+    base_dir = CONV_DIR if conv_dir is None else conv_dir
+    path = base_dir / (cid + ".db")
     try:
-        if path.resolve().parent != CONV_DIR.resolve():
+        if path.resolve().parent != base_dir.resolve():
             return None
     except (OSError, RuntimeError):
         return None
@@ -3913,16 +3907,16 @@ def _sqlite_max_idx(
     return sqlite_tail_lifecycle.resolve_resume_db_max_idx(_sqlite_ro_pool(), db_path, sql, deps)
 
 
-def _transcript_path(cid: str) -> Path:
-    return BRAIN_DIR / cid / ".system_generated" / "logs" / TRANSCRIPT_NAME
+def _transcript_path(cid: str, *, brain_dir: Path | None = None) -> Path:
+    return (BRAIN_DIR if brain_dir is None else brain_dir) / cid / ".system_generated" / "logs" / TRANSCRIPT_NAME
 
 
-def _select_transcript_path(cid: str) -> Path | None:
+def _select_transcript_path(cid: str, *, brain_dir: Path | None = None) -> Path | None:
     """Существующий файл транскрипта: `transcript_full.jsonl`, при ENOENT — `transcript.jsonl`.
 
     None — ни одного файла (свежий разговор до первого шага) или ошибка stat.
     """
-    base = _transcript_path(cid).parent
+    base = (_transcript_path(cid, brain_dir=brain_dir) if brain_dir is not None else _transcript_path(cid)).parent
     for name in (TRANSCRIPT_NAME, TRANSCRIPT_FALLBACK_NAME):
         path = base / name
         try:
@@ -3935,12 +3929,12 @@ def _select_transcript_path(cid: str) -> Path | None:
     return None
 
 
-def _transcript_anchor(cid: str, path: Path | None = None) -> tuple[int, int] | None:
+def _transcript_anchor(cid: str, path: Path | None = None, *, brain_dir: Path | None = None) -> tuple[int, int] | None:
     """(наибольший step_index, размер файла) транскрипта до старта хода.
 
     Нет файла — (-1, 0); ошибка чтения — None.
     """
-    path = path if path is not None else _transcript_path(cid)
+    path = path if path is not None else (_transcript_path(cid, brain_dir=brain_dir) if brain_dir is not None else _transcript_path(cid))
     try:
         size = path.stat().st_size
     except FileNotFoundError:
@@ -3976,7 +3970,7 @@ class _TurnPlan:
         self.transcript_path: Path | None = None
 
 
-def _prespawn_plan(cid: str, resumed: bool, usage_enabled: bool = False) -> _TurnPlan:
+def _prespawn_plan(cid: str, resumed: bool, usage_enabled: bool = False, *, zero_canon: bool = False) -> _TurnPlan:
     """Якорь хода ДО spawn: байтовый водяной знак транскрипта и максимум idx в БД.
 
     Свежий разговор: base_idx=0. Продолжение треда (resume): оба водяных знака
@@ -3991,10 +3985,11 @@ def _prespawn_plan(cid: str, resumed: bool, usage_enabled: bool = False) -> _Tur
         plan.reason = "cid"
         plan.offset = -1
         return plan
+    conv_dir, brain_dir = resolve_agy_runtime_dirs(True, clean_home=CLEAN_HOME_DIR, zc_home=_zc_manager().zc_home, default_conv_dir=CONV_DIR, default_brain_dir=BRAIN_DIR) if zero_canon else (None, None)
     if usage_enabled:
         # Выбранный файл (full, иначе transcript.jsonl) и его водяной знак — на попытку.
-        plan.transcript_path = _select_transcript_path(cid)
-    anchor = _transcript_anchor(cid, plan.transcript_path)
+        plan.transcript_path = _select_transcript_path(cid, brain_dir=brain_dir) if brain_dir is not None else _select_transcript_path(cid)
+    anchor = _transcript_anchor(cid, plan.transcript_path, brain_dir=brain_dir) if brain_dir is not None else _transcript_anchor(cid, plan.transcript_path)
     if anchor is None:
         plan.reason = "resume_unanchored"
         plan.cause = sqlite_tail_lifecycle.ResumeAnchorCause.TRANSCRIPT_ERROR
@@ -4008,7 +4003,7 @@ def _prespawn_plan(cid: str, resumed: bool, usage_enabled: bool = False) -> _Tur
     if _breaker_blocks_now():
         plan.reason = "breaker"
         return plan
-    db_path = _db_path_for(cid)
+    db_path = _db_path_for(cid, conv_dir=conv_dir) if conv_dir is not None else _db_path_for(cid)
     if db_path is None:
         plan.reason = "resume_unanchored"
         plan.cause = sqlite_tail_lifecycle.ResumeAnchorCause.DB_MISSING
@@ -4247,6 +4242,7 @@ class _TranscriptTail(InterruptionTailState):
         isolate_tool_preambles: bool = False,
         preambles_emitted: set[int] | None = None,
         run_ref: Any = None,
+        zero_canon: bool = False,
     ) -> None:
         self.emit = emit
         self.run_ref: Any = run_ref
@@ -4297,6 +4293,7 @@ class _TranscriptTail(InterruptionTailState):
         self._open_fail_logged: bool = False
         self._oversize_logged: set[int] = set()
         self._finished: bool = False
+        self._conv_dir, self._brain_dir = resolve_agy_runtime_dirs(True, clean_home=CLEAN_HOME_DIR, zc_home=_zc_manager().zc_home, default_conv_dir=CONV_DIR, default_brain_dir=BRAIN_DIR) if zero_canon else (None, None)
         # Закреплённый на попытку файл транскрипта (только при usage_enabled).
         self._path: Path | None = self.plan.transcript_path
         # Счётчики шагов хода: единственный писатель — поток tail; наружу — снимок.
@@ -4338,13 +4335,14 @@ class _TranscriptTail(InterruptionTailState):
                     self._owned_cid = cid
                 else:
                     self._sqlite_off("cid_busy")
-            self._db_path = _db_path_for(cid)
+            conv_dir, brain_dir = getattr(self, "_conv_dir", None), getattr(self, "_brain_dir", None)
+            self._db_path = _db_path_for(cid, conv_dir=conv_dir) if conv_dir is not None else _db_path_for(cid)
             if self._db_path is None:
                 self._sqlite_off("cid")
             if self.resumed and self._offset < 0:
                 try:
                     pinned = self._transcript_file() if self.usage_enabled else None
-                    path = pinned if pinned is not None else _transcript_path(cid)
+                    path = pinned if pinned is not None else (_transcript_path(cid, brain_dir=brain_dir) if brain_dir is not None else _transcript_path(cid))
                     self._offset = path.stat().st_size
                 except OSError:
                     self._offset = 0
@@ -4468,10 +4466,11 @@ class _TranscriptTail(InterruptionTailState):
         одного файла нет, проверка повторяется, а найденный путь не меняется до конца
         попытки (появившийся позже full не подменяет смещение другого файла).
         """
+        brain_dir = getattr(self, "_brain_dir", None)
         if not self.usage_enabled:
-            return _transcript_path(self.cid)
+            return _transcript_path(self.cid, brain_dir=brain_dir) if brain_dir is not None else _transcript_path(self.cid)
         if self._path is None:
-            self._path = _select_transcript_path(self.cid)
+            self._path = _select_transcript_path(self.cid, brain_dir=brain_dir) if brain_dir is not None else _select_transcript_path(self.cid)
         return self._path
 
     # ---- счётчики usage ------------------------------------------------------------
@@ -5465,7 +5464,7 @@ class Run:
         # Единая монотонная точка отсчёта terminal drain попытки (<= DRAIN_MAX_S).
         self._drain_t0: float | None = None
         # Водяной знак resume снимается ДО spawn: история разговора не переотдаётся.
-        plan = _prespawn_plan(self.run_cid, bool(self.run_cid), self.usage_enabled)
+        plan = _prespawn_plan(self.run_cid, bool(self.run_cid), self.usage_enabled, zero_canon=zero_canon)
         if self.run_cid and not _cid_acquire(self.run_cid, self.turn_id):
             plan.anchored = False
             plan.reason = "cid_busy"
@@ -5563,6 +5562,7 @@ class Run:
             isolate_tool_preambles=self.isolate_tool_preambles,
             preambles_emitted=self._preambles_emitted,
             run_ref=self,
+            zero_canon=zero_canon,
         )
         if policy is not None:
             self._tail.deadline_s = policy.effective_max_timeout_s + 60.0
@@ -7159,19 +7159,18 @@ class Handler(BaseHTTPRequestHandler):
                 cid_valid=bool(_CID_RE.fullmatch(out_cid)),
             )
             if isinstance((exp_st := ctx.get("explicit_state")), ExplicitTurnState) and exp_st.handled:
-                _ = _explicit_adapter().finalize_turn(exp_st, _explicit_commit_out(ctx, out), commit_act, _CID_RE)
+                if ctx.get("defer_explicit_finalize"):
+                    ctx["explicit_commit_act"] = commit_act
+                else:
+                    _ = finalize_deferred_explicit_turn(_explicit_adapter(), exp_st, out, commit_act=commit_act, cid_re=_CID_RE)
             elif all((dict(commit=True).get(commit_act, False), bool(ctx.get("sess_key")))):
                 _session_commit(ctx["sess_key"], out_cid, str(ctx.get("tools_fp") or ""))
             elif all((dict(invalidate=True).get(commit_act, False), bool(ctx.get("hot_resumed")), bool(ctx.get("sess_key")))):
                 _session_invalidate(ctx["sess_key"], str(ctx["conversation_id"]))
             if out.get("state") != "client_gone":
-                _last_ok[0] = (
-                    time.monotonic()
-                    if (out.get("state") == "done" and out.get("rc") == 0)
-                    else 0.0
-                )
+                _last_ok[0] = time.monotonic() if (out.get("state") == "done" and out.get("rc") == 0) else 0.0
         finally:
-            if isinstance((exp_st := ctx.get("explicit_state")), ExplicitTurnState) and exp_st.handled:
+            if isinstance((exp_st := ctx.get("explicit_state")), ExplicitTurnState) and exp_st.handled and not ctx.get("defer_explicit_finalize"):
                 _explicit_adapter().release_if_unfinalized(exp_st, post_spawn=bool(out.get("response_started")))
             # Каталог изображений живёт весь ход (все попытки) и уходит до слота.
             if img_registered and img_dir is not None:
@@ -7450,6 +7449,7 @@ class Handler(BaseHTTPRequestHandler):
         owned_cid = ""
         ctx: dict[str, object] = {}
         zc_turn_cwd: Path | None = None
+        explicit_state: ExplicitTurnState | None = None
         turn_id = uuid.uuid4().hex
         try:
             raw = self.rfile.read(length) if length else b""
@@ -7745,23 +7745,20 @@ class Handler(BaseHTTPRequestHandler):
                 tools_fp = "" if explicit_state.handled else (_RESUMED_TOOLS.compute_tools_fingerprint(tools, tool_choice, has_attachments=full_attached, attachment_tool=_attachment_tool() if full_attached else None) if emulate_tools else "")
             full_prompt_val: object = full_mat if all((is_resumed, lazy_on)) else full_mat.get()
             stripped_val: object = stripped_mat if all((is_resumed, lazy_on)) else stripped_mat.get()
-            req_id, sub_id = extract_correlation(
-                self.headers, max_len=_lsc.corr_max_len(config_path=DYNAMIC_CONFIG_PATH)
-            )
+            req_id, sub_id = extract_correlation(self.headers, max_len=_lsc.corr_max_len(config_path=DYNAMIC_CONFIG_PATH))
             req_id = self._request_id
             _anchor_meta = (messages, continuity_scope, chat_id, _CID_RE)
             ctx = {
                 "explicit_state": explicit_state,
+                "defer_explicit_finalize": bool(explicit_state and explicit_state.handled),
+                "explicit_adapter": _explicit_adapter(),
+                "explicit_cid_re": _CID_RE,
                 "registry_use_cid": use_cid,
                 "registry_owned_cid": owned_cid,
                 "t_req_start": t_req_start,
                 "req_id": req_id,
                 "client_retry_budget": parse_retry_budget_header(self.headers),
-                "step_job_id": str(
-                    self.headers.get("X-Idempotency-Key")
-                    or req.get("step_job_id")
-                    or ""
-                ),
+                "step_job_id": str(self.headers.get("X-Idempotency-Key") or req.get("step_job_id") or ""),
                 # Эмуляция: модель зовёт инструменты клиента, нативные agy выключены.
                 "agy_mode": "emulate" if emulate_tools else resolve_agy_mode(req),
                 "emulate_tools": emulate_tools,
@@ -7782,14 +7779,8 @@ class Handler(BaseHTTPRequestHandler):
                 "conversation_id": conversation_id,
                 "cid_re": _CID_RE,
                 "dynamic_config_path": DYNAMIC_CONFIG_PATH,
-                "register_post_turn": lambda om: _lsc.register_post_turn_if_committed(
-                    om, ctx, _CONTINUITY, _anchor_meta, config_path=DYNAMIC_CONFIG_PATH
-                ),
-                "tag": (
-                    f"client={self._client_tag()} "
-                    f"ua={(self.headers.get('User-Agent') or '-')[:60]}"
-                    f"{format_log_corr_suffix(req_id, sub_id)}"
-                ),
+                "register_post_turn": lambda om: _lsc.register_post_turn_if_committed(om, ctx, _CONTINUITY, _anchor_meta, config_path=DYNAMIC_CONFIG_PATH),
+                "tag": f"client={self._client_tag()} ua={(self.headers.get('User-Agent') or '-')[:60]}{format_log_corr_suffix(req_id, sub_id)}",
                 "stream": bool(req.get("stream")),
                 "images": images,
                 "img_dir": img_dir,
@@ -7811,6 +7802,7 @@ class Handler(BaseHTTPRequestHandler):
                 budget.release(reserved)
             if zc_turn_cwd is not None and not ctx.get("job_owns_cid"):
                 zero_canon_profile.AgyZeroCanonProfileManager.cleanup_turn_zc_cwd(zc_turn_cwd)
+            abort_explicit_turn_safe(_explicit_adapter(), explicit_state, post_spawn=True)
 
     @staticmethod
     def _graceful_notice(reason: str, limit_s: object) -> str:
@@ -7984,6 +7976,8 @@ class Handler(BaseHTTPRequestHandler):
             tool_turn.finish()
             if tool_turn.error:
                 err = tool_turn.error_body()
+        if ctx.get("defer_explicit_finalize"):
+            _ = finalize_deferred_explicit_turn(_explicit_adapter(), ctx.get("explicit_state"), out, tool_turn=tool_turn, err=err or None, commit_act=str(ctx.get("explicit_commit_act") or "abort"), cid_re=_CID_RE)
         if err is not None:
             status = cast(int, err.pop("_status", err["code"]))
             headers = cast("dict[str, str] | None", err.pop("_headers", None))
