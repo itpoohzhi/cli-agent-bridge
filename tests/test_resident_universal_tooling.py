@@ -78,6 +78,7 @@ class _FakeMuseMcpDriver:
     def __init__(self, session_id: str) -> None:
         self.session_id: str = session_id
         self.mcp_url: str = ""
+        self.start_params: dict[str, Any] = {}
         self.client_results: dict[str, Any] = {}
         self.client_error: BaseException | None = None
         self._thread: threading.Thread | None = None
@@ -86,7 +87,8 @@ class _FakeMuseMcpDriver:
         _ = timeout_s
         turn_context["turn_id"] = "turn-mcp-1"
         start_msg = cast(dict[str, Any], json.loads(build_session_start_msg(self.session_id, "muse-ember-1.0", "denyUnmatched")))
-        bridge = cast(dict[str, Any], start_msg["params"]["config"]["mcpServers"]["bridge"])
+        self.start_params = cast(dict[str, Any], start_msg["params"])
+        bridge = cast(dict[str, Any], self.start_params["config"]["mcpServers"]["bridge"])
         self.mcp_url = str(bridge["url"])
         auth_header = str(bridge["headers"]["Authorization"])
         self._thread = threading.Thread(target=self._run_mcp_client, args=(self.mcp_url, auth_header), daemon=True)
@@ -141,6 +143,9 @@ def test_loopback_mcp_tool_capture_and_turn_cancel() -> None:
     driver.join_client()
 
     assert dispatched == [True] and driver.client_error is None
+    assert driver.start_params["approvalMode"] == "allowAll"
+    no_mcp = cast(dict[str, Any], json.loads(build_session_start_msg(sid, "muse-ember-1.0", "denyUnmatched")))
+    assert no_mcp["params"]["approvalMode"] == "denyUnmatched"
     assert driver.client_results["init"][0] == 200
     listed_names = [t["name"] for t in driver.client_results["list"][1]["result"]["tools"]]
     assert listed_names == ["bash"] and driver.client_results["call"][0] == 200
@@ -207,11 +212,13 @@ def test_warm_slot_multi_turn_rebind_no_false_reset() -> None:
         )
 
     user_one = TranscriptItem("user", "Run pwd", "digest:u1")
+    raw_assistant = build_assistant_transcript_item('raw preamble <tool_call>{"name":"bash","arguments":{"command":"pwd"}}</tool_call>')
+    assert raw_assistant is not None
     binding = SlotBinding("slot-u3", 1)
     tracker = ResidentHistoryTracker()
 
     def _on_exec(req: Mapping[str, Any]) -> None:
-        _ = tracker.commit("session-u3", plan_history_transition(None, _env((user_one,))), binding)
+        _ = tracker.commit("session-u3", plan_history_transition(None, _env((user_one,))), binding, raw_assistant)
         cast(list[tuple[str, Any]], req["turn_context"]["_committed_slot_sink"]).append(("session-u3", binding))
 
     chunks = [{"choices": [{"index": 0, "delta": {"tool_calls": [{"index": 0, "id": "call_raw", "type": "function", "function": {"name": "bash", "arguments": '{"command":"pwd"}'}}]}, "finish_reason": "tool_calls"}]}]
@@ -222,18 +229,21 @@ def test_warm_slot_multi_turn_rebind_no_false_reset() -> None:
     tc = res.tool_calls[0]
     assistant_t2 = build_assistant_transcript_item("", [{"id": tc.id, "type": "function", "function": {"name": tc.function.name, "arguments": tc.function.arguments}}])
     assert assistant_t2 is not None
-    plan2 = plan_history_transition(tracker.get("session-u3"), _env((user_one, assistant_t2, TranscriptItem("tool", f"[tool result {tc.id}] /w", "digest:t1"))), binding)
-    assert plan2.requires_slot_reset is False
+    tool_result = TranscriptItem("tool", f"[tool result {tc.id}] /w", "digest:t1")
+    assert plan_history_transition(tracker.get("session-u3"), _env((user_one, assistant_t2, tool_result)), binding).requires_slot_reset is False
+    _ = tracker.commit("session-u3-raw", plan_history_transition(None, _env((user_one,))), binding, raw_assistant)
+    assert tracker.rebind_assistant_item("session-u3-raw", binding, assistant_t2) is True
+    assert plan_history_transition(tracker.get("session-u3-raw"), _env((user_one, assistant_t2, tool_result)), binding).requires_slot_reset is False
 
 
 def test_muse_host_tool_suppression_and_clean_home(tmp_path: Path) -> None:
     sid = uuid7()
     with TurnWireSessionScope.bind(TurnMcpSessionSpec(emulate_tools=True, suppress_host_tools=True)):
         suppressed = cast(dict[str, Any], json.loads(build_session_start_msg(sid, "muse-ember-1.0", "denyUnmatched")))
-    assert "developerPrompt" in suppressed["params"]["config"] and suppressed["params"]["config"]["developerPrompt"] is None
+    assert suppressed["params"]["approvalMode"] == "denyUnmatched" and suppressed["params"]["config"]["developerPrompt"] is None
     with TurnWireSessionScope.bind(TurnMcpSessionSpec(emulate_tools=True, suppress_host_tools=False)):
         baseline = cast(dict[str, Any], json.loads(build_session_start_msg(sid, "muse-ember-1.0", "denyUnmatched")))
-    assert "config" not in baseline["params"]
+    assert "config" not in baseline["params"] and baseline["params"]["approvalMode"] == "denyUnmatched"
 
     src_home = tmp_path / "src_home"
     (src_home / ".config" / "muse").mkdir(parents=True)
