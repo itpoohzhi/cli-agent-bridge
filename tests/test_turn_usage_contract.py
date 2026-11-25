@@ -334,4 +334,4 @@ def test_ver003_lossless_turn_result_and_dispatch_format() -> None:
     assert turn_usage_of(replaced) == tu
     out = _format_turn_output(replaced, "stdio_resident")
     assert out["turn_usage"] == tu
-    assert out["usage"] == {"input_tokens": 700, "output_tokens": 50, "cache_read_tokens": 400, "cache_creation_tokens": 200, "reasoning_tokens": 15, "usage_present": True}
+    assert out["usage"] == {"input_tokens": 700, "output_tokens": 50, "cache_read_tokens": 400, "cache_creation_tokens": 200, "reasoning_tokens": 15, "usage_present": True, "usage_source": "upstream_report", "usage_missing_reason": None}
