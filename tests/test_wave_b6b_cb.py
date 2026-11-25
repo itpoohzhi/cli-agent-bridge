@@ -122,3 +122,38 @@ def test_b6b_abandoned_provider_probe() -> None:
     cb.record_success(k3, reclaimed)
     assert cb.record_failure(k2, FailureOutcome(status=500), lease=abandoned) == "route_fail"
     assert cb.try_acquire(k3) is not None
+
+
+def test_b6b_pre_outage_and_late_success_do_not_reclose_open_or_evict_probe() -> None:
+    now, cb = _clock_cb()
+    k1 = ("p5", "m1", "b1")
+    stale_closed = cb.try_acquire(k1)
+    for _ in range(3):
+        cb.record_failure(k1, FailureOutcome(status=500))
+    cb.record_success(k1, stale_closed)
+    assert cb.try_acquire(k1) is None
+    now[0] += 90.0
+    probe_a = cb.try_acquire(k1)
+    now[0] += 90.0
+    probe_b = cb.try_acquire(k1)
+    cb.record_success(k1, probe_a)
+    assert (probe_b is not None, cb.try_acquire(k1) is None) == (True, True)
+    cb.record_failure(k1, FailureOutcome(status=500), lease=probe_b)
+    assert cb.try_acquire(k1) is None
+
+
+def test_b6b_late_provider_success_and_auth_probe_clears_probes() -> None:
+    now, cb = _clock_cb()
+    k1, k2, k3 = ("p6", "m1", "b1"), ("p6", "m2", "b1"), ("p6", "m3", "b1")
+    stale_closed = cb.try_acquire(k1)
+    cb.record_failure(k1, FailureOutcome(status=401, detail="invalid_api_key"))
+    cb.record_success(k1, stale_closed)
+    assert cb.try_acquire(k2) is None
+    now[0] += 90.0
+    probe_a = cb.try_acquire(k2)
+    now[0] += 90.0
+    probe_b = cb.try_acquire(k3)
+    cb.record_success(k2, probe_a)
+    assert cb.try_acquire(k2) is None
+    cb.record_failure(k3, FailureOutcome(status=401, detail="invalid_api_key"), lease=probe_b)
+    assert (id(cb._providers["p6"]) not in cb._probes, cb.try_acquire(k2) is None) == (True, True)
