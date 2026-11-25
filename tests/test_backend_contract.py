@@ -192,52 +192,48 @@ class TestRegistry(unittest.TestCase):
 
 
 class TestRealAdapters(unittest.TestCase):
-    """Droid и Muse подчиняются одному контракту; поведение droid-моделей не меняется."""
+    """Активные адаптеры и Muse подчиняются контракту текущего fleet.json."""
 
     def test_server_registry_has_enabled_backends_from_fleet(self) -> None:
         ids = {a.id: a for a in server.BACKENDS.adapters()}
         self.assertEqual(set(ids), {
-            "droid", "muse", "codex", "agy", "opencode-zen", "claude-p",
-            "opencode-go", "opencode-go-claude",
-            "openai-key-2", "openai-key-3", "deepseek-direct",
+            "agy", "claude-p", "codex", "deepseek-direct", "muse",
+            "neuralwatt", "neuralwatt-flex", "openai-key-3",
+            "opencode-go", "opencode-go-claude", "opencode-zen",
         })
-        self.assertIn("droid", ids)
+        self.assertNotIn("droid", ids)
         self.assertIn("muse", ids)
+        self.assertIn("neuralwatt", ids)
         routes = server.FLEET["models"]["claude-haiku-5-5"]["routing"]["routes"]
         self.assertEqual({r["backend"]: r["priority"] for r in routes}["opencode-go-claude"], 15)
 
     def test_model_routing(self) -> None:
         reg = server.BACKENDS
         expected = {
-            "claude-sonnet-5-5": "droid",
-            "gemini-3.8-flash": "droid", "gemini-3.8-flash-agy": "agy",
-            "gpt-6.1-sol": "openai-key-2",
-            "claude-sonnet-5-5-droid": "droid",
-            "gemini-3.8-flash-droid": "droid",
-            "gpt-6.1-sol-droid": "droid",
-            "muse-ember-1.0": "muse",
-            "muse-spark-1.3": "muse",
-            "muse-spark-1.3-contributor": "muse",
-            "muse-wonder-1.0": "muse",
-            "muse-wonder-full-1.0": "muse",
-            "gpt-6.1-terra": "openai-key-2",
-            "claude-opus-5-5": "claude-p",
+            "claude-sonnet-5-5": "claude-p", "claude-opus-5-5": "claude-p",
             "claude-haiku-5-5": "opencode-go-claude",
-            "gemini-4-argon": "agy",
-            "gemini-4-carbon": "agy",
-            "gemini-4-hydrogen": "agy",
-            "deepseek-v4.1-flash-free": "opencode-zen",
-            "flint-40b-free": "opencode-zen",
-            "mimo-v2.6-flash-free": "opencode-zen",
-            "nemotron-3.5-lightning-free": "opencode-zen",
-            "nemotron-3.5-super-vl-free": "opencode-zen",
-            "beam-free": "opencode-zen",
-            "big-pickle": "opencode-zen",
-            "iceman-free": "opencode-zen",
-            "inkling-2-small-free": "opencode-zen",
-            "longcat-2.5-free": "opencode-zen",
-            "minimax-m3.1-flash-free": "opencode-zen",
-            "deepseek-v4.1-flash": "deepseek-direct",
+            "gpt-6.1-sol": "openai-key-3", "gpt-6.1-terra": "openai-key-3",
+            **{m: "agy" for m in (
+                "gemini-3.8-flash", "gemini-3.8-flash-agy", "gemini-4-argon",
+                "gemini-4-carbon", "gemini-4-hydrogen", "gemini-4-neon",
+                "gemini-pro-orchestrator", "gemini-pro-orchestrator-argon",
+                "gemini-pro-orchestrator-neon",
+            )},
+            **{m: "muse" for m in (
+                "muse-ember-1.0", "muse-spark-1.3", "muse-spark-1.3-contributor",
+                "muse-wonder-1.0", "muse-wonder-full-1.0",
+            )},
+            **{m: "neuralwatt" for m in ("deepseek-v4.1-flash", "glm-5.3-flash")},
+            **{m: "neuralwatt-flex" for m in (
+                "deepseek-v4.1-flash-flex", "glm-5.3-flex",
+                "kimi-k3.1-pro-flex", "mimo-v2.6-pro-flex",
+            )},
+            **{m: "opencode-zen" for m in (
+                "deepseek-v4.1-flash-free", "flint-40b-free", "mimo-v2.6-flash-free",
+                "nemotron-3.5-lightning-free", "nemotron-3.5-super-vl-free",
+                "beam-free", "big-pickle", "iceman-free", "inkling-2-small-free",
+                "longcat-2.5-free", "minimax-m3.1-flash-free",
+            )},
         }
         self.assertEqual(set(server.FLEET["order"]), set(expected))
         for mid, backend in expected.items():
@@ -246,12 +242,7 @@ class TestRealAdapters(unittest.TestCase):
 
     def test_compiled_model_owners(self) -> None:
         catalog = server._load_fleet()
-        expected = {
-            "gpt-6.1-sol": "openai-key-2",
-            "gpt-6.1-terra": "openai-key-2",
-            "deepseek-v4.1-flash": "opencode-go-sub1",
-        }
-        for mid, backend in expected.items():
+        for mid, backend in (("gpt-6.1-sol", "openai-key-3"), ("gpt-6.1-terra", "openai-key-3"), ("deepseek-v4.1-flash", "neuralwatt")):
             self.assertEqual(catalog["models"][mid]["backend"], backend, mid)
 
     def test_each_adapter_exposes_contract_and_capabilities(self):
