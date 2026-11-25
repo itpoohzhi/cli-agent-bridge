@@ -108,6 +108,60 @@ def extract_codex_legacy_usage(payload: Mapping[str, Any]) -> UsageUpdate | None
     return usage if usage is not None and _has_positive_usage(usage) else None
 
 
+def _frame_identifier(params: Mapping[str, Any], *keys: str) -> str | None:
+    """Return the first non-empty string identifier from a mapping."""
+    for key in keys:
+        value = params.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return None
+
+
+def _extract_frame_ids(params: Mapping[str, Any]) -> tuple[str | None, str | None]:
+    """Extract thread and turn identifiers from a Codex v2 params mapping."""
+    thread_id = _frame_identifier(params, "threadId", "thread_id")
+    turn_id = _frame_identifier(params, "turnId", "turn_id")
+    turn = params.get("turn")
+    if not turn_id and isinstance(turn, Mapping):
+        turn_id = _frame_identifier(turn, "id")
+    return thread_id, turn_id
+
+
+def _ids_match_active(
+    frame_ids: tuple[str | None, str | None],
+    active_thread_id: str | None,
+    active_turn_id: str | None,
+) -> bool:
+    """Return whether present frame identifiers match the active request."""
+    thread_id, turn_id = frame_ids
+    if active_thread_id and thread_id and thread_id != active_thread_id:
+        return False
+    if active_turn_id and turn_id and turn_id != active_turn_id:
+        return False
+    return True
+
+
+def is_frame_usage_allowed(
+    payload: Mapping[str, Any],
+    active_thread_id: str | None = None,
+    active_turn_id: str | None = None,
+) -> bool:
+    """Check whether a Codex v2 usage frame belongs to the active turn."""
+    method = payload.get("method")
+    params = payload.get("params")
+    if not isinstance(params, Mapping):
+        return False
+    if not _ids_match_active(
+        _extract_frame_ids(params), active_thread_id, active_turn_id
+    ):
+        return False
+    if method == "thread/tokenUsage/updated":
+        return isinstance(params.get("tokenUsage"), Mapping)
+    if method == "turn/completed":
+        return isinstance(params.get("turn"), Mapping)
+    return False
+
+
 def format_codex_effect_error(payload: Mapping[str, object]) -> str:
     """Format an EMIT_ERROR effect payload consistently."""
     code, msg = str(payload.get("code") or ""), str(payload.get("message") or "")
@@ -116,20 +170,43 @@ def format_codex_effect_error(payload: Mapping[str, object]) -> str:
     return code or msg or "resident_protocol_failed"
 
 
-def codex_v2_effects_to_chunk(
-    effects: tuple[ProtocolEffect, ...], payload: dict[str, Any]
-) -> DecodedChunk | None:
-    """Convert Codex v2 FSM effects plus stateless usage extraction into DecodedChunk."""
+def _guarded_usage(
+    effects: tuple[ProtocolEffect, ...],
+    payload: Mapping[str, Any],
+    active_thread_id: str | None,
+    active_turn_id: str | None,
+    guard_enabled: bool,
+) -> UsageUpdate | None:
+    """Extract usage and apply optional frame and identifier guards."""
     usage = extract_codex_v2_usage(payload)
-    if not effects and usage is None:
+    if not guard_enabled:
+        return usage
+    if not is_frame_usage_allowed(payload, active_thread_id, active_turn_id):
         return None
+    if effects:
+        return usage
+    params = payload.get("params")
+    thread_id, turn_id = _extract_frame_ids(params)
+    if not any((active_thread_id, active_turn_id)):
+        return usage
+    if active_thread_id == thread_id is not None:
+        return usage
+    if active_turn_id == turn_id is not None:
+        return usage
+    return None
+
+
+def _collect_effect_parts(
+    effects: tuple[ProtocolEffect, ...],
+) -> tuple[str, str, str | None, bool]:
+    """Collect text, reasoning, error, and terminal state from protocol effects."""
     text_parts: list[str] = []
     reasoning_parts: list[str] = []
     error: str | None = None
     is_term = False
     for eff in effects:
         if eff.kind is EffectKind.EMIT_DELTA:
-            target = text_parts if eff.payload.get("channel") == "content" else reasoning_parts
+            target = (reasoning_parts, text_parts)[eff.payload.get("channel") == "content"]
             target.append(str(eff.payload.get("delta", "")))
         elif eff.kind is EffectKind.EMIT_ERROR:
             error = format_codex_effect_error(eff.payload)
@@ -137,9 +214,27 @@ def codex_v2_effects_to_chunk(
             is_term = True
             if eff.payload.get("status") == "interrupted" and error is None:
                 error = "turn_interrupted"
+    return "".join(text_parts), "".join(reasoning_parts), error, is_term
+
+
+def codex_v2_effects_to_chunk(
+    effects: tuple[ProtocolEffect, ...],
+    payload: dict[str, Any],
+    *,
+    active_thread_id: str | None = None,
+    active_turn_id: str | None = None,
+    guard_enabled: bool = False,
+) -> DecodedChunk | None:
+    """Convert Codex v2 FSM effects plus stateless usage extraction into DecodedChunk."""
+    usage = _guarded_usage(
+        effects, payload, active_thread_id, active_turn_id, guard_enabled
+    )
+    if not effects and usage is None:
+        return None
+    text, reasoning, error, is_term = _collect_effect_parts(effects)
     return DecodedChunk(
-        text="".join(text_parts),
-        reasoning="".join(reasoning_parts),
+        text=text,
+        reasoning=reasoning,
         is_terminal=is_term,
         raw=payload,
         error=error,
