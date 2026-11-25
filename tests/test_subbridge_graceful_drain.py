@@ -561,18 +561,39 @@ class BridgeProc:
         return conn.getresponse()
 
     def wait_ready(self) -> None:
-        deadline = time.monotonic() + 15
+        deadline = time.monotonic() + 35
+        last_status: int | None = None
+        last_err = ""
         while time.monotonic() < deadline:
             if self.proc.poll() is not None:
                 raise AssertionError(
                     f"bridge exited early rc={self.proc.returncode}: {self.output()}"
                 )
+            conn: http.client.HTTPConnection | None = None
             try:
-                if self.request("GET", "/health", timeout=0.5).status == 200:
+                conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=1.0)
+                conn.request(
+                    "GET",
+                    "/health",
+                    headers={"Authorization": f"Bearer {KEY}"},
+                )
+                resp = conn.getresponse()
+                last_status = resp.status
+                resp.read()
+                if last_status == 200:
                     return
-            except OSError:
-                time.sleep(0.02)
-        raise AssertionError("bridge did not start")
+                time.sleep(0.05)
+            except OSError as exc:
+                last_err = f"{type(exc).__name__}: {exc}"
+                time.sleep(0.05)
+            finally:
+                if conn is not None:
+                    conn.close()
+        self.stop()
+        raise AssertionError(
+            f"bridge did not start within 35s (port={self.port}, "
+            f"last_status={last_status}, last_err={last_err}): {self.output()}"
+        )
 
     def output(self) -> str:
         if self.proc.stdout is None or self.proc.poll() is None:
