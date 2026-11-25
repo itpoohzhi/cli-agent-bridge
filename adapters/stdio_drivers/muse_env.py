@@ -16,7 +16,7 @@ from typing import Any
 
 from core.stdio_resident.config import ENV_CLEAN_CLI_HOME_ROOT, clean_cli_home_enabled
 from core.subbridge_zero_canon import filter_muse_settings
-from core.zero_canon_fs import ensure_private_dir, remove_entry, write_atomic_0600
+from core.zero_canon_fs import ensure_private_dir, remove_entry, replace_atomic_0600, write_atomic_0600
 
 MUSE_ENV_ALLOWLIST: tuple[str, ...] = (
     "PATH", "HOME", "LANG", "LC_ALL", "TMPDIR", "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "MUSE_PROVIDER",
@@ -86,7 +86,11 @@ def verify_binary(config: Mapping[str, Any]) -> tuple[bool, str]:
 
 
 def prepare_muse_zero_canon_home(
-    source_home: str | Path, target_home: str | Path, *, source_xdg_config: str | Path | None = None
+    source_home: str | Path,
+    target_home: str | Path,
+    *,
+    source_xdg_config: str | Path | None = None,
+    allow_replace: bool = False,
 ) -> Path:
     """Prepare isolated Muse HOME with only `auth.json` (0600) and filtered `settings.json`."""
     src_home, zc_home = Path(source_home), Path(target_home)
@@ -113,10 +117,11 @@ def prepare_muse_zero_canon_home(
     if (src_home / ".muse").is_dir():
         ensure_private_dir(zc_home / ".muse", 0o700)
         targets.append(zc_home / ".muse")
+    writer = replace_atomic_0600 if allow_replace else write_atomic_0600
     for target in targets:
         if auth_src is not None:
-            write_atomic_0600(target / "auth.json", auth_src.read_bytes())
-        write_atomic_0600(target / "settings.json", filtered)
+            writer(target / "auth.json", auth_src.read_bytes())
+        writer(target / "settings.json", filtered)
     for base in (zc_home, *targets):
         for name in _MUSE_FORBIDDEN_NAMES:
             remove_entry(base / name)
@@ -190,6 +195,7 @@ def build_muse_env(
             trusted_env.get("HOME") or str(Path.home()),
             _resolve_clean_muse_home(trusted_env, turn_sandbox),
             source_xdg_config=trusted_env.get("XDG_CONFIG_HOME"),
+            allow_replace=True,
         )
         env["HOME"] = str(clean_home)
         env["XDG_CONFIG_HOME"] = str(clean_home / ".config")

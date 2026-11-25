@@ -324,3 +324,47 @@ def test_static_safety_proof_no_session_start_or_bearer_token_logged() -> None:
             call_text = ast.unparse(node).lower()
             for token in sensitive_tokens:
                 assert token not in call_text, f"{rel} logs sensitive token {token!r}: {call_text}"
+
+
+def test_clean_cli_home_reuse_updates_auth_and_zero_canon_stays_fail_closed(tmp_path: Path) -> None:
+    """Reusing clean_cli_home updates auth/settings atomically (0600); allow_replace=False fails closed."""
+    src_home = _seed_muse_src_home(tmp_path)
+    clean_root = tmp_path / "clean_root"
+    server_env = {
+        "HOME": str(src_home),
+        "BRIDGE_STDIO_CLEAN_CLI_HOME_ENABLED": "true",
+        "BRIDGE_STDIO_CLEAN_CLI_HOME_ROOT": str(clean_root),
+    }
+
+    env1 = build_muse_env(None, "/usr/bin/true", turn_sandbox=str(tmp_path / "sb1"), server_env=server_env)
+    clean_home = Path(env1["HOME"])
+    auth_dst = clean_home / ".config" / "muse" / "auth.json"
+    settings_dst = clean_home / ".config" / "muse" / "settings.json"
+    assert auth_dst.read_text(encoding="utf-8") == '{"access":"tok"}'
+    assert stat.S_IMODE(auth_dst.stat().st_mode) == 0o600
+    assert stat.S_IMODE(settings_dst.stat().st_mode) == 0o600
+
+    _ = (src_home / ".config" / "muse" / "auth.json").write_text('{"access":"tok-2"}', encoding="utf-8")
+    env2 = build_muse_env(None, "/usr/bin/true", turn_sandbox=str(tmp_path / "sb2"), server_env=server_env)
+    assert env2["HOME"] == env1["HOME"]
+    assert auth_dst.read_text(encoding="utf-8") == '{"access":"tok-2"}'
+    assert stat.S_IMODE(auth_dst.stat().st_mode) == 0o600
+    assert stat.S_IMODE(settings_dst.stat().st_mode) == 0o600
+
+    zc_home = tmp_path / "zc_home"
+    _ = prepare_muse_zero_canon_home(src_home, zc_home)
+    try:
+        _ = prepare_muse_zero_canon_home(src_home, zc_home)
+        raise AssertionError("prepare_muse_zero_canon_home must fail closed on existing file")
+    except FileExistsError:
+        pass
+    try:
+        _ = build_muse_env(
+            None,
+            "/usr/bin/true",
+            server_env={"HOME": str(src_home)},
+            zero_canon_home=str(zc_home),
+        )
+        raise AssertionError("build_muse_env(zero_canon_home=...) must fail closed on existing file")
+    except FileExistsError:
+        pass
