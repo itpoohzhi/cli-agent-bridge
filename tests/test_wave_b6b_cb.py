@@ -82,8 +82,7 @@ def test_b6b_abandoned_probe_ttl_and_done_lease() -> None:
     assert cb.release_lease(abandoned) is False
 
 
-def test_b6b_ignored_sets_done_and_concurrent_half_open() -> None:
-    import concurrent.futures
+def test_b6b_ignored_sets_done() -> None:
     now, cb = _clock_cb()
     k1 = ("p2", "m1", "b1")
     for _ in range(3):
@@ -95,6 +94,12 @@ def test_b6b_ignored_sets_done_and_concurrent_half_open() -> None:
     lease_b = cb.try_acquire(k1)
     assert (lease_b is not None, cb.release_lease(lease_a), cb.try_acquire(k1) is None) == (True, False, True)
     cb.record_success(k1, lease_b)
+
+
+def test_b6b_concurrent_half_open() -> None:
+    import concurrent.futures
+    now, cb = _clock_cb()
+    k1 = ("p3", "m1", "b1")
     for _ in range(3):
         cb.record_failure(k1, FailureOutcome(status=500))
     now[0] += 90.0

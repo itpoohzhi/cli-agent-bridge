@@ -41,12 +41,8 @@ class RouteCB:
 
     def _state_blocks(self, state: _TupleState | _ProviderState | None, ts: float) -> bool:
         """Open state blocks during cooldown or while a half-open probe is within TTL."""
-        if state is None or state.open_until is None:
-            return False
-        if ts < state.open_until:
-            return True
-        deadline, _ = self._probes.get(id(state), (0.0, None))
-        return state.probe_in_flight and ts < deadline
+        deadline = self._probes.get(id(state), (0.0, None))[0]
+        return state is not None and state.open_until is not None and (ts < state.open_until or (state.probe_in_flight and ts < deadline))
 
     def _claim_probe(self, state: _TupleState | _ProviderState | None, ts: float, lease: RouteProbeLease) -> bool:
         """Flip probe_in_flight with owning lease and bounded deadline on an open state."""
@@ -72,8 +68,7 @@ class RouteCB:
             if self._state_blocks(p, ts) or self._state_blocks(t, ts):
                 return None
             lease = RouteProbeLease(key=key)
-            lease.provider_lease = self._claim_probe(p, ts, lease)
-            lease.tuple_lease = self._claim_probe(t, ts, lease)
+            lease.provider_lease, lease.tuple_lease = self._claim_probe(p, ts, lease), self._claim_probe(t, ts, lease)
             return lease
 
     def release_lease(self, lease: RouteProbeLease | None) -> bool:
@@ -89,44 +84,34 @@ class RouteCB:
         """Reset tuple/provider state on success and release any held probe lease."""
         with self._lock:
             eff_lease = self._active_lease(lease)
-            t = self._tuples.get(key)
-            if t is not None:
+            if (t := self._tuples.get(key)) is not None:
                 t.failures, t.first_fail_ts, t.open_until, t.probe_in_flight = 0, None, None, False
                 self._probes.pop(id(t), None)
-            p = self._providers.get(key[0])
-            if p is not None:
+            if (p := self._providers.get(key[0])) is not None:
                 if getattr(eff_lease, "provider_lease", False) or p.open_until is not None:
                     p.open_until, p.probe_in_flight = None, False
                     p.unproven.clear()
                     self._probes.pop(id(p), None)
                 else:
                     p.unproven = deque(((k, ts) for k, ts in p.unproven if k != key), maxlen=_UNPROVEN_DEQUE_MAX)
-            if lease is not None:
-                lease.done = True
+            if lease is not None: lease.done = True
 
     def record_failure(self, key: RouteTupleKey, outcome: FailureOutcome | None = None, lease: RouteProbeLease | None = None, now: float | None = None) -> str:
         """Classify outcome and update tuple/provider state; never logs credentials."""
         eff = outcome or FailureOutcome()
         with self._lock:
-            ts = self._clock() if now is None else now
-            eff_lease = self._active_lease(lease)
+            ts, eff_lease = self._clock() if now is None else now, self._active_lease(lease)
             if not is_recordable_failure(eff.status, eff.error, eff.reason):
-                self._clear_probe_flags(eff_lease)
-                if lease is not None:
-                    lease.done = True
-                return "ignored"
-            if eff.status in (401, 402, 403):
+                res = "ignored"
+            elif eff.status in (401, 402, 403):
                 res = self._handle_auth_failure(key, eff, eff_lease, ts)
-                if lease is not None:
-                    lease.done = True
-                return res
-            self._bump_tuple_fail(key, ts, force_open=bool(getattr(eff_lease, "tuple_lease", False)))
-            if getattr(eff_lease, "provider_lease", False):
-                self._open_provider_wide(key[0], ts)
-            self._clear_probe_flags(eff_lease)
-            if lease is not None:
-                lease.done = True
-            return "route_fail"
+            else:
+                self._bump_tuple_fail(key, ts, force_open=bool(getattr(eff_lease, "tuple_lease", False)))
+                if getattr(eff_lease, "provider_lease", False): self._open_provider_wide(key[0], ts)
+                res = "route_fail"
+            if eff.status not in (401, 402, 403): self._clear_probe_flags(eff_lease)
+            if lease is not None: lease.done = True
+            return res
 
     def retry_after_s(self, keys: Iterable[RouteTupleKey], now: float | None = None) -> int:
         """Compute clamped Retry-After >= 1 across blocking routes using max(tuple, provider) open_until."""
