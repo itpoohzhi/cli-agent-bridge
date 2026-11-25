@@ -57,51 +57,69 @@ class CBAttemptGuard:
             self.legacy.record_success(self.candidate, HealthDomain.CREDENTIAL_SCOPE)
             self.probe.succeed(now)
 
-    def record_exception(self, exc: BaseException) -> None:
+    def record_exception(self, exc: BaseException, now: float | None = None) -> None:
         if self.done:
             return
-        self.done = True
         if self.route_cb is not None:
-            self.route_cb.record_failure(self.key, FailureOutcome(error=exc), self.lease)
-        elif self.legacy is not None and self.probe is not None:
-            self.legacy.release_probe(self.probe)
+            try:
+                self.route_cb.record_failure(self.key, FailureOutcome(error=exc), self.lease)
+                self.done = True
+            except BaseException:
+                self.release()
+                raise
+            return
+        if self.legacy is not None:
+            now_err = time.monotonic() if now is None else now
+            try:
+                self.legacy.record_failure(self.candidate, HealthDomain.ROUTE, now_err)
+            finally:
+                self.done = True
+                if self.probe is not None:
+                    self.legacy.release_probe(self.probe)
 
-    def record_error(self, error: BaseException, host: Any, failover: RouteFailover, quota_rules: QuotaRules) -> RouteRefusal | None:
+    def record_error(self, error: BaseException, host: Any, failover: RouteFailover, quota_rules: QuotaRules, now: float | None = None) -> RouteRefusal | None:
         if self.done:
             return None
-        self.done = True
         if self.legacy is not None:
-            return self._record_legacy_error(error, host, failover, quota_rules)
-        recorded, status, detail = None, None, ""
-        if isinstance(error, RouteRefusal):
-            recorded, status = error, error.status_code
-            detail = refusal_detail(error)
-            if status == 429:
+            return self._record_legacy_error(error, host, failover, quota_rules, now=now)
+        try:
+            recorded, status, detail = None, None, ""
+            if isinstance(error, RouteRefusal):
+                recorded, status = error, error.status_code
+                detail = refusal_detail(error)
+                if status == 429:
+                    qdec = classify_429(dict(error.response_headers), error.response_body, quota_rules)
+                    if qdec.is_quota:
+                        recorded = apply_quota_429(error, qdec, host, f"{self.candidate.origin}@{self.candidate.route_id}")
+            if self.route_cb is not None:
+                self.route_cb.record_failure(self.key, FailureOutcome(status=status, error=error, detail=detail), self.lease)
+            self.done = True
+            return recorded
+        except BaseException:
+            self.release()
+            raise
+
+    def _record_legacy_error(self, error: BaseException, host: Any, failover: RouteFailover, quota_rules: QuotaRules, now: float | None = None) -> RouteRefusal | None:
+        now_err = time.monotonic() if now is None else now
+        recorded = error if isinstance(error, RouteRefusal) else None
+        try:
+            action = legacy_failure_action(error, failover)
+            if action == "quota":
                 qdec = classify_429(dict(error.response_headers), error.response_body, quota_rules)
                 if qdec.is_quota:
+                    self.legacy.record_failure(self.candidate, HealthDomain.CREDENTIAL_SCOPE, now_err, cooldown_s=qdec.reset_s, reason=qdec.reason)
                     recorded = apply_quota_429(error, qdec, host, f"{self.candidate.origin}@{self.candidate.route_id}")
-        if self.route_cb is not None:
-            self.route_cb.record_failure(self.key, FailureOutcome(status=status, error=error, detail=detail), self.lease)
-        return recorded
-
-    def _record_legacy_error(self, error: BaseException, host: Any, failover: RouteFailover, quota_rules: QuotaRules) -> RouteRefusal | None:
-        now_err = time.monotonic()
-        recorded = error if isinstance(error, RouteRefusal) else None
-        action = legacy_failure_action(error, failover)
-        if action == "quota":
-            qdec = classify_429(dict(error.response_headers), error.response_body, quota_rules)
-            if qdec.is_quota:
-                self.legacy.record_failure(self.candidate, HealthDomain.CREDENTIAL_SCOPE, now_err, cooldown_s=qdec.reset_s, reason=qdec.reason)
-                recorded = apply_quota_429(error, qdec, host, f"{self.candidate.origin}@{self.candidate.route_id}")
-            else:
+                else:
+                    self.legacy.record_failure(self.candidate, HealthDomain.ROUTE, now_err)
+            elif action == "slot_refusal":
+                self.legacy.record_failure(self.candidate, HealthDomain.CREDENTIAL_SCOPE, now_err, cooldown_s=quota_rules.cooldown_default_s, reason=f"http_{error.status_code}_slot_refusal")
+            elif action == "route":
                 self.legacy.record_failure(self.candidate, HealthDomain.ROUTE, now_err)
-        elif action == "slot_refusal":
-            self.legacy.record_failure(self.candidate, HealthDomain.CREDENTIAL_SCOPE, now_err, cooldown_s=quota_rules.cooldown_default_s, reason=f"http_{error.status_code}_slot_refusal")
-        elif action == "route":
-            self.legacy.record_failure(self.candidate, HealthDomain.ROUTE, now_err)
-        if self.probe is not None:
-            self.legacy.release_probe(self.probe)
-        return recorded
+            return recorded
+        finally:
+            self.done = True
+            if self.probe is not None:
+                self.legacy.release_probe(self.probe)
 
 
 def get_route_cb(runtime: Any, env: Mapping[str, str] | None = None) -> tuple[RouteCB | None, RouteCircuitBreaker | None]:
