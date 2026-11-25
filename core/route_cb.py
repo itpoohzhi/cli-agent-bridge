@@ -55,8 +55,8 @@ class RouteCB:
     def _owns(self, flag: bool, state: _TupleState | _ProviderState | None, lease: RouteProbeLease) -> bool:
         return bool(flag and state and self._probes.get(id(state), (0.0, None))[1] is lease)
 
-    def _active_lease(self, lease: RouteProbeLease | None) -> RouteProbeLease | None:
-        if not lease or lease.done:
+    def _active_lease(self, lease: RouteProbeLease | None, key: RouteTupleKey | None = None) -> RouteProbeLease | None:
+        if not lease or lease.done or (key is not None and lease.key != key):
             return None
         t_ok = self._owns(lease.tuple_lease, self._tuples.get(lease.key), lease)
         p_ok = self._owns(lease.provider_lease, self._providers.get(lease.key[0]), lease)
@@ -86,16 +86,20 @@ class RouteCB:
     def _can_reset(st: _TupleState | _ProviderState, lease: RouteProbeLease | None, eff: RouteProbeLease | None, attr: str) -> bool:
         return st.open_until is None or lease is None or bool(getattr(eff, attr, False))
 
+    @staticmethod
+    def _prune_unproven(p: _ProviderState, key: RouteTupleKey) -> None:
+        p.unproven = deque(((k, ts) for k, ts in p.unproven if k != key), maxlen=_UNPROVEN_DEQUE_MAX)
+
     def record_success(self, key: RouteTupleKey, lease: RouteProbeLease | None = None) -> None:
         """Reset tuple/provider state on success and release any held probe lease."""
         with self._lock:
-            eff_lease = self._active_lease(lease) if (lease and lease.key == key) else None
+            eff_lease = self._active_lease(lease, key)
             if (t := self._tuples.get(key)) and self._can_reset(t, lease, eff_lease, "tuple_lease"):
                 t.failures, t.first_fail_ts, t.open_until, t.probe_in_flight = 0, None, None, False
                 self._probes.pop(id(t), None)
             if p := self._providers.get(key[0]):
                 if p.open_until is None:
-                    p.unproven = deque(((k, ts) for k, ts in p.unproven if k != key), maxlen=_UNPROVEN_DEQUE_MAX)
+                    self._prune_unproven(p, key)
                 elif self._can_reset(p, lease, eff_lease, "provider_lease"):
                     p.open_until, p.probe_in_flight = None, False
                     p.unproven.clear()
