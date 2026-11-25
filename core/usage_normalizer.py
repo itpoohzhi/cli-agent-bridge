@@ -19,11 +19,15 @@ class _Omitted:
 OMITTED: object = _Omitted()
 
 
+def _is_positive_counter(value: object) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0
+
+
 def resolve_usage_presence(*, explicit: bool | None, supplied_values: Sequence[object]) -> bool:
-    """Явный флаг доминирует; иначе usage передан, если есть хоть одно не-OMITTED значение."""
-    if explicit is not None:
-        return bool(explicit)
-    return any(not isinstance(value, _Omitted) for value in supplied_values)
+    """Явный False доминирует; иначе usage передан только при наличии положительного счётчика."""
+    if explicit is False:
+        return False
+    return any(not isinstance(value, _Omitted) and _is_positive_counter(value) for value in supplied_values)
 
 
 @dataclass(frozen=True, init=False)

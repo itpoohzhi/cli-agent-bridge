@@ -218,8 +218,8 @@ def test_passthrough_json_usage_and_missing_usage():
 
 
 @pytest.mark.parametrize(("tail", "expected"), [
-    (b'"usage": null, "usage": {"prompt_tokens": 1, "completion_tokens": 2}', {"input_tokens": 1, "output_tokens": 2}),
-    (b'{"usage":{"input_tokens":7}} {"usage":{"output_tokens":9}}', {"input_tokens": 7, "output_tokens": 9}),
+    (b'"usage": null, "usage": {"prompt_tokens": 1, "completion_tokens": 2}', {"input_tokens": 1, "output_tokens": 2, "usage_source": "upstream_report"}),
+    (b'{"usage":{"input_tokens":7}} {"usage":{"output_tokens":9}}', {"input_tokens": 7, "output_tokens": 9, "usage_source": "upstream_report"}),
     (b'"usage": {"prompt_tokens": 1, "compl', None),
     (b"no usage here", None),
     (b'"usage": [1, 2]', None),

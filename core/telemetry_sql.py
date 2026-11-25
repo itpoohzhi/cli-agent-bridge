@@ -19,11 +19,17 @@ SCHEMA = (
     "route_mode VARCHAR, outbound_target VARCHAR, egress_proxy VARCHAR, stream BOOLEAN, "
     "status_code INTEGER, error_type VARCHAR, queue_ms DOUBLE, ttfb_ms DOUBLE, total_ms DOUBLE, "
     "stream_chunks INTEGER, prompt_tokens INTEGER, completion_tokens INTEGER, cached_tokens INTEGER, "
-    "total_tokens INTEGER, response_bytes BIGINT, reasoning_tokens INTEGER, usage_present BOOLEAN"
+    "total_tokens INTEGER, response_bytes BIGINT, reasoning_tokens INTEGER, usage_present BOOLEAN, "
+    "usage_source VARCHAR, usage_missing_reason VARCHAR"
 )
 COLUMNS: tuple[tuple[str, str], ...] = tuple((n, t) for n, t in (part.split() for part in SCHEMA.split(", ")))
 NAMES = tuple(name for name, _ in COLUMNS)
-MIGRATION_COLUMNS: tuple[tuple[str, str], ...] = (("reasoning_tokens", "INTEGER"), ("usage_present", "BOOLEAN"))
+MIGRATION_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("reasoning_tokens", "INTEGER"),
+    ("usage_present", "BOOLEAN"),
+    ("usage_source", "TEXT"),
+    ("usage_missing_reason", "TEXT"),
+)
 _OK = "(status_code >= 200 AND status_code < 400)"
 _Q = "quantile_cont({}, {})"
 _E = {  # SQL-выражения агрегатов; одни и те же для duckdb и sqlite3
@@ -190,6 +196,8 @@ def make_row(event: Mapping[str, Any], max_len: int | None = None, scan_len: int
     vals["auth_mode"] = first_truthy(vals["auth_mode"], "none")
     present = vals["usage_present"]
     vals["usage_present"] = None if present is None else bool(present)
+    vals["usage_source"] = first_truthy(vals["usage_source"], None)
+    vals["usage_missing_reason"] = first_truthy(vals["usage_missing_reason"], None)
     return tuple(_coerce(typ, vals[name]) for name, typ in COLUMNS)
 
 

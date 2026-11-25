@@ -11,6 +11,7 @@ import functools
 import json
 import math
 import os
+import re
 import sys
 import time
 from collections.abc import Mapping
@@ -24,7 +25,15 @@ from core.usage_fields import finalize_event_usage, telemetry_usage_updates
 
 _USAGE_KEYS = {"prompt_tokens": "input_tokens", "completion_tokens": "output_tokens", "cached_tokens": "cache_read_tokens"}
 _MODEL_PLACEHOLDERS = {"unknown": None}
+_ROLE_RE = re.compile(r"^[a-z0-9-]{1,64}$")
 
+def _resolve_subagent_role(header_role: Any, field_role: Any, sid: Any) -> str | None:
+    """Нормализация роли: header -> field -> префикс subagent_id; только ^[a-z0-9-]{1,64}$."""
+    sid_prefix = sid.strip().split("-", 1)[0] if isinstance(sid, str) and sid.strip() else None
+    for raw in (header_role, field_role, sid_prefix):
+        if isinstance(raw, str) and _ROLE_RE.fullmatch(norm := raw.strip().lower()):
+            return norm
+    return None
 
 def _pair(value: Any) -> tuple[str, str] | None:
     """Пара (outbound_target, egress_proxy) из JSON-значения; None — значение парой не является."""
@@ -33,7 +42,6 @@ def _pair(value: Any) -> tuple[str, str] | None:
     except (TypeError, KeyError, IndexError):
         return None
     return str(head), str(tail)
-
 
 @functools.lru_cache(maxsize=8)
 def _parse_backend_topology(raw: str) -> dict[str, tuple[str, str]]:
@@ -46,17 +54,14 @@ def _parse_backend_topology(raw: str) -> dict[str, tuple[str, str]]:
     pairs = ((str(key), _pair(value)) for key, value in items)
     return {key: pair for key, pair in pairs if pair}
 
-
 def known_model(model: str) -> str | None:
     """Модель для телеметрии; плейсхолдер «unknown» не записывается."""
     return _MODEL_PLACEHOLDERS.get(model, model)
-
 
 def http_error_type(status: int) -> str | None:
     """Тип ошибки для ответов 4xx/5xx; None — успешный статус."""
     label = f"http_{status}" if status >= 400 else None
     return label
-
 
 def telemetry_note(handler: Any, nbytes: int | str = 0, chunk: bool = False, first_byte: bool = False) -> None:
     """Проброс учёта байт из ResponseSink в миксин обработчика (нет миксина — no-op)."""
@@ -64,36 +69,29 @@ def telemetry_note(handler: Any, nbytes: int | str = 0, chunk: bool = False, fir
     if callable(note):
         note(nbytes, chunk=chunk, first_byte=first_byte)
 
-
 def telemetry_tail(handler: Any, data: bytes) -> None:
     """Проброс байт ответа passthrough в миксин: хвост нужен для usage (нет миксина — no-op)."""
     tail = getattr(handler, "_telemetry_tail", None)
     if callable(tail):
         tail(data)
 
-
 def telemetry_usage(handler: Any, usage: Any) -> None:
     """Проброс usage passthrough в миксин обработчика."""
     if usage is not None and callable(hook := getattr(handler, "_telemetry_usage", None)):
         hook(usage)
 
-
 def _always_on() -> bool:
     return True
 
-
 def resolve_backend_topology(backends: Any, backend_id: str, route_mode: str) -> tuple[str, str]:
     """backend_id -> (outbound_target, egress_proxy) для телеметрии; карта настраивается через env."""
-    topology = {
-        **D.BRIDGE_TELEMETRY_BACKEND_TOPOLOGY,
-        **_parse_backend_topology(os.environ.get("BRIDGE_TELEMETRY_BACKEND_TOPOLOGY_JSON", "")),
-    }
+    env_topo = _parse_backend_topology(os.environ.get("BRIDGE_TELEMETRY_BACKEND_TOPOLOGY_JSON", ""))
+    topology = {**D.BRIDGE_TELEMETRY_BACKEND_TOPOLOGY, **env_topo}
     known = topology.get(backend_id)
     if known:
         return str(known[0]), str(known[1])
     port = getattr(backends.get(backend_id), "_port", None) if route_mode == "passthrough" else None
     return (f":{port}" if port else f"cli:{backend_id}"), "direct"
-
 
 def _query_number(qs: dict[str, list[str]], key: str, default: Any, cast: type) -> Any:
     """Числовой параметр запроса: последнее значение; нечисловое, nan/inf и неположительное -> default."""
@@ -103,12 +101,10 @@ def _query_number(qs: dict[str, list[str]], key: str, default: Any, cast: type) 
         return default
     return value if all((math.isfinite(value), value > 0)) else default
 
-
 def _auth_mode(auth: str) -> str:
     """Режим авторизации запроса для телеметрии: bearer/other/none."""
     mode = "bearer" if auth.lower().startswith("bearer ") else ("other" if auth else "none")
     return mode
-
 
 class TelemetryHooksMixin:
     """Учёт одного запроса: старт, байты/TTFB/чанки, одна идемпотентная запись в стор."""
@@ -184,12 +180,21 @@ class TelemetryHooksMixin:
 
     def _telemetry_meta_request(self, req: Mapping[str, Any]) -> None:
         """Метаданные из тела запроса: режим потока и модель (только строковая)."""
-        model = req.get("model")
-        self._telemetry_meta(stream=bool(req.get("stream")), model=model if isinstance(model, str) else None)
+        model, role = req.get("model"), req.get("subagent_role")
+        self._telemetry_meta(
+            stream=bool(req.get("stream")),
+            model=model if isinstance(model, str) else None,
+            subagent_role=role if isinstance(role, str) else None,
+        )
 
     def _telemetry_usage(self, usage: dict[str, Any] | None) -> None:
         """Токены из usage-блока ответа бэкенда (input/output/cache_read/reasoning/usage_present)."""
-        self._telemetry_meta(**telemetry_usage_updates(usage))
+        updates = telemetry_usage_updates(usage)
+        if not updates.get("usage_present") and (self._req_meta or {}).get("usage_present") is True:
+            return
+        if updates.get("usage_present") and isinstance(self._req_meta, dict):
+            self._req_meta.pop("usage_missing_reason", None)
+        self._telemetry_meta(**updates)
 
     def _telemetry_queue_start(self, backend_id: str) -> float:
         self._telemetry_meta(backend_id=backend_id)
@@ -242,25 +247,19 @@ class TelemetryHooksMixin:
         auth = as_str(header_value(headers, "Authorization"))
         usage = finalize_event_usage(meta)
         trace = getattr(self, "_trace", None)
+        sid = self._subagent_id()
+        header_role = header_value(headers, srv._bridge_env("SUBAGENT_ROLE_HEADER", "X-Subagent-Role"))
+        role = _resolve_subagent_role(header_role, meta.get("subagent_role"), sid)
         return {
             "request_id": trace.request_id if trace else None,
-            "client_ip": address[0],
-            "client_port": address[1],
+            "client_ip": address[0], "client_port": address[1],
             "user_agent": header_value(headers, "User-Agent"),
-            "subagent_id": self._subagent_id(),
-            "subagent_role": header_value(headers, srv._bridge_env("SUBAGENT_ROLE_HEADER", "X-Subagent-Role")),
-            "auth_mode": _auth_mode(auth),
-            "http_method": self.command,
-            "outbound_target": target,
-            "egress_proxy": egress,
-            "queue_ms": self._req_queue_ms,
-            "ttfb_ms": self._req_ttfb_ms,
+            "subagent_id": sid, "auth_mode": _auth_mode(auth),
+            "http_method": self.command, "outbound_target": target, "egress_proxy": egress,
+            "queue_ms": self._req_queue_ms, "ttfb_ms": self._req_ttfb_ms,
             "total_ms": (time.monotonic() - first_truthy(self._req_started_mono, default=0.0)) * 1000.0,
-            "stream_chunks": self._req_stream_chunks,
-            "response_bytes": self._req_bytes,
-            **meta,
-            **usage,
-            "status_code": status,
+            "stream_chunks": self._req_stream_chunks, "response_bytes": self._req_bytes,
+            **meta, **usage, "subagent_role": role, "status_code": status,
         }
 
     def _record_telemetry(self, client_gone: bool = False, **fields: Any) -> None:
@@ -288,13 +287,7 @@ class TelemetryHooksMixin:
         if self._req_tracking:
             srv.REQUEST_TELEMETRY.record_request(self._telemetry_event(meta, status))
 
-
 __all__ = [
-    "TelemetryHooksMixin",
-    "http_error_type",
-    "known_model",
-    "resolve_backend_topology",
-    "telemetry_note",
-    "telemetry_tail",
-    "telemetry_usage",
+    "TelemetryHooksMixin", "http_error_type", "known_model",
+    "resolve_backend_topology", "telemetry_note", "telemetry_tail", "telemetry_usage",
 ]

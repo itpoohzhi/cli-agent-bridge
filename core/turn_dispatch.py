@@ -187,8 +187,9 @@ def _format_turn_output(result: Any, backend_kind: str) -> dict[str, Any]:
         out["turn_usage"] = turn_usage
     else:
         u = out["usage"]
-        present = getattr(result.usage, "usage_present", None)
-        u["usage_present"] = present if isinstance(present, bool) else any((bool(u.get("input_tokens")), bool(u.get("output_tokens")), u.get("cache_read_tokens") is not None, u.get("cache_creation_tokens") is not None))
+        if isinstance((present := getattr(result.usage, "usage_present", None)), bool):
+            u["usage_present"] = present
+        out["usage"] = enrich_turn_usage_dict(u, None)
     return out
 
 

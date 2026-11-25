@@ -86,7 +86,6 @@ def test_resolve_usage_log_source_value(
 def test_parse_ts_epoch(value: object, expected: float | None) -> None:
     assert parse_ts_epoch(value) == expected
 
-
 @pytest.mark.parametrize(
     ("record", "expected"),
     [
@@ -164,12 +163,13 @@ def test_normalize_usage_record_aliases_http_and_iso_priority() -> None:
 @pytest.mark.parametrize(
     ("explicit", "values", "expected"),
     [
-        (True, (OMITTED,), True),
+        (True, (OMITTED,), False),
         (False, (1, 2), False),
         (None, (), False),
         (None, (OMITTED, OMITTED), False),
-        (None, (0, OMITTED), True),
-        (None, (False,), True),
+        (None, (0, OMITTED), False),
+        (None, (False,), False),
+        (None, (1, OMITTED), True),
     ],
 )
 def test_resolve_usage_presence(
@@ -180,10 +180,10 @@ def test_resolve_usage_presence(
 
 def test_usage_presence_matrix() -> None:
     assert Usage().usage_present is False
-    assert Usage(0, 0).usage_present is True
+    assert Usage(0, 0).usage_present is False
     assert Usage(10, 20).usage_present is True
     assert Usage(0, 0, usage_present=False).usage_present is False
-    assert Usage(usage_present=True).usage_present is True
+    assert Usage(usage_present=True).usage_present is False
 
 
 def test_usage_defaults_and_asdict() -> None:
