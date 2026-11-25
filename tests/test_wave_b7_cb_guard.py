@@ -55,6 +55,8 @@ def test_b7_guard_new_error_and_legacy_paths() -> None:
     from core.route_cb_guard import CBAttemptGuard
     CBAttemptGuard(cand, k, legacy=leg, probe=None).succeed(201.0)
     CBAttemptGuard(cand, k, legacy=leg, probe=None).record_exception(TimeoutError("x"))
+    CBAttemptGuard(cand, k, legacy=SimpleNamespace(release_probe=lambda _p: 1 / 0), probe=None).release()
+    CBAttemptGuard(cand, k, legacy=None, probe=SimpleNamespace()).release()
     gl_exc = acquire_cb_guard((None, leg), cand, k, 202.0)
     gl_exc.record_exception(TimeoutError("x"))
     gl_err = acquire_cb_guard((None, leg), cand, k, 203.0)
