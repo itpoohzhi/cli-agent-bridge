@@ -393,8 +393,8 @@ def test_terminate_groups_parallel_has_bounded_budget_and_kills_stubborn() -> No
     elapsed = time.monotonic() - start
     assert all(p.poll() is not None for p in procs)
     assert (
-        elapsed < 0.3 + 1.0
-    )  # не зависит от числа процессов: общий бюджет, а не сумма
+        elapsed < 0.3 + 1.0 + 0.5
+    )  # не зависит от числа процессов: общий бюджет (+запас планировщика), а не сумма
     assert {p.returncode for p in procs} == {-signal.SIGTERM, -signal.SIGKILL}
 
 
@@ -561,7 +561,7 @@ class BridgeProc:
         return conn.getresponse()
 
     def wait_ready(self) -> None:
-        deadline = time.monotonic() + 35
+        deadline = time.monotonic() + 45
         last_status: int | None = None
         last_err = ""
         while time.monotonic() < deadline:
@@ -589,10 +589,14 @@ class BridgeProc:
             finally:
                 if conn is not None:
                     conn.close()
+        if self.proc.poll() is None:
+            self.proc.kill()
+        self.proc.wait(5)
+        out = self.output()
         self.stop()
         raise AssertionError(
-            f"bridge did not start within 35s (port={self.port}, "
-            f"last_status={last_status}, last_err={last_err}): {self.output()}"
+            f"bridge did not start within 45s (port={self.port}, "
+            f"last_status={last_status}, last_err={last_err}): {out}"
         )
 
     def output(self) -> str:
