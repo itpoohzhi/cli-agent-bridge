@@ -8,7 +8,7 @@ import re
 from collections.abc import Callable
 from typing import Final, cast
 
-from core.tool_trailing_quote_repair import has_single_trailing_quote_suffix, strip_single_trailing_quote
+from core.tool_trailing_semicolon_repair import has_single_trailing_quote_suffix, has_single_trailing_suffix, strip_single_trailing_suffix
 DEFAULT_MAX_QUOTE_CANDIDATES: Final[int] = 128
 DEFAULT_MAX_VERIFY_CHARS: Final[int] = 65536
 DEFAULT_MAX_NESTING_DEPTH: Final[int] = 32
@@ -218,8 +218,8 @@ def repair_json_quotes_strict(
     allowed_arg_keys: frozenset[str] | None = None,
     required_arg_keys: frozenset[str] | None = None,
 ) -> str | None:
-    if has_single_trailing_quote_suffix(raw_text):
-        return strip_single_trailing_quote(raw_text)
+    if has_single_trailing_suffix(raw_text):
+        return strip_single_trailing_suffix(raw_text)
     return repair_unescaped_json_quotes(
         escaped_text, allowed_arg_keys=allowed_arg_keys, required_arg_keys=required_arg_keys
     )

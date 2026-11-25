@@ -233,6 +233,33 @@ def _check_incident_4_agy_timeout_338s() -> dict[str, bool]:
     }
 
 
+def _check_incident_5_resumed_and_semicolon(chunk_chars: int) -> dict[str, bool]:
+    from core.resumed_tools_policy import build_compact_tools_reminder
+    from core.tool_emulation import LiveParserError
+
+    def _call(name: str, args: str, tail: str = "") -> str:
+        return _OPEN_TAG + '{"name":"' + name + '","arguments":' + args + "}" + tail + _CLOSE_TAG
+
+    bash = _call("bash", '{"command":"ls"}')
+    reminder = build_compact_tools_reminder(["bash", "read"])
+    echo = _parse_with_repair(bash + "\n" + reminder, chunk_chars)
+    read_semi = _call("read", '{"path":"c"}', ";")
+    semi = _parse_with_repair(bash + bash + read_semi, chunk_chars)
+    try:
+        _parse_with_repair(_call("read", '{"path":"c"}', ";;"), chunk_chars)
+        double_closed = False
+    except LiveParserError:
+        double_closed = True
+    return {
+        "incident_5_resumed_reminder_echo_safe": (
+            not any(t in reminder for t in (_OPEN_TAG, _CLOSE_TAG, "<json>"))
+            and len(echo.tool_calls) == 1
+        ),
+        "incident_5_single_semicolon_recovered": len(semi.tool_calls) == 3,
+        "incident_5_double_semicolon_fail_closed": double_closed,
+    }
+
+
 def run_wave_tools_incidents(bridge_fn: Callable[[], Any], chunk_chars: int) -> dict[str, bool]:
     """Полный набор проверок wave_4_tools (legacy + инциденты #1/#2/#3)."""
     _ = bridge_fn()
@@ -241,4 +268,5 @@ def run_wave_tools_incidents(bridge_fn: Callable[[], Any], chunk_chars: int) -> 
     checks.update(_check_incident_2(chunk_chars))
     checks.update(_check_incident_3(chunk_chars))
     checks.update(_check_incident_4_agy_timeout_338s())
+    checks.update(_check_incident_5_resumed_and_semicolon(chunk_chars))
     return checks

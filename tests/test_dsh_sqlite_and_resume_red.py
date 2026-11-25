@@ -15,6 +15,10 @@ for _path in (str(AGY_BRIDGE), str(ROOT)):
     if _path not in sys.path:
         sys.path.insert(0, _path)
 
+from core.prompt_rendering import (  # noqa: E402
+    _TOOL_CALL_MARKER_RE,  # pyright: ignore[reportPrivateUsage]
+    TOOL_CALL_FORMAT_LINE,
+)
 from core.resumed_tools_policy import (  # noqa: E402
     build_compact_tools_reminder,
     compute_tools_fingerprint,
@@ -105,7 +109,9 @@ def test_resumed_tools_reminder_is_much_smaller_than_full_schemas() -> None:
     )
     assert len(reminder.encode()) < len(full_schemas.encode()) // 5
     assert '"parameters"' not in reminder
-    assert "<tool_call>" in reminder and "required" in reminder
+    assert TOOL_CALL_FORMAT_LINE in reminder and "required" in reminder
+    assert _TOOL_CALL_MARKER_RE.search(reminder) is None
+    assert "<json>" not in reminder
 
 
 def test_resumed_tools_wrapper_honors_choice_and_escapes_names() -> None:
