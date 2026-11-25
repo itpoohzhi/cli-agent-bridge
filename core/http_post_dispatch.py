@@ -10,6 +10,7 @@ from core import passthrough_effort_map as _pem
 from core.http_post_context import PostRequestContext
 from core.http_post_ingress import begin_post, read_post_request
 from core.http_post_routing import PostRoute, PreparedPostBody, log_route, native_autonomy, native_effort, prepare_post_body, prepare_route_request, resolve_post_route, selected_route_allowed
+from core.resident_identity import turn_ids_and_resident_ctx
 
 _NATIVE_SCRATCH = frozenset({"requested_turn_id", "resume_turn_id", "messages", "raw_key", "keyed"})
 
@@ -86,21 +87,6 @@ def _native_backend(route: PostRoute) -> Any:
     return adapter
 
 
-def _turn_ids(route: PostRoute, ctx: dict[str, Any], extra: dict[str, Any]) -> bool:
-    handler, host = route.handler, route.host
-    ctx["requested_turn_id"] = (
-        handler.headers.get("X-Turn-Id") or str(extra.get("turn_id") or "")
-    ).strip()
-    ctx["resume_turn_id"] = (
-        handler.headers.get("X-Resume-Turn-Id") or str(extra.get("resume_turn_id") or "")
-    ).strip()
-    for candidate in (ctx["requested_turn_id"], ctx["resume_turn_id"]):
-        if candidate and not host.validate_turn_id(candidate):
-            route.reject(400, "invalid_request", "invalid turn_id")
-            return False
-    return True
-
-
 def _native_inputs(route: PostRoute, ctx: dict[str, Any]) -> Any:
     handler, host = route.handler, route.host
     gated = handler._context_gate(route.request, route.model_id, route.model, route.model_len)
@@ -119,7 +105,8 @@ def _native_inputs(route: PostRoute, ctx: dict[str, Any]) -> Any:
     extra = extra if isinstance(extra, dict) else {}
     ctx["cwd"] = str(extra.get("cwd") or "")
     ctx["fwd_env"] = handler._forwarded_env(extra, route.model_id, route.model_len)
-    return adapter if ctx["fwd_env"] is not False and _turn_ids(route, ctx, extra) else None
+    valid = turn_ids_and_resident_ctx(route, ctx, extra, adapter=adapter)
+    return adapter if ctx["fwd_env"] is not False and valid else None
 
 
 def _native_tools(route: PostRoute, ctx: dict[str, Any]) -> list[dict[str, Any]]:

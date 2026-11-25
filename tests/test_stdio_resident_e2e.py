@@ -12,8 +12,11 @@ from typing import Any, cast, override
 import pytest
 
 from adapters.stdio_resident_adapter import StdioResidentAdapter
+from core.backend_routing_models import Transcript, TranscriptItem
+from core.resident_history import build_assistant_transcript_item
 from core.stdio_resident.process_io import ResidentProcessHandle
 from core.stdio_resident.protocol_driver import DecodedChunk, StreamJsonDriver
+from core.stdio_resident.resident_runtime import ResidentBridgeRuntime
 from core.stdio_resident.session_manager import StdioSessionManager
 from core.stdio_resident.types import SlotAffinityKey
 
@@ -43,15 +46,19 @@ def _config(*, delay_s: float = 0.0) -> dict[str, Any]:
     }
 
 
-def _request(cwd: Path, chat_key: str, prompt: str) -> dict[str, Any]:
-    return {
+def _request(cwd: Path, chat_key: str, prompt: str, rpc: Any = None) -> dict[str, Any]:
+    req: dict[str, Any] = {
         "owner_hash": "e2e-owner",
         "chat_key": chat_key,
+        "chat_id": chat_key,
         "model": "fake-model",
         "effort": "medium",
         "cwd": str(cwd),
         "prompt": prompt,
     }
+    if rpc is not None:
+        req["rpc"] = rpc
+    return req
 
 
 def _content(chunks: list[dict[str, Any]]) -> str:
@@ -74,21 +81,40 @@ def resident_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("BRIDGE_STDIO_CANCEL_GRACE_S", str(CANCEL_GRACE_S))
 
 
+def _tx(*items: TranscriptItem) -> Transcript:
+    return Transcript(items=items, runnable=True)
+
+
+def _u(text: str) -> TranscriptItem:
+    import hashlib
+
+    digest = hashlib.sha256(f"[user]\n{text}".encode("utf-8")).hexdigest()
+    return TranscriptItem("user", text, digest)
+
+
 def test_cold_start_then_hot_turn_reuses_pid_and_has_fast_ttft(
     resident_env: None,
     tmp_path: Path,
 ) -> None:
     adapter = StdioResidentAdapter(_config())
     try:
+        u1 = _u("first turn")
         first_chunks = list(
-            adapter.execute_chat(_request(tmp_path, "chat-hot", "first turn"))
+            adapter.execute_chat(
+                _request(tmp_path, "chat-hot", "first turn", rpc=_tx(u1)),
+                trusted_owner_hash="e2e-owner",
+            )
         )
         first_handle = _only_handle(adapter)
         first_pid = first_handle.pid
 
+        a1 = build_assistant_transcript_item(_content(first_chunks))
+        assert a1 is not None
+        u2 = _u("second turn")
         started_at = time.monotonic()
         second_stream = adapter.execute_chat(
-            _request(tmp_path, "chat-hot", "second turn")
+            _request(tmp_path, "chat-hot", "second turn", rpc=_tx(u1, a1, u2)),
+            trusted_owner_hash="e2e-owner",
         )
         first_hot_chunk = next(second_stream)
         hot_ttft_s = time.monotonic() - started_at
@@ -106,98 +132,66 @@ def test_cold_start_then_hot_turn_reuses_pid_and_has_fast_ttft(
         adapter.shutdown(timeout_s=1.0)
 
 
+def _start_cancelled_turn(adapter: StdioResidentAdapter, tmp_path: Path, cancel_event: threading.Event) -> int:
+    cwd = os.path.realpath(tmp_path)
+    key = SlotAffinityKey(owner_hash="e2e-owner", chat_key="chat-cancel", backend_id=adapter.id, model="fake-model", effort="medium", cwd_norm=cwd, env_digest="")
+    stream = adapter._session_manager.execute_turn_stream(affinity_key=key, prompt="cancelled history", argv_builder=adapter._build_argv, cwd=cwd, cancel_event=cancel_event)
+    first_chunk = next(stream)
+    handle = _only_handle(adapter)
+    assert first_chunk.text == "echo: "
+    cancel_event.set()
+    assert list(stream) == []
+    assert not handle.is_alive() and not adapter._pool._slots
+    return handle.pid
+
+
 def test_client_cancellation_uses_grace_and_next_turn_starts_clean_process(
-    resident_env: None,
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
+    resident_env: None, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
     observed_graces: list[float] = []
     original_terminate = ResidentProcessHandle.terminate_gracefully
 
-    def record_terminate(
-        self: ResidentProcessHandle,
-        grace_s: float,
-        timeout_s: float = 2.0,
-    ) -> int:
+    def record_terminate(self: ResidentProcessHandle, grace_s: float, timeout_s: float = 2.0) -> int:
         observed_graces.append(grace_s)
         return original_terminate(self, grace_s, timeout_s)
 
-    monkeypatch.setattr(
-        ResidentProcessHandle,
-        "terminate_gracefully",
-        record_terminate,
-    )
+    monkeypatch.setattr(ResidentProcessHandle, "terminate_gracefully", record_terminate)
     adapter = StdioResidentAdapter(_config(delay_s=0.05))
-    cancel_event = threading.Event()
-    cwd = os.path.realpath(tmp_path)
-    affinity_key = SlotAffinityKey(
-        owner_hash="e2e-owner",
-        chat_key="chat-cancel",
-        backend_id=adapter.id,
-        model="fake-model",
-        effort="medium",
-        cwd_norm=cwd,
-    )
     try:
-        cancelled_stream = adapter._session_manager.execute_turn_stream(
-            affinity_key=affinity_key,
-            prompt="cancelled history",
-            argv_builder=adapter._build_argv,
-            cwd=cwd,
-            cancel_event=cancel_event,
-        )
-        first_chunk = next(cancelled_stream)
-        cancelled_handle = _only_handle(adapter)
-        cancelled_pid = cancelled_handle.pid
-        assert first_chunk.text == "echo: "
-
-        cancel_event.set()
-        assert list(cancelled_stream) == []
+        cancelled_pid = _start_cancelled_turn(adapter, tmp_path, threading.Event())
         assert observed_graces == [CANCEL_GRACE_S]
-        assert not cancelled_handle.is_alive()
-        assert not adapter._pool._slots
-
-        fresh_chunks = list(
-            adapter.execute_chat(_request(tmp_path, "chat-cancel", "fresh turn"))
-        )
-        fresh_handle = _only_handle(adapter)
-        assert fresh_handle.pid != cancelled_pid
+        fresh_chunks = list(adapter.execute_chat(_request(tmp_path, "chat-cancel", "fresh turn"), trusted_owner_hash="e2e-owner"))
+        assert _only_handle(adapter).pid != cancelled_pid
         assert _content(fresh_chunks) == "echo: fresh turn"
         assert "cancelled history" not in _content(fresh_chunks)
     finally:
         adapter.shutdown(timeout_s=1.0)
 
 
+def _slot_pids(adapter: StdioResidentAdapter) -> set[int]:
+    slots = cast(dict[str, Any], adapter._pool._slots)
+    return {entry.handle.pid for entry in slots.values()}
+
+
 def test_chat_keys_are_isolated_while_each_chat_keeps_its_pid(
-    resident_env: None,
-    tmp_path: Path,
+    resident_env: None, tmp_path: Path,
 ) -> None:
     adapter = StdioResidentAdapter(_config())
     try:
-        chat_a_first = list(adapter.execute_chat(_request(tmp_path, "chat-a", "a1")))
-        slots = cast(dict[str, Any], adapter._pool._slots)
-        pid_a = next(iter(slots.values())).handle.pid
-
-        chat_b = list(adapter.execute_chat(_request(tmp_path, "chat-b", "b1")))
-        pids_after_b = {
-            entry.affinity_key.chat_key: entry.handle.pid
-            for entry in slots.values()
-        }
-        chat_a_second = list(
-            adapter.execute_chat(_request(tmp_path, "chat-a", "a2"))
-        )
-        pids_final = {
-            entry.affinity_key.chat_key: entry.handle.pid
-            for entry in slots.values()
-        }
-
-        assert pids_after_b["chat-a"] == pid_a
-        assert pids_after_b["chat-b"] != pid_a
-        assert pids_final == pids_after_b
-        assert _content(chat_a_first) == "echo: a1"
-        assert _content(chat_b) == "echo: b1"
-        assert _content(chat_a_second).endswith("a2")
-        assert "b1" not in _content(chat_a_second)
+        ua1 = _u("a1")
+        a1 = list(adapter.execute_chat(_request(tmp_path, "chat-a", "a1", rpc=_tx(ua1)), trusted_owner_hash="e2e-owner"))
+        pids_a = _slot_pids(adapter)
+        assert len(pids_a) == 1
+        ub1 = _u("b1")
+        b1 = list(adapter.execute_chat(_request(tmp_path, "chat-b", "b1", rpc=_tx(ub1)), trusted_owner_hash="e2e-owner"))
+        pids_ab = _slot_pids(adapter)
+        assert len(pids_ab) == 2 and pids_a.issubset(pids_ab)
+        aa1 = build_assistant_transcript_item(_content(a1))
+        assert aa1 is not None
+        a2 = list(adapter.execute_chat(_request(tmp_path, "chat-a", "a2", rpc=_tx(ua1, aa1, _u("a2"))), trusted_owner_hash="e2e-owner"))
+        assert _slot_pids(adapter) == pids_ab
+        assert _content(a1) == "echo: a1" and _content(b1) == "echo: b1"
+        assert _content(a2).endswith("a2") and "b1" not in _content(a2)
     finally:
         adapter.shutdown(timeout_s=1.0)
 
@@ -239,6 +233,7 @@ def _install_driver(
     driver: StreamJsonDriver,
 ) -> None:
     adapter._driver = driver
+    adapter._runtime = ResidentBridgeRuntime(adapter._pool, driver, adapter._config)
     adapter._session_manager = StdioSessionManager(adapter._pool, driver)
 
 

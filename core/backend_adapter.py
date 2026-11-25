@@ -106,31 +106,16 @@ class Capabilities:
     usage: str = "estimated"
 
 
-@dataclass(frozen=True)
-class TranscriptItem:
-    """Один вход истории для неизменённого Droid-пути."""
-
-    role: str
-    text: str
-    digest: str
-
-
-@dataclass(frozen=True)
-class Transcript:
-    """Нормализованная история хода."""
-
-    system: str | None = None
-    runnable: bool = True
-    items: tuple[TranscriptItem, ...] = ()
-
-
-@dataclass(frozen=True)
-class ImageAttachment:
-    """Проверенное вложение хода."""
-
-    name: str
-    mime: str
-    data: bytes
+from core.backend_routing_models import (  # noqa: E402
+    ImageAttachment as ImageAttachment,
+    ToolCall as ToolCall,
+    ToolFunction as ToolFunction,
+    Transcript as Transcript,
+    TranscriptItem as TranscriptItem,
+    TurnEvent as TurnEvent,
+    TurnResult as TurnResult,
+    Usage as Usage,
+)
 
 
 @dataclass(frozen=True)
@@ -167,60 +152,15 @@ class TurnContext:
     managed_turn: Any = None
     detach_on_disconnect: bool = False
     cancel_event: Any = None
+    resident_identity: Any = None
+    owner_hash: str = ""
+    conversation_id: str = ""
+    conversation_ephemeral: bool = True
+    cache_key: str = ""
     # Проброшенное окружение extra_body.env (ADR-0016): уже санитизировано мостом; адаптеры без
     # поддержки поле игнорируют; repr скрыт, чтобы секреты не попадали в логи/трейсы.
     fwd_env: dict[str, str] | None = field(default=None, repr=False)
     target_model: str = ""
-
-
-@dataclass(frozen=True)
-class Usage:
-    """Токены готового ответа."""
-
-    input_tokens: int = 0
-    output_tokens: int = 0
-    cache_read_tokens: int | None = None
-    cache_creation_tokens: int | None = None
-
-
-@dataclass(frozen=True)
-class ToolFunction:
-    """Сериализованные аргументы вызова OpenAI function."""
-
-    name: str
-    arguments: str
-
-
-@dataclass(frozen=True)
-class ToolCall:
-    """Вызов инструмента в готовом ответе."""
-
-    index: int
-    id: str
-    function: ToolFunction
-    type: str = "function"
-
-
-@dataclass(frozen=True)
-class TurnEvent:
-    """Событие доставки: текст или типизированный вызов."""
-
-    kind: str
-    value: str | ToolCall
-
-
-@dataclass(frozen=True)
-class TurnResult:
-    """Итог адаптера; None events означает необходимость фасадного разбора текста."""
-
-    state: str = "done"
-    rc: int = 0
-    text: str = ""
-    reasoning: str = ""
-    usage: Usage = field(default_factory=Usage)
-    err: str = ""
-    events: tuple[TurnEvent, ...] | None = None
-    tool_calls: tuple[ToolCall, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -799,6 +739,11 @@ class BackendNotSupported(BackendError):
 
 
 class BackendAdapter(ABC):
+    uses_resident_identity: bool = False
+
+    def resident_identity_config(self) -> tuple[bytes, str, bool] | None:
+        return None
+
     """Интерфейс адаптера одного консольного бинарника.
 
     `config` — запись `backends[<id>]` каталога; `catalog_source` — вызываемый объект,

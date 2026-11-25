@@ -117,25 +117,21 @@ def test_build_argv_adds_stream_json_model_conversation_without_dupes() -> None:
     base = ["agy.real"]
     argv = driver.build_argv(base, {"model": "gemini-x", "conversation_id": "cid-1"})
     assert base == ["agy.real"]
-    expected = [
-        "agy.real", "--input-format", "stream-json", "--output-format", "stream-json",
-        "--print-timeout", "0", "--model", "gemini-x", "--conversation", "cid-1",
-    ]
+    expected = ["agy.real", "--input-format", "stream-json", "--output-format", "stream-json", "--print-timeout", "30", "--model", "gemini-x", "--conversation", "cid-1"]
     assert argv == expected
     assert driver.build_argv(argv, {"model": "gemini-x", "conversation_id": "cid-1"}) == argv
     merged = driver.build_argv(["agy.real", "--input-format=stream-json", "--print-timeout=0"], {})
     assert merged.count("--input-format=stream-json") == 1 and "--input-format" not in merged
-    assert merged.count("--print-timeout=0") == 1 and "--print-timeout" not in merged
+    assert merged.count("--print-timeout=30") == 1 and "--print-timeout" not in merged
+    assert "--effort" not in driver.build_argv(["agy.real"], {"effort": " off "})
 
 
 def test_encode_turn_shape_context_and_newline() -> None:
-    encoded = AgyStreamJsonDriver().encode_turn(
-        "hello", {"session_id": "s-1", "turn_sandbox": "/tmp/x", "cwd": "/tmp"}
-    )
+    encoded = AgyStreamJsonDriver().encode_turn("hello", {"session_id": "s-1", "turn_sandbox": "/tmp/x", "cwd": "/tmp"})
     assert encoded.endswith(b"\n")
     payload = json.loads(encoded)
     assert payload["type"] == "user" and payload["event"] == "user"
-    assert payload["message"] == {"role": "user", "content": "hello"}
+    assert payload["message"] == {"role": "user", "content": [{"type": "text", "text": "hello"}]}
     assert payload["session_id"] == "s-1"
     assert "turn_sandbox" not in payload and "cwd" not in payload
 
@@ -224,7 +220,7 @@ def _affinity(cid: str, cwd: str) -> SlotAffinityKey:
         backend_id="agy",
         model="test-model",
         effort="",
-        cwd_norm=cwd,
+        cwd_norm=cwd, env_digest="",
     )
 
 

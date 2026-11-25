@@ -8,12 +8,67 @@ import os
 import shutil
 import signal
 import subprocess
+import threading
 import time
 from contextlib import suppress
 from typing import Any
 
 _POLL_INTERVAL_S = 0.05
 _SIGKILL_DEADLINE_S = 2.0
+
+
+def join_maintenance_thread(
+    thread: threading.Thread | None,
+    timeout_s: float,
+    logger: Any,
+) -> None:
+    """Join a maintenance thread without holding the pool condition lock."""
+    if thread:
+        if thread is not threading.current_thread():
+            if thread.is_alive():
+                timeout = max(0.0, timeout_s)
+                thread.join(timeout=timeout)
+                if thread.is_alive():
+                    logger.warning(
+                        "maintenance thread %s join timeout after %.3fs; still alive",
+                        thread.name,
+                        timeout,
+                    )
+
+
+def terminate_entries(
+    entries: list[Any],
+    terminate_fn: Any,
+    grace_s: float,
+    reason: str,
+    logger: Any,
+) -> tuple[Exception | None, list[Any]]:
+    """Terminate slot entries outside pool lock; return first error and failures."""
+    first_error: Exception | None = None
+    failed: list[Any] = []
+    for entry in entries:
+        try:
+            terminate_fn(entry, grace_s)
+        except Exception as exc:
+            if type(exc).__name__ != "StdioProcessTerminated":
+                logger.exception("failed to close %s slot %s", reason, entry.slot_id)
+            first_error = first_error if first_error else exc
+            failed.append(entry)
+        else:
+            if not getattr(entry.handle, "_pgid_dead", True):
+                failed.append(entry)
+    return first_error, failed
+
+
+def extract_handle_pgid(handle: object) -> int:
+    """Return a positive process-group id, falling back to the process id."""
+    res = 0
+    for attr in ("_pgid", "pid"):
+        val = getattr(handle, attr, 0)
+        if type(val) is int and val > 0:
+            res = val
+            break
+    return res
 
 
 def get_process_start_time(pid: int) -> str:

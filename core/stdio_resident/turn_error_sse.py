@@ -52,6 +52,12 @@ _SAFE_ERROR_CODES: Final[frozenset[str]] = frozenset(
         "invalid_review_profile",
         "unsupported_model_effort",
         "output_limit_exceeded",
+        "auth_required",
+        "forbidden",
+        "invalid_request",
+        "invalid_principal_hash",
+        "warm_slot_mismatch_after_retry",
+        "invalid_upstream_encoding",
         "resident_turn_failed",
         "slot_lease_timeout",
         "turn_timeout",
@@ -72,7 +78,15 @@ class TurnErrorResponse:
     body: dict[str, object]
 
 
+_STATUS_ERROR_TYPES: Final[dict[int, str]] = {
+    401: "authentication_error",
+    403: "permission_error",
+}
+
+
 def _error_type_for(status: int, code: str) -> str:
+    if mapped := _STATUS_ERROR_TYPES.get(status):
+        return mapped
     if code == ERR_TOOL_EVENT_FORBIDDEN:
         return "policy_error"
     if code == "output_limit_exceeded":
