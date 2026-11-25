@@ -104,6 +104,8 @@ def test_route_contract_separation_rejects_mixed_kinds_and_forbidden_aliases() -
         )
     with pytest.raises(rcc.RouteCatalogContractError, match="forbidden_model_alias"):
         rcc.validate_no_forbidden_aliases({"gpt-6.2-sol": {"backend_id": rcc.SOL_MODEL_ID}})
+    assert rcc.SOL62_MODEL_ID not in rcc.UNAVAILABLE_MODEL_IDS
+    assert rcc.SOL62_MODEL_ID in rcc.FORBIDDEN_ALIAS_MODEL_IDS
 
 
 def test_sync_codex_catalog_matches_fleet_and_separates_transports() -> None:
