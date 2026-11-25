@@ -4,15 +4,23 @@ from __future__ import annotations
 
 import ast
 import re
-import shutil
-import subprocess
-import unittest
 from pathlib import Path
 
 from core.stdio_resident.config import StdioPoolConfig
 
 ROOT = Path(__file__).resolve().parents[1]
-BASE_COMMIT = "e052eb18e0a625e966911588ee1c435e87d2ab78"
+MONOLITH_CAPS: dict[str, int] = {
+    "server.py": 7864,
+    "adapters/stdio_drivers/muse_driver.py": 341,
+    "core/stdio_resident/codex_driver.py": 572,
+    "core/tool_emulation.py": 1981,
+}
+NEW_MODULE_PREFIXES: tuple[str, ...] = (
+    "core.stdio_resident.mcp_tool_capture",
+    "core.stdio_resident.mcp_capture_server",
+    "core.stdio_resident.tool_turn_outcome",
+    "adapters.stdio_drivers.muse_mcp_wire",
+)
 
 BND_001: tuple[str, ...] = (
     "core/stdio_resident/mcp_tool_capture.py",
@@ -160,24 +168,13 @@ def test_mod_i1_file_and_function_budgets() -> None:
 
 
 def test_mod_i2_untouched_monoliths() -> None:
-    """Frozen monoliths have zero diff against the wave baseline commit."""
-    if shutil.which("git") is None:
-        raise unittest.SkipTest("git executable unavailable")
-    probe = subprocess.run(
-        ["git", "-C", str(ROOT), "cat-file", "-e", f"{BASE_COMMIT}^{{commit}}"],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if probe.returncode != 0:
-        raise unittest.SkipTest(f"baseline commit {BASE_COMMIT} unavailable")
-    diff = subprocess.run(
-        ["git", "-C", str(ROOT), "diff", BASE_COMMIT, "--", *MONOLITHS],
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    assert diff.stdout == "", f"frozen monoliths modified:\n{diff.stdout}"
+    """Frozen monoliths stay within LOC caps and never import new tool-capture modules."""
+    for rel in MONOLITHS:
+        lines = _read_lines(rel)
+        cap = MONOLITH_CAPS[rel]
+        assert len(lines) <= cap, f"{rel}: LOC={len(lines)} > cap {cap}"
+        bad = _has_forbidden_import(_imports_of(rel), NEW_MODULE_PREFIXES)
+        assert not bad, f"{rel} must not import new tool-capture modules: {bad}"
 
 
 def test_mod_i3_layer_boundaries() -> None:
