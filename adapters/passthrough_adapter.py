@@ -109,6 +109,7 @@ from core.session_affinity import (
     request_scope,
     session_affinity,
 )
+from core.telemetry_hooks import telemetry_usage
 from core.usage_wire import positive_wire_usage
 
 _SLIDING_WIN_FLAG = DynamicFlagSource(FLAG_PASSTHROUGH_SLIDING_WINDOW)
@@ -1745,6 +1746,7 @@ class PassthroughAdapter(BackendAdapter):
     ) -> bool:
         """Совместимый позиционный вход: sink, sanitize, deadline, on_timeout, window."""
         sink, sanitize = context[:2]
+        telemetry_handler = getattr(sink, "_handler", None)
         sink = _GuardedSink(sink, kw.get("stream_guard"))
         kw.update(zip(("deadline", "on_timeout", "window"), context[2:]))
         trusted = self._trusted_tools(resp, sanitize)
@@ -1758,20 +1760,15 @@ class PassthroughAdapter(BackendAdapter):
             ("X-Accel-Buffering", "no"),
         ]
         outcome = StreamOutcome(committed=True)
-        kw.update(
-            tool_schemas=schemas,
-            limits=self.limits,
-            process=self.process_budget,
-            sanitize=sanitize,
-            trusted_tools=trusted,
-            state=outcome,
-        )
+        kw.update(tool_schemas=schemas, limits=self.limits, process=self.process_budget)
+        kw.update(sanitize=sanitize, trusted_tools=trusted, state=outcome)
         try:
             sink.start(200, headers)
             outcome = relay_sse(resp.readline, sink.write, **kw)
         except (socket.timeout, OSError, http.client.HTTPException) as exc:
             return self._stream_io_error(sink, outcome, {**kw, "error": exc})
         finally:
+            telemetry_usage(telemetry_handler, outcome.last_usage)
             sink.close()
         ok = self._stream_success(outcome)
         if ok:
