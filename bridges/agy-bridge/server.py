@@ -115,14 +115,11 @@ _BRIDGE_DIR = str(Path(__file__).resolve().parent)
 if _BRIDGE_DIR not in sys.path:
     sys.path.insert(0, _BRIDGE_DIR)
 
-import anthropic_runtime as _ant_rt  # noqa: E402
+import anthropic_runtime as _ant_rt, stat_sha_cache as _stat_sha_cache  # noqa: E402
 
 _ANTHROPIC_PROBE = _ant_rt.AgyAnthropicProbe()
 
-from agy_runtime.process_supervisor import (  # noqa: E402 # pyright: ignore[reportImplicitRelativeImport]
-    ProcessSupervisor,
-    ProcessSupervisorConfig,
-)
+from agy_runtime.process_supervisor import ProcessSupervisor, ProcessSupervisorConfig  # noqa: E402 # pyright: ignore[reportImplicitRelativeImport]
 from agy_runtime.retry_budget import should_allow_retry_attempt  # noqa: E402 # pyright: ignore[reportImplicitRelativeImport]
 from agy_runtime.stream_relay import StreamRelay  # noqa: E402 # pyright: ignore[reportImplicitRelativeImport]
 from agy_runtime.arbiter_types import _StepState  # noqa: E402 # pyright: ignore[reportImplicitRelativeImport]
@@ -957,7 +954,7 @@ def _runtime_build_fields() -> dict[str, object]:
     """Поля `/health`: git_head_sha, boot_ts, agy_binary_sha256, agy_home, очередь."""
     return BUILD_INFO.snapshot(
         {
-            "agy_binary_sha256": _file_sha256(AGY_BIN) or BUILD_UNKNOWN,
+            "agy_binary_sha256": _cached_agy_binary_sha256() or BUILD_UNKNOWN,
             "agy_home": str(CLEAN_HOME_DIR),
             **_TURN_RESILIENCE.health_fields(),
             **slot_and_session.health_queue_fields(_slots),
@@ -1824,21 +1821,13 @@ def _safe_log_value(value: object) -> str:
 
 
 def _file_sha256(path: object) -> str:
-    """SHA-256 файла чанками по 1 MiB; '' — файл недоступен или изменился при чтении.
-
-    Кэш по пути с идентичностью (st_dev, st_ino, st_mtime_ns, st_size): неизменный
-    бинарь (~190 MiB) хешируется один раз. Хеширование идёт вне `_sha_cache_lock`,
-    под отдельным замком единственного вычислителя.
-    """
+    """SHA-256 файла чанками 1 MiB с проверкой StatKey (legacy/runtime wiring)."""
     resolved = os.path.expanduser(str(path))
-
     def identity() -> tuple[int, int, int, int]:
         info = os.stat(resolved)
         return (info.st_dev, info.st_ino, info.st_mtime_ns, info.st_size)
-
     try:
-        key = identity()
-        rt = _hygiene_rt()
+        key, rt = identity(), _hygiene_rt()
         ck = f"{resolved}:{key}"
         if (hit := rt.sha_cache_get(ck)) is not None:
             return hit
@@ -1856,6 +1845,14 @@ def _file_sha256(path: object) -> str:
             return hexdigest
     except OSError:
         return ""
+
+
+_ORIG_FILE_SHA256 = _file_sha256
+
+
+def _cached_agy_binary_sha256() -> str:
+    """Lock-free StatKey SHA-256 бинаря agy; уважает monkeypatch `_file_sha256`."""
+    return _file_sha256(AGY_BIN) if _file_sha256 is not _ORIG_FILE_SHA256 else _stat_sha_cache.DEFAULT_STAT_SHA_CACHE.get_sha256(AGY_BIN, legacy_fn=_file_sha256)
 
 
 def _read_image_flag() -> bool:
@@ -3289,14 +3286,11 @@ def _reset_sqlite_guards_for_tests() -> None:
         _HYGIENE_RT = None
     with _cfg_lock:
         _cfg_snapshot = _COLD_FLAGS
-        _cfg_key = None
-        _cfg_checked_at = None
-    with _image_flag_lock:
-        _image_flag_cache = (0.0, False)
-    with _image_fallback_flag_lock:
-        _image_fallback_flag_cache = (0.0, False)
+        _cfg_key = _cfg_checked_at = None
+    with _image_flag_lock: _image_flag_cache = (0.0, False)
+    with _image_fallback_flag_lock: _image_fallback_flag_cache = (0.0, False)
     with _sha_cache_lock:
-        _sha_cache.clear()
+        _sha_cache.clear(); _stat_sha_cache.DEFAULT_STAT_SHA_CACHE.clear()
     with _sqlite_guard_lock:
         _breaker_state = "CLOSED"
         _breaker_failures = 0
@@ -8261,8 +8255,7 @@ def main() -> None:
     _ = _load_persisted_sessions()
     _ = _sweep_workspace()
     threading.Thread(target=_sweep_loop, daemon=True).start()
-    # Хеш бинаря agy считается заранее, чтобы первый image-ход не платил за него.
-    threading.Thread(target=_file_sha256, args=(AGY_BIN,), daemon=True).start()
+    _stat_sha_cache.DEFAULT_STAT_SHA_CACHE.warm_up(AGY_BIN)
     _log(f"fleet_sha256={FLEET['sha256']} models={len(FLEET['order'])}")
     try:
         _launcher()
