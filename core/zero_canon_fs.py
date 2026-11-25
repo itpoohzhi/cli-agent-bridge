@@ -184,7 +184,7 @@ def replace_atomic_text_0600(dst: Path, text: str) -> None:
 def prepare_codex_zero_canon_home(base_env: Mapping[str, str], root: str | Path) -> dict[str, str]:
     """Готовит приватный per-turn Codex Zero-Canon HOME (`0o700`), filtered config и nofollow auth (`0o600`)."""
     from core.subbridge_zero_canon import dump_toml, filter_codex_config
-
+    from core.zc_static_cwd_and_source import is_source_header_enabled, resolve_codex_source_tag
     zc_root = Path(root)
     dst_codex = zc_root / ".codex"
     for directory in (zc_root, dst_codex, zc_root / "cwd"):
@@ -200,7 +200,8 @@ def prepare_codex_zero_canon_home(base_env: Mapping[str, str], root: str | Path)
         auth_bytes = _read_optional_regular_nofollow(src_codex / "auth.json")
         if auth_bytes is not None:
             write_atomic_0600(dst_codex / "auth.json", auth_bytes)
-    write_atomic_text_0600(dst_codex / "config.toml", dump_toml(filter_codex_config(raw_cfg)))
+    src_tag = resolve_codex_source_tag(is_zero_canon=True) if is_source_header_enabled(base_env) else None
+    write_atomic_text_0600(dst_codex / "config.toml", dump_toml(filter_codex_config(raw_cfg, source_tag=src_tag)))
     cleaned = sanitize_zero_canon_env(base_env, zc_root)
     cleaned["CODEX_HOME"] = str(dst_codex)
     cleaned["BRIDGE_ZERO_CANON"] = "1"
@@ -215,9 +216,7 @@ def make_ephemeral_zc_cwd(parent: Path, prefix: str = "zc-cwd-") -> Path:
     return turn_dir.resolve()
 
 
-_SECRET_ENV_EXACT: Final[frozenset[str]] = frozenset(
-    {"BRIDGE_KEY", "BRIDGE_API_KEY", "INTERNAL_SERVICE_KEY", "META_API_KEY"}
-)
+_SECRET_ENV_EXACT: Final[frozenset[str]] = frozenset({"BRIDGE_KEY", "BRIDGE_API_KEY", "INTERNAL_SERVICE_KEY", "META_API_KEY"})
 _SECRET_ENV_SUFFIXES: Final[tuple[str, ...]] = ("_BRIDGE_KEY", "_SERVICE_KEY")
 
 

@@ -98,13 +98,36 @@ def _clone(value: Any) -> Any:
     return value
 
 
-def filter_codex_config(raw: Mapping[str, Any]) -> dict[str, Any]:
+def _inject_codex_source_header(result: dict[str, Any], source_tag: str | None) -> None:
+    if not isinstance(source_tag, str) or not source_tag.strip():
+        return
+    from core.zc_static_cwd_and_source import is_source_header_enabled, resolve_codex_source_tag
+
+    if not is_source_header_enabled():
+        return
+    providers = result.get("model_providers")
+    codex_lb = providers.get("codex-lb") if isinstance(providers, dict) else None
+    if not isinstance(codex_lb, dict):
+        return
+    safe_tag = resolve_codex_source_tag({"x-codex-source": source_tag})
+    raw_hdrs = codex_lb.get("http_headers")
+    hdrs = (
+        {str(k): v for k, v in raw_hdrs.items() if str(k).lower() != "x-codex-source"}
+        if isinstance(raw_hdrs, Mapping)
+        else {}
+    )
+    hdrs["X-Codex-Source"] = safe_tag
+    codex_lb["http_headers"] = hdrs
+
+
+def filter_codex_config(raw: Mapping[str, Any], source_tag: str | None = None) -> dict[str, Any]:
     """Копия config.toml без `mcp_servers`/`plugins`/`notify`/хуков и без AGENTS.md."""
     if not isinstance(raw, Mapping):
         raise TypeError(f"Expected a mapping, got {type(raw).__name__}")
     denied = {*CODEX_CONFIG_DENY_SECTIONS, *CODEX_CONFIG_DENY_EXTRA}
     result = {str(key): _clone(item) for key, item in raw.items() if key not in denied}
     result.update(CODEX_CONFIG_FORCED)
+    _inject_codex_source_header(result, source_tag)
     return result
 
 
