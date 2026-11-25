@@ -15,6 +15,7 @@ from core.http_post_ingress import begin_post, read_post_request
 from core.http_post_routing import prepare_post_body, resolve_post_route, selected_route_allowed
 import core.passthrough_effort_map as _pem
 from core.passthrough_exchange import _validate_endpoint, internal_trace_scope
+from core.provider_route_scope import dispatch_scoped_single, filter_dispatch_routes
 from core.quota_classifier import QuotaRules, classify_429
 from core.retry_control import MAX_RETRY_RATIO, MAX_TOTAL_ATTEMPTS_LIMIT, CircuitPolicy, HealthDomain, RetryReservation, RetrySizing, RetryTokenBucket, RouteCandidate, RouteCircuitBreaker, validate_retry_sizing
 from core.route_attempts import BRIDGE_OWNER, STATELESS_REPLAY_ENDPOINTS, AttemptPhase, AttemptState, RouteAttempt, RouteFailover, RouteRefusal, build_georouter_headers, build_pool_exhausted_error, evaluate_replay, failover_from_mapping, normalize_replay_endpoint
@@ -388,17 +389,14 @@ def _request_policy(route: Any) -> Any:
 def _dispatch(route: Any) -> None:
     routing = effective_model_routing(route.model_id, route.model)
     if not (route.host.flag_enabled(ROUTING_FLAG) and routing and routing.get("enabled", True)):
-        route.model["backend"] = routing.get("zero_canon_backend") or routing.get("disabled_backend") or route.model.get("backend")
-        route, wire = _pem.apply_attempt_effort_map(route, route.host.BACKENDS.get(route.model.get("backend")), prepare_post_body(route))
-        dispatch_route(route, wire)
+        dispatch_scoped_single(route, routing, _pem.apply_attempt_effort_map, prepare_post_body, dispatch_route)
         return
     route = replace(route, model={**route.model, "routing": routing})
     if route.model_id.endswith("-" + route.model["backend"]) and not selected_route_allowed(route):
         return
     policy = _request_policy(route)
     routes = tuple(spec for spec in parse_routes(route.model) if _eligible(route, spec, policy))
-    if not routes:
-        route.reject(503, "route_unavailable", "no eligible transport is available")
+    if (routes := filter_dispatch_routes(route, routes)) is None:
         return
     seed = resolve_transport_seed(dict(route.handler.headers.items()), {**route.request, **route.ingress.transport_controls})
     _run_routes(route, routes, seed, policy)

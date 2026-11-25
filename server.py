@@ -7279,14 +7279,8 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
         try:
             out = self._dispatch(ctx, None)
         except ResidentTurnError as exc:
-            from core.stdio_resident.sse_error_bridge import _sanitize_log_text
-
-            safe_err = _sanitize_log_text(exc.response.message, extra_code=exc.response.code)
-            _log(
-                f"json_resident_error status={exc.status} code={exc.response.code} err={safe_err!r}"
-            )
-            lease.record_failure(exc)
-            self._send(exc.status, exc.response.body)
+            from core.resident_failover import handle_json_resident_error
+            handle_json_resident_error(self, lease, exc, _log)
             return
         if out.get("state") == "client_gone":
             lease.record_discard("client_disconnected")
@@ -7543,6 +7537,8 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
         except Exception as exc:  # noqa: BLE001 - RW-211: клиенту нужен конверт, а не сырой сбой
             if gate.failed_closed:
                 return
+            from core.resident_failover import maybe_raise_sse_precommit_refusal
+            maybe_raise_sse_precommit_refusal(self, lease, exc, live_sent[0])
             from core.stdio_resident.sse_error_bridge import SseErrorContext, handle_sse_stream_exception
             if handle_sse_stream_exception(exc, live_sent[0], SseErrorContext(self, lease, emit, stream_error_frame, _log)):
                 return
