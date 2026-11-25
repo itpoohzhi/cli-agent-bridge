@@ -579,6 +579,7 @@ class BridgeProc:
                 )
                 resp = conn.getresponse()
                 last_status = resp.status
+                last_err = ""
                 resp.read()
                 if last_status == 200:
                     return
@@ -591,9 +592,11 @@ class BridgeProc:
                     conn.close()
         if self.proc.poll() is None:
             self.proc.kill()
-        self.proc.wait(5)
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            self.proc.wait(5)
         out = self.output()
-        self.stop()
+        with contextlib.suppress(Exception):
+            self.stop()
         raise AssertionError(
             f"bridge did not start within 45s (port={self.port}, "
             f"last_status={last_status}, last_err={last_err}): {out}"

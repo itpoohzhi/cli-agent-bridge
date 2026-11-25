@@ -140,7 +140,7 @@ jobs:
           python -c "import socket, time; t=time.monotonic(); r=socket.getfqdn('127.0.0.1'); print(f'getfqdn={r} elapsed={time.monotonic()-t:.3f}s')"
 
       - name: Run drain, lifecycle, launchd, and stream drain tests
-        run: python -m pytest tests/test_drain_policy.py tests/test_drain_contract_http.py tests/test_drain_launchd_consistency.py tests/test_drain_multistep_restart.py tests/test_graceful_shutdown_drain.py tests/test_subbridge_graceful_drain.py tests/test_subbridge_lifecycle.py tests/test_stream_drain_finish_reason.py -q --durations=10
+        run: python -m pytest tests/test_drain_policy.py tests/test_drain_contract_http.py tests/test_drain_launchd_consistency.py tests/test_drain_multistep_restart.py tests/test_graceful_shutdown_drain.py tests/test_subbridge_graceful_drain.py tests/test_subbridge_lifecycle.py tests/test_stream_drain_finish_reason.py tests/test_bridge_stream_lifecycle.py tests/test_rpc_lifecycle.py tests/test_model_lifecycle.py -q --durations=10
 
       - name: Run drain policy kill-switch verification
         run: BRIDGE_DRAIN_POLICY_ENABLED=0 python -m pytest tests/test_drain_contract_http.py -q -k kill_switch
