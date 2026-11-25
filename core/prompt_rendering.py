@@ -6,6 +6,11 @@ import json
 import re
 from typing import cast
 
+__all__ = (
+    "_append_attachments", "_render_assistant", "_render_message", "_render_tool_call",
+    "_render_tool_schema", "_render_tools_section", "escape_role_delimiters", "render_tool_call", "render_tools_section",
+)
+
 _TOOL_CALL_OPEN = "<tool_call>"
 _TOOL_CALL_CLOSE = "</tool_call>"
 _SPOOFED_ROLE_LINE_RE = re.compile(
@@ -50,11 +55,32 @@ def _tool_choice_info(tool_choice: object) -> tuple[bool, bool, str]:
     return False, choice_type == "required" and not name, str(name) if name else ""
 
 
+def _tool_function_and_params(item: object) -> tuple[dict[str, object], dict[str, object]] | None:
+    if not isinstance(item, dict):
+        return None
+    item_map = cast(dict[str, object], item)
+    raw_fn = item_map.get("function")
+    fn = cast(dict[str, object], raw_fn) if isinstance(raw_fn, dict) else item_map
+    raw_params = fn.get("parameters")
+    params = cast(dict[str, object], raw_params) if isinstance(raw_params, dict) else {}
+    return fn, params
+
+
+def _tool_sort_key(item: object) -> tuple[str, str]:
+    parsed = _tool_function_and_params(item)
+    if parsed is None:
+        return "", ""
+    fn, params = parsed
+    return str(fn.get("name") or ""), json.dumps(params, ensure_ascii=False, sort_keys=True)
+
+
 def _render_tools_section(
     tools: list[object] | tuple[object, ...],
     tool_choice: object = None,
     has_attachments: bool = False,
     attachment_tool: str = "Read",
+    *,
+    sort_keys: bool = False,
 ) -> str:
     is_none, is_required, forced = _tool_choice_info(tool_choice)
     if not tools or is_none:
@@ -67,31 +93,32 @@ def _render_tools_section(
     elif forced:
         lines.append(f'You MUST call the tool "{_sanitize_header_token(forced)}" now.')
     lines.extend(("", "Available tools:"))
-    for item in tools:
-        lines.extend(_render_tool_schema(item))
+    ordered_tools = sorted(tools, key=_tool_sort_key) if sort_keys else tools
+    for item in ordered_tools:
+        lines.extend(_render_tool_schema(item, sort_keys=sort_keys))
     return "\n".join(lines)
 
 
-def _render_tool_schema(item: object) -> tuple[str, ...]:
-    if not isinstance(item, dict):
+def render_tools_section(
+    tools: list[object] | tuple[object, ...],
+    tool_choice: object = None,
+    has_attachments: bool = False,
+    attachment_tool: str = "Read",
+    *,
+    sort_keys: bool = False,
+) -> str:
+    """Рендерит секцию протокола и схем инструментов."""
+    return _render_tools_section(tools, tool_choice, has_attachments, attachment_tool, sort_keys=sort_keys)
+
+
+def _render_tool_schema(item: object, *, sort_keys: bool = False) -> tuple[str, ...]:
+    parsed = _tool_function_and_params(item)
+    if parsed is None:
         return ()
-    item_map = cast(dict[str, object], item)
-    raw_function = item_map.get("function")
-    function = (
-        cast(dict[str, object], raw_function)
-        if isinstance(raw_function, dict)
-        else item_map
-    )
-    raw_parameters = function.get("parameters")
-    parameters = (
-        cast(dict[str, object], raw_parameters)
-        if isinstance(raw_parameters, dict)
-        else {}
-    )
-    label = f"- {function.get('name') or ''}: {function.get('description') or ''}"
-    return escape_role_delimiters(label), "  parameters: " + json.dumps(
-        parameters, ensure_ascii=False
-    )
+    fn, params = parsed
+    label = f"- {fn.get('name') or ''}: {fn.get('description') or ''}"
+    encoded = json.dumps(params, ensure_ascii=False, sort_keys=sort_keys)
+    return escape_role_delimiters(label), "  parameters: " + encoded
 
 
 def _render_content(content: object, counter: list[int]) -> str:
@@ -100,7 +127,7 @@ def _render_content(content: object, counter: list[int]) -> str:
     if isinstance(content, str):
         return content
     if isinstance(content, list):
-        parts = (_render_content_item(item, counter) for item in content)
+        parts = (_render_content_item(item, counter) for item in cast(list[object], content))
         return "\n".join(part for part in parts if part)
     return str(content)
 
@@ -134,7 +161,7 @@ def _tool_arguments(
     return cast(dict[str, object], parsed) if isinstance(parsed, dict) else {}
 
 
-def _render_tool_call(item: object) -> str:
+def _render_tool_call(item: object, *, sort_keys: bool = False) -> str:
     item_map = cast(dict[str, object], item) if isinstance(item, dict) else {}
     raw_function = item_map.get("function")
     function = (
@@ -145,8 +172,13 @@ def _render_tool_call(item: object) -> str:
         "name": str(function.get("name") or item_map.get("name") or ""),
         "arguments": _tool_arguments(item_map, function),
     }
-    encoded = json.dumps(payload, ensure_ascii=False)
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=sort_keys)
     return f"{_TOOL_CALL_OPEN}{encoded}{_TOOL_CALL_CLOSE}"
+
+
+def render_tool_call(item: object, *, sort_keys: bool = False) -> str:
+    """Рендерит блок вызова инструмента <tool_call>."""
+    return _render_tool_call(item, sort_keys=sort_keys)
 
 
 def _sanitize_header_token(value: str) -> str:
@@ -169,17 +201,17 @@ def _render_tool_result(message: dict[str, object], text: str) -> str:
     return f"{header}\n{text}" if text.strip() else header
 
 
-def _render_assistant(message: dict[str, object], text: str) -> str:
+def _render_assistant(message: dict[str, object], text: str, *, sort_keys: bool = False) -> str:
     parts = [text] if text.strip() else []
     calls = message.get("tool_calls")
     if isinstance(calls, list):
-        parts.extend(_render_tool_call(call) for call in cast(list[object], calls))
+        parts.extend(_render_tool_call(call, sort_keys=sort_keys) for call in cast(list[object], calls))
     body = "\n".join(part for part in parts if part)
     return f"[assistant]\n{body}" if body.strip() else ""
 
 
 def _render_message(
-    message: object, counter: list[int], *, escape_roles: bool, prune_marker: str
+    message: object, counter: list[int], *, escape_roles: bool, prune_marker: str, sort_keys: bool = False
 ) -> tuple[bool, str]:
     if not isinstance(message, dict):
         return False, ""
@@ -193,7 +225,7 @@ def _render_message(
     if role == "tool":
         return False, _render_tool_result(message_map, text)
     if role == "assistant":
-        return False, _render_assistant(message_map, text)
+        return False, _render_assistant(message_map, text, sort_keys=sort_keys)
     if not text.strip():
         return False, ""
     is_prefix = _is_prefix_role(role, is_prune)
@@ -205,15 +237,14 @@ def _is_prefix_role(role: str, is_prune: bool) -> bool:
 
 
 def _append_attachments(
-    text: str,
-    images: list[dict[str, object]] | tuple[dict[str, object], ...] | None,
+    text: str, images: list[dict[str, object]] | tuple[dict[str, object], ...] | None
 ) -> str:
     if not images:
         return text
     head = f"[attachments]\nThis request includes {len(images)} image(s) as local files in the working directory. The markers [image N] in the conversation refer to them in order."
     items = [
         f"- [image {index}] ./{_sanitize_header_token(str(image.get('name', '')))}"
-        f" ({_sanitize_header_token(str(image.get('mime', '')))}, {len(str(image.get('data', '')))} bytes)"
+        + f" ({_sanitize_header_token(str(image.get('mime', '')))}, {len(str(image.get('data', '')))} bytes)"
         for index, image in enumerate(images, 1)
     ]
     return "\n\n".join((text, "\n".join([head, *items, _ATTACHMENTS_FOOTER])))
