@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Any, Final
 
 from core.codex_zero_canon_policy import CodexZeroCanonPolicyError
+from core.resident_failover import should_defer_sse_headers
 from core.stdio_resident.codex_protocol_fsm import ProtocolPhase, ProtocolState
 from core.stdio_resident.sse_error_bridge import sanitize_log_text
 from core.stdio_resident.turn_error_sse import ResidentTurnError, build_turn_error, sanitize_error_message
@@ -144,6 +145,11 @@ class ZeroCanonSseHeaderGate:
     on_disconnect: Callable[[], None] | None = None
     header_write_failed: bool = False
     failed_closed: bool = False
+    defer_routed_headers: bool = False
+
+    @property
+    def _defer_any(self) -> bool:
+        return self.defer_zc_headers or self.defer_routed_headers
 
     @classmethod
     def for_request(
@@ -152,7 +158,12 @@ class ZeroCanonSseHeaderGate:
     ) -> ZeroCanonSseHeaderGate:
         """Create a request-scoped SSE header gate."""
         managed = ctx.get("managed_turn") or getattr(handler, "_active_managed_turn", None)
-        return cls(handler, ctx, managed, trace_headers, pruned, should_defer_zero_canon_sse_headers(handler, ctx), initial_frame_fn)
+        return cls(
+            handler, ctx, managed, trace_headers, pruned,
+            should_defer_zero_canon_sse_headers(handler, ctx),
+            initial_frame_fn,
+            defer_routed_headers=should_defer_sse_headers(handler, ctx),
+        )
 
     def _optional_admission(self) -> tuple[Any, str] | None:
         adm = self.ctx.get("zero_canon_admission") or getattr(self.handler, "_zero_canon_admission", None)
@@ -221,24 +232,24 @@ class ZeroCanonSseHeaderGate:
         return self._emit_sse_200(attestation) and self._emit_initial_frame(emit_initial)
 
     def ensure_initial_headers(self) -> bool:
-        """Emit initial SSE headers + role frame immediately unless Zero-Canon defers them."""
-        return True if self.defer_zc_headers else self.ensure_headers(phase="admitted", emit_initial=True)
+        """Emit initial SSE headers + role frame immediately unless deferred by Zero-Canon or routing."""
+        return True if self._defer_any else self.ensure_headers(phase="admitted", emit_initial=True)
 
     def ensure_live_headers(self) -> bool:
         """Emit deferred SSE headers on first live chunk, failing closed without admission proof."""
         return self.ensure_headers(phase="admitted", emit_initial=True)
 
     def allow_keepalive(self) -> bool:
-        """Return False while deferred Zero-Canon headers remain unsent or after fail-closed."""
+        """Return False while deferred headers remain unsent or after fail-closed."""
         if self.failed_closed:
             return False
-        return not self.defer_zc_headers or bool(getattr(self.handler, "_headers_already_sent", False))
+        return not self._defer_any or bool(getattr(self.handler, "_headers_already_sent", False))
 
     def handle_pre_stream_error(
         self, exc: BaseException, lease: Any, *, log_fn: Callable[[str], None] | None = None
     ) -> bool:
         """Send pre-stream HTTP error JSON when deferred SSE headers were never flushed."""
-        if not self.defer_zc_headers or self.failed_closed:
+        if not self._defer_any or self.failed_closed:
             return False
         if getattr(self.handler, "_headers_already_sent", False) or getattr(self.handler, "_client_write_dead", False):
             return False
@@ -259,10 +270,10 @@ class ZeroCanonSseHeaderGate:
         return True
 
     def finalize_zero_chunk_headers(self, err: Mapping[str, Any] | None = None) -> bool:
-        """Finalize deferred headers on 0-chunk turn using verified phase=completed proof."""
+        """Finalize deferred headers on 0-chunk turn (using phase=completed proof for Zero-Canon)."""
         if self.failed_closed:
             return False
-        if not self.defer_zc_headers or getattr(self.handler, "_headers_already_sent", False):
+        if not self._defer_any or getattr(self.handler, "_headers_already_sent", False):
             return True
         if err is not None:
             status = _error_status_from_mapping(err)
