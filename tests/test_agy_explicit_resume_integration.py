@@ -403,3 +403,97 @@ def test_server_handler_e2e_plain_legacy_and_zero_canon(tmp_path: Path, monkeypa
     assert z2 == 200 and zr2["zero_canon"] is True and zr2["conversation_id"] == _CID_3 and zp2["conversation_id"] == _CID_3 and zr2["cwd_existed"] is True and cwd2.name.startswith("turn-") and cwd2 != cwd1 and not cwd2.exists()
     assert "SECOND_USER" in str(zr2["prompt"]) and "FIRST_USER" not in str(zr2["prompt"])
     assert (tmp_path / "zc" / "agy-zc-cwd").is_dir() and list((tmp_path / "zc" / "agy-zc-cwd").glob("turn-*")) == []
+
+
+def test_bug_b1_json_think_zero_tools_commits_cleaned_content_and_resumes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    for env in ("BRIDGE_HOT_ZC_PLAIN_ENABLED", "BRIDGE_HOT_ZC_AGENTIC_ENABLED", "BRIDGE_HOT_CANONICAL_TOOLS_ENABLED", "AGY_ZERO_CANON_ENABLED"):
+        monkeypatch.setenv(env, "1")
+    h = _setup_server(monkeypatch, tmp_path / "b1_think", [_CID_1, _CID_2])
+
+    def _exec_think(_self: object, run: SimpleNamespace, on_text: object, *_a: object, **_k: object) -> dict[str, object]:
+        rec = cast("dict[str, object]", run.rec)
+        cid = str(rec["conversation_id"]) or h.cids.pop(0)
+        reply = "<think>hidden</think>Visible\n" if len(h.runs) == 1 else "Turn2\n"
+        if callable(on_text):
+            _ = on_text(reply)
+        return {"state": "done", "rc": 0, "text": reply, "conversation_id": cid, "usage": {}, "response_started": True}
+
+    monkeypatch.setattr(cast("object", getattr(h.srv, "Handler")), "_execute", _exec_think)
+    m1 = [{"role": "user", "content": "think first"}]
+    c1, p1, r1 = h.post(m1, chat_id="zc-think", tools=_UNSORTED_TOOLS, review_profile="Zero-Canon")
+    msg1 = cast("dict[str, object]", cast("list[dict[str, object]]", p1["choices"])[0]["message"])
+    assert c1 == 200 and msg1["content"] == "Visible\n" and "<think>" not in str(msg1["content"]) and r1["conversation_id"] == ""
+    m2 = [*m1, {"role": "assistant", "content": "Visible\n"}, {"role": "user", "content": "next"}]
+    c2, p2, r2 = h.post(m2, chat_id="zc-think", tools=_UNSORTED_TOOLS, review_profile="Zero-Canon")
+    assert c2 == 200 and r2["conversation_id"] == _CID_1 and p2["conversation_id"] == _CID_1
+    assert "next" in str(r2["prompt"]) and "think first" not in str(r2["prompt"])
+
+
+def test_bug_b1_json_and_sse_live_parser_error_aborts_slot(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    for env in ("BRIDGE_HOT_ZC_PLAIN_ENABLED", "BRIDGE_HOT_ZC_AGENTIC_ENABLED", "BRIDGE_HOT_CANONICAL_TOOLS_ENABLED", "AGY_ZERO_CANON_ENABLED"):
+        monkeypatch.setenv(env, "1")
+    h = _setup_server(monkeypatch, tmp_path / "b1_err", [_CID_1, _CID_2])
+
+    def _exec_bad_finish(_self: object, run: SimpleNamespace, on_text: object, *_a: object, **_k: object) -> dict[str, object]:
+        rec = cast("dict[str, object]", run.rec)
+        cid = str(rec["conversation_id"]) or h.cids.pop(0)
+        raw = '<tool_call>{"name": "z_tool", "arguments": {'
+        if callable(on_text):
+            _ = on_text(raw)
+        return {"state": "done", "rc": 0, "text": raw, "conversation_id": cid, "usage": {}, "response_started": True}
+
+    monkeypatch.setattr(cast("object", getattr(h.srv, "Handler")), "_execute", _exec_bad_finish)
+    m1 = [{"role": "user", "content": "bad tool json"}]
+    c1, p1, _ = h.post(m1, chat_id="zc-err-json", tools=_UNSORTED_TOOLS, review_profile="Zero-Canon")
+    ad = cast("Callable[[], _AdapterProto]", getattr(h.srv, "_explicit_adapter"))()
+    st = _req_store(ad)
+    assert c1 == 502 and "error" in p1
+    assert all(snap.state == SlotState.EMPTY and not snap.lease_token for snap in getattr(st, "_slots").values())
+
+    sse_chunks: list[str] = []
+    body = json.dumps({"model": cast("str", getattr(h.srv, "MODEL_ID")), "stream": True, "messages": m1, "tools": _UNSORTED_TOOLS}).encode("utf-8")
+    headers = Message()
+    headers["Content-Length"], headers["Authorization"], headers["X-DSH-Chat-Id"], headers["X-Review-Profile"] = str(len(body)), f"Bearer {_TOK_A}", "zc-err-sse", "Zero-Canon"
+    handler_cls = cast("type[object]", getattr(h.srv, "Handler"))
+    handler = cast("Callable[[type[object]], object]", getattr(handler_cls, "__new__"))(handler_cls)
+    for k, v in (
+        ("path", "/v1/chat/completions"), ("headers", headers), ("rfile", io.BytesIO(body)), ("wfile", io.BytesIO()),
+        ("client_address", ("127.0.0.1", 7777)), ("close_connection", False), ("connection", object()),
+        ("_registry_job", None), ("_t_req_start", None), ("_flush_deadline", None), ("_client_tag", _const("test")),
+        ("_send", h._record_send), ("send_response", _noop), ("send_header", _noop), ("end_headers", _noop),
+        ("_reset_flush_window", _noop), ("_emit", lambda chunk: sse_chunks.append(chunk) is None),
+    ):
+        setattr(handler, k, v)
+    cast("Callable[[], None]", getattr(handler, "do_POST"))()
+    assert st.flush_now(timeout_s=2.0) is True
+    assert h.responses[-1][0] == 502 or any("error" in c for c in sse_chunks)
+    assert all(snap.state == SlotState.EMPTY and not snap.lease_token for snap in getattr(st, "_slots").values())
+
+
+def test_bug_b2_zc_resume_prespawn_plan_uses_agy_home_zc(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import sqlite3
+
+    srv = _load_server()
+    clean_home = tmp_path / "agy-home"
+    zc_home = tmp_path / "agy-home-zc"
+    conv_dir = zc_home / ".gemini" / "antigravity-cli" / "conversations"
+    brain_dir = zc_home / ".gemini" / "antigravity-cli" / "brain" / _CID_1 / ".system_generated" / "logs"
+    conv_dir.mkdir(parents=True, exist_ok=True)
+    brain_dir.mkdir(parents=True, exist_ok=True)
+    (brain_dir / "transcript_full.jsonl").write_text('{"step_index": 2, "type": "PLANNER_RESPONSE"}\n', encoding="utf-8")
+    with sqlite3.connect(conv_dir / f"{_CID_1}.db") as conn:
+        _ = conn.execute("CREATE TABLE steps (idx integer PRIMARY KEY, step_type integer, status integer, step_payload blob)")
+        _ = conn.execute("INSERT INTO steps VALUES (2, 15, 2, X'00')")
+    cfg = tmp_path / "dynamic_config.json"
+    _ = cfg.write_text(json.dumps({"SQLITE_REASONING_ENABLED": True, "AGY_ZERO_CANON_ENABLED": True}), encoding="utf-8")
+    monkeypatch.setattr(srv, "DYNAMIC_CONFIG_PATH", cfg)
+    monkeypatch.setattr(srv, "CLEAN_HOME_DIR", clean_home)
+    monkeypatch.setattr(srv, "CONV_DIR", clean_home / ".gemini" / "antigravity-cli" / "conversations")
+    monkeypatch.setattr(srv, "BRAIN_DIR", clean_home / ".gemini" / "antigravity-cli" / "brain")
+    monkeypatch.setenv("AGY_SQLITE_REASONING_ENABLED", "1")
+    cast("Callable[[], None]", getattr(srv, "_reset_sqlite_guards_for_tests"))()
+    plan_zc = cast("Callable[..., object]", getattr(srv, "_prespawn_plan"))(_CID_1, True, True, zero_canon=True)
+    plan_std = cast("Callable[..., object]", getattr(srv, "_prespawn_plan"))(_CID_1, True, True, zero_canon=False)
+    assert getattr(plan_zc, "anchored") is True and getattr(plan_zc, "base_idx") == 3
+    assert str(zc_home) in str(getattr(plan_zc, "transcript_path"))
+    assert getattr(plan_std, "anchored") is False
