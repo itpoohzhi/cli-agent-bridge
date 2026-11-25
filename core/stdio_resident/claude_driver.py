@@ -18,6 +18,7 @@ from core.claude_zero_canon import (
     find_forbidden_claude_flags,
     serialize_claude_json,
 )
+from core.stdio_resident.config import suppress_builtin_tools_enabled
 from core.stdio_resident.protocol_driver import (
     DecodedChunk,
     DriverCapabilities,
@@ -46,8 +47,10 @@ class ClaudeStreamJsonDriver(StreamJsonDriver):
             argv.extend(("--input-format", "stream-json"))
         if not self._has_flag(argv, "--output-format"):
             argv.extend(("--output-format", "stream-json"))
+        if self._should_suppress_builtin_tools(options) and not self._has_flag(argv, "--tools"):
+            argv.extend(("--tools", ""))
 
-        managed_options = {"print", "input_format", "output_format"}
+        managed_options = {"print", "input_format", "output_format", "suppress_builtin_tools", "emulate_tools"}
         for name, value in options.items():
             normalized_name = name.removeprefix("--").replace("-", "_")
             if normalized_name in managed_options or value is None or value is False:
@@ -217,6 +220,17 @@ class ClaudeStreamJsonDriver(StreamJsonDriver):
 
         _ = timeout_s
         return bool(handle.is_alive())
+
+    def slot_profile_key(self, options: Mapping[str, Any]) -> str:
+        """Keep `--tools ""` slots separate from default slots in the resident pool."""
+        return "tools-suppressed" if self._should_suppress_builtin_tools(options) else "default"
+
+    @staticmethod
+    def _should_suppress_builtin_tools(options: Mapping[str, Any]) -> bool:
+        """Explicit per-call override wins; otherwise emulate_tools + env flag (default off)."""
+        if "suppress_builtin_tools" in options:
+            return bool(options["suppress_builtin_tools"])
+        return bool(options.get("emulate_tools")) and suppress_builtin_tools_enabled()
 
     @staticmethod
     def _has_flag(argv: list[str], flag: str) -> bool:

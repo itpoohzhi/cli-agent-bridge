@@ -2,17 +2,24 @@
 
 from __future__ import annotations
 
+# pyright: reportAny=false, reportExplicitAny=false, reportPrivateUsage=false
 import inspect
 import os
+import time
 from collections.abc import Callable, Iterator, Mapping
-from contextlib import suppress
+from contextlib import ExitStack, suppress
+from dataclasses import replace
 from typing import Any, cast
 
 from core.resident_canonical import _fail_if
+from core.stdio_resident.config import StdioPoolConfig, mcp_tool_capture_enabled, suppress_builtin_tools_enabled
+from core.stdio_resident.mcp_capture_server import McpLoopbackServer, TurnMcpSessionSpec, TurnWireSessionScope
+from core.stdio_resident.mcp_tool_capture import McpToolCaptureSession, McpToolCaptureSpec
 from core.stdio_resident.process_io import TIMEOUT
 from core.stdio_resident.protocol_driver import DecodedChunk
 from core.stdio_resident.runtime_types import PreDispatchResidentError, ResidentStreamError
 from core.stdio_resident.session_manager import _build_cancel_payload, _track_fsm_ids
+from core.tool_mode import ToolMode, resolve_tool_mode
 
 
 def _resolve_spawn_env(driver: Any, fwd_env: Mapping[str, str], iso: Any) -> dict[str, str] | None:
@@ -32,12 +39,7 @@ def _resolve_spawn_env(driver: Any, fwd_env: Mapping[str, str], iso: Any) -> dic
     return spawn_env
 
 
-def prepare_runtime_spec(
-    driver: Any,
-    envelope: Any,
-    base_argv: list[str],
-    iso: Any,
-) -> tuple[list[str], str, dict[str, str] | None]:
+def prepare_runtime_spec(driver: Any, envelope: Any, base_argv: list[str], iso: Any) -> tuple[list[str], str, dict[str, str] | None]:
     ver = getattr(driver, "verify_environment", None)
     if callable(ver):
         ok, reason = cast(tuple[bool, str], ver())
@@ -119,22 +121,112 @@ def _read_decoded_step(driver: Any, handle: Any, idle_s: float, turn_ctx: dict[s
     return _decode_tagged_line(driver, handle, tagged, turn_ctx)
 
 
-def stream_driver_turn(
-    driver: Any,
-    handle: Any,
-    envelope: Any,
-    ctx: dict[str, Any],
-    on_dispatched: Callable[[], None],
+def _build_turn_mcp_context(
+    envelope: Any, ctx: Mapping[str, Any]
+) -> tuple[McpLoopbackServer | None, McpToolCaptureSession | None, TurnMcpSessionSpec | None]:
+    if not bool(getattr(envelope, "emulate_tools", False)):
+        return (None, None, None)
+    cfg = ctx.get("mcp_config")
+    mcp_on = bool(getattr(cfg, "mcp_tool_capture_enabled", False)) if cfg is not None else mcp_tool_capture_enabled()
+    suppress_on = bool(getattr(cfg, "suppress_builtin_tools_enabled", False)) if cfg is not None else suppress_builtin_tools_enabled()
+    schemas = cast(Mapping[str, Any], getattr(envelope, "tool_schemas", None) or {})
+    if mcp_on and schemas and resolve_tool_mode(schemas, getattr(envelope, "tool_choice", None)) is ToolMode.EMULATE:
+        cfg_eff = cfg if cfg is not None else StdioPoolConfig.from_env()
+        spec_cap = McpToolCaptureSpec.create(schemas, tool_mode=ToolMode.EMULATE)
+        sess = McpToolCaptureSession(spec_cap)
+        srv = McpLoopbackServer(
+            sess, max_request_bytes=int(getattr(cfg_eff, "mcp_max_request_bytes", 1048576)),
+            cancel_wait_s=float(getattr(cfg_eff, "mcp_cancel_wait_s", 2.0)), coalesce_ms=int(getattr(cfg_eff, "mcp_coalesce_ms", 25)),
+        )
+        wire = TurnMcpSessionSpec(bearer_token=spec_cap.bearer_token, server_name=spec_cap.server_name, suppress_host_tools=suppress_on, emulate_tools=True)
+        return (srv, sess, wire)
+    return (None, None, TurnMcpSessionSpec(suppress_host_tools=True, emulate_tools=True)) if suppress_on else (None, None, None)
+
+
+def _resolve_cancel_payload(driver: Any, turn_ctx: Mapping[str, object]) -> bytes | None:
+    scope = TurnWireSessionScope.current()
+    payload = scope.build_cancel_payload(turn_ctx) if scope is not None else None
+    return payload if payload is not None else _build_cancel_payload(driver, turn_ctx)
+
+
+def _drain_after_cancel(driver: Any, handle: Any, turn_ctx: dict[str, Any], wait_s: float) -> None:
+    deadline = time.monotonic() + max(0.05, wait_s)
+    while time.monotonic() < deadline:
+        kind, tagged = _read_next(handle, min(0.05, max(0.01, deadline - time.monotonic())))
+        if tagged is None and kind != TIMEOUT:
+            break
+        if kind == TIMEOUT or getattr(tagged, "is_stderr", False):
+            continue
+        raw_line = tagged.line if hasattr(tagged, "line") else str(tagged)
+        decoded = None
+        with suppress(Exception):
+            decoded = driver.decode_line(raw_line)
+        if decoded:
+            _track_fsm_ids(decoded, turn_ctx)
+        if driver.is_terminal(raw_line, decoded):
+            break
+
+
+def _finish_mcp_capture(
+    driver: Any, handle: Any, turn_ctx: dict[str, Any], srv: McpLoopbackServer, *, cancel: bool = True
+) -> DecodedChunk:
+    srv.wait_for_coalesce()
+    payload = _resolve_cancel_payload(driver, turn_ctx) if cancel else None
+    if payload:
+        with suppress(Exception):
+            handle.write(payload)
+    srv.release()
+    if cancel:
+        _drain_after_cancel(driver, handle, turn_ctx, srv.cancel_wait_s)
+    return DecodedChunk(is_terminal=True, is_tool_stop=True, tool_calls=srv.session.snapshot_captured_calls())
+
+
+def _stream_with_mcp(
+    driver: Any, handle: Any, turn_ctx: dict[str, Any], idle_s: float, srv: McpLoopbackServer
 ) -> Iterator[DecodedChunk]:
-    custom = _call_driver_stream(driver, handle, envelope, ctx)
-    if custom:
-        yield from custom
-    else:
+    last_activity, done = time.monotonic(), False
+    while not done and not srv.captured_event.is_set():
+        rem_idle = max(0.01, idle_s - (time.monotonic() - last_activity))
+        kind, tagged = _read_next(handle, min(rem_idle, 0.05))
+        if kind == TIMEOUT:
+            if srv.captured_event.is_set():
+                break
+            _fail_if(time.monotonic() - last_activity >= idle_s, ResidentStreamError("resident_turn_timeout", code="turn_timeout"))
+            continue
+        if tagged is None:
+            if srv.captured_event.is_set():
+                break
+            raise ResidentStreamError("resident process ended before the terminal marker", code="upstream_incomplete_stream")
+        last_activity = time.monotonic()
+        chunk, done, emit = _decode_tagged_line(driver, handle, tagged, turn_ctx)
+        if emit and not (done and srv.captured_event.is_set()):
+            yield cast(DecodedChunk, chunk)
+    if srv.captured_event.is_set():
+        yield _finish_mcp_capture(driver, handle, turn_ctx, srv, cancel=not done)
+
+
+def stream_driver_turn(
+    driver: Any, handle: Any, envelope: Any, ctx: dict[str, Any], on_dispatched: Callable[[], None]
+) -> Iterator[DecodedChunk]:
+    srv, _sess, wire_spec = _build_turn_mcp_context(envelope, ctx)
+    with ExitStack() as stack:
+        if srv is not None and wire_spec is not None:
+            _ = stack.enter_context(srv)
+            _ = stack.enter_context(TurnWireSessionScope.bind(replace(wire_spec, mcp_url=srv.url)))
+        elif wire_spec is not None:
+            _ = stack.enter_context(TurnWireSessionScope.bind(wire_spec))
+        custom = _call_driver_stream(driver, handle, envelope, ctx)
+        if custom:
+            yield from custom
+            return
         raw_ctx = ctx.get("extra_turn_context")
-        turn_ctx = raw_ctx if isinstance(raw_ctx, dict) else (dict(raw_ctx) if raw_ctx else {})
+        turn_ctx = cast(dict[str, Any], raw_ctx) if isinstance(raw_ctx, dict) else (dict(cast(Mapping[str, Any], raw_ctx)) if raw_ctx else {})
         timeouts = cast(tuple[float, float], ctx["timeouts"])
         _send_turn_input(driver, handle, str(ctx["prompt"]), turn_ctx, timeouts[0])
         on_dispatched()
+        if srv is not None:
+            yield from _stream_with_mcp(driver, handle, turn_ctx, timeouts[1], srv)
+            return
         done = False
         while not done:
             chunk, done, emit = _read_decoded_step(driver, handle, timeouts[1], turn_ctx)
@@ -143,7 +235,7 @@ def stream_driver_turn(
 
 
 def cancel_driver_turn(driver: Any, handle: Any, turn_context: Mapping[str, object] | None) -> None:
-    payload = _build_cancel_payload(driver, turn_context if turn_context else {})
+    payload = _resolve_cancel_payload(driver, turn_context if turn_context else {})
     if payload:
         with suppress(Exception):
             handle.write(payload)

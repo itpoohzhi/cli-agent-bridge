@@ -50,6 +50,7 @@ class ProtocolState:
     thread_id: str | None = None
     turn_id: str | None = None
     zero_canon: bool = False
+    suppress_tools: bool = False
     requested_model: str | None = None
     requested_effort: str | None = None
     actual_model: str | None = None
@@ -64,12 +65,12 @@ TransitionResult: TypeAlias = tuple[ProtocolState, tuple[ProtocolEffect, ...]]
 _Handler: TypeAlias = Callable[[ProtocolState, JsonMap], TransitionResult]
 
 _DELTAS: Mapping[str, str] = {"item/agentMessage/delta": "content", "item/reasoning/textDelta": "reasoning", "item/reasoning/summaryTextDelta": "reasoning_summary"}
-_TOOL_METHODS = frozenset(
+_TOOL_METHODS = frozenset((
     "item/tool/call item/tool/requestUserInput applyPatchApproval execCommandApproval "
-    "item/commandExecution/requestApproval item/fileChange/requestApproval item/permissions/requestApproval "
-    "item/commandExecution/outputDelta item/fileChange/outputDelta item/commandExecution/terminalInteraction "
-    "item/fileChange/patchUpdated item/mcpToolCall/progress".split()
-)
+    + "item/commandExecution/requestApproval item/fileChange/requestApproval item/permissions/requestApproval "
+    + "item/commandExecution/outputDelta item/fileChange/outputDelta item/commandExecution/terminalInteraction "
+    + "item/fileChange/patchUpdated item/mcpToolCall/progress"
+).split())
 _TOOL_ITEMS = frozenset("commandExecution fileChange mcpToolCall dynamicToolCall collabAgentToolCall webSearch".split())
 _THREAD_PHASES = frozenset((ProtocolPhase.INITIALIZED, ProtocolPhase.THREAD_READY, ProtocolPhase.COMPLETED, ProtocolPhase.CANCELLED))
 _TURN_PHASES = frozenset((ProtocolPhase.THREAD_READY, ProtocolPhase.COMPLETED, ProtocolPhase.CANCELLED))
@@ -130,17 +131,18 @@ def _start_thread(s: ProtocolState, p: JsonMap) -> TransitionResult:
     if s.phase not in _THREAD_PHASES:
         return _fail(s, "resident_protocol_failed", "thread/start invalid phase")
     rid, zc = s.next_request_id, bool(p.get("zero_canon", s.zero_canon))
+    st = bool(p.get("suppress_tools", p.get("emulate_tools", s.suppress_tools)))
     model, cwd = _str(p.get("model")), _str(p.get("cwd"))
     params: dict[str, object] = {"ephemeral": bool(p.get("ephemeral", True))}
     if model is not None:
         params["model"] = model
     if cwd is not None:
         params["cwd"] = cwd
-    if zc:
+    if zc or st:
         params["sandbox"], params["approvalPolicy"] = "read-only", "never"
     nxt = ProtocolState(
         phase=ProtocolPhase.THREAD_STARTING, epoch=s.epoch + 1, next_request_id=rid + 1, pending_request_id=rid,
-        zero_canon=zc, requested_model=model, user_agent=s.user_agent, pending_utf8=s.pending_utf8,
+        zero_canon=zc, suppress_tools=st, requested_model=model, user_agent=s.user_agent, pending_utf8=s.pending_utf8,
     )
     return nxt, (_rpc("thread/start", params, rid),)
 
@@ -149,6 +151,7 @@ def _start_turn(s: ProtocolState, p: JsonMap) -> TransitionResult:
     if s.phase not in _TURN_PHASES or s.thread_id is None:
         return _fail(s, "resident_protocol_failed", "turn/start needs server threadId")
     rid, zc = s.next_request_id, bool(p.get("zero_canon", s.zero_canon))
+    st = bool(p.get("suppress_tools", p.get("emulate_tools", s.suppress_tools)))
     raw_in = p.get("input")
     items: list[object] = list(cast(list[object], raw_in)) if isinstance(raw_in, list) else [{"type": "text", "text": str(p.get("prompt", ""))}]
     model, effort = _str(p.get("model")) or s.requested_model, _str(p.get("effort")) or s.requested_effort
@@ -157,11 +160,11 @@ def _start_turn(s: ProtocolState, p: JsonMap) -> TransitionResult:
         params["model"] = model
     if effort is not None:
         params["effort"] = effort
-    if zc:
+    if zc or st:
         params["approvalPolicy"], params["sandboxPolicy"] = "never", {"type": "readOnly", "networkAccess": False}
     nxt = replace(
         s, phase=ProtocolPhase.TURN_ACTIVE, epoch=s.epoch + 1, pending_request_id=rid, interrupt_request_id=None,
-        next_request_id=rid + 1, turn_id=None, zero_canon=zc, requested_model=model, requested_effort=effort, error_code=None, error_message=None,
+        next_request_id=rid + 1, turn_id=None, zero_canon=zc, suppress_tools=st, requested_model=model, requested_effort=effort, error_code=None, error_message=None,
     )
     return nxt, (_rpc("turn/start", params, rid),)
 
@@ -253,8 +256,9 @@ def _on_turn_notification(s: ProtocolState, method: str, p: JsonMap) -> Transiti
         if p.get("willRetry") is True or p.get("threadId") not in (None, s.thread_id):
             return s, ()
         return _fail(s, "resident_protocol_failed", _err(p.get("error"), "upstream err"))
-    if s.zero_canon and _is_tool_event(method, p) and p.get("threadId") in (None, s.thread_id):
-        return _fail(s, "zero_canon_tool_event_forbidden", f"forbidden tool: {method}")
+    if (s.zero_canon or s.suppress_tools) and _is_tool_event(method, p) and p.get("threadId") in (None, s.thread_id):
+        code = "zero_canon_tool_event_forbidden" if s.zero_canon else "builtin_tool_event_forbidden"
+        return _fail(s, code, f"forbidden tool: {method}")
     return s, ()
 
 

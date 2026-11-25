@@ -42,8 +42,7 @@ _LOGGER = logging.getLogger(__name__)
 
 
 def _binding_of(item: Any) -> SlotBinding | None:
-    res = SlotBinding(item.slot_id, item.generation) if item else None
-    return res
+    return SlotBinding(item.slot_id, item.generation) if item else None
 
 
 def _resolve_driver_method(driver: Any) -> Any:
@@ -91,6 +90,8 @@ class ResidentBridgeRuntime:
                 state = _TurnState(current, opts, session_key, slot, plan, any((eph, bool(iso.active), not runnable)))
                 yield from self._stream_and_commit_turn(state)
             finally:
+                if isinstance(options.extra_turn_context, dict) and "_committed_slot" in turn_ctx:
+                    options.extra_turn_context["_committed_slot"] = turn_ctx["_committed_slot"]
                 shutil.rmtree(sandbox, ignore_errors=True)
 
     @contextmanager
@@ -182,6 +183,7 @@ class ResidentBridgeRuntime:
 
     def _stream_and_commit_turn(self, state: _TurnState) -> Iterator[DecodedChunk]:
         parts: list[str] = []
+        tool_calls: list[dict[str, object]] = []
         byte_count = 0
         last_hb = time.monotonic()
         try:
@@ -189,6 +191,7 @@ class ResidentBridgeRuntime:
                 state.dispatched = any((state.dispatched, bool(getattr(decoded, "dispatched", False))))
                 text, encoded = self._encoded_chunk(decoded)
                 parts.append(text)
+                tool_calls.extend(cast(list[dict[str, object]], tc) if isinstance(tc := getattr(decoded, "tool_calls", None), list) else ())
                 byte_count += encoded
                 cap = state.options.max_output_bytes
                 _fail_if(bool(cap) and byte_count > cast(int, cap), ResourceLimitError("output_limit_exceeded"))
@@ -196,7 +199,7 @@ class ResidentBridgeRuntime:
                 _fail_if(ev.is_set() if ev else False, ResidentCancelledError("resident turn cancelled"))
                 last_hb = self._tick_keepalive(state.options.keepalive, last_hb)
                 if all((decoded.is_terminal, not decoded.error)):
-                    self._commit_terminal(state, "".join(parts))
+                    self._commit_terminal(state, "".join(parts), tool_calls or None)
                 yield decoded
         except (ResidentCancelledError, ResourceLimitError, ResidentStreamError):
             raise
@@ -206,10 +209,10 @@ class ResidentBridgeRuntime:
         finally:
             self._cleanup_turn(state)
 
-    def _commit_terminal(self, state: _TurnState, text: str) -> None:
+    def _commit_terminal(self, state: _TurnState, text: str, tool_calls: list[dict[str, object]] | None = None) -> None:
         if state.options.terminal_validator:
             state.options.terminal_validator(text)
-        item = build_assistant_transcript_item(text)
+        item = build_assistant_transcript_item(text, tool_calls)
         leave_s = float(getattr(self._config, "leave_timeout_s", 2.0))
         teardown_driver_turn(self._driver, state.slot.handle, state.options.extra_turn_context, leave_s)
         state.slot_released = self._pool.release(state.slot.slot_id, success=True, lease_id=state.slot.lease_id)
@@ -220,9 +223,16 @@ class ResidentBridgeRuntime:
             state.evicted = [b for _, b in self._tracker.commit(state.session_key, state.plan, binding, item)]
             self._close_all(state.evicted)
             state.evicted.clear()
+            if isinstance(ctx := state.options.extra_turn_context, dict):
+                ctx["_committed_slot"] = (state.session_key, binding)
+                if isinstance(sink := ctx.get("_committed_slot_sink"), list):
+                    cast(list[Any], sink).append((state.session_key, binding))
         else:
             self._close_binding(_binding_of(self._tracker.invalidate(state.session_key)))
         state.committed_ok = True
+
+    def rebind_assistant_item(self, session_key: str, binding: SlotBinding, item: Any) -> bool:
+        return self._tracker.rebind_assistant_item(session_key, binding, item)
 
     def _cleanup_turn(self, state: _TurnState) -> None:
         try:
@@ -253,6 +263,7 @@ class ResidentBridgeRuntime:
             "extra_turn_context": state.options.extra_turn_context,
             "prompt": state.plan.prompt_to_send,
             "timeouts": (hs_s, idle_s),
+            "mcp_config": self._config,
         }
 
         def mark_dispatched() -> None:

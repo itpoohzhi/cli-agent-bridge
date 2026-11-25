@@ -9,10 +9,12 @@ import hmac
 import json
 import os
 import sys
+import tempfile
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+from core.stdio_resident.config import ENV_CLEAN_CLI_HOME_ROOT, clean_cli_home_enabled
 from core.subbridge_zero_canon import filter_muse_settings
 from core.zero_canon_fs import ensure_private_dir, remove_entry, write_atomic_0600
 
@@ -147,6 +149,16 @@ def build_muse_zero_canon_argv(argv: list[str]) -> list[str]:
     return cleaned
 
 
+def _resolve_clean_muse_home(trusted_env: Mapping[str, str], turn_sandbox: str | None) -> Path:
+    """Resolve the clean Muse HOME root: explicit env override, turn sandbox, or temp fallback."""
+    raw_root = str(trusted_env.get(ENV_CLEAN_CLI_HOME_ROOT) or "").strip()
+    if raw_root:
+        return Path(raw_root).expanduser() / "muse-clean-home"
+    if turn_sandbox:
+        return Path(turn_sandbox) / "muse-clean-home"
+    return Path(tempfile.gettempdir()) / f"cli-agent-bridge-muse-clean-{os.getuid()}"
+
+
 def build_muse_env(
     base_env: Mapping[str, str] | None,
     verified_binary_path: str,
@@ -173,6 +185,14 @@ def build_muse_env(
             trusted_env.get("HOME") or str(Path.home()), zero_canon_home, source_xdg_config=trusted_env.get("XDG_CONFIG_HOME")
         )
         env["HOME"], env["XDG_CONFIG_HOME"], env["BRIDGE_ZERO_CANON"] = str(zc_home), str(zc_home / ".config"), "1"
+    elif clean_cli_home_enabled(trusted_env):
+        clean_home = prepare_muse_zero_canon_home(
+            trusted_env.get("HOME") or str(Path.home()),
+            _resolve_clean_muse_home(trusted_env, turn_sandbox),
+            source_xdg_config=trusted_env.get("XDG_CONFIG_HOME"),
+        )
+        env["HOME"] = str(clean_home)
+        env["XDG_CONFIG_HOME"] = str(clean_home / ".config")
     return env
 
 
