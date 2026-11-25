@@ -104,13 +104,13 @@ class RouteCB:
                     p.open_until, p.probe_in_flight = None, False
                     p.unproven.clear()
                     self._probes.pop(id(p), None)
-            if lease: lease.done = True
+            if lease and lease.key == key: lease.done = True
 
     def record_failure(self, key: RouteTupleKey, outcome: FailureOutcome | None = None, lease: RouteProbeLease | None = None, now: float | None = None) -> str:
         """Classify outcome and update tuple/provider state; never logs credentials."""
         eff = outcome or FailureOutcome()
         with self._lock:
-            ts, eff_lease = self._clock() if now is None else now, self._active_lease(lease)
+            ts, eff_lease = self._clock() if now is None else now, self._active_lease(lease, key)
             if not is_recordable_failure(eff.status, eff.error, eff.reason):
                 res = "ignored"
             elif eff.status in (401, 402, 403):
@@ -120,7 +120,7 @@ class RouteCB:
                 if getattr(eff_lease, "provider_lease", False): self._open_provider_wide(key[0], ts)
                 res = "route_fail"
             self._clear_probe_flags(eff_lease)
-            if lease: lease.done = True
+            if lease and lease.key == key: lease.done = True
             return res
 
     def retry_after_s(self, keys: Iterable[RouteTupleKey], now: float | None = None) -> int:

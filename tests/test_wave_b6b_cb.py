@@ -157,3 +157,17 @@ def test_b6b_late_provider_success_and_auth_probe_clears_probes() -> None:
     assert cb.try_acquire(k2) is None
     cb.record_failure(k3, FailureOutcome(status=401, detail="invalid_api_key"), lease=probe_b)
     assert (id(cb._providers["p6"]) not in cb._probes, cb.try_acquire(k2) is None) == (True, True)
+
+
+def test_b6b_mismatched_key_lease_ignored_in_success_and_failure() -> None:
+    now, cb = _clock_cb()
+    k1, k_other = ("p7", "m1", "b1"), ("p8", "m2", "b1")
+    for _ in range(3):
+        cb.record_failure(k1, FailureOutcome(status=500))
+    now[0] += 90.0
+    lease1 = cb.try_acquire(k1)
+    assert lease1 is not None and lease1.tuple_lease is True
+    cb.record_failure(k_other, FailureOutcome(status=500), lease=lease1)
+    cb.record_success(k_other, lease=lease1)
+    assert (lease1.done, cb.try_acquire(k_other) is not None, cb.try_acquire(k1) is None) == (False, True, True)
+    assert cb.release_lease(lease1) is True
