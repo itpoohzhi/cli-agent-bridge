@@ -4,6 +4,8 @@
 <dict>
 	<key>EnvironmentVariables</key>
 	<dict>
+		<key>BRIDGE_EXIT_TIMEOUT_S</key>
+		<string>180</string>
 		<key>BRIDGE_INVOKE_NORMALIZATION_ENABLED</key>
 		<string>true</string>
 		<key>BRIDGE_MAX_CONCURRENT</key>
