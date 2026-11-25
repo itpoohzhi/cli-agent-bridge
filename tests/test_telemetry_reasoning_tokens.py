@@ -76,12 +76,17 @@ def test_normalize_usage_fields_openai_keys() -> None:
         "cache_read_tokens": None,
         "reasoning_tokens": None,
         "usage_present": True,
+        "usage_source": "upstream_report",
+        "usage_missing_reason": None,
     }
 
 
-def test_normalize_usage_fields_zero_counters_confirm_presence() -> None:
+def test_normalize_usage_fields_zero_counters_are_not_present() -> None:
+    """Контракт B1b: нулевые счётчики не подтверждают usage, причина — empty_zero_usage."""
     fields = normalize_usage_fields({"prompt_tokens": 0, "completion_tokens": 0})
-    assert fields["usage_present"] is True
+    assert fields["usage_present"] is False
+    assert fields["usage_missing_reason"] == "empty_zero_usage"
+    assert fields["usage_source"] is None
 
 
 def test_normalize_usage_fields_empty_mapping_is_not_present() -> None:
@@ -95,11 +100,17 @@ def test_normalize_usage_fields_none_gives_all_none() -> None:
         "cache_read_tokens": None,
         "reasoning_tokens": None,
         "usage_present": None,
+        "usage_source": None,
+        "usage_missing_reason": None,
     }
 
 
 def test_normalize_usage_fields_explicit_flag() -> None:
-    assert normalize_usage_fields({"usage_present": True})["usage_present"] is True
+    """Контракт B1b: явный usage_present=True без положительных счётчиков не принимается."""
+    assert normalize_usage_fields({"prompt_tokens": 1, "usage_present": True})["usage_present"] is True
+    bare = normalize_usage_fields({"usage_present": True})
+    assert bare["usage_present"] is False
+    assert bare["usage_missing_reason"] == "usage_missing_in_stream"
 
 
 def test_normalize_usage_fields_cache_variants() -> None:
@@ -120,7 +131,8 @@ def test_normalize_usage_fields_reasoning_from_details() -> None:
 
 def test_normalize_usage_returns_reasoning_without_presence_flag() -> None:
     fields = normalize_usage({"prompt_tokens": 1, "output_tokens_details": {"reasoning_tokens": 2}})
-    assert fields == {"input_tokens": 1, "output_tokens": None, "cache_read_tokens": None, "reasoning_tokens": 2}
+    assert fields == {"input_tokens": 1, "output_tokens": None, "cache_read_tokens": None, "reasoning_tokens": 2,
+                      "usage_source": "upstream_report", "usage_missing_reason": None}
 
 
 def test_extract_usage_openai_with_reasoning() -> None:
@@ -129,6 +141,7 @@ def test_extract_usage_openai_with_reasoning() -> None:
         "input_tokens": 10,
         "output_tokens": 5,
         "reasoning_tokens": 3,
+        "usage_source": "upstream_report",
     }
 
 
@@ -138,20 +151,24 @@ def test_extract_usage_anthropic_keys() -> None:
         "input_tokens": 7,
         "output_tokens": 4,
         "cache_read_tokens": 2,
+        "usage_source": "upstream_report",
     }
 
 
-def test_extract_usage_zero_counters_confirmed() -> None:
+def test_extract_usage_zero_counters_are_not_confirmed() -> None:
+    """Контракт B1b: нулевой usage не подтверждает присутствие, причина empty_zero_usage."""
     tail = b'{"usage":{"prompt_tokens":0,"completion_tokens":0}}'
     usage = extract_usage(tail)
-    assert usage == {"input_tokens": 0, "output_tokens": 0}
-    assert telemetry_usage_updates(usage)["usage_present"] is True
+    assert usage == {"usage_missing_reason": "empty_zero_usage"}
+    updates = telemetry_usage_updates(usage)
+    assert updates["usage_present"] is False
+    assert updates["usage_missing_reason"] == "empty_zero_usage"
 
 
 def test_extract_usage_cli_contract_without_presence_flag() -> None:
     tail = b'"usage": {"prompt_tokens": 1, "completion_tokens": 2}'
     usage = extract_usage(tail)
-    assert usage == {"input_tokens": 1, "output_tokens": 2}
+    assert usage == {"input_tokens": 1, "output_tokens": 2, "usage_source": "upstream_report"}
     assert telemetry_usage_updates(usage)["usage_present"] is True
 
 
@@ -168,6 +185,8 @@ def test_enrich_turn_usage_dict_overwrites_and_marks_present() -> None:
         "cache_read_tokens": 2,
         "reasoning_tokens": 3,
         "usage_present": True,
+        "usage_source": "upstream_report",
+        "usage_missing_reason": None,
     }
     assert base == {"input_tokens": 1, "output_tokens": 1}
 
@@ -178,6 +197,8 @@ def test_enrich_turn_usage_dict_skips_absent_optional_fields() -> None:
         "input_tokens": 10,
         "output_tokens": 5,
         "usage_present": True,
+        "usage_source": "upstream_report",
+        "usage_missing_reason": None,
     }
 
 
@@ -189,11 +210,17 @@ def test_telemetry_usage_updates_maps_keys() -> None:
         "cached_tokens": 2,
         "reasoning_tokens": 3,
         "usage_present": True,
+        "usage_source": "upstream_report",
+        "usage_missing_reason": None,
     }
 
 
 def test_telemetry_usage_updates_none_usage() -> None:
-    assert telemetry_usage_updates(None) == {"usage_present": None}
+    assert telemetry_usage_updates(None) == {
+        "usage_present": False,
+        "usage_source": None,
+        "usage_missing_reason": "usage_missing_in_stream",
+    }
 
 
 def test_finalize_event_usage_full_block() -> None:
@@ -212,6 +239,8 @@ def test_finalize_event_usage_full_block() -> None:
         "reasoning_tokens": 3,
         "total_tokens": 15,
         "usage_present": True,
+        "usage_source": "upstream_report",
+        "usage_missing_reason": None,
     }
     assert meta == {"event": "turn"}
 
@@ -230,14 +259,18 @@ def test_finalize_event_usage_empty_meta() -> None:
         "reasoning_tokens": None,
         "total_tokens": None,
         "usage_present": False,
+        "usage_source": None,
+        "usage_missing_reason": "usage_missing_in_stream",
     }
 
 
 def test_finalize_event_usage_zero_total_stays_none() -> None:
+    """Контракт B1b: нулевые счётчики при явном usage_present=True остаются без usage."""
     raw = {"prompt_tokens": 0, "completion_tokens": 0, "usage_present": True}
     usage = finalize_event_usage(raw)
     assert usage["total_tokens"] is None
-    assert usage["usage_present"] is True
+    assert usage["usage_present"] is False
+    assert usage["usage_missing_reason"] == "empty_zero_usage"
 
 
 def test_format_turn_output_propagates_reasoning_tokens_and_presence() -> None:

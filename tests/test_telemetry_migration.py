@@ -28,7 +28,7 @@ try:  # DuckDB опционален: миграцию проверяем и на
 except Exception:  # noqa: BLE001 - любой сбой импорта = миграция проверяется только на sqlite3
     duckdb = None
 
-LEGACY_COLUMNS = COLUMNS[:-2]
+LEGACY_COLUMNS = COLUMNS[:-4]
 LEGACY_SCHEMA = ", ".join(f"{name} {typ}" for name, typ in LEGACY_COLUMNS)
 _LEGACY_INSERT = f"INSERT INTO bridge_requests VALUES ({', '.join('?' * len(LEGACY_COLUMNS))})"
 
@@ -72,11 +72,16 @@ def _check_migrated(store: RequestTelemetryStore) -> None:
 
 
 def test_schema_contract() -> None:
-    """Схема 31 колонка: новые строго в конце, прежние 29 не тронуты, разрезы дополнены аддитивно."""
-    assert len(NAMES) == 31
-    assert NAMES[-2:] == ("reasoning_tokens", "usage_present")
-    assert NAMES[:-2] == tuple(name for name, _ in LEGACY_COLUMNS)
-    assert MIGRATION_COLUMNS == (("reasoning_tokens", "INTEGER"), ("usage_present", "BOOLEAN"))
+    """Схема 33 колонки: новые строго в конце, прежние 29 не тронуты, разрезы дополнены аддитивно."""
+    assert len(NAMES) == 33
+    assert NAMES[-4:] == ("reasoning_tokens", "usage_present", "usage_source", "usage_missing_reason")
+    assert NAMES[:-4] == tuple(name for name, _ in LEGACY_COLUMNS)
+    assert MIGRATION_COLUMNS == (
+        ("reasoning_tokens", "INTEGER"),
+        ("usage_present", "BOOLEAN"),
+        ("usage_source", "TEXT"),
+        ("usage_missing_reason", "TEXT"),
+    )
     assert "reasoning_tokens" not in LEGACY_SCHEMA
     for cols in (SUMMARY_COLS, MODEL_COLS, CLIENT_COLS):
         assert "reasoning_tokens" in cols
