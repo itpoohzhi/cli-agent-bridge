@@ -101,6 +101,7 @@ class CanonDeliveryTest(unittest.TestCase):
 
     def _assert_rejected(self, result, prefix):
         self.assertEqual(_exit_code(result), 2)
+        self.assertEqual(getattr(result, "lower_margin", result[2]), 0)
         reasons = _reasons(result)
         self.assertTrue(any(r.startswith(prefix) for r in reasons), reasons)
 
@@ -175,6 +176,12 @@ class CanonDeliveryTest(unittest.TestCase):
         self._write_bytes(other, b"elsewhere")
         os.symlink(other, self.ug_path)
         self._assert_rejected(self._check(), "CANON_LOST user-global %s" % b_guard.UG_DISPLAY)
+
+    def test_user_global_directory_is_canon_lost(self):
+        os.makedirs(self.ug_path)
+        res = self._check()
+        self._assert_rejected(res, "CANON_LOST user-global %s" % b_guard.UG_DISPLAY)
+        self.assertTrue(any("нечитаем" in r for r in _reasons(res)), _reasons(res))
 
     # --- нечитаемый канон ---
 
