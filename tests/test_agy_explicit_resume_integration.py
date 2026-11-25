@@ -397,12 +397,24 @@ def test_server_handler_e2e_plain_legacy_and_zero_canon(tmp_path: Path, monkeypa
     h_zc = _setup_server(monkeypatch, tmp_path / "zc", [_CID_3, _CID_2])
     z1, zp1, zr1 = h_zc.post(m1, chat_id="zc-e2e", review_profile="Zero-Canon")
     cwd1 = Path(str(zr1["cwd"]))
-    assert z1 == 200 and zr1["zero_canon"] is True and zr1["conversation_id"] == "" and zp1["conversation_id"] == _CID_3 and zr1["cwd_existed"] is True and cwd1.name.startswith("turn-") and not cwd1.exists()
-    z2, zp2, zr2 = h_zc.post(m2, chat_id="zc-e2e", review_profile="Zero-Canon")
-    cwd2 = Path(str(zr2["cwd"]))
-    assert z2 == 200 and zr2["zero_canon"] is True and zr2["conversation_id"] == _CID_3 and zp2["conversation_id"] == _CID_3 and zr2["cwd_existed"] is True and cwd2.name.startswith("turn-") and cwd2 != cwd1 and not cwd2.exists()
-    assert "SECOND_USER" in str(zr2["prompt"]) and "FIRST_USER" not in str(zr2["prompt"])
-    assert (tmp_path / "zc" / "agy-zc-cwd").is_dir() and list((tmp_path / "zc" / "agy-zc-cwd").glob("turn-*")) == []
+    import os
+    import stat
+    try:
+        assert z1 == 200 and zr1["zero_canon"] is True and zr1["conversation_id"] == "" and zp1["conversation_id"] == _CID_3 and zr1["cwd_existed"] is True and cwd1 == tmp_path / "zc" / "agy-zc-static-cwd" and cwd1.is_dir()
+        z2, zp2, zr2 = h_zc.post(m2, chat_id="zc-e2e", review_profile="Zero-Canon")
+        cwd2 = Path(str(zr2["cwd"]))
+        assert z2 == 200 and zr2["zero_canon"] is True and zr2["conversation_id"] == _CID_3 and zp2["conversation_id"] == _CID_3 and zr2["cwd_existed"] is True and cwd2 == cwd1 and cwd1.is_dir()
+        assert stat.S_IMODE(cwd1.stat().st_mode) == 0o555 and list(cwd1.iterdir()) == []
+        assert "SECOND_USER" in str(zr2["prompt"]) and "FIRST_USER" not in str(zr2["prompt"])
+        (tmp_path / "zc" / "dynamic_config.json").write_text(json.dumps({"AGY_ZERO_CANON_ENABLED": True, "bridge_agy_zc_static_cwd_enabled": False}))
+        h_zc.cids.append(_CID_1)
+        ks, _, zr_ks = h_zc.post(m1, chat_id="zc-e2e-ks", review_profile="Zero-Canon")
+        cwd_ks = Path(str(zr_ks["cwd"]))
+        assert ks == 200 and zr_ks["zero_canon"] is True and cwd_ks.name.startswith("turn-") and not cwd_ks.exists()
+        assert list((tmp_path / "zc" / "agy-zc-cwd").glob("turn-*")) == [] and cwd1.is_dir()
+    finally:
+        if cwd1.exists():
+            os.chmod(cwd1, 0o700)
 
 
 def test_bug_b1_json_think_zero_tools_commits_cleaned_content_and_resumes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
