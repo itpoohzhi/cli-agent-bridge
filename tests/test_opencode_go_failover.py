@@ -304,6 +304,52 @@ def test_passthrough_fail_log_correlates_model_and_request_id() -> None:
     assert "status=502" in fails[-1]
     assert "model=deepseek-v4.1-flash" in fails[-1]
     assert "request_id=req_fail_log_1" in fails[-1]
+    assert "detail=" in fails[-1]
+    assert "\n" not in fails[-1]
+
+
+def test_passthrough_fail_logs_sanitized_detail() -> None:
+    logs: list[str] = []
+    adapter = PassthroughAdapter(
+        "neuralwatt-flex",
+        {"kind": "passthrough", "base_url": "http://127.0.0.1:1/v1", "max_concurrent": 1},
+        lambda: {},
+        host=SimpleNamespace(_log=logs.append),
+        limits=PassthroughLimits(),
+        sanitize=False,
+    )
+    sink = _Sink()
+    try:
+        adapter._fail(
+            sink,
+            502,
+            "upstream_metadata_conflict",
+            "conflicting id\nfake=1",
+            model="mimo-v2.6-pro-flex",
+            request_id="req_meta_1",
+        )
+        adapter._fail(
+            sink,
+            502,
+            "upstream_metadata_conflict",
+            "   ",
+            model="mimo-v2.6-pro-flex",
+            request_id="req_meta_2",
+        )
+        adapter._fail(
+            sink,
+            502,
+            "upstream_metadata_conflict",
+            "x" * 100,
+            model="mimo-v2.6-pro-flex",
+            request_id="req_meta_3",
+        )
+    finally:
+        adapter.shutdown()
+    assert len(logs) == 3
+    assert "detail=conflicting_id_fake_1" in logs[0] and "\n" not in logs[0]
+    assert logs[1].endswith("detail=-")
+    assert logs[2].endswith("detail=" + "x" * 64)
 
 
 # ---- фасад: per-route изоляция и пул в `_run_routes`, presend-контракт ---------

@@ -202,6 +202,22 @@ def test_aggregate_chunk_metadata_conflict_is_502(field: str, value: str) -> Non
     assert (error.status, error.code) == (502, "upstream_metadata_conflict")
 
 
+def test_aggregate_created_and_fingerprint_are_first_wins_without_502() -> None:
+    first = frame({**chunk([{"index": 0, "delta": {"role": "assistant", "content": "a"}, "finish_reason": None}]), "created": 1795585216, "system_fingerprint": None})
+    second = frame({**chunk([{"index": 0, "delta": {"content": "b"}, "finish_reason": None}]), "created": 1795585217, "system_fingerprint": "fp-1"})
+    third = frame({**chunk([{"index": 0, "delta": {"content": "c"}, "finish_reason": "stop"}]), "created": 1795585220, "system_fingerprint": "fp-2"})
+    body = agg(first + second + third + DONE)
+    assert body["created"] == 1795585216
+    assert body["system_fingerprint"] == "fp-1"
+    assert message_of(body)["content"] == "abc"
+
+    zero_first = frame({**chunk([{"index": 0, "delta": {"content": "x"}, "finish_reason": None}]), "created": 0})
+    nonzero_next = frame({**chunk([{"index": 0, "delta": {"content": "y"}, "finish_reason": "stop"}]), "created": 1795585300})
+    body2 = agg(zero_first + nonzero_next + DONE)
+    assert body2["created"] == 1795585300
+    assert message_of(body2)["content"] == "xy"
+
+
 def test_aggregate_unknown_delta_fields_are_dropped() -> None:
     raw = (
         delta_frame({"role": "assistant", "x_vendor_extra": {"a": 1}})
