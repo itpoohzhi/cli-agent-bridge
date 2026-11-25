@@ -74,6 +74,30 @@ def test_b6b_abandoned_probe_ttl_and_done_lease() -> None:
     assert (abandoned is not None and abandoned.tuple_lease, cb.try_acquire(k1) is None) == (True, True)
     now[0] += 90.0
     reclaimed = cb.try_acquire(k1)
-    assert reclaimed is not None and cb.record_failure(k1, FailureOutcome(status=500), lease=abandoned) == "route_fail"
-    assert cb.try_acquire(k1) is None
+    assert (reclaimed is not None, cb.release_lease(abandoned), cb.try_acquire(k1) is None) == (True, True, True)
+    cb.record_success(k1, reclaimed)
+    assert cb.try_acquire(k1) is not None
+    assert cb.record_failure(k1, FailureOutcome(status=500), lease=abandoned) == "route_fail"
+    assert cb.try_acquire(k1) is not None
     assert cb.release_lease(abandoned) is False
+
+
+def test_b6b_ignored_sets_done_and_concurrent_half_open() -> None:
+    import concurrent.futures
+    now, cb = _clock_cb()
+    k1 = ("p2", "m1", "b1")
+    for _ in range(3):
+        cb.record_failure(k1, FailureOutcome(status=500))
+    now[0] += 90.0
+    lease_a = cb.try_acquire(k1)
+    assert lease_a is not None and cb.record_failure(k1, FailureOutcome(status=400), lease=lease_a) == "ignored"
+    assert lease_a.done is True
+    lease_b = cb.try_acquire(k1)
+    assert (lease_b is not None, cb.release_lease(lease_a), cb.try_acquire(k1) is None) == (True, False, True)
+    cb.record_success(k1, lease_b)
+    for _ in range(3):
+        cb.record_failure(k1, FailureOutcome(status=500))
+    now[0] += 90.0
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as ex:
+        got = list(ex.map(lambda _: cb.try_acquire(k1), range(4)))
+    assert sum(1 for x in got if x is not None) == 1
