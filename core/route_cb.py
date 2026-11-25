@@ -82,17 +82,21 @@ class RouteCB:
             lease.done = True
             return True
 
+    @staticmethod
+    def _can_reset(st: _TupleState | _ProviderState, lease: RouteProbeLease | None, eff: RouteProbeLease | None, attr: str) -> bool:
+        return st.open_until is None or lease is None or bool(getattr(eff, attr, False))
+
     def record_success(self, key: RouteTupleKey, lease: RouteProbeLease | None = None) -> None:
         """Reset tuple/provider state on success and release any held probe lease."""
         with self._lock:
-            eff_lease = self._active_lease(lease) if (lease is None or lease.key == key) else None
-            if (t := self._tuples.get(key)) and (t.open_until is None or lease is None or getattr(eff_lease, "tuple_lease", False)):
+            eff_lease = self._active_lease(lease) if (lease and lease.key == key) else None
+            if (t := self._tuples.get(key)) and self._can_reset(t, lease, eff_lease, "tuple_lease"):
                 t.failures, t.first_fail_ts, t.open_until, t.probe_in_flight = 0, None, None, False
                 self._probes.pop(id(t), None)
             if p := self._providers.get(key[0]):
                 if p.open_until is None:
                     p.unproven = deque(((k, ts) for k, ts in p.unproven if k != key), maxlen=_UNPROVEN_DEQUE_MAX)
-                elif lease is None or getattr(eff_lease, "provider_lease", False):
+                elif self._can_reset(p, lease, eff_lease, "provider_lease"):
                     p.open_until, p.probe_in_flight = None, False
                     p.unproven.clear()
                     self._probes.pop(id(p), None)
