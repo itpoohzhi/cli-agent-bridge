@@ -88,10 +88,16 @@ def test_b7_legacy_error_matrix() -> None:
     except TypeError:
         pass
     g_fail_cb.release()
+    g_exc_cb = CBAttemptGuard(cand, k, route_cb=SimpleNamespace(record_failure=lambda *_a: 1 / 0, release_lease=lambda lease: released_calls.append(("exc", lease))), lease="L2")
+    try:
+        g_exc_cb.record_exception(RuntimeError("boom"))
+        assert False, "expected ZeroDivisionError"
+    except ZeroDivisionError:
+        pass
     g_fail_leg = CBAttemptGuard(cand, k, legacy=SimpleNamespace(release_probe=lambda p: released_calls.append(p)), probe="P1")
     try:
         g_fail_leg.record_error(RouteRefusal(500, (), b""), SimpleNamespace(), RouteFailover(), QuotaRules.from_config(), now=12.0)
         assert False, "expected AttributeError"
     except AttributeError:
         pass
-    assert (g_fail_cb.done, g_fail_leg.done, released_calls) == (True, True, ["L1", "P1"])
+    assert (g_fail_cb.done, g_fail_leg.done, released_calls) == (True, True, ["L1", ("exc", "L2"), "P1"])
