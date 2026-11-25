@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import hashlib
+import math
 from collections.abc import Mapping
 from dataclasses import asdict, replace
-from typing import ClassVar, cast, override
+from typing import Any, ClassVar, cast, override
+
+from core.resident_identity import ResidentRequestError
 
 from adapters.stdio_drivers.agy_config import (
     FLAG_AGY_RESIDENT,
@@ -52,23 +55,60 @@ class AgyStreamJsonDriver(StreamJsonDriver):
     def config(self) -> AgyResidentConfig:
         return self._config
 
+    @staticmethod
+    def _set_pair(argv: list[str], flag: str, value: str) -> None:
+        prefix = f"{flag}="
+        eq_idx = next((i for i, item in enumerate(argv) if item.startswith(prefix)), None)
+        fl_idx = next((i for i, item in enumerate(argv) if item == flag), None)
+        if not isinstance(eq_idx, type(None)):
+            argv[eq_idx] = f"{flag}={value}"
+        elif not isinstance(fl_idx, type(None)):
+            pos = fl_idx + 1
+            argv[pos : pos + 1] = [value]
+        else:
+            argv.extend((flag, value))
+
+    @staticmethod
+    def _parse_timeout_val(value: object) -> float:
+        try:
+            fv = float(cast(Any, value))
+            bad = any((isinstance(value, bool), not math.isfinite(fv), fv > 86400))
+            if bad:
+                raise ValueError("invalid timeout")
+            return fv
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ResidentRequestError(400, "invalid_request") from exc
+
+    @classmethod
+    def validate_timeout(cls, options: _Map) -> int:
+        keys = ("print_timeout", "print_timeout_s", "first_progress_timeout_s", "idle_timeout_s", "turn_total_timeout_s", "safety_cap_s")
+        raw_vals = [options.get(k) for k in keys]
+        parsed = [cls._parse_timeout_val(v) for v in raw_vals if not isinstance(v, type(None))]
+        positives = [math.ceil(v) for v in parsed if v > 0]
+        res = min(max(1, min(positives)), 86400) if positives else 30
+        return res
+
     @override
     def build_argv(self, base_argv: list[str], options: _Map) -> list[str]:
         argv = list(base_argv)
         self._ensure_pair(argv, "--input-format", "stream-json")
         self._ensure_pair(argv, "--output-format", "stream-json")
-        self._ensure_pair(argv, "--print-timeout", "0")
+        self._set_pair(argv, "--print-timeout", str(self.validate_timeout(options)))
         if model := self._option_str(options, "model"):
             self._ensure_pair(argv, "--model", model)
         if effort := self._option_str(options, "effort"):
-            self._ensure_pair(argv, "--effort", effort)
+            if bool({effort.strip().lower()} - {"", "off"}):
+                self._ensure_pair(argv, "--effort", effort)
         if cid := self._option_str(options, "conversation", "conversation_id", "cid"):
             self._ensure_pair(argv, "--conversation", cid)
         return argv
 
     @override
     def encode_turn(self, prompt: str, turn_context: _Map | None = None) -> bytes:
-        msg: _Dict = {"role": "user", "content": prompt}
+        msg: _Dict = {
+            "role": "user",
+            "content": [{"type": "text", "text": prompt}],
+        }
         payload: _Dict = {"type": "user", "event": "user", "message": msg}
         for key, value in (turn_context or {}).items():
             if key not in _INTERNAL_CTX_KEYS and key not in payload:

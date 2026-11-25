@@ -334,27 +334,22 @@ def build_affinity_key(
     model: str,
     effort: str,
     cwd_norm: str,
+    *,
+    env_digest: str,
     is_ephemeral: bool = False,
     driver_fingerprint: str = "",
     review_profile: str = "standard",
 ) -> SlotAffinityKey:
-    """Construct ``SlotAffinityKey`` with optional wave fields supported by types."""
-    kwargs: dict[str, Any] = {
-        "owner_hash": owner_hash,
-        "chat_key": chat_key,
-        "backend_id": backend_id,
-        "model": model,
-        "effort": effort,
-        "cwd_norm": cwd_norm,
-    }
-    if dataclasses.is_dataclass(SlotAffinityKey):
-        fields = {f.name for f in dataclasses.fields(SlotAffinityKey)}
-        if "is_ephemeral" in fields:
-            kwargs["is_ephemeral"] = is_ephemeral
-        if "review_profile" in fields:
-            kwargs["review_profile"] = normalize_review_profile(review_profile)
-        if "driver_fingerprint" in fields:
-            kwargs["driver_fingerprint"] = driver_fingerprint
-        elif "fingerprint" in fields:
-            kwargs["fingerprint"] = driver_fingerprint
-    return SlotAffinityKey(**kwargs)
+    """Construct a complete resident-process affinity key."""
+    return SlotAffinityKey(
+        owner_hash=owner_hash,
+        chat_key=chat_key,
+        backend_id=backend_id,
+        model=model,
+        effort=effort,
+        cwd_norm=cwd_norm,
+        is_ephemeral=is_ephemeral,
+        review_profile=normalize_review_profile(review_profile),
+        driver_fingerprint=driver_fingerprint,
+        env_digest=env_digest,
+    )

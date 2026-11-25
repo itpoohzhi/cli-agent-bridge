@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
-import os
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
+from functools import partial
 from typing import Any
 
+from adapters.stdio_resident_runtime import (
+    build_turn_request_from_ctx,
+    wrap_emulate_tools_sse_writer,
+)
 from core.backend_adapter import StreamSink, TurnContext, TurnResult
 from core.runtime_env import stdio_usage_contract_enabled
 from core.stdio_resident.codex_attestation_wire import (
@@ -70,17 +74,31 @@ def sample_usage_enabled(data: Mapping[str, Any]) -> bool:
 def _build_turn_request(
     adapter_id: str, ctx: TurnContext, profile: str
 ) -> dict[str, Any]:
-    return {
-        "chat_key": ctx.turn_id or ctx.rid or "default",
-        "backend_id": adapter_id,
-        "model": ctx.model,
-        "effort": ctx.effort,
-        "cwd": ctx.cwd or os.getcwd(),
-        "prompt": ctx.prompt,
-        "env": ctx.fwd_env,
-        "review_profile": profile,
-        "turn_context": {"model": ctx.model, "effort": ctx.effort, "review_profile": profile},
-    }
+    return build_turn_request_from_ctx(adapter_id, ctx, profile)
+
+
+def _emulate_tools_setup(
+    adapter: Any, ctx: TurnContext, writer: StreamSink | None
+) -> tuple[StreamSink | None, Callable[[str], None] | None, Callable[[], bool] | None]:
+    handler = getattr(ctx, "handler", None)
+
+    def _close_stream() -> None:
+        if handler:
+            setattr(handler, "close_connection", True)
+
+    def _keepalive() -> bool:
+        output = getattr(handler, "wfile", None)
+        if output:
+            output.write(b": keepalive\n\n")
+            output.flush()
+        return bool(output)
+
+    raw_cap = adapter._config.max_turn_output_bytes
+    max_bytes = max(1024, int(raw_cap if raw_cap else 4194304))
+    ka = _keepalive if handler else None
+    wrapped = wrap_emulate_tools_sse_writer(writer, ctx.emulate_tools, max_bytes, _close_stream, ka)
+    validator = getattr(ctx, "terminal_validator", None)
+    return (None if ctx.emulate_tools else wrapped), validator, (ka if ctx.emulate_tools else None)
 
 
 def execute_stdio_turn(
@@ -99,16 +117,18 @@ def execute_stdio_turn(
     hdr_map = dict(raw_headers.items()) if hasattr(raw_headers, "items") else None
     driver = getattr(adapter, "_driver", None)
     wire_zc = should_wire_v2_zero_canon(protocol, profile, handler)
-    writer = (
-        wrap_v2_sse_writer(sse_writer, driver, handler, ctx.model, ctx.effort)
-        if wire_zc
-        else sse_writer
+    base_writer = wrap_v2_sse_writer(sse_writer, driver, handler, ctx.model, ctx.effort) if wire_zc else sse_writer
+    routed_writer, validator, keepalive = _emulate_tools_setup(adapter, ctx, base_writer)
+    if validator:
+        request["_terminal_validator"] = validator
+    if keepalive:
+        request["_keepalive"] = keepalive
+    execute_chat = partial(
+        adapter.execute_chat,
+        trusted_owner_hash=ctx.owner_hash,
+        trusted_identity=getattr(ctx, "resident_identity", None),
     )
-    routed = execute_routed_turn_result(
-        adapter.execute_chat, protocol, request, writer, headers=hdr_map
-    )
+    routed = execute_routed_turn_result(execute_chat, protocol, request, routed_writer, headers=hdr_map)
     if wire_zc:
-        record_v2_turn_completion(
-            driver, handler, model=ctx.model, effort=ctx.effort, has_sse=sse_writer is not None
-        )
+        record_v2_turn_completion(driver, handler, model=ctx.model, effort=ctx.effort, has_sse=bool(sse_writer))
     return make_turn_result(routed.text, routed.reasoning, routed.usage if usage_enabled else None)

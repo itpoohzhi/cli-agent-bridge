@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass, field
 from typing import NotRequired, Protocol, TypedDict, TypeVar, cast
 
 from core.fleet_model_validation import FLEET_MODEL_KEYS as FLEET_MODEL_KEYS
@@ -106,3 +107,80 @@ def catalog_models(
         for mid in order
         if mid in models and _belongs_to_backend(models[mid], backend_id)
     ]
+
+
+@dataclass(frozen=True)
+class TranscriptItem:
+    """Один вход истории для неизменённого Droid-пути."""
+
+    role: str
+    text: str
+    digest: str
+
+
+@dataclass(frozen=True)
+class Transcript:
+    """Нормализованная история хода."""
+
+    system: str | None = None
+    runnable: bool = True
+    items: tuple[TranscriptItem, ...] = ()
+
+
+@dataclass(frozen=True)
+class ImageAttachment:
+    """Проверенное вложение хода."""
+
+    name: str
+    mime: str
+    data: bytes
+
+
+@dataclass(frozen=True)
+class Usage:
+    """Токены готового ответа."""
+
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cache_read_tokens: int | None = None
+    cache_creation_tokens: int | None = None
+
+
+@dataclass(frozen=True)
+class ToolFunction:
+    """Сериализованные аргументы вызова OpenAI function."""
+
+    name: str
+    arguments: str
+
+
+@dataclass(frozen=True)
+class ToolCall:
+    """Вызов инструмента в готовом ответе."""
+
+    index: int
+    id: str
+    function: ToolFunction
+    type: str = "function"
+
+
+@dataclass(frozen=True)
+class TurnEvent:
+    """Событие доставки: текст или типизированный вызов."""
+
+    kind: str
+    value: str | ToolCall
+
+
+@dataclass(frozen=True)
+class TurnResult:
+    """Итог адаптера; None events означает необходимость фасадного разбора текста."""
+
+    state: str = "done"
+    rc: int = 0
+    text: str = ""
+    reasoning: str = ""
+    usage: Usage = field(default_factory=Usage)
+    err: str = ""
+    events: tuple[TurnEvent, ...] | None = None
+    tool_calls: tuple[ToolCall, ...] = ()

@@ -227,6 +227,14 @@ def step_slot_fsm(
         return SlotState.CLOSED, []
 
 
+@dataclass(frozen=True, slots=True)
+class SlotBinding:
+    """Identity of one concrete resident-slot generation."""
+
+    slot_id: str
+    generation: int
+
+
 @dataclass(frozen=True)
 class SlotAffinityKey:
     """Stable affinity dimensions for selecting a resident slot."""
@@ -237,6 +245,7 @@ class SlotAffinityKey:
     model: str
     effort: str
     cwd_norm: str
+    env_digest: str = field(default="", kw_only=True)
     review_profile: str = "standard"
 
 
