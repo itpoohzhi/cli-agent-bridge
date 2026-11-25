@@ -188,21 +188,11 @@ def test_agy_gate_disabled_error_returned_without_fallback(monkeypatch: pytest.M
 # fmt: on
 
 
-def _fake_route(
-    provider_id: str | None,
-    backend: str = "claude-p",
-    backends: dict[str, Any] | None = None,
-) -> tuple[Any, list[tuple[int, str, str]]]:
+def _fake_route(provider_id: str | None, backend: str = "claude-p", backends: dict[str, Any] | None = None) -> tuple[Any, list[tuple[int, str, str]]]:
     rejects: list[tuple[int, str, str]] = []
-    host = SimpleNamespace(
-        PROVIDER_SCOPES={"agy": ("agy-bridge",)}, BACKENDS=backends or {}
-    )
-    route = SimpleNamespace(
-        ingress=SimpleNamespace(provider_id=provider_id),
-        host=host,
-        model={"backend": backend},
-        reject=lambda c, r, m: rejects.append((c, r, m)) or False,
-    )
+    default_backends: dict[str, Any] = {"agy": SimpleNamespace(id="agy", owned_by="agy-bridge")}
+    host = SimpleNamespace(PROVIDER_SCOPES={"agy": ("agy-bridge",)}, BACKENDS=default_backends if backends is None else backends)
+    route = SimpleNamespace(ingress=SimpleNamespace(provider_id=provider_id), host=host, model={"backend": backend}, reject=lambda c, r, m: rejects.append((c, r, m)) or False)
     return route, rejects
 
 
@@ -217,12 +207,14 @@ def test_unit_backend_matches_provider_scopes_and_fail_closed() -> None:
         "claude-p": SimpleNamespace(owned_by="claude-p-bridge"),
     }
     assert backend_matches_provider("claude-p", None, scopes, backends) is True
-    for bid in ("agy", "agy-bridge", "own", "prv", "cfg"):
+    for bid in ("agy-bridge", "own", "prv", "cfg"):
         assert backend_matches_provider(bid, "agy", scopes, backends) is True
+    assert backend_matches_provider("agy", "agy", scopes, backends) is False
     assert backend_matches_provider("claude-p", "agy", scopes, backends) is False
     assert backend_matches_provider("claude-p", "claude-p", scopes, backends) is False
     assert backend_matches_provider("", "", scopes, backends) is False
     assert backend_matches_provider("agy", "agy", {"agy": ()}, backends) is False
+    assert backend_matches_provider("agy", "agy", {"agy": {"agy-bridge": 1}}, backends) is False  # type: ignore[dict-item]
     assert backend_matches_provider("", "agy", {"agy": ""}, backends) is False
     assert backend_matches_provider("agy", "agy", {"agy": None}, backends) is False  # type: ignore[dict-item]
     assert backend_matches_provider("claude-p", "claude-p", {"claude-p": ("agy",)}, backends) is False
@@ -232,10 +224,10 @@ def test_unit_scope_routes_preserves_unscoped_and_fails_closed() -> None:
     from core.provider_route_scope import scope_routes
 
     scopes = {"agy": ("agy-bridge",)}
-    rc, ra = SimpleNamespace(backend="claude-p"), SimpleNamespace(backend="agy-c")
+    rc, ra, rn = SimpleNamespace(backend="claude-p"), SimpleNamespace(backend="agy-c"), SimpleNamespace(backend=None)
     backends = {"agy-c": SimpleNamespace(config={"provider": "agy-bridge"})}
     assert scope_routes([rc, ra], None, scopes, backends) == (rc, ra)
-    assert scope_routes([rc, ra], "agy", scopes, backends) == (ra,)
+    assert scope_routes([rc, ra, rn], "agy", scopes, backends) == (ra,)
     assert scope_routes([rc, ra], "claude-p", scopes, backends) == ()
 
 
@@ -283,9 +275,7 @@ def test_unit_single_route_provider_allowed_and_dispatch_scoped_single() -> None
         lambda r, w: sent.append((r, w)),
     )
     assert sent == [] and jdb[0][:2] == (503, "provider_route_unavailable")
-    rdo, jdo = _fake_route(
-        "agy", backend="claude-p", backends={"agy": SimpleNamespace(id="agy")}
-    )
+    rdo, jdo = _fake_route("agy", backend="claude-p", backends={"agy": SimpleNamespace(id="agy", owned_by="agy-bridge")})
     dispatch_scoped_single(
         rdo,
         {"disabled_backend": "agy"},

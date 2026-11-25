@@ -54,7 +54,7 @@ def _adapter_matches(adapter: object, allowed: Collection[str]) -> bool:
 def _normalize_allowed(raw: object) -> frozenset[str]:
     if isinstance(raw, str):
         return frozenset((raw,)) if raw else frozenset()
-    if isinstance(raw, Collection) and not isinstance(raw, (bytes, bytearray)):
+    if isinstance(raw, Collection) and not isinstance(raw, (bytes, bytearray, Mapping)):
         return frozenset(x for x in raw if isinstance(x, str) and x)
     return frozenset()
 
@@ -76,12 +76,9 @@ def backend_matches_provider(
     if backend_id in allowed:
         return True
     adapter = backends.get(backend_id) if backends is not None else None
-    if adapter is not None and (
-        getattr(adapter, "owned_by", None) is not None
-        or isinstance(getattr(adapter, "config", None), Mapping)
-    ):
+    if adapter is not None:
         return _adapter_matches(adapter, allowed)
-    return backend_id == provider_id
+    return False
 
 
 def scope_routes(
@@ -99,7 +96,7 @@ def scope_routes(
         spec
         for spec in routes
         if backend_matches_provider(
-            str(getattr(spec, "backend", "")),
+            b if isinstance(b := getattr(spec, "backend", None), str) else "",
             provider_id,
             provider_scopes,
             backends,
@@ -192,10 +189,6 @@ def filter_dispatch_routes(
         return tuple(routes)
     scoped = scope_routes(routes, provider_id, scopes, backends)
     if not scoped:
-        _ = route.reject(
-            503,
-            "provider_route_unavailable",
-            f"no eligible transport for provider '{provider_id}'",
-        )
+        _reject_provider_scope(route, provider_id)
         return None
     return scoped
