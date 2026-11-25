@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import stat
 import sys
@@ -84,6 +85,29 @@ def _relax_tmp_path(tmp_path: Path) -> Iterator[None]:
             os.chmod(child, 0o700)
 
 
+def _assert_fail_closed(mgr: Any, target: Path) -> None:
+    with pytest.raises(RuntimeError):
+        zc_static_cwd.ensure_static_cwd(target, mgr)
+
+
+def _assert_degrades(
+    mgr: Any,
+    target: Path,
+    caplog: pytest.LogCaptureFixture,
+    env: dict[str, str] | None = None,
+) -> None:
+    with caplog.at_level(logging.WARNING):
+        cwd = zc_static_cwd.acquire_turn_cwd(mgr, environ={} if env is None else env)
+    assert cwd.ephemeral is True
+    assert cwd.path != target
+    assert cwd.path.is_dir()
+    assert cwd.path.name.startswith("turn-")
+    assert cwd.path.parent == mgr.zc_cwd
+    assert "agy_zc_static_cwd_degraded" in caplog.text
+    cwd.release()
+    assert not cwd.path.exists()
+
+
 @requires_non_root
 def test_default_static_path_reused_across_turns(tmp_path: Path) -> None:
     mgr = _mgr(tmp_path)
@@ -123,7 +147,7 @@ def test_static_cwd_is_not_writable(tmp_path: Path) -> None:
 
 
 @requires_non_root
-def test_leaf_symlink_rejected_valid_and_dangling(tmp_path: Path) -> None:
+def test_leaf_symlink_fail_closed_valid_and_dangling(tmp_path: Path) -> None:
     mgr = _mgr(tmp_path)
     base = mgr.base
     base.mkdir(mode=0o700, parents=True)
@@ -134,13 +158,11 @@ def test_leaf_symlink_rejected_valid_and_dangling(tmp_path: Path) -> None:
     dangling = base / "link-dangling"
     dangling.symlink_to(base / "missing")
     for link in (valid, dangling):
-        env = {zc_static_cwd.STATIC_CWD_PATH_ENV: str(link)}
-        with pytest.raises(RuntimeError):
-            zc_static_cwd.acquire_turn_cwd(mgr, environ=env)
+        _assert_fail_closed(mgr, link)
 
 
 @requires_non_root
-def test_parent_symlink_rejected(tmp_path: Path) -> None:
+def test_parent_symlink_fail_closed(tmp_path: Path) -> None:
     mgr = _mgr(tmp_path)
     base = mgr.base
     base.mkdir(mode=0o700, parents=True)
@@ -148,30 +170,43 @@ def test_parent_symlink_rejected(tmp_path: Path) -> None:
     real_parent.mkdir(mode=0o700)
     linked = base / "link-parent"
     linked.symlink_to(real_parent)
-    env = {zc_static_cwd.STATIC_CWD_PATH_ENV: str(linked / "agy-zc-static-cwd")}
-    with pytest.raises(RuntimeError):
-        zc_static_cwd.acquire_turn_cwd(mgr, environ=env)
+    _assert_fail_closed(mgr, linked / "agy-zc-static-cwd")
 
 
 @requires_non_root
-def test_parent_world_writable_without_sticky_rejected(tmp_path: Path) -> None:
+def test_ancestor_symlink_fail_closed_before_mkdir(tmp_path: Path) -> None:
+    mgr = _mgr(tmp_path)
+    real = tmp_path / "real-tree"
+    real.mkdir(mode=0o700)
+    linked = tmp_path / "linked-tree"
+    linked.symlink_to(real)
+    target = linked / "nested" / "agy-zc-static-cwd"
+    _assert_fail_closed(mgr, target)
+    assert not (real / "nested").exists()
+
+
+@requires_non_root
+def test_relative_path_fail_closed(tmp_path: Path) -> None:
+    mgr = _mgr(tmp_path)
+    _assert_fail_closed(mgr, Path("relative/agy-zc-static-cwd"))
+
+
+@requires_non_root
+def test_parent_world_writable_without_sticky_fail_closed(tmp_path: Path) -> None:
     mgr = _mgr(tmp_path)
     loose = tmp_path / "loose-parent"
     loose.mkdir(mode=0o700)
     os.chmod(loose, 0o777)
-    env = {zc_static_cwd.STATIC_CWD_PATH_ENV: str(loose / "agy-zc-static-cwd")}
-    with pytest.raises(RuntimeError):
-        zc_static_cwd.acquire_turn_cwd(mgr, environ=env)
+    _assert_fail_closed(mgr, loose / "agy-zc-static-cwd")
 
 
 @requires_non_root
-def test_wrong_mode_0o755_rejected(tmp_path: Path) -> None:
+def test_wrong_mode_0o755_fail_closed(tmp_path: Path) -> None:
     mgr = _mgr(tmp_path)
     static = _static_dir(mgr)
     static.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     static.mkdir(mode=0o755)
-    with pytest.raises(RuntimeError):
-        zc_static_cwd.acquire_turn_cwd(mgr, environ={})
+    _assert_fail_closed(mgr, static)
 
 
 @requires_non_root
@@ -180,38 +215,39 @@ def test_wrong_mode_0o700_persistent_after_retries(tmp_path: Path) -> None:
     static = _static_dir(mgr)
     static.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     static.mkdir(mode=0o700)
-    with pytest.raises(RuntimeError):
-        zc_static_cwd.acquire_turn_cwd(mgr, environ={})
+    _assert_fail_closed(mgr, static)
 
 
 @requires_non_root
-def test_non_empty_0o555_static_dir_rejected(tmp_path: Path) -> None:
+def test_non_empty_0o555_fail_closed(tmp_path: Path) -> None:
     mgr = _mgr(tmp_path)
     static = _static_dir(mgr)
     static.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     static.mkdir(mode=0o700)
     (static / "planted.txt").write_text("pwned", encoding="utf-8")
     os.chmod(static, 0o555)
-    with pytest.raises(RuntimeError):
-        zc_static_cwd.acquire_turn_cwd(mgr, environ={})
+    _assert_fail_closed(mgr, static)
 
 
 @requires_non_root
-def test_same_uid_plant_caught_on_next_turn(tmp_path: Path) -> None:
+def test_same_uid_plant_caught_on_next_turn(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
     mgr = _mgr(tmp_path)
     first = zc_static_cwd.acquire_turn_cwd(mgr, environ={})
     assert first.ephemeral is False
     # ARCH_PANEL F-002: same-uid adversary relaxes the mode, plants a file,
-    # then restores 0o555; the next turn must fail closed (no fallback).
+    # then restores 0o555; strict verification fails closed (no fallback to
+    # the tampered static dir) and acquire degrades to an ephemeral CWD.
     os.chmod(first.path, 0o700)
     (first.path / "planted.txt").write_text("pwned", encoding="utf-8")
     os.chmod(first.path, 0o555)
-    with pytest.raises(RuntimeError):
-        zc_static_cwd.acquire_turn_cwd(mgr, environ={})
+    _assert_fail_closed(mgr, first.path)
+    _assert_degrades(mgr, first.path, caplog)
 
 
 @requires_non_root
-def test_overlap_with_protected_dirs_rejected(tmp_path: Path) -> None:
+def test_overlap_with_protected_dirs_fail_closed(tmp_path: Path) -> None:
     mgr = _mgr(tmp_path)
     mgr.real_home.mkdir(mode=0o700, parents=True)
     mgr.gemini_dir.mkdir(mode=0o700, parents=True)
@@ -220,13 +256,11 @@ def test_overlap_with_protected_dirs_rejected(tmp_path: Path) -> None:
         mgr.gemini_dir / "nested" / "agy-zc-static-cwd",
         mgr.base,
     ):
-        env = {zc_static_cwd.STATIC_CWD_PATH_ENV: str(target)}
-        with pytest.raises(RuntimeError):
-            zc_static_cwd.acquire_turn_cwd(mgr, environ=env)
+        _assert_fail_closed(mgr, target)
 
 
 @requires_non_root
-def test_uid_mismatch_rejected(
+def test_uid_mismatch_fail_closed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     mgr = _mgr(tmp_path)
@@ -238,9 +272,77 @@ def test_uid_mismatch_rejected(
     fake_uid = os.getuid() + 4242
     monkeypatch.setattr(os, "getuid", lambda: fake_uid)
     monkeypatch.setattr(os, "geteuid", lambda: fake_uid)
-    env = {zc_static_cwd.STATIC_CWD_PATH_ENV: str(static)}
+    _assert_fail_closed(mgr, static)
+
+
+@requires_non_root
+@pytest.mark.parametrize(
+    "kind",
+    ("non_empty_0o555", "leaf_symlink", "wrong_mode_0o755", "overlap", "relative"),
+)
+def test_f002_acquire_degrades_safely_on_tampering(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, kind: str
+) -> None:
+    mgr = _mgr(tmp_path)
+    env: dict[str, str] = {}
+    if kind == "non_empty_0o555":
+        target = _static_dir(mgr)
+        target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        target.mkdir(mode=0o700)
+        (target / "planted.txt").write_text("pwned", encoding="utf-8")
+        os.chmod(target, 0o555)
+    elif kind == "leaf_symlink":
+        real = tmp_path / "real-target"
+        real.mkdir(mode=0o700)
+        target = tmp_path / "link-target"
+        target.symlink_to(real)
+        env[zc_static_cwd.STATIC_CWD_PATH_ENV] = str(target)
+    elif kind == "wrong_mode_0o755":
+        target = _static_dir(mgr)
+        target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        target.mkdir(mode=0o755)
+    elif kind == "overlap":
+        mgr.real_home.mkdir(mode=0o700, parents=True)
+        target = mgr.real_home / "agy-zc-static-cwd"
+        env[zc_static_cwd.STATIC_CWD_PATH_ENV] = str(target)
+    else:
+        target = Path("relative/agy-zc-static-cwd")
+        env[zc_static_cwd.STATIC_CWD_PATH_ENV] = str(target)
+    _assert_degrades(mgr, target, caplog, env)
+
+
+@requires_non_root
+def test_f002_fail_closed_env_re_raises(tmp_path: Path) -> None:
+    mgr = _mgr(tmp_path)
+    static = _static_dir(mgr)
+    static.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    static.mkdir(mode=0o755)
+    env = {zc_static_cwd.STATIC_CWD_FAIL_CLOSED_ENV: "1"}
     with pytest.raises(RuntimeError):
         zc_static_cwd.acquire_turn_cwd(mgr, environ=env)
+
+
+@requires_non_root
+def test_f002_single_tamper_is_not_a_persistent_dos(tmp_path: Path) -> None:
+    mgr = _mgr(tmp_path)
+    first = zc_static_cwd.acquire_turn_cwd(mgr, environ={})
+    assert first.ephemeral is False
+    static = first.path
+    os.chmod(static, 0o700)
+    (static / "planted.txt").write_text("pwned", encoding="utf-8")
+    os.chmod(static, 0o555)
+    degraded = zc_static_cwd.acquire_turn_cwd(mgr, environ={})
+    assert degraded.ephemeral is True
+    assert degraded.path != static
+    degraded.release()
+    assert not degraded.path.exists()
+    os.chmod(static, 0o700)
+    (static / "planted.txt").unlink()
+    os.chmod(static, 0o555)
+    recovered = zc_static_cwd.acquire_turn_cwd(mgr, environ={})
+    assert recovered.ephemeral is False
+    assert recovered.path == static
+    assert list(static.iterdir()) == []
 
 
 def test_kill_switch_env_returns_ephemeral(tmp_path: Path) -> None:
@@ -345,8 +447,91 @@ def test_enabled_config_variants(tmp_path: Path) -> None:
         ('{"bridge_agy_zc_static_cwd_enabled": "OFF"}', False),
         ('{"bridge_agy_zc_static_cwd_enabled": true}', True),
         ('{"bridge_agy_zc_static_cwd_enabled": 1}', True),
-        ("{not json at all", True),
+        ('{"bridge_agy_zc_static_cwd_enabled": "on"}', True),
+        ('{"bridge_agy_zc_static_cwd_enabled": null}', False),
+        ('{"bridge_agy_zc_static_cwd_enabled": [1]}', False),
+        ('{"bridge_agy_zc_static_cwd_enabled": {"x": 1}}', False),
+        ("{not json at all", False),
+        ("[]", False),
     )
     for raw, expected in variants:
         cfg.write_text(raw, encoding="utf-8")
         assert zc_static_cwd.is_agy_static_cwd_enabled(cfg, environ={}) is expected
+
+
+@requires_non_root
+def test_f001_corrupt_config_fails_closed_not_open(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    mgr = _mgr(tmp_path)
+    cfg = tmp_path / "dynamic_config.json"
+    cfg.write_text("{not json at all", encoding="utf-8")
+    with caplog.at_level(logging.WARNING):
+        enabled = zc_static_cwd.is_agy_static_cwd_enabled(cfg, environ={})
+        turn = zc_static_cwd.acquire_turn_cwd(mgr, cfg, environ={})
+    assert enabled is False
+    assert "agy_zc_static_cwd_config_unreadable" in caplog.text
+    assert turn.ephemeral is True
+    assert turn.path.name.startswith("turn-")
+    turn.release()
+    assert not turn.path.exists()
+
+
+@requires_non_root
+def test_f001_non_dict_root_fails_closed(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    mgr = _mgr(tmp_path)
+    cfg = tmp_path / "dynamic_config.json"
+    cfg.write_text("[]", encoding="utf-8")
+    with caplog.at_level(logging.WARNING):
+        enabled = zc_static_cwd.is_agy_static_cwd_enabled(cfg, environ={})
+        turn = zc_static_cwd.acquire_turn_cwd(mgr, cfg, environ={})
+    assert enabled is False
+    assert "agy_zc_static_cwd_config_invalid_root" in caplog.text
+    assert turn.ephemeral is True
+    turn.release()
+    assert not turn.path.exists()
+
+
+@requires_non_root
+def test_f001_non_scalar_value_fails_closed(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    cfg = tmp_path / "dynamic_config.json"
+    cfg.write_text('{"bridge_agy_zc_static_cwd_enabled": [1]}', encoding="utf-8")
+    with caplog.at_level(logging.WARNING):
+        assert zc_static_cwd.is_agy_static_cwd_enabled(cfg, environ={}) is False
+    assert "agy_zc_static_cwd_config_bad_value" in caplog.text
+
+
+@requires_non_root
+def test_f001_directory_as_config_fails_closed(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    cfg = tmp_path / "dynamic_config.json"
+    cfg.mkdir(mode=0o700)
+    with caplog.at_level(logging.WARNING):
+        enabled = zc_static_cwd.is_agy_static_cwd_enabled(cfg, environ={})
+    assert enabled is False
+    assert "agy_zc_static_cwd_config_unreadable" in caplog.text
+
+
+@requires_non_root
+def test_f001_missing_config_defaults_enabled(tmp_path: Path) -> None:
+    mgr = _mgr(tmp_path)
+    missing = tmp_path / "dynamic_config.json"
+    assert zc_static_cwd.is_agy_static_cwd_enabled(missing, environ={}) is True
+    assert zc_static_cwd.is_agy_static_cwd_enabled(None, environ={}) is True
+    turn = zc_static_cwd.acquire_turn_cwd(mgr, missing, environ={})
+    assert turn.ephemeral is False
+
+
+@requires_non_root
+def test_f001_valid_dict_without_key_defaults_enabled(tmp_path: Path) -> None:
+    mgr = _mgr(tmp_path)
+    cfg = tmp_path / "dynamic_config.json"
+    cfg.write_text("{}", encoding="utf-8")
+    assert zc_static_cwd.is_agy_static_cwd_enabled(cfg, environ={}) is True
+    turn = zc_static_cwd.acquire_turn_cwd(mgr, cfg, environ={})
+    assert turn.ephemeral is False
