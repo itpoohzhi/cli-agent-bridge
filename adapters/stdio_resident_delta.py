@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import time
 from collections.abc import Callable, Iterator, Mapping
 from functools import partial
@@ -26,6 +27,7 @@ from core.turn_usage import TurnUsage
 from core.turn_usage_result import make_turn_result
 from core.usage_wire import build_turn_wire_usage
 
+logger = logging.getLogger(__name__)
 _BRIDGE_STREAM_KINDS = frozenset({"content", "reasoning"})
 
 
@@ -169,7 +171,9 @@ def _rebind_tool_turn_slot(
     rebind = getattr(runtime, "rebind_assistant_item", None) or getattr(adapter, "rebind_assistant_item", None)
     item = bridge.committed_assistant_item(result)
     if callable(rebind) and item is not None:
-        _ = rebind(slot_ref[0], slot_ref[1], item)
+        ok = bool(rebind(slot_ref[0], slot_ref[1], item))
+        if not ok:
+            logger.debug("resident_rebind_assistant_item_skipped: slot_mismatch")
 
 
 def execute_stdio_turn(adapter: Any, protocol: str, ctx: TurnContext, sse_writer: StreamSink | None) -> TurnResult:

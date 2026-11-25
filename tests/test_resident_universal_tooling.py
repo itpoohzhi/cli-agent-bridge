@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import queue
 import socket
 import stat
@@ -17,9 +18,10 @@ from typing import Any, cast
 
 from adapters.stdio_drivers.muse_codec import build_session_start_msg, decode_msp_line, uuid7
 from adapters.stdio_drivers.muse_env import build_muse_env
-from adapters.stdio_resident_delta import execute_stdio_turn
-from core.backend_adapter import TurnContext
-from core.backend_routing_models import TranscriptItem
+from adapters.stdio_drivers.muse_mcp_wire import apply_scope_to_session_start
+from adapters.stdio_resident_delta import _rebind_tool_turn_slot, execute_stdio_turn
+from core.backend_adapter import TurnContext, TurnResult
+from core.backend_routing_models import ToolCall, ToolFunction, TranscriptItem
 from core.resident_history import ResidentHistoryTracker, build_assistant_transcript_item, plan_history_transition
 from core.resident_identity import ResidentIdentity
 from core.resident_turn_envelope import ResidentTurnEnvelope
@@ -28,7 +30,8 @@ from core.stdio_resident.codex_protocol_fsm import EffectKind, EventKind, Protoc
 from core.stdio_resident.config import mcp_tool_capture_enabled
 from core.stdio_resident.mcp_capture_server import TurnMcpSessionSpec, TurnWireSessionScope
 from core.stdio_resident.process_io import LINE, TIMEOUT
-from core.stdio_resident.runtime_wire import stream_driver_turn
+from core.stdio_resident.runtime_wire import cancel_driver_turn, stream_driver_turn
+from core.stdio_resident.tool_turn_outcome import LiveToolStreamBridge
 from core.stdio_resident.types import SlotBinding
 
 _BASH_SCHEMAS: dict[str, Any] = {
@@ -283,3 +286,44 @@ def test_claude_and_codex_builtin_tool_suppression() -> None:
 
     zc_st, _ = transition(ProtocolState(phase=ProtocolPhase.TURN_ACTIVE, thread_id="thr-z", zero_canon=True, suppress_tools=True), ProtocolEvent(EventKind.SERVER_FRAME, {"jsonrpc": "2.0", "method": "item/tool/call", "params": {"threadId": "thr-z"}}))
     assert zc_st.phase is ProtocolPhase.FAILED and zc_st.error_code == "zero_canon_tool_event_forbidden"
+
+
+def test_apply_scope_to_session_start_preserves_existing_config_keys() -> None:
+    params: dict[str, Any] = {"sessionId": "sid-keep-cfg", "config": {"customFlag": True}}
+    spec = TurnMcpSessionSpec(
+        mcp_url="http://127.0.0.1:43211/mcp/abc",
+        bearer_token="tok-secret",
+        server_name="bridge",
+        emulate_tools=True,
+        suppress_host_tools=True,
+    )
+    with TurnWireSessionScope.bind(spec):
+        out = apply_scope_to_session_start(params, clear_developer_prompt=False)
+    assert out["config"]["customFlag"] is True
+    assert "bridge" in out["config"]["mcpServers"]
+    assert out["approvalMode"] == "allowAll"
+
+
+def test_cancel_driver_turn_write_failure_logs_warning_without_payload_leak(caplog: Any) -> None:
+    class _FailingHandle:
+        def write(self, _data: bytes) -> None:
+            raise BrokenPipeError("pipe closed")
+
+    driver = SimpleNamespace(build_cancel_payload=lambda: b'{"secret":"super-secret-cancel-payload"}\n')
+    with caplog.at_level(logging.WARNING, logger="core.stdio_resident.runtime_wire"):
+        cancel_driver_turn(driver, _FailingHandle(), {"turn_id": "t-fail"})
+    assert "resident_cancel_write_failed: BrokenPipeError" in caplog.text
+    assert "super-secret-cancel-payload" not in caplog.text
+
+
+def test_rebind_tool_turn_slot_mismatch_logs_debug_without_crash(caplog: Any) -> None:
+    adapter = SimpleNamespace(_runtime=SimpleNamespace(rebind_assistant_item=lambda *_args: False))
+    bridge = LiveToolStreamBridge(emulate_tools=False, sse_writer=None)
+    result = TurnResult(
+        text="",
+        tool_calls=(ToolCall(index=0, id="call_mismatch", function=ToolFunction(name="bash", arguments='{"command":"pwd"}')),),
+    )
+    committed_slots: list[tuple[str, Any]] = [("session-x", SlotBinding("slot-x", 1))]
+    with caplog.at_level(logging.DEBUG, logger="adapters.stdio_resident_delta"):
+        _rebind_tool_turn_slot(adapter, {}, committed_slots, bridge, result)
+    assert "resident_rebind_assistant_item_skipped: slot_mismatch" in caplog.text

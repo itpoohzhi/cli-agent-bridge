@@ -4,6 +4,7 @@ from __future__ import annotations
 
 # pyright: reportAny=false, reportExplicitAny=false, reportPrivateUsage=false
 import inspect
+import logging
 import os
 import time
 from collections.abc import Callable, Iterator, Mapping
@@ -20,6 +21,8 @@ from core.stdio_resident.protocol_driver import DecodedChunk
 from core.stdio_resident.runtime_types import PreDispatchResidentError, ResidentStreamError
 from core.stdio_resident.session_manager import _build_cancel_payload, _track_fsm_ids
 from core.tool_mode import ToolMode, resolve_tool_mode
+
+logger = logging.getLogger(__name__)
 
 
 def _resolve_spawn_env(driver: Any, fwd_env: Mapping[str, str], iso: Any) -> dict[str, str] | None:
@@ -173,8 +176,10 @@ def _finish_mcp_capture(
     srv.wait_for_coalesce()
     payload = _resolve_cancel_payload(driver, turn_ctx) if cancel else None
     if payload:
-        with suppress(Exception):
+        try:
             handle.write(payload)
+        except Exception as exc:
+            logger.warning("resident_cancel_write_failed: %s", type(exc).__name__)
     srv.release()
     if cancel:
         _drain_after_cancel(driver, handle, turn_ctx, srv.cancel_wait_s)
@@ -210,18 +215,18 @@ def stream_driver_turn(
 ) -> Iterator[DecodedChunk]:
     srv, _sess, wire_spec = _build_turn_mcp_context(envelope, ctx)
     with ExitStack() as stack:
-        if srv is not None and wire_spec is not None:
+        if srv is not None:
             _ = stack.enter_context(srv)
-            _ = stack.enter_context(TurnWireSessionScope.bind(replace(wire_spec, mcp_url=srv.url)))
-        elif wire_spec is not None:
-            _ = stack.enter_context(TurnWireSessionScope.bind(wire_spec))
+        if wire_spec is not None:
+            eff_spec = replace(wire_spec, mcp_url=srv.url) if srv is not None else wire_spec
+            _ = stack.enter_context(TurnWireSessionScope.bind(eff_spec))
         custom = _call_driver_stream(driver, handle, envelope, ctx)
         if custom:
             yield from custom
             return
         raw_ctx = ctx.get("extra_turn_context")
         turn_ctx = cast(dict[str, Any], raw_ctx) if isinstance(raw_ctx, dict) else (dict(cast(Mapping[str, Any], raw_ctx)) if raw_ctx else {})
-        timeouts = cast(tuple[float, float], ctx["timeouts"])
+        timeouts = cast(tuple[float, float], ctx.get("timeouts", (30.0, 120.0)))
         _send_turn_input(driver, handle, str(ctx["prompt"]), turn_ctx, timeouts[0])
         on_dispatched()
         if srv is not None:
@@ -237,5 +242,7 @@ def stream_driver_turn(
 def cancel_driver_turn(driver: Any, handle: Any, turn_context: Mapping[str, object] | None) -> None:
     payload = _resolve_cancel_payload(driver, turn_context if turn_context else {})
     if payload:
-        with suppress(Exception):
+        try:
             handle.write(payload)
+        except Exception as exc:
+            logger.warning("resident_cancel_write_failed: %s", type(exc).__name__)

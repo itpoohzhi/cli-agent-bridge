@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import ast
+import copy
 import http.client
 import json
 import socket
@@ -11,6 +13,10 @@ from pathlib import Path
 from typing import cast
 
 from adapters.stdio_drivers.muse_env import build_muse_env, prepare_muse_zero_canon_home
+from adapters.stdio_drivers.muse_mcp_wire import (
+    apply_scope_to_session_start,
+    redact_session_start_for_log,
+)
 from core.stdio_resident.config import StdioPoolConfig
 from core.stdio_resident.mcp_capture_server import (
     McpLoopbackServer,
@@ -245,3 +251,76 @@ def test_qa_005_and_threat_005_kill_switches_and_clean_home(tmp_path: Path) -> N
     assert stat.S_IMODE(clean_home.stat().st_mode) == 0o700
     assert stat.S_IMODE((clean_home / ".config" / "muse" / "auth.json").stat().st_mode) == 0o600
     assert not (clean_home / "AGENTS.md").exists()
+
+
+def test_verify_auth_non_ascii_path_and_bearer_no_typeerror() -> None:
+    """Non-ASCII path or Authorization header returns 403/401 deterministically without TypeError."""
+    spec = McpToolCaptureSpec.create(_SCHEMAS)
+    session = McpToolCaptureSession(spec)
+    assert session.verify_auth("/mcp/тест", f"Bearer {spec.bearer_token}") == (False, 403)
+    assert session.verify_auth(spec.capability_path, "Bearer токен") == (False, 401)
+    assert session.verify_auth(spec.capability_path, None) == (False, 401)
+    assert session.verify_auth(spec.capability_path, f"Bearer {spec.bearer_token}") == (True, 200)
+
+
+def test_redact_session_start_for_log_strips_secrets_without_mutation() -> None:
+    """redact_session_start_for_log removes mcp_url, nonce, and bearer_token without mutating input."""
+    spec = McpToolCaptureSpec.create(_SCHEMAS)
+    mcp_url = f"http://127.0.0.1:43210{spec.capability_path}"
+    wire_spec = TurnMcpSessionSpec(
+        mcp_url=mcp_url,
+        bearer_token=spec.bearer_token,
+        server_name="bridge",
+        emulate_tools=True,
+        suppress_host_tools=True,
+    )
+    params: dict[str, object] = {
+        "sessionId": "sid-redact-1",
+        "config": {"customFlag": True},
+    }
+    with TurnWireSessionScope.bind(wire_spec):
+        _ = apply_scope_to_session_start(params, clear_developer_prompt=False)
+    snapshot = copy.deepcopy(params)
+    redacted = redact_session_start_for_log(params)
+
+    assert params == snapshot
+    for rendered in (repr(redacted), json.dumps(redacted)):
+        assert mcp_url not in rendered
+        assert spec.nonce not in rendered
+        assert spec.bearer_token not in rendered
+        assert "43210" not in rendered
+    cfg = cast("dict[str, object]", redacted["config"])
+    assert cfg["customFlag"] is True
+    srv = cast("dict[str, object]", cast("dict[str, object]", cfg["mcpServers"])["bridge"])
+    assert srv["url"] == "<redacted>"
+    assert cast("dict[str, object]", srv["headers"])["Authorization"] == "<redacted>"
+
+
+def test_static_safety_proof_no_session_start_or_bearer_token_logged() -> None:
+    """Driver/transport sources never log session/start params, payload, or bearer_token."""
+    root = Path(__file__).resolve().parents[1]
+    targets = (
+        "adapters/stdio_drivers/muse_driver.py",
+        "adapters/stdio_drivers/muse_codec.py",
+        "adapters/stdio_drivers/muse_mcp_wire.py",
+        "core/stdio_resident/runtime_wire.py",
+    )
+    log_methods = frozenset({"debug", "info", "warning", "warn", "error", "exception", "critical", "log"})
+    sensitive_tokens = ("bearer_token", "session/start", "session_start", "authorization", "mcp_url", "payload", "params")
+    for rel in targets:
+        tree = ast.parse((root / rel).read_text(encoding="utf-8"), filename=rel)
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            is_print = isinstance(node.func, ast.Name) and node.func.id == "print"
+            is_log_attr = isinstance(node.func, ast.Attribute) and node.func.attr in log_methods
+            is_logger_obj = (
+                isinstance(node.func, ast.Attribute)
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id in {"logger", "logging", "log"}
+            )
+            if not (is_print or (is_log_attr and is_logger_obj)):
+                continue
+            call_text = ast.unparse(node).lower()
+            for token in sensitive_tokens:
+                assert token not in call_text, f"{rel} logs sensitive token {token!r}: {call_text}"

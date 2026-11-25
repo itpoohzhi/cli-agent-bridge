@@ -8,7 +8,7 @@ import json
 import os
 import time
 from collections.abc import Mapping
-from typing import Any
+from typing import Any, cast
 
 from core.stdio_resident.mcp_capture_server import TurnWireSessionScope
 
@@ -62,7 +62,8 @@ def apply_scope_to_session_start(
 ) -> dict[str, Any]:
     """Attach turn-scoped MCP server config and cancel builder to ``session/start`` params."""
     scope = TurnWireSessionScope.current()
-    cfg: dict[str, Any] = {}
+    existing_cfg = params.get("config")
+    cfg: dict[str, Any] = dict(cast(Mapping[str, Any], existing_cfg)) if isinstance(existing_cfg, Mapping) else {}
     if clear_developer_prompt:
         cfg["developerPrompt"] = None
     if scope is not None:
@@ -84,3 +85,33 @@ def apply_scope_to_session_start(
     if cfg:
         params["config"] = cfg
     return params
+
+
+def redact_session_start_for_log(params: Mapping[str, Any]) -> dict[str, Any]:
+    """Return a copy of ``session/start`` params with MCP ``url`` and ``Authorization`` redacted."""
+    out: dict[str, Any] = dict(params)
+    raw_cfg = out.get("config")
+    if not isinstance(raw_cfg, Mapping):
+        return out
+    cfg: dict[str, Any] = dict(cast(Mapping[str, Any], raw_cfg))
+    out["config"] = cfg
+    raw_servers = cfg.get("mcpServers")
+    if not isinstance(raw_servers, Mapping):
+        return out
+    servers: dict[str, Any] = {}
+    for name, raw_srv in cast(Mapping[str, Any], raw_servers).items():
+        if not isinstance(raw_srv, Mapping):
+            servers[str(name)] = raw_srv
+            continue
+        srv: dict[str, Any] = dict(cast(Mapping[str, Any], raw_srv))
+        if "url" in srv:
+            srv["url"] = "<redacted>"
+        raw_hdrs = srv.get("headers")
+        if isinstance(raw_hdrs, Mapping):
+            srv["headers"] = {
+                k: ("<redacted>" if str(k).lower() == "authorization" else v)
+                for k, v in cast(Mapping[str, Any], raw_hdrs).items()
+            }
+        servers[str(name)] = srv
+    cfg["mcpServers"] = servers
+    return out

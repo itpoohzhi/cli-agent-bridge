@@ -141,9 +141,13 @@ class McpToolCaptureSession:
         return self._spec
 
     def verify_auth(self, path: str, auth_header: str | None) -> tuple[bool, int]:
-        if not hmac.compare_digest(path, self._spec.capability_path):
+        path_b = path.encode("utf-8", errors="surrogatepass")
+        expected_path_b = self._spec.capability_path.encode("utf-8", errors="surrogatepass")
+        if not hmac.compare_digest(path_b, expected_path_b):
             return (False, 403)
-        if not hmac.compare_digest(auth_header or "", f"Bearer {self._spec.bearer_token}"):
+        auth_b = (auth_header or "").encode("utf-8", errors="surrogatepass")
+        expected_auth_b = f"Bearer {self._spec.bearer_token}".encode("utf-8", errors="surrogatepass")
+        if not hmac.compare_digest(auth_b, expected_auth_b):
             return (False, 401)
         return (True, 200)
 
