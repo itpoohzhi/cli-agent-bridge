@@ -28,7 +28,9 @@ from core.usage_wire import (
 
 _Obj = dict[str, Any]
 SignalHook = Callable[[str, frozenset[str]], None]
-_META_KEYS = ("id", "created", "model", "system_fingerprint")
+_STRICT_META_KEYS = ("id", "model")
+_FIRST_WINS_META_KEYS = ("created", "system_fingerprint")
+_META_KEYS = _STRICT_META_KEYS + _FIRST_WINS_META_KEYS
 CACHE_KEYS_TO_CLEAN = (
     "prompt_tokens_details",
     "cached_tokens",
@@ -67,6 +69,14 @@ def _merge_first(target: _Obj, key: str, value: Any, what: str) -> None:
         target[key] = value
     elif target[key] != value:
         raise _bad("upstream_metadata_conflict", f"conflicting {what}")
+
+
+def _keep_first(target: _Obj, key: str, value: Any) -> None:
+    if value is None or value == "":
+        return
+    if key == "created" and (isinstance(value, bool) or value == 0):
+        return
+    target.setdefault(key, value)
 
 
 def choice_index(value: Any) -> int:
@@ -224,8 +234,10 @@ class NonstreamAggregator:
     def consume_chunk(self, chunk: _Obj) -> None:
         if chunk.get("error"):
             raise _bad("upstream_stream_error", "upstream error chunk")
-        for key in _META_KEYS:
+        for key in _STRICT_META_KEYS:
             _merge_first(self._meta, key, chunk.get(key), key)
+        for key in _FIRST_WINS_META_KEYS:
+            _keep_first(self._meta, key, chunk.get(key))
         if isinstance(chunk.get("usage"), dict):
             self._usage = chunk["usage"]
         choices = chunk.get("choices")

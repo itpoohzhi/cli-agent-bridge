@@ -1352,9 +1352,13 @@ class PassthroughAdapter(BackendAdapter):
         model: str = "-",
         request_id: str = "-",
     ) -> None:
+        detail = (
+            re.sub(r"[^A-Za-z0-9_.:@/-]+", "_", str(message or "").strip()).strip("_")[:64]
+            or "-"
+        )
         self._log(
             f"passthrough fail status={status} type={error_type} "
-            f"model={model} request_id={request_id}"
+            f"model={model} request_id={request_id} detail={detail}"
         )
         headers, body = _json_error(status, error_type, message)
         sink.start(status, headers)
