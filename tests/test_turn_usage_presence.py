@@ -24,6 +24,8 @@ def test_normalize_usage_fields_absent_is_none() -> None:
         "cache_read_tokens": None,
         "reasoning_tokens": None,
         "usage_present": None,
+        "usage_source": None,
+        "usage_missing_reason": None,
     }
 
 
@@ -42,6 +44,8 @@ def test_normalize_usage_fields_real_counters() -> None:
         "cache_read_tokens": 3,
         "reasoning_tokens": None,
         "usage_present": True,
+        "usage_source": "upstream_report",
+        "usage_missing_reason": None,
     }
 
 
@@ -53,7 +57,10 @@ def test_normalize_usage_fields_openai_aliases() -> None:
 
 
 def test_telemetry_usage_updates_absent_usage_only_flag() -> None:
-    assert telemetry_usage_updates({"usage_present": False}) == {"usage_present": False}
+    updates = telemetry_usage_updates({"usage_present": False})
+    assert updates["usage_present"] is False
+    assert updates["usage_source"] is None
+    assert set(updates) == {"usage_present", "usage_source", "usage_missing_reason"}
 
 
 def test_telemetry_usage_updates_real_counters() -> None:
@@ -61,6 +68,8 @@ def test_telemetry_usage_updates_real_counters() -> None:
         "prompt_tokens": 10,
         "completion_tokens": 20,
         "usage_present": True,
+        "usage_source": "upstream_report",
+        "usage_missing_reason": None,
     }
 
 
@@ -72,18 +81,29 @@ def test_enrich_turn_usage_dict_overwrites_only_present_fields() -> None:
         reasoning_tokens=None,
     )
     enriched = enrich_turn_usage_dict({"input_tokens": 1, "usage_present": False}, turn_usage)
-    assert enriched == {"input_tokens": 5, "cache_read_tokens": 2, "usage_present": True}
+    assert {k: v for k, v in enriched.items() if k != "usage_missing_reason"} == {
+        "input_tokens": 5,
+        "cache_read_tokens": 2,
+        "usage_present": True,
+        "usage_source": "upstream_report",
+    }
+    assert enriched.get("usage_missing_reason") is None
 
 
 def test_format_turn_output_usage_absent() -> None:
     out = _format_turn_output(TurnResult(text="hi"), "cli")
     assert out["usage"]["usage_present"] is False
-    assert telemetry_usage_updates(out["usage"]) == {"usage_present": False}
+    updates = telemetry_usage_updates(out["usage"])
+    assert updates["usage_present"] is False
+    assert updates["usage_source"] is None
+    assert set(updates) == {"usage_present", "usage_source", "usage_missing_reason"}
 
 
-def test_format_turn_output_usage_zero_counters_present() -> None:
+def test_format_turn_output_usage_zero_counters_absent() -> None:
     out = _format_turn_output(TurnResult(text="hi", usage=NormalizerUsage(0, 0)), "cli")
-    assert out["usage"]["usage_present"] is True
+    assert out["usage"]["usage_present"] is False
+    assert out["usage"]["usage_source"] is None
+    assert out["usage"]["usage_missing_reason"] == "empty_zero_usage"
 
 
 def test_format_turn_output_usage_counters_present() -> None:

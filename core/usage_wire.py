@@ -168,8 +168,13 @@ def positive_wire_usage(usage: object) -> dict | None:
     """Копия wire-`usage` с положительными счётчиками, иначе `None` (ошибка не обнуляет токены)."""
     if not isinstance(usage, Mapping):
         return None
-    keys = ("prompt_tokens", "completion_tokens", "total_tokens")
-    values: list[object] = [usage.get(k) for k in keys]  # pyright: ignore[reportUnknownMemberType]
+    keys = ("prompt_tokens", "completion_tokens", "total_tokens", "cached_tokens", "reasoning_tokens")
+    values: list[object] = [
+        *(usage.get(k) for k in keys),  # pyright: ignore[reportUnknownMemberType]
+        _wire_nested(usage, "prompt_tokens_details", "cached_tokens"),  # pyright: ignore[reportUnknownArgumentType]
+        _wire_nested(usage, "completion_tokens_details", "reasoning_tokens"),  # pyright: ignore[reportUnknownArgumentType]
+        _wire_nested(usage, "output_tokens_details", "reasoning_tokens"),  # pyright: ignore[reportUnknownArgumentType]
+    ]
     positive = any(isinstance(v, int) and not isinstance(v, bool) and v > 0 for v in values)
     return dict(usage) if positive else None  # pyright: ignore[reportUnknownArgumentType]
 

@@ -76,17 +76,36 @@ _CODEX_LEGACY_POLICY = UsageExtractPolicy(
 )
 
 
+def _has_positive_usage(usage: UsageUpdate) -> bool:
+    """Return True iff at least one token counter in UsageUpdate is positive."""
+    return any(
+        isinstance(v, int) and not isinstance(v, bool) and v > 0
+        for v in (
+            usage.input_tokens,
+            usage.output_tokens,
+            usage.cache_read_tokens,
+            usage.cache_creation_tokens,
+            usage.reasoning_tokens,
+            usage.reported_total_tokens,
+        )
+    )
+
+
 def extract_codex_v2_usage(payload: Mapping[str, Any]) -> UsageUpdate | None:
     """Extract per-turn snapshot or fail-closed SESSION_COUNTER from Codex v2 frame."""
     turn_usage = extract_usage_by_policy(payload, _CODEX_V2_TURN_POLICY)
     if turn_usage is not None:
-        return turn_usage
-    return extract_usage_by_policy(payload, _CODEX_V2_SESSION_POLICY)
+        return turn_usage if _has_positive_usage(turn_usage) else None
+    session_usage = extract_usage_by_policy(payload, _CODEX_V2_SESSION_POLICY)
+    if session_usage is not None and _has_positive_usage(session_usage):
+        return session_usage
+    return None
 
 
 def extract_codex_legacy_usage(payload: Mapping[str, Any]) -> UsageUpdate | None:
     """Extract per-turn usage from legacy Codex app-server JSON-RPC frame."""
-    return extract_usage_by_policy(payload, _CODEX_LEGACY_POLICY)
+    usage = extract_usage_by_policy(payload, _CODEX_LEGACY_POLICY)
+    return usage if usage is not None and _has_positive_usage(usage) else None
 
 
 def format_codex_effect_error(payload: Mapping[str, object]) -> str:

@@ -31,7 +31,7 @@ EXPECTED_COLUMNS = (
     "request_id ts_epoch ts_iso client_ip client_port user_agent subagent_id subagent_role client_kind "
     "auth_mode http_method endpoint model backend_id route_mode outbound_target egress_proxy stream "
     "status_code error_type queue_ms ttfb_ms total_ms stream_chunks prompt_tokens completion_tokens "
-    "cached_tokens total_tokens response_bytes reasoning_tokens usage_present"
+    "cached_tokens total_tokens response_bytes reasoning_tokens usage_present usage_source usage_missing_reason"
 ).split()
 
 
