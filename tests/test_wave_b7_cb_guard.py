@@ -78,26 +78,20 @@ def test_b7_legacy_error_matrix() -> None:
     g3.release()
     assert (r429 is not None and r429.status_code == 429, r_slot is not None and r_slot.status_code == 404, leg.try_acquire(RouteCandidate("r2", "m1", "b2", "s", "id2"), 12.0) is None, g3.done) == (True, True, True, True)
     leg.record_success(cand, HealthDomain.ROUTE)
-    released_calls: list[Any] = []
-    fake_cb = SimpleNamespace(release_lease=lambda lease: released_calls.append(lease))
+
+
+def test_b7_release_cleanup_on_internal_errors() -> None:
+    import pytest
     from core.route_cb_guard import CBAttemptGuard
-    g_fail_cb = CBAttemptGuard(cand, k, route_cb=fake_cb, lease="L1")
-    try:
+    cand, k, released = RouteCandidate("r1", "m1", "b1", "s", "id"), ("p1", "m1", "b1"), []
+    g_fail_cb = CBAttemptGuard(cand, k, route_cb=SimpleNamespace(release_lease=released.append), lease="L1")
+    with pytest.raises(TypeError):
         g_fail_cb.record_error(RouteRefusal(429, None, b""), SimpleNamespace(), RouteFailover(), QuotaRules.from_config(), now=12.0)
-        assert False, "expected TypeError"
-    except TypeError:
-        pass
     g_fail_cb.release()
-    g_exc_cb = CBAttemptGuard(cand, k, route_cb=SimpleNamespace(record_failure=lambda *_a: 1 / 0, release_lease=lambda lease: released_calls.append(("exc", lease))), lease="L2")
-    try:
+    g_exc_cb = CBAttemptGuard(cand, k, route_cb=SimpleNamespace(record_failure=lambda *_a: 1 / 0, release_lease=lambda lease: released.append(("exc", lease))), lease="L2")
+    with pytest.raises(ZeroDivisionError):
         g_exc_cb.record_exception(RuntimeError("boom"))
-        assert False, "expected ZeroDivisionError"
-    except ZeroDivisionError:
-        pass
-    g_fail_leg = CBAttemptGuard(cand, k, legacy=SimpleNamespace(release_probe=lambda p: released_calls.append(p)), probe="P1")
-    try:
+    g_fail_leg = CBAttemptGuard(cand, k, legacy=SimpleNamespace(release_probe=released.append), probe="P1")
+    with pytest.raises(AttributeError):
         g_fail_leg.record_error(RouteRefusal(500, (), b""), SimpleNamespace(), RouteFailover(), QuotaRules.from_config(), now=12.0)
-        assert False, "expected AttributeError"
-    except AttributeError:
-        pass
-    assert (g_fail_cb.done, g_fail_leg.done, released_calls) == (True, True, ["L1", ("exc", "L2"), "P1"])
+    assert (g_fail_cb.done, g_fail_leg.done, released) == (True, True, ["L1", ("exc", "L2"), "P1"])
