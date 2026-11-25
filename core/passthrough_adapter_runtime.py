@@ -19,11 +19,9 @@ from core import defaults as D, passthrough_precommit
 from core.backend_adapter import PreSendTransientError
 from core.liveness_signals import LivenessWindow, passthrough_window
 from core.nonstream_aggregator import internal_stream_body, request_deadlines
+from core.passthrough_abort_fsm import PassthroughAbortFSM, abort_socket_locked, fsm_enabled, pick_reopen_fn
 from core.passthrough_sliding_window import FLAG_PASSTHROUGH_SLIDING_WINDOW, open_sliding_deadline
-from core.passthrough_stream_options import (
-    BoundedNegativeCache, model_scope_hash, prepare_stream_usage_body,
-    should_retry_stream_options, strip_stream_options,
-)
+from core.passthrough_stream_options import (BoundedNegativeCache, model_scope_hash, prepare_stream_usage_body, should_retry_stream_options, strip_stream_options)
 from core.route_attempts import RouteRefusal, evaluate_presend_candidate, failover_from_mapping
 from core.runtime_env import flag_enabled
 from core.slot_acquire import acquire_slot_cancellable
@@ -152,24 +150,23 @@ class _RequestRuntime:
         self._socket: socket.socket | None = None
         self._stop, self._aborted = threading.Event(), threading.Event()
         self._transport_lock = threading.Lock()
+        self._fsm = PassthroughAbortFSM(self._abort_io)
         self.watcher = threading.Thread(target=self._watch, daemon=True, name="passthrough-deadline")
 
+    def _abort_io(self) -> None:
+        abort_socket_locked(self._transport_lock, self._stop, self._aborted, self._socket)
+
     def abort(self) -> None:
-        """Сбрасывает только принадлежащий запросу сокет, но не закрывает его."""
-        with self._transport_lock:
-            if self._stop.is_set():
-                return
-            self._aborted.set()
-            if self._socket is not None:
-                try:
-                    self._socket.shutdown(socket.SHUT_RDWR)
-                except OSError:
-                    return
+        """Прерывает сокет запроса без маскировки причины в FSM."""
+        self._fsm.on_explicit_cancel() if fsm_enabled() else self._abort_io()
 
     def _watch(self) -> None:
         while not self._stop.wait(min(self.adapter.limits.poll_interval_s, max(0.0, self.slide.deadline_s - time.monotonic()))):
-            if time.monotonic() >= self.slide.deadline_s or self.exchange.sink.client_gone():
-                self.abort()
+            if self.exchange.sink.client_gone():
+                self._fsm.on_client_gone() if fsm_enabled() else self._abort_io()
+                return
+            if time.monotonic() >= self.slide.deadline_s:
+                self._fsm.on_deadline() if fsm_enabled() else self._abort_io()
                 return
 
     def _on_socket(self, sock: socket.socket) -> None:
@@ -181,9 +178,9 @@ class _RequestRuntime:
         self.pooling = enabled
 
     def _check(self) -> None:
-        if self.exchange.sink.client_gone():
+        if self.exchange.sink.client_gone() or (fsm_enabled() and self._fsm.is_client_cancelled()):
             raise self.adapter._client_gone_exc()
-        if self._aborted.is_set() or time.monotonic() >= self.slide.deadline_s:
+        if (self._fsm.is_timeout() if fsm_enabled() else self._aborted.is_set()) or time.monotonic() >= self.slide.deadline_s:
             raise TimeoutError("upstream deadline exceeded")
 
     def open_response(self) -> bool:
@@ -204,18 +201,19 @@ class _RequestRuntime:
             adapter._fail_io(request.sink, error.status_code == 504 or isinstance(error.__cause__, TimeoutError), model=model, request_id=request_id)
             return False
         except (OSError, http.client.HTTPException) as error:
+            if fsm_enabled() and (self._fsm.is_client_cancelled() or request.sink.client_gone()):
+                self._fsm.on_client_gone()
+                raise adapter._client_gone_exc() from error
             model, request_id = fail_context(request.request, request.headers, adapter.host)
             adapter._fail_io(request.sink, self._is_timeout_error(error), model=model, request_id=request_id)
             return False
         return True
 
     def _is_timeout_error(self, error: BaseException) -> bool:
-        return bool(
-            isinstance(error, TimeoutError)
-            or self._aborted.is_set()
-            or time.monotonic() >= self.slide.deadline_s
-            or (self.exchange.window is not None and self.exchange.window.expired())
-        )
+        deadline_passed, expired = time.monotonic() >= self.slide.deadline_s, (self.exchange.window is not None and self.exchange.window.expired())
+        if fsm_enabled():
+            return self._fsm.classify_timeout(error, client_gone=self.exchange.sink.client_gone(), deadline_passed=deadline_passed, window_expired=expired)
+        return bool(isinstance(error, TimeoutError) or self._aborted.is_set() or deadline_passed or expired)
 
     def _reopen_response(self) -> http.client.HTTPResponse:
         request, adapter = self.exchange, self.adapter
@@ -267,23 +265,23 @@ class _RequestRuntime:
                 self._check()
                 if evaluation.is_refusal:
                     raise PassthroughRouteRefusal(response.status, headers, body)
-                # Кандидат по статусу, но не отказ слота (например, запрет модели):
-                # тело уже прочитано, поэтому ответ отдаётся дословно здесь.
                 self.successful = adapter._emit_response(response, request.sink, (body, False))
                 return
-        reopen = self._reopen_response if self.internal and not getattr(request.sink, "accepts_presend_errors", False) and not flag_enabled("BRIDGE_TRANSPORT_ROUTING_ENABLED") else None
         self.successful = adapter._respond(
-            response, request.request, request.sink, self.deadline, on_timeout=self.abort,
+            response, request.request, request.sink, self.deadline,
+            on_timeout=(self._fsm.on_deadline if fsm_enabled() else self._abort_io),
             window=request.window, slide=self.slide, headers=request.headers,
             affinity_uuid=self.affinity_info.get("affinity_uuid"),
-            affinity_scope=self.affinity_info.get("affinity_scope"), reopen=reopen,
+            affinity_scope=self.affinity_info.get("affinity_scope"),
+            reopen=pick_reopen_fn(self.internal, request.sink, self._reopen_response),
         )
+
+    def trigger_client_gone(self) -> None:
+        self._fsm.on_client_gone() if fsm_enabled() else self._abort_io()
 
     def _can_reuse(self) -> bool:
         response = self.response
-        if not all((_pooling_enabled(), self.pooling, self.successful)):
-            return False
-        if self._aborted.is_set() or response is None:
+        if not all((_pooling_enabled(), self.pooling, self.successful)) or self._aborted.is_set() or response is None:
             return False
         return _response_reusable(response)
 
@@ -296,10 +294,11 @@ class _RequestRuntime:
             if self.watcher.ident is not None:
                 self.watcher.join(timeout=self.adapter.limits.reader_join_timeout_s)
         finally:
-            connection, self.connection = self.connection, None
-            if connection is not None:
-                adapter = self.adapter
-                adapter._pool.release_connection(adapter._host, adapter._port, connection, can_reuse=self._can_reuse())
+            connection, response, can_reuse = self.connection, self.response, self._can_reuse()
+            self.connection, self.response = None, None
+            self._fsm.clear_callback()
+            if response is not None and not can_reuse: response.close()
+            if connection is not None: self.adapter._pool.release_connection(self.adapter._host, self.adapter._port, connection, can_reuse=can_reuse)
 
 
 def handle_request(
@@ -330,7 +329,7 @@ def handle_request(
         except Exception as error:
             if not isinstance(error, type(adapter._client_gone_exc())):
                 raise
-            runtime.abort()
+            runtime.trigger_client_gone()
     finally:
         try:
             runtime.close()
