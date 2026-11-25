@@ -94,6 +94,7 @@ def test_b6b_ignored_sets_done() -> None:
     lease_b = cb.try_acquire(k1)
     assert (lease_b is not None, cb.release_lease(lease_a), cb.try_acquire(k1) is None) == (True, False, True)
     cb.record_success(k1, lease_b)
+    assert lease_b.done is True
 
 
 def test_b6b_concurrent_half_open() -> None:
