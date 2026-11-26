@@ -267,6 +267,11 @@ def test_filter_zero_canon_providers_codex_ingress() -> None:
         qwen_p, ZC, codex_v2_enabled=True, model_id="qwen4-max") == qwen_p
     assert zhttp.filter_zero_canon_providers(
         [], ZC, codex_v2_enabled=True, model_id="gpt-6.9-unknown") == []
+    with pytest.raises(HERR) as e3:
+        zhttp.filter_zero_canon_providers([], "Zero-Canon", codex_v2_enabled=False, model_id="gpt-6.2-sol")
+    assert (e3.value.http_status, e3.value.code) == (503, "zero_canon_unsupported_by_driver")
+    assert zhttp.filter_zero_canon_providers([], "Zero-Canon", codex_v2_enabled=False, model_id="qwen4-max") == []
+    assert zhttp.filter_zero_canon_providers([], "Zero-Canon", codex_v2_enabled=False, model_id=None) == []
 
 
 def test_codex_catalog_policy_bidirectional_parity() -> None:

@@ -191,7 +191,7 @@ class _V2SlotState:
     last_turn_state: ProtocolState | None = None
     last_effects: tuple[ProtocolEffect, ...] = ()
     bound_handle: object | None = None
-    usage_guard_enabled: bool = True
+    usage_guard_enabled: bool | None = None
     handshake_acked: bool = False
     turn_proof: TurnProofRecorder | None = None
     last_turn_proof: TurnProofRecorder | None = None
@@ -467,8 +467,11 @@ class CodexAppServerV2Driver(StreamJsonDriver):
                 rec.record_turn(self._state.turn_id, self._state.epoch)
             if any(e.kind is EffectKind.EMIT_ERROR and e.payload.get("code") == "zero_canon_tool_event_forbidden" for e in effects):
                 rec.record_tool_event()
+        guard = self._ctx().usage_guard_enabled
+        if guard is None:
+            guard = self._ctx().usage_guard_enabled = is_codex_usage_frame_guard_enabled()
         return codex_v2_effects_to_chunk(effects, payload, active_thread_id=self._state.thread_id,
-                                         active_turn_id=self._state.turn_id, guard_enabled=self._ctx().usage_guard_enabled)
+                                         active_turn_id=self._state.turn_id, guard_enabled=guard)
 
     @override
     def is_terminal(self, raw_line: str, decoded: DecodedChunk | None) -> bool:
