@@ -5,8 +5,6 @@ from __future__ import annotations
 import os
 import shutil
 import tempfile
-import urllib.error
-import urllib.parse
 import urllib.request
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
@@ -15,11 +13,16 @@ from pathlib import Path
 from typing import Any
 
 from core.runtime_env import env_bool, env_first
+from core.stdio_resident.bridge_proxy_payload import BridgeProxyOptions
+from core.stdio_resident.proxy_policy import (
+    NoRedirectHandler as _NoRedirectHandler,  # noqa: F401
+    ensure_loopback_url as _validate_loopback_bridge_url,
+    resolve_proxy_timeout_s as _resolve_proxy_timeout_s,
+)
 from core.stdio_resident.routed_turn_result import (
     ProxyBridgeOptions,
     RoutedExecOptions,
     RoutedTurnResult,
-    _NoRedirectHandler as _NoRedirectHandler,
     build_routed_turn_error as _build_routed_turn_error,  # noqa: F401
     execute_routed_turn_result as _execute_routed_turn_result_impl,
     proxy_zero_canon_bridge_turn_result as _proxy_result_impl,
@@ -36,7 +39,6 @@ from core.subbridge_zero_canon import (
     ZERO_CANON_PROFILE as ZERO_CANON_PROFILE,
     is_zero_canon_profile,
 )
-from core.timeout_ladder import FLAG_TIMEOUT_LADDER, TimeoutLadderConfig, load_timeout_ladder_config
 from core.zc_static_cwd_and_source import (
     CODEX_BACKEND_IDS as CODEX_BACKEND_IDS,
     CODEX_PROTOCOLS as CODEX_PROTOCOLS,
@@ -165,32 +167,17 @@ def zero_canon_isolation(driver: Any, review_profile: str | None) -> Iterator[Ze
         shutil.rmtree(root, ignore_errors=True)
 
 
-_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
-
-
-def _validate_loopback_bridge_url(base_url: str) -> str:
-    parsed = urllib.parse.urlparse(base_url)
-    if parsed.scheme != "http" or parsed.hostname not in _LOOPBACK_HOSTS:
-        raise ValueError(f"non_loopback_zero_canon_bridge_url:{base_url}")
-    return base_url.rstrip("/")
-
-
-def _resolve_proxy_timeout_s(
-    timeout_s: float | None, environ: Mapping[str, str] | None = None
-) -> float:
-    if timeout_s is not None:
-        return timeout_s
-    env = os.environ if environ is None else environ
-    raw = env.get("HUB_ZERO_CANON_PROXY_TIMEOUT_S")
-    if raw is not None and raw.strip():
-        return float(raw)
-    try:
-        ladder = load_timeout_ladder_config(env)
-    except ValueError:
-        if env_bool(env, (FLAG_TIMEOUT_LADDER,), False):
-            raise
-        ladder = TimeoutLadderConfig()
-    return ladder.effective_first_event_s if ladder.enabled else 180.0
+def _proxy_opts(
+    *, usage_enabled: bool = True, timeout_s: float | None = None, proxy_options: BridgeProxyOptions | None = None
+) -> ProxyBridgeOptions:
+    return ProxyBridgeOptions(
+        validate_url_fn=_validate_loopback_bridge_url,
+        resolve_timeout_fn=_resolve_proxy_timeout_s,
+        opener_factory=urllib.request.build_opener,
+        timeout_s=timeout_s,
+        usage_enabled=usage_enabled,
+        proxy_options=proxy_options,
+    )
 
 
 def proxy_zero_canon_bridge_turn_result(
@@ -198,16 +185,12 @@ def proxy_zero_canon_bridge_turn_result(
     model: str,
     prompt: str,
     headers: Mapping[str, str] | None = None,
-    *,
-    timeout_s: float | None = None,
+    **kwargs: Any,
 ) -> RoutedTurnResult:
     """Перенаправляет Zero-Canon Claude-ход на локальный `:9881` с сохранением TurnUsage."""
-    opts = ProxyBridgeOptions(
-        validate_url_fn=_validate_loopback_bridge_url,
-        resolve_timeout_fn=_resolve_proxy_timeout_s,
-        opener_factory=urllib.request.build_opener,
-        timeout_s=timeout_s,
-        usage_enabled=True,
+    opts = _proxy_opts(
+        timeout_s=kwargs.get("timeout_s"),
+        proxy_options=kwargs.get("proxy_options"),
     )
     return _proxy_result_impl(base_url, model, prompt, headers, opts)
 
@@ -235,15 +218,12 @@ def _bridge_proxy_compat(
     model: str,
     prompt: str,
     headers: Mapping[str, str] | None = None,
-    *,
-    usage_enabled: bool = True,
+    **kwargs: Any,
 ) -> RoutedTurnResult:
     if proxy_zero_canon_bridge_turn is _DEFAULT_PROXY_TURN:
-        opts = ProxyBridgeOptions(
-            validate_url_fn=_validate_loopback_bridge_url,
-            resolve_timeout_fn=_resolve_proxy_timeout_s,
-            opener_factory=urllib.request.build_opener,
-            usage_enabled=usage_enabled,
+        opts = _proxy_opts(
+            usage_enabled=bool(kwargs.get("usage_enabled", True)),
+            proxy_options=kwargs.get("proxy_options"),
         )
         return _proxy_result_impl(base_url, model, prompt, headers, opts)
     content, thought = proxy_zero_canon_bridge_turn(base_url, model, prompt, headers)
@@ -255,8 +235,7 @@ def execute_routed_turn_result(
     protocol: str,
     request: dict[str, Any],
     sse_writer: Callable[[str, str], Any] | None,
-    *,
-    headers: Mapping[str, str] | None = None,
+    **kwargs: Any,
 ) -> RoutedTurnResult:
     """Выполняет ход с учётом `decide_zero_canon_route`, возвращая `RoutedTurnResult`."""
     route = decide_zero_canon_route(
@@ -268,8 +247,9 @@ def execute_routed_turn_result(
     usage_enabled = raw_enabled if isinstance(raw_enabled, bool) else True
     opts = RoutedExecOptions(
         bridge_proxy_fn=_bridge_proxy_compat,
-        headers=headers,
+        headers=kwargs.get("headers"),
         usage_enabled=usage_enabled,
+        proxy_options=kwargs.get("proxy_options"),
     )
     return _execute_routed_turn_result_impl(execute_chat, route, request, sse_writer, opts)
 
