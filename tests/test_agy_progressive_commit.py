@@ -508,3 +508,43 @@ def test_f014_drain_traces_propagates_backpressure_and_stops_on_failure() -> Non
     assert body.stage("Первый чанк") is False
     assert trace_mock.call_count == 1
     assert body.delivery_fsm.wire_committed is True
+
+
+def test_f003_precommit_pending_traces_drained_on_done_without_content() -> None:
+    """F-003: накопленные в PRECOMMIT tool_trace доставляются в drain() при state=done без контента."""
+    body = _direct_runner()
+    body.progressive = body.buffering = True
+    body.delivery_fsm = initial_delivery_state(True)
+    trace_mock = Mock(return_value=True)
+    body.s.on_tool_trace = trace_mock
+
+    assert body.trace({"step_index": 3, "tool_name": "grep"}) is True
+    assert trace_mock.call_count == 0
+    assert body.drain() is True
+    assert trace_mock.call_count == 1
+    assert body._pending_traces == []
+
+
+def test_f002_finalize_stream_in_precommit_flushes_and_marks_wire_committed() -> None:
+    """F-002: finalize_stream из PRECOMMIT сбрасывает precommit-буфер и синхронизирует wire_committed."""
+    body = _direct_runner()
+    body.progressive = True
+    body.buffering = False
+    body.delivery_fsm = initial_delivery_state(True)
+    body.s.buffer.stage_fragment(" ")
+    body._invoke = lambda: {
+        "state": "idle_timeout",
+        "rc": 124,
+        "timeout_limit_s": 10,
+        "retained_events": [("text", "хвост")],
+    }
+    body.s.hooks = (
+        lambda key, default=False: key == "graceful_timeout_on_partial" or default,
+        body.s.hooks[1],
+        body.s.hooks[2],
+        body.s.hooks[3],
+    )
+
+    body._run_body()
+    assert body.delivery_fsm.wire_committed is True
+    assert body.s.buffer.commit_fragments() == ()

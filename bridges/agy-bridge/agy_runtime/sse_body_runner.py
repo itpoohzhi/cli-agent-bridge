@@ -223,15 +223,9 @@ class _SseBodyRunner:
         if callable(log):
             log(str(self.s.ctx.get("model", "")), out, self._attempt_started_at, str(self.s.ctx.get("tag", "")))
     def reconcile_trace(self, out: dict[str, Any]) -> None:
-        ledger = self.s.ledger
-        cid = str(next(filter(None, (out.get("conversation_id"),)), self.cid))
-        snapshot = out.get("trace_snapshot")
-        active = ledger._active
+        ledger, cid, snapshot = self.s.ledger, str(next(filter(None, (out.get("conversation_id"),)), self.cid)), out.get("trace_snapshot")
         terminal = dict(first_token_timeout=True, first_event_timeout=True).get(str(out.get("state")), False)
-        valid = all( ( bool(cid.strip()), any((not self.cid, cid == self.cid)),
-                is_uncommitted_step(active, ledger.last_committed_step_idx),
-                not terminal, snapshot == ledger.snapshot(), ) )
-        valid = valid and can_safely_replay_turn(snapshot, ledger.last_committed_step_idx)
+        valid = all((bool(cid.strip()), any((not self.cid, cid == self.cid)), is_uncommitted_step(ledger._active, ledger.last_committed_step_idx), not terminal, snapshot == ledger.snapshot())) and can_safely_replay_turn(snapshot, ledger.last_committed_step_idx)
         if not valid:
             ledger.trace_complete = False
         self.cid = cid
@@ -242,15 +236,20 @@ class _SseBodyRunner:
             if s.tool_turn.error:
                 s.buffer.rollback_uncommitted()
                 return True
-        callbacks = dict(content=s.on_text, reasoning_content=s.on_reasoning)
-        pending = normalize_staged_fragments(s.buffer.commit_fragments())
-        ok = True
+        callbacks, pending, ok = dict(content=s.on_text, reasoning_content=s.on_reasoning), normalize_staged_fragments(s.buffer.commit_fragments()), True
         for channel, value in pending:
-            callback = dict(callbacks, tool_calls=lambda v: s.on_calls(json.loads(v)))[channel]
-            ok = callback(value)
+            ok = dict(callbacks, tool_calls=lambda v: s.on_calls(json.loads(v)))[channel](value)
             if not ok:
                 s.ledger.client_delivery_reconciled = False
                 break
+        traces = list(getattr(self, "_pending_traces", ()))
+        if hasattr(self, "_pending_traces"):
+            self._pending_traces.clear()
+        for ev in traces:
+            if not ok or self.cancelled() or self.expired():
+                break
+            if s.ledger.should_forward_step(ev.get("step_index")):
+                ok = s.on_tool_trace(ev)
         if all((ok, pending, s.ledger._active >= 0)):
             _ = s.ledger.mark_step_completed(s.ledger._active)
         return ok
@@ -293,8 +292,12 @@ class _SseBodyRunner:
             if any((self.cancelled(), dict(client_gone=True).get(str(out.get("state")), False))):
                 s.hooks[1]("client gone mid-stream, child killed")
             else:
+                if self.progressive and not self.delivery_fsm.wire_committed and self._flush_precommit():
+                    _ = self._drain_traces()
                 ctx["finalize_timeout"] = s.finalize_stream
                 s.finalize_stream(out)
+                if self.progressive and not self.delivery_fsm.wire_committed and any((s.emitted_content, s.emitted_reasoning_or_tool)):
+                    self._mark_wire_sent()
                 if not out.get("graceful_done"):
                     self.finish(out)
         self._log_turn_summary(out)
@@ -322,9 +325,7 @@ class _SseBodyRunner:
     def _finish_response(self, out: dict[str, Any], err: Any, reason: str) -> None:
         s, presend = self.s, all(((is_present(err)), not self.s.ctx["stream_committed"], any((self.s.resilience, self.s.ctx.get("step_job_id")))))
         if presend:
-            clean = {k: redact_diagnostic_text(v) if isinstance(v, str) else v for k, v in err.items()}
-            code = 503 if err.get("type") == "overloaded" else (int(err.get("code") or 502) if any((s.ctx.get("step_job_id"), err.get("type") == CAPACITY_REASON)) else 502)
-            extra = retry_after_headers(out, err)
+            clean, code, extra = {k: redact_diagnostic_text(v) if isinstance(v, str) else v for k, v in err.items()}, (503 if err.get("type") == "overloaded" else (int(err.get("code") or 502) if any((s.ctx.get("step_job_id"), err.get("type") == CAPACITY_REASON)) else 502)), retry_after_headers(out, err)
             s.handler._send(code, {"error": clean}, extra) if extra else s.handler._send(code, {"error": clean})
             s.handler.close_connection = True
         elif s.commit():
@@ -337,12 +338,10 @@ class _SseBodyRunner:
         except (TypeError, ValueError, AttributeError):
             return None
     def finish_success(self, out: dict[str, Any], reason: str) -> bool:
-        s = self.s
-        cid = str(next(filter(None, (out.get("conversation_id"),)), ""))
+        s, cid = self.s, str(next(filter(None, (out.get("conversation_id"),)), ""))
         ok = s.emit(s.chunk({}, reason, conversation_id=cid))
         if any((ok, not s.resilience)):
-            ok = True
-            usage = s.handler._usage_payload(next(filter(None, (out.get("usage"),)), dict[str, Any]()), out.get("usage_resolved"))
+            ok, usage = True, s.handler._usage_payload(next(filter(None, (out.get("usage"),)), dict[str, Any]()), out.get("usage_resolved"))
             if all((should_emit_wire_usage(out.get("usage_resolved")), any((usage.get("prompt_tokens"), usage.get("completion_tokens"))))):
                 ok = s.emit(s.chunk({}, reason, usage=usage, conversation_id=cid))
         return ok

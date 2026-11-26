@@ -344,3 +344,49 @@ def test_rw006_emulate_tools_tracks_only_sanitized_wire_content() -> None:
     wire_text = session.emitted_stream_text + session.emitted_reasoning_text
     assert "Префикс" in wire_text
     assert "<" not in wire_text and ">" not in wire_text
+
+
+def test_f001_emulate_tools_no_duplicate_tool_call_on_partial_timeout() -> None:
+    """F-001a: после wire-эмиссии tool_call сырые text-события из retained не дублируют вызов."""
+    srv = load_server()
+    session, handler, _ctx = _make_session(
+        emulate_tools=True, tool_turn_cls=srv._ToolTurn
+    )
+    raw = 'План. <tool_call>{"name":"read","arguments":{"path":"a.py"}}</tool_call>'
+    assert session.stream_text(raw) is True
+    assert session.emitted_tool_calls == 1
+    out: dict[str, Any] = {
+        "state": "idle_timeout",
+        "timeout_limit_s": 10,
+        "retained_events": [("text", raw)],
+    }
+    session.finalize_timeout(out)
+    assert out["graceful_done"] is True
+    tool_calls = [
+        tc for d in _parse_deltas(handler.emitted) for tc in (d.get("tool_calls") or [])
+    ]
+    assert len(tool_calls) == 1
+
+
+def test_f001_open_tool_tag_prefix_does_not_corrupt_full_retained_tool_call() -> None:
+    """F-001b: незакрытый префикс <tool_ca в буфере tool_turn не склеивается с полным <tool_call> в retained."""
+    srv = load_server()
+    session, handler, _ctx = _make_session(
+        emulate_tools=True, tool_turn_cls=srv._ToolTurn
+    )
+    assert session.stream_text("Привет <tool_ca") is True
+    assert session.tool_turn is not None
+    assert session.tool_turn._normalizer.has_open_tool_call() is True
+    full = '<tool_call>{"name":"read","arguments":{"path":"b.py"}}</tool_call>'
+    out: dict[str, Any] = {
+        "state": "idle_timeout",
+        "timeout_limit_s": 10,
+        "retained_events": [("text", full)],
+    }
+    session.finalize_timeout(out)
+    assert out["graceful_done"] is True
+    deltas = _parse_deltas(handler.emitted)
+    tool_calls = [tc for d in deltas for tc in (d.get("tool_calls") or [])]
+    assert len(tool_calls) == 1
+    assert json.loads(tool_calls[0]["function"]["arguments"]) == {"path": "b.py"}
+    assert "<tool_ca" not in "".join(d.get("content", "") for d in deltas)

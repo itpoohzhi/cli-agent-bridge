@@ -264,12 +264,18 @@ class SseStreamSession:
             emitted_content=self.emitted_stream_text,
             emitted_reasoning=self.emitted_reasoning_text,
             emitted_tool_traces=self.emitted_tool_trace_keys, )
+        if self.tool_turn and self.emitted_tool_calls:
+            retained = [(k, p) for k, p in retained if k != "text"]
+        elif (self.tool_turn and self.tool_turn._normalizer.has_open_tool_call()
+              and any(k == "text" and "<tool_call>" in str(p) for k, p in retained)):
+            self._bind_stream_targets()
         self.b05_skipped_chars += skipped
         self.b05_flushed_tail_chars += sum( len(str(p)) for k, p in retained
             if k in ("text", "reasoning") )
         ok = True
         callbacks = dict( text=self.tool_turn.feed if self.tool_turn else self.on_text,
-            reasoning=self.on_reasoning, tool_trace=self.on_tool_trace, )
+            reasoning=self.tool_turn.feed_reasoning if self.tool_turn else self.on_reasoning,
+            tool_trace=self.on_tool_trace, )
         for kind, payload in retained:
             callback = callbacks.get(kind)
             if callback:
