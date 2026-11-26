@@ -108,6 +108,8 @@ class _SseBodyRunner:
     def trace(self, event: dict[str, Any]) -> bool:
         self._note_progress("tool_calls", event)
         forward = self.s.ledger.should_forward_step(event.get("step_index"))
+        if all((self.buffering, forward)):
+            self.collector.on_record(dict(event, tool_name=event.get("tool_name", event.get("name")), type=event.get("type", "tool_result")))
         if getattr(self, "progressive", False):
             if not forward:
                 return True
@@ -120,8 +122,6 @@ class _SseBodyRunner:
                 return True
             return False
         ok = True
-        if all((self.buffering, forward)):
-            self.collector.on_record(dict(event, tool_name=event.get("tool_name", event.get("name")), type=event.get("type", "tool_result")))
         if any((not self.buffering, forward)):
             ok = self.s.on_tool_trace(event) if not self.expired() else False
         return ok
@@ -162,6 +162,7 @@ class _SseBodyRunner:
                     self._pending_traces.clear()
             else:
                 self._post_live_replay_attempted = True
+                return dict(self._last_out) if self._last_out else dict(state="pump_error", rc=1, err="post_live_replay_blocked")
         if self.buffering:
             self.prepare_buffer()
             ctx.update(conversation_id=self.cid, attempt_budget_s=budget, attempt_index=index)

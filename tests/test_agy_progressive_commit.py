@@ -450,3 +450,46 @@ def test_rw007_normal_progressive_summary_is_closed_without_replay_block(
     assert summary["phase_end"] == "closed"
     assert summary["midstream_replay_blocked"] is False
     assert summary["post_live_replay_attempted"] is False
+
+
+def test_f011_post_live_attempt_blocks_replay_without_reinvoking_upstream() -> None:
+    """F-011: attempt(index>0) после wire_committed=True сразу возвращает ошибку без _invoke/prepare_buffer."""
+    body = _direct_runner()
+    body.progressive = body.buffering = True
+    body.delivery_fsm = initial_delivery_state(True)
+    assert body.stage("Доставленный чанк") is True
+    assert body.delivery_fsm.wire_committed is True
+    body._last_out = {"state": "pump_error", "rc": 1, "err": "upstream_broken"}
+
+    invoke_mock = Mock(return_value={"state": "done", "rc": 0})
+    prep_mock = Mock()
+    body._invoke = invoke_mock
+    body.prepare_buffer = prep_mock
+
+    out1 = body.attempt(1, 10.0)
+    assert invoke_mock.call_count == 0
+    assert prep_mock.call_count == 0
+    assert body._post_live_replay_attempted is True
+    assert out1 == {"state": "pump_error", "rc": 1, "err": "upstream_broken"}
+
+    logs: list[str] = []
+    body.s.hooks = (body.s.hooks[0], logs.append, body.s.hooks[2], body.s.hooks[3])
+    body._log_turn_summary(out1)
+    summary = json.loads(logs[-1])
+    assert summary["phase_end"] == "closed"
+    assert summary["post_live_replay_attempted"] is True
+    assert summary["midstream_replay_blocked"] is True
+
+
+def test_f012_progressive_trace_records_to_collector() -> None:
+    """F-012: progressive trace() также передаёт forwarded-трейсы в collector.on_record."""
+    body = _direct_runner()
+    body.progressive = body.buffering = True
+    body.delivery_fsm = initial_delivery_state(True)
+    rec = Mock()
+    body.collector.on_record = rec
+    event = {"step_index": 2, "tool_name": "read_file"}
+
+    assert body.trace(event) is True
+    assert rec.call_count == 1
+    assert rec.call_args[0][0]["tool_name"] == "read_file"
