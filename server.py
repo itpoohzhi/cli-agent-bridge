@@ -1158,6 +1158,11 @@ def is_browser_forwarding_enabled() -> bool:
     return _FORWARD_FLAG_SOURCE.enabled()
 
 
+def is_trusted_tool_streaming_enabled() -> bool:
+    """Kill-switch потоковой передачи доверенных tool_calls через PassthroughAdapter."""
+    return flag_enabled("BRIDGE_TRUSTED_TOOL_STREAMING_ENABLED")
+
+
 def _extra_denied_names() -> frozenset:
     raw = os.environ.get("BRIDGE_BROWSER_FORWARD_DENYLIST", "")
     return frozenset(n.strip().upper() for n in raw.split(",") if n.strip())
@@ -7161,7 +7166,7 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
                 try:
                     if not headers_sent[0]:
                         headers_sent[0] = True
-                        self._headers_already_sent = True
+                        self._headers_already_sent = True  # pyright: ignore[reportAttributeAccessIssue]
                         self.send_response(200)
                         self.send_header(
                             "Content-Type", "text/event-stream; charset=utf-8"

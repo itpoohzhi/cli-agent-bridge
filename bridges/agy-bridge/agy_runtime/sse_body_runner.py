@@ -1,3 +1,4 @@
+# fmt: off
 # ruff: noqa: E501
 """Оркестрация SSE: публикация границ хода, безопасный replay и единый финал."""
 # pyright: reportAny=false, reportExplicitAny=false, reportPrivateUsage=false
@@ -18,6 +19,8 @@ from core.stream_activity_policy import SlidingActivityWindow, build_final_outco
 from core.turn_usage_fsm import should_emit_wire_usage
 from core.stream_resilience_policy import can_safely_replay_turn, is_present, is_uncommitted_step
 from core.stream_resilience_runtime import MidstreamReplayOrchestrator
+from core.runtime_env import flag_enabled
+from agy_runtime.stream_delivery_fsm import DeliveryEvent, DeliveryEventKind, TurnSummaryMetrics, can_retry_after_failure, canonical_trace_key, format_turn_summary, initial_delivery_state, mark_sent, next_retry_epoch, step_delivery
 _attempt_scope = threading.local()
 def current_attempt_index() -> int:
     return getattr(_attempt_scope, "index", -1)
@@ -30,19 +33,17 @@ def invoke_at_attempt[T](index: int, invoke: Callable[[], T]) -> T:
 @final
 class _SseBodyRunner:
     def __init__(self, session: SseStreamSession) -> None:
-        self.s = session
-        self.time = _owner_time(session.handler)
+        self.s, self.time = session, _owner_time(session.handler)
         self.replay = MidstreamReplayOrchestrator(session.config, clock=self.time.monotonic, sleeper=self.time.sleep)
-        self.replay.buffer = session.buffer
-        self.collector = AgyToolTraceCollector(session.ledger)
-        self.buffering = False
-        self.deadline = float("inf")
+        self.replay.buffer, self.collector = session.buffer, AgyToolTraceCollector(session.ledger)
+        self.buffering = self.progressive = self._post_live_replay_attempted = self._direct_finalize = False
+        self.delivery_fsm, self._pending_traces, self._delivery_seq = initial_delivery_state(False), [], 0
+        self._turn_started_at, self._ttft_ms, self.deadline = self.time.monotonic(), None, float("inf")
         self.cid = str(next(filter(None, (session.ctx.get("conversation_id"),)), ""))
         self._last_out: dict[str, Any] = {}
         self._activity_window: SlidingActivityWindow | None = None
         self._activity_runtime: activity_runtime.ActivityRuntime | None = None
-        self._attempt_started_at = self._attempt_budget = 0.0
-        self.stop: Any = None
+        self._attempt_started_at, self._attempt_budget, self.stop = 0.0, 0.0, None
     def _note_progress(self, kind: str, payload: object) -> None:
         runtime = getattr(self, "_activity_runtime", None)
         if is_present(runtime):
@@ -52,21 +53,54 @@ class _SseBodyRunner:
         try:
             payload = json.loads(value) if channel == "tool_calls" else value
         except (ValueError, TypeError):
-            payload = value.strip()
-        self._note_progress(channel, payload)
-        ok = False
-        if not self.cancelled():
-            self.s.buffer.stage_fragment(value, channel)
-            ok = self.s.commit()
-        return ok
-    def stage_reasoning(self, value: str) -> bool:
-        return self.stage(value, "reasoning_content")
-    def stage_calls(self, value: list[dict[str, Any]]) -> bool:
-        return self.stage(json.dumps(value, ensure_ascii=False), "tool_calls")
-    def cancelled(self) -> bool:
-        return self.s.disconnected
-    def keepalive(self) -> bool:
-        return self._deliver(self.s.keepalive)
+            payload = None if channel == "tool_calls" else value.strip()
+        self._note_progress(channel, payload if payload is not None else value.strip())
+        bad_tc = channel == "tool_calls" and not isinstance(payload, list)
+        if self.cancelled() or bad_tc:
+            return False
+        wire_val = payload if channel == "tool_calls" else value
+        if getattr(self, "_direct_finalize", False):
+            return self._deliver_direct(wire_val, channel)
+        if getattr(self, "progressive", False):
+            kind = dict(tool_calls=DeliveryEventKind.TOOL_CALLS, reasoning_content=DeliveryEventKind.REASONING).get(channel, DeliveryEventKind.CONTENT)
+            deliverable = bool(payload) if channel == "tool_calls" else bool(value.strip())
+            self.delivery_fsm, actions = step_delivery(self.delivery_fsm, DeliveryEvent(epoch=self.delivery_fsm.epoch, seq=self._delivery_seq, kind=kind, channel=channel, payload=value, deliverable=deliverable))
+            act = actions[0].kind if actions else "drop_stale"
+            if act in ("flush_and_emit", "emit"):
+                ok = (act != "flush_and_emit" or self._flush_precommit()) and self._deliver_direct(wire_val, channel)
+                if ok:
+                    self._mark_wire_sent()
+                    ok = self._drain_traces()
+                return ok
+            if act != "stage":
+                return False
+        self.s.buffer.stage_fragment(value, channel)
+        return self.s.commit()
+    def _mark_wire_sent(self) -> None:
+        self.delivery_fsm, self._delivery_seq = mark_sent(self.delivery_fsm, self._delivery_seq), self._delivery_seq + 1
+        self._ttft_ms = (self.time.monotonic() - self._turn_started_at) * 1000 if self._ttft_ms is None else self._ttft_ms
+        self.s.ledger.client_delivery_reconciled = False
+    def _flush_precommit(self) -> bool:
+        for channel, value in normalize_staged_fragments(self.s.buffer.commit_fragments()):
+            if self.cancelled() or self.expired() or not self._deliver_direct(json.loads(value) if channel == "tool_calls" else value, channel):
+                return False
+            self._mark_wire_sent()
+        return True
+    def _deliver_direct(self, value: Any, channel: str) -> bool:
+        fn = dict(content=self.s.on_text, reasoning_content=self.s.on_reasoning, tool_calls=self.s.on_calls).get(channel)
+        return fn(value) if fn else False
+    def _drain_traces(self, *, force: bool = False) -> bool:
+        if not force and not self.delivery_fsm.wire_committed:
+            return True
+        pending, self._pending_traces = list(self._pending_traces), []
+        for event in pending:
+            if self.cancelled() or (not force and self.expired()) or (self.s.ledger.should_forward_step(event.get("step_index")) and not self.s.on_tool_trace(event)):
+                return False
+        return True
+    def stage_reasoning(self, value: str) -> bool: return self.stage(value, "reasoning_content")
+    def stage_calls(self, value: list[dict[str, Any]]) -> bool: return self.stage(json.dumps(value, ensure_ascii=False), "tool_calls")
+    def cancelled(self) -> bool: return self.s.disconnected
+    def keepalive(self) -> bool: return self._deliver(self.s.keepalive)
     def text(self, value: str) -> bool:
         self._note_progress("content", value)
         return self._deliver(self.s.stream_text, value)
@@ -74,34 +108,26 @@ class _SseBodyRunner:
         self._note_progress("reasoning", value)
         return self._deliver(self.s.stream_reasoning, value)
     def _deliver(self, callback: Any, *args: Any) -> bool:
-        ok = False
-        if not self.expired():
-            ok = callback(*args)
-        return ok
-    def expired(self) -> bool:
-        return self.time.monotonic() >= self.deadline
+        return callback(*args) if not self.expired() else False
+    def expired(self) -> bool: return self.time.monotonic() >= self.deadline
     def trace(self, event: dict[str, Any]) -> bool:
         self._note_progress("tool_calls", event)
         forward = self.s.ledger.should_forward_step(event.get("step_index"))
-        ok = True
         if all((self.buffering, forward)):
-            record = dict(event, tool_name=event.get("tool_name", event.get("name")), type=event.get("type", "tool_result"))
-            self.collector.on_record(record)
+            self.collector.on_record(dict(event, tool_name=event.get("tool_name", event.get("name")), type=event.get("type", "tool_result")))
+        if getattr(self, "progressive", False):
+            if not forward:
+                return True
+            self.delivery_fsm, actions = step_delivery(self.delivery_fsm, DeliveryEvent(epoch=self.delivery_fsm.epoch, seq=self._delivery_seq, kind=DeliveryEventKind.TOOL_TRACE, channel="tool_trace", payload=""))
+            act = actions[0].kind if actions else "drop_stale"
+            if act == "emit":
+                return not self.expired() and not self.cancelled() and self.s.on_tool_trace(event)
+            return (self._pending_traces.append(event) is None) if act == "stage" else False
+        ok = True
         if any((not self.buffering, forward)):
-            ok = False
-            if not self.expired():
-                ok = self.s.on_tool_trace(event)
+            ok = self.s.on_tool_trace(event) if not self.expired() else False
         return ok
-    def prepare_buffer(self) -> None:
-        s = self.s
-        s.stream_text, s.stream_reasoning = self.stage, self.stage_reasoning
-        if is_present(s.tool_turn):
-            s.tool_turn = s.hooks[3](next(filter(None, (s.ctx.get("tools"),)), list[dict[str, Any]]()), self.stage, self.stage_reasoning, self.stage_calls)
-            s.stream_text = s.tool_turn.feed
-            s.stream_reasoning = s.tool_turn.feed_reasoning
-            s.ctx["tool_stop"] = s.tool_turn.turn_complete
-            s.ctx["tool_calls_emitted"] = lambda: bool(s.tool_turn.calls)
-            s.ctx["emitted_call_ids"] = lambda: [str(c.get("id", "")) for c in s.tool_turn.calls]
+    def prepare_buffer(self) -> None: self.s._bind_stream_targets(self.stage, self.stage_reasoning, self.stage_calls)
     def tool_stop(self) -> bool:
         return self.expired() or bool(self.stop and self.stop())
     def settle_decision(self, *, proc_exited: bool = False, result_received: bool = False) -> SettleDecision:
@@ -122,8 +148,16 @@ class _SseBodyRunner:
         ctx["attempt_index"] = index
         self._activity_window = self._activity_runtime = None
         self._attempt_started_at, self._attempt_budget = self.time.monotonic(), budget
-        if self.buffering:
+        if index > 0:
+            if not can_retry_after_failure(self.delivery_fsm):
+                self._post_live_replay_attempted = True
+                return dict(self._last_out) if self._last_out else dict(state="pump_error", rc=1, err="post_live_replay_blocked")
             s.buffer.rollback_uncommitted()
+            if self.progressive:
+                self.delivery_fsm = next_retry_epoch(self.delivery_fsm, self.time.monotonic() * 1000)
+                s.reset_precommit_emitted()
+                self._pending_traces.clear()
+        if self.buffering:
             self.prepare_buffer()
             ctx.update(conversation_id=self.cid, attempt_budget_s=budget, attempt_index=index)
             self.deadline = self._attempt_started_at + budget if s.config.flag_enabled("midstream_retry_enabled") else float("inf")
@@ -181,15 +215,9 @@ class _SseBodyRunner:
         if callable(log):
             log(str(self.s.ctx.get("model", "")), out, self._attempt_started_at, str(self.s.ctx.get("tag", "")))
     def reconcile_trace(self, out: dict[str, Any]) -> None:
-        ledger = self.s.ledger
-        cid = str(next(filter(None, (out.get("conversation_id"),)), self.cid))
-        snapshot = out.get("trace_snapshot")
-        active = ledger._active
+        ledger, cid, snapshot = self.s.ledger, str(next(filter(None, (out.get("conversation_id"),)), self.cid)), out.get("trace_snapshot")
         terminal = dict(first_token_timeout=True, first_event_timeout=True).get(str(out.get("state")), False)
-        valid = all( ( bool(cid.strip()), any((not self.cid, cid == self.cid)),
-                is_uncommitted_step(active, ledger.last_committed_step_idx),
-                not terminal, snapshot == ledger.snapshot(), ) )
-        valid = valid and can_safely_replay_turn(snapshot, ledger.last_committed_step_idx)
+        valid = all((bool(cid.strip()), any((not self.cid, cid == self.cid)), is_uncommitted_step(ledger._active, ledger.last_committed_step_idx), not terminal, snapshot == ledger.snapshot())) and can_safely_replay_turn(snapshot, ledger.last_committed_step_idx)
         if not valid:
             ledger.trace_complete = False
         self.cid = cid
@@ -200,21 +228,24 @@ class _SseBodyRunner:
             if s.tool_turn.error:
                 s.buffer.rollback_uncommitted()
                 return True
-        callbacks = dict(content=s.on_text, reasoning_content=s.on_reasoning)
-        pending = normalize_staged_fragments(s.buffer.commit_fragments())
-        ok = True
+        callbacks, pending, ok = dict(content=s.on_text, reasoning_content=s.on_reasoning), normalize_staged_fragments(s.buffer.commit_fragments()), True
         for channel, value in pending:
-            callback = dict(callbacks, tool_calls=lambda v: s.on_calls(json.loads(v)))[channel]
-            ok = callback(value)
+            ok = dict(callbacks, tool_calls=lambda v: s.on_calls(json.loads(v)))[channel](value)
             if not ok:
                 s.ledger.client_delivery_reconciled = False
                 break
+        if ok and getattr(self, "_pending_traces", None):
+            ok = self._drain_traces(force=True)
+        if getattr(self, "progressive", False) and not self.delivery_fsm.wire_committed and any((s.emitted_content, s.emitted_reasoning_or_tool)):
+            self._mark_wire_sent()
         if all((ok, pending, s.ledger._active >= 0)):
             _ = s.ledger.mark_step_completed(s.ledger._active)
         return ok
     def run(self) -> None:
         s, ctx = self.s, self.s.ctx
-        self.buffering = any((s.config.flag_enabled("midstream_retry_enabled"), s.config.flag_enabled("tool_rollback_enabled")))
+        self.progressive = bool(flag_enabled("BRIDGE_AGY_PROGRESSIVE_COMMIT_ENABLED"))
+        self.delivery_fsm = initial_delivery_state(self.progressive, precommit_started_ms=self._turn_started_at * 1000)
+        self.buffering = any((self.progressive, s.config.flag_enabled("midstream_retry_enabled"), s.config.flag_enabled("tool_rollback_enabled")))
         try:
             allowed = True if any((s.resilience, ctx.get("step_job_id"))) else s.commit()
             if allowed:
@@ -238,22 +269,47 @@ class _SseBodyRunner:
                 if not self.cancelled():
                     proceed = self.drain()
             else:
-                s.buffer.rollback_uncommitted()
-                _ = out.pop("retained_events", None)
+                raw_ret = out.get("retained_events")
+                can_graceful = self.progressive and out.get("state") in ("timeout", "idle_timeout") and s.hooks[0]("graceful_timeout_on_partial") and isinstance(raw_ret, (list, tuple)) and any(k == "text" and str(p).strip() for k, p in raw_ret)
+                if self.delivery_fsm.wire_committed:
+                    s.ledger.client_delivery_reconciled = False
+                elif not can_graceful:
+                    s.buffer.rollback_uncommitted()
+                    _ = out.pop("retained_events", None)
+                    self._pending_traces.clear()
         else:
             out = self.attempt(0, self.replay.attempt_budget_s(0) if s.config.flag_enabled("sliding_activity_window_enabled") else s.config.first_event_timeout_s)
         if proceed:
             if any((self.cancelled(), dict(client_gone=True).get(str(out.get("state")), False))):
                 s.hooks[1]("client gone mid-stream, child killed")
             else:
-                ctx["finalize_timeout"] = s.finalize_stream
-                s.finalize_stream(out)
+                if self.progressive and not self.delivery_fsm.wire_committed and self._flush_precommit():
+                    _ = self._drain_traces(force=out.get("state") == "done")
+                raw_ret2 = out.get("retained_events")
+                if self.progressive and self._pending_traces and not self.delivery_fsm.wire_committed and out.get("state") in ("timeout", "idle_timeout") and isinstance(raw_ret2, (list, tuple)) and any(k == "text" and str(p).strip() for k, p in raw_ret2):
+                    seen = {canonical_trace_key(p) for k, p in raw_ret2 if k == "tool_trace"} | set(s.emitted_tool_trace_keys)
+                    traces, self._pending_traces = [ev for ev in self._pending_traces if s.ledger.should_forward_step(ev.get("step_index")) and canonical_trace_key(ev) not in seen], []
+                    out["retained_events"] = [*raw_ret2, *(("tool_trace", ev) for ev in traces)]
+                ctx["finalize_timeout"], self._direct_finalize = s.finalize_stream, True
+                try:
+                    s.finalize_stream(out)
+                finally:
+                    self._direct_finalize = False
+                if self.progressive and not self.delivery_fsm.wire_committed and any((s.emitted_content, s.emitted_reasoning_or_tool)):
+                    self._mark_wire_sent()
+                if self.progressive and self._pending_traces and self.delivery_fsm.wire_committed and not out.get("graceful_done"):
+                    _ = self._drain_traces(force=True)
                 if not out.get("graceful_done"):
                     self.finish(out)
+        self._log_turn_summary(out)
+    def _log_turn_summary(self, out: dict[str, Any]) -> None:
+        s, rc = self.s, out.get("rc")
+        self.delivery_fsm, _ = step_delivery(self.delivery_fsm, DeliveryEvent(epoch=self.delivery_fsm.epoch, seq=self._delivery_seq, kind=DeliveryEventKind.DONE if out.get("state") == "done" else DeliveryEventKind.ERROR, channel="", payload=""))
+        metrics = TurnSummaryMetrics(b05_skipped_chars=s.b05_skipped_chars, b05_flushed_tail_chars=s.b05_flushed_tail_chars, midstream_replay_blocked=bool(self._post_live_replay_attempted and self.delivery_fsm.wire_committed), post_live_replay_attempted=self._post_live_replay_attempted, client_gone=self.cancelled() or out.get("state") == "client_gone", tool_turn_active=is_present(s.tool_turn), tool_parse_error=bool(s.tool_turn.error) if is_present(s.tool_turn) else False, upstream_rc=rc if type(rc) is int else None, ttft_ms=self._ttft_ms, total_ms=(self.time.monotonic() - self._turn_started_at) * 1000)
+        if len(s.hooks) > 1 and callable(s.hooks[1]):
+            s.hooks[1](format_turn_summary(self.delivery_fsm, metrics))
     def finish(self, out: dict[str, Any]) -> None:
-        s = self.s
-        err = s.handler._error_body(out, s.resilience)
-        reason, proceed = "stop", True
+        s, err, reason, proceed = self.s, self.s.handler._error_body(out, self.s.resilience), "stop", True
         if all(((not is_present(err)), (is_present(s.tool_turn)))):
             s.tool_turn.finish()
             proceed = not self.cancelled() and (s.tool_turn.ok or bool(s.tool_turn.error))
@@ -268,12 +324,9 @@ class _SseBodyRunner:
         if proceed:
             self._finish_response(out, err, reason)
     def _finish_response(self, out: dict[str, Any], err: Any, reason: str) -> None:
-        s = self.s
-        presend = all(((is_present(err)), not s.ctx["stream_committed"], any((s.resilience, s.ctx.get("step_job_id")))))
+        s, presend = self.s, all(((is_present(err)), not self.s.ctx["stream_committed"], any((self.s.resilience, self.s.ctx.get("step_job_id")))))
         if presend:
-            clean = {k: redact_diagnostic_text(v) if isinstance(v, str) else v for k, v in err.items()}
-            code = 503 if err.get("type") == "overloaded" else (int(err.get("code") or 502) if any((s.ctx.get("step_job_id"), err.get("type") == CAPACITY_REASON)) else 502)
-            extra = retry_after_headers(out, err)
+            clean, code, extra = {k: redact_diagnostic_text(v) if isinstance(v, str) else v for k, v in err.items()}, (503 if err.get("type") == "overloaded" else (int(err.get("code") or 502) if any((s.ctx.get("step_job_id"), err.get("type") == CAPACITY_REASON)) else 502)), retry_after_headers(out, err)
             s.handler._send(code, {"error": clean}, extra) if extra else s.handler._send(code, {"error": clean})
             s.handler.close_connection = True
         elif s.commit():
@@ -286,12 +339,10 @@ class _SseBodyRunner:
         except (TypeError, ValueError, AttributeError):
             return None
     def finish_success(self, out: dict[str, Any], reason: str) -> bool:
-        s = self.s
-        cid = str(next(filter(None, (out.get("conversation_id"),)), ""))
+        s, cid = self.s, str(next(filter(None, (out.get("conversation_id"),)), ""))
         ok = s.emit(s.chunk({}, reason, conversation_id=cid))
         if any((ok, not s.resilience)):
-            ok = True
-            usage = s.handler._usage_payload(next(filter(None, (out.get("usage"),)), dict[str, Any]()), out.get("usage_resolved"))
+            ok, usage = True, s.handler._usage_payload(next(filter(None, (out.get("usage"),)), dict[str, Any]()), out.get("usage_resolved"))
             if all((should_emit_wire_usage(out.get("usage_resolved")), any((usage.get("prompt_tokens"), usage.get("completion_tokens"))))):
                 ok = s.emit(s.chunk({}, reason, usage=usage, conversation_id=cid))
         return ok
