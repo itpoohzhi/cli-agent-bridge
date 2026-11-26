@@ -92,7 +92,7 @@ def test_flag_on_codex_standard_empty_cwd_is_neutral_dir(monkeypatch: pytest.Mon
     assert path.is_dir()
     assert not (path / "AGENTS.md").exists()
     assert list(path.iterdir()) == []
-    assert stat.S_IMODE(path.stat().st_mode) == 0o700
+    assert stat.S_IMODE(path.stat().st_mode) == 0o500
     req_cwd = build_turn_request_from_ctx("codex", _ctx(""), "standard")["cwd"]
     assert req_cwd not in ("", os.getcwd())
     assert not (Path(req_cwd) / "AGENTS.md").exists()
@@ -108,6 +108,16 @@ def test_flag_on_keyed_chat_without_cwd_keeps_stable_cwd_norm(monkeypatch: pytes
     second, _ = build_resident_envelope_from_chat("codex", body, _SECRET)
     assert first.cwd_norm == second.cwd_norm
     assert first.cwd_norm != os.path.realpath(os.getcwd())
+
+
+def test_flag_on_cwd_is_per_principal_and_stable_across_turns(monkeypatch: pytest.MonkeyPatch) -> None:
+    _flag(monkeypatch, "true")
+    a1, _ = build_resident_envelope_from_chat("codex", {"prompt": "x", "subagent_id": "a"}, _SECRET)
+    a2, _ = build_resident_envelope_from_chat("codex", {"prompt": "y", "subagent_id": "a"}, _SECRET)
+    b1, _ = build_resident_envelope_from_chat("codex", {"prompt": "x", "subagent_id": "b"}, _SECRET)
+    assert a1.cwd_norm == a2.cwd_norm
+    assert a1.cwd_norm != b1.cwd_norm
+    assert stat.S_IMODE(os.stat(a1.cwd_norm).st_mode) == 0o500 == stat.S_IMODE(os.stat(b1.cwd_norm).st_mode)
 
 
 def test_flag_on_explicit_cwd_preserved(monkeypatch: pytest.MonkeyPatch) -> None:

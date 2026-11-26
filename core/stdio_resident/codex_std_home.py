@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import atexit
+import hashlib
 import os
 import re
 import shutil
@@ -35,6 +36,8 @@ _PID_DIR_RE: Final[re.Pattern[str]] = re.compile(r"^pid-(\d+)-")
 _OWNED_LOCK: Final[threading.Lock] = threading.Lock()
 _OWNED_DIRS: set[Path] = set()
 _ATEXIT_STATE: dict[str, bool] = {"registered": False}
+# Сигнатуры (mtime_ns, size, ino) хостового auth.json, уже синхронизированного в слот.
+_AUTH_SYNC_SIGS: dict[Path, tuple[int, int, int]] = {}
 
 
 def _flag(name: str, environ: Mapping[str, str] | None, config_path: Path | None) -> bool:
@@ -184,12 +187,19 @@ def _stable_owned_dir(suffix: str) -> Path:
     return path
 
 
-def create_neutral_fallback_cwd() -> str:
-    """Возвращает стабильный пустой `0o700` каталог (без `AGENTS.md`) fallback-CWD процесса.
+def _scope_tag(*parts: str) -> str:
+    return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()[:16]
 
-    Путь постоянен между вызовами, чтобы `SlotAffinityKey.cwd_norm` не менялся между ходами.
+
+def create_neutral_fallback_cwd(principal_key: str = "") -> str:
+    """Возвращает стабильный пустой read-only (`0o500`) каталог без `AGENTS.md` per-principal.
+
+    Путь постоянен между вызовами одного принципала (стабильный `SlotAffinityKey.cwd_norm`);
+    разные принципалы получают разные каталоги. Дочерний Codex не может создать в нём файлы.
     """
-    return str(_stable_owned_dir("neutral-cwd"))
+    path = _stable_owned_dir(f"neutral-cwd-{_scope_tag(str(os.getuid()), principal_key)}")
+    os.chmod(path, 0o500)
+    return str(path)
 
 
 def _read_optional(path: Path) -> bytes | None:
@@ -206,28 +216,53 @@ def _source_codex_dir(base_env: Mapping[str, str]) -> Path | None:
     return Path(raw) if raw else None
 
 
+def _auth_sig(path: Path) -> tuple[int, int, int]:
+    st = path.stat()
+    return (st.st_mtime_ns, st.st_size, st.st_ino)
+
+
+def _sync_auth_json(src_codex: Path | None, dst_auth: Path) -> None:
+    """Синхронизирует `auth.json`, не затирая обновлённый в слоте OAuth-токен при неизменном хостовом файле."""
+    src_auth = src_codex / "auth.json" if src_codex is not None else None
+    auth_bytes = _read_optional(src_auth) if src_auth is not None else None
+    if auth_bytes is None or src_auth is None:
+        if dst_auth in _AUTH_SYNC_SIGS:
+            dst_auth.unlink(missing_ok=True)
+            _ = _AUTH_SYNC_SIGS.pop(dst_auth, None)
+        return
+    sig = _auth_sig(src_auth)
+    if dst_auth.exists() and _AUTH_SYNC_SIGS.get(dst_auth) == sig:
+        return
+    replace_atomic_0600(dst_auth, auth_bytes)
+    _AUTH_SYNC_SIGS[dst_auth] = sig
+
+
 def _sync_codex_files(src_codex: Path | None, dst_codex: Path, raw_cfg_out: dict[str, Any]) -> None:
     """Читает хостовые `config.toml`/`auth.json` (без симлинков) и атомарно обновляет копии слота."""
     cfg_bytes = _read_optional(src_codex / "config.toml") if src_codex is not None else None
-    auth_bytes = _read_optional(src_codex / "auth.json") if src_codex is not None else None
     if cfg_bytes is not None:
         raw_cfg_out.update(tomllib.loads(cfg_bytes.decode("utf-8")))
     cfg_text = dump_toml(filter_codex_standard_config(raw_cfg_out))
     with _OWNED_LOCK:
-        if auth_bytes is not None:
-            replace_atomic_0600(dst_codex / "auth.json", auth_bytes)
-        else:
-            (dst_codex / "auth.json").unlink(missing_ok=True)
+        _sync_auth_json(src_codex, dst_codex / "auth.json")
         replace_atomic_0600(dst_codex / "config.toml", cfg_text.encode("utf-8"))
 
 
-def prepare_codex_std_home(base_env: Mapping[str, str], root: str | Path | None = None) -> dict[str, str]:
+def _home_scope_suffix(base_env: Mapping[str, str], scope_key: str) -> str:
+    src = _source_codex_dir(base_env)
+    src_real = os.path.realpath(src) if src is not None else ""
+    return f"std-home-{_scope_tag(str(os.getuid()), src_real, scope_key)}"
+
+
+def prepare_codex_std_home(
+    base_env: Mapping[str, str], root: str | Path | None = None, *, scope_key: str = ""
+) -> dict[str, str]:
     """Готовит чистый `HOME`/`CODEX_HOME` (`0o700`): `auth.json` (`0o600`) и filtered `config.toml`.
 
-    Без `root` используется стабильный process-scoped каталог (нет утечки каталогов на warm-ходах);
-    файлы обновляются при каждом вызове. Симлинк на `auth.json`/`config.toml` — fail-closed.
+    Без `root` — стабильный process-scoped каталог, изолированный по `(uid, realpath источника, scope_key)`;
+    `auth.json` слота перезаписывается только при смене сигнатуры хостового файла. Симлинк на `auth.json`/`config.toml` — fail-closed.
     """
-    home_root = Path(root) if root is not None else _stable_owned_dir("std-home")
+    home_root = Path(root) if root is not None else _stable_owned_dir(_home_scope_suffix(base_env, scope_key))
     dst_codex = home_root / ".codex"
     for directory in (home_root, dst_codex, home_root / "cwd"):
         ensure_private_dir(directory, 0o700)

@@ -166,7 +166,7 @@ def test_owned_home_and_neutral_cwd_are_private_and_registered(tmp_path: Path, m
     try:
         assert home_root.parent == cwd.parent == tmp_path / f"codex-std-homes-{os.getuid()}"
         assert home_root.name.startswith(f"pid-{os.getpid()}-")
-        assert stat.S_IMODE(cwd.stat().st_mode) == 0o700 and not list(cwd.iterdir())
+        assert stat.S_IMODE(cwd.stat().st_mode) == 0o500 and not list(cwd.iterdir())
         assert home_root in codex_std_home._OWNED_DIRS and cwd in codex_std_home._OWNED_DIRS
     finally:
         cleanup_std_home_dir(home_root)
@@ -180,15 +180,66 @@ def test_neutral_fallback_cwd_is_stable_private_and_recreated(tmp_path: Path, mo
     try:
         second = Path(create_neutral_fallback_cwd())
         assert first == second
-        assert stat.S_IMODE(first.stat().st_mode) == 0o700
+        assert stat.S_IMODE(first.stat().st_mode) == 0o500
         assert not list(first.iterdir()) and not (first / "AGENTS.md").exists()
         assert len(list(first.parent.glob("pid-*"))) == 1
         cleanup_std_home_dir(first)
         assert not first.exists()
         third = Path(create_neutral_fallback_cwd())
-        assert third == first and stat.S_IMODE(third.stat().st_mode) == 0o700
+        assert third == first and stat.S_IMODE(third.stat().st_mode) == 0o500
     finally:
         cleanup_std_home_dir(first)
+
+
+def test_neutral_cwd_is_per_principal_and_read_only(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(codex_std_home.tempfile, "gettempdir", lambda: str(tmp_path))
+    one, two = Path(create_neutral_fallback_cwd("p1")), Path(create_neutral_fallback_cwd("p2"))
+    try:
+        assert one != two and one == Path(create_neutral_fallback_cwd("p1"))
+        for path in (one, two):
+            assert stat.S_IMODE(path.stat().st_mode) == 0o500
+            with pytest.raises(PermissionError):
+                (path / "AGENTS.md").write_text("x", encoding="utf-8")
+    finally:
+        cleanup_std_home_dir(one)
+        cleanup_std_home_dir(two)
+
+
+def test_prepare_std_home_isolated_per_source_home_and_scope(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(codex_std_home.tempfile, "gettempdir", lambda: str(tmp_path))
+    env_a, _ = _source_home(tmp_path / "a")
+    env_b, _ = _source_home(tmp_path / "b")
+    first = Path(prepare_codex_std_home(env_a)["HOME"])
+    auth_a = first / ".codex" / "auth.json"
+    auth_a.write_text('{"token":"refreshed-a"}', encoding="utf-8")
+    second = Path(prepare_codex_std_home(env_b)["HOME"])
+    scoped = Path(prepare_codex_std_home(env_a, scope_key="s1")["HOME"])
+    try:
+        assert len({first, second, scoped}) == 3
+        assert auth_a.read_text(encoding="utf-8") == '{"token":"refreshed-a"}'
+    finally:
+        for path in (first, second, scoped):
+            cleanup_std_home_dir(path)
+
+
+def test_prepare_std_home_keeps_refreshed_auth_until_host_changes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(codex_std_home.tempfile, "gettempdir", lambda: str(tmp_path))
+    env, src = _source_home(tmp_path)
+    home_root = Path(prepare_codex_std_home(env)["HOME"])
+    auth = home_root / ".codex" / "auth.json"
+    try:
+        auth.write_text('{"token":"refreshed"}', encoding="utf-8")
+        _ = prepare_codex_std_home(env)
+        assert auth.read_text(encoding="utf-8") == '{"token":"refreshed"}'
+        (src / "auth.json").write_text('{"token":"host-new-longer"}', encoding="utf-8")
+        _ = prepare_codex_std_home(env)
+        assert auth.read_text(encoding="utf-8") == '{"token":"host-new-longer"}'
+        assert stat.S_IMODE(auth.stat().st_mode) == 0o600
+        (src / "auth.json").unlink()
+        _ = prepare_codex_std_home(env)
+        assert not auth.exists()
+    finally:
+        cleanup_std_home_dir(home_root)
 
 
 def test_prepare_std_home_without_root_reuses_process_scoped_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

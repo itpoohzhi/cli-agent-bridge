@@ -294,7 +294,7 @@ def _provider_max_concurrent(driver_config: Mapping[str, Any], *, flat: bool) ->
 
 def _total_cap(env: Mapping[str, str]) -> int:
     raw = (env.get(_ENV_CODEX_POOL_TOTAL_CAP) or "").strip()
-    return max(2, min(int(raw), 64)) if raw.isdigit() else _DEFAULT_CODEX_POOL_TOTAL_CAP
+    return max(2, min(int(raw), 64)) if raw.isascii() and raw.isdigit() else _DEFAULT_CODEX_POOL_TOTAL_CAP
 
 
 def _codex_pool_target(env: Mapping[str, str], driver_config: Mapping[str, Any]) -> int | None:
@@ -324,13 +324,13 @@ def _align_codex_v2_pool_slots(
     if target is None:
         return pool_cfg
     updates: dict[str, Any] = {}
-    if _env_unset(env, "BRIDGE_STDIO_MAX_EPHEMERAL_SLOTS"):
-        updates["max_ephemeral_slots"] = target
     if _env_unset(env, "BRIDGE_STDIO_MAX_SLOTS"):
         new_max = max(pool_cfg.max_slots, target)
         updates["max_slots"] = new_max
         if _env_unset(env, "BRIDGE_STDIO_MAX_SLOTS_PER_PRINCIPAL"):
             updates["max_slots_per_principal"] = new_max
+    if _env_unset(env, "BRIDGE_STDIO_MAX_EPHEMERAL_SLOTS"):
+        updates["max_ephemeral_slots"] = min(target, updates.get("max_slots", pool_cfg.max_slots))
     return dataclasses.replace(pool_cfg, **updates) if updates else pool_cfg
 
 

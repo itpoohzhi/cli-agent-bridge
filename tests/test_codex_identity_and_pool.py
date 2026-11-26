@@ -11,6 +11,7 @@ import pytest
 from adapters.stdio_drivers import (
     CODEX_POOL_UNIFIED_CAP_FLAG,
     _align_codex_v2_pool_slots,
+    _total_cap,
     build_affinity_key,
 )
 from core.resident_identity import (
@@ -217,3 +218,13 @@ def test_b24_flag_off_keeps_legacy_behavior() -> None:
     assert (flat.max_slots, flat.max_ephemeral_slots) == (4, 2)
     nested = _align_codex_v2_pool_slots(base, env, {"limits": {"max_concurrent": 6}})
     assert (nested.max_slots, nested.max_ephemeral_slots) == (6, 6)
+
+
+def test_total_cap_non_ascii_digit_falls_back_to_default() -> None:
+    assert _total_cap({"BRIDGE_CODEX_POOL_TOTAL_CAP": "\u00b2"}) == 20
+
+
+def test_explicit_max_slots_clamps_ephemeral_slots() -> None:
+    env = _pool_env(BRIDGE_STDIO_MAX_SLOTS="4")
+    out = _align_codex_v2_pool_slots(StdioPoolConfig.from_env(env), env, {"max_concurrent": 20})
+    assert out.max_ephemeral_slots == 4 <= out.max_slots == 4

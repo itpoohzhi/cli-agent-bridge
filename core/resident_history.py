@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import re
 import threading
 from collections.abc import Sequence
 from collections import OrderedDict
@@ -30,6 +29,8 @@ class CommittedSessionState:
     cwd_norm: str
     review_profile: str
     item_digests: tuple[str, ...]
+    canonical_digests: tuple[str, ...] = ()
+    integrity_enabled: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -42,8 +43,9 @@ class HistoryPlan:
     reason: str
 
 
-_TOOL_RESULT_MARKER_RE = re.compile(r"\[tool result[ \]]")
-_TOOL_CALL_BLOCK_RE = re.compile(r"(?<!\\)<tool_call>(.*?)</tool_call>", re.DOTALL)
+_TOOL_CALL_OPEN = "<tool_call>"
+_TOOL_CALL_CLOSE = "</tool_call>"
+_JSON_DECODER = json.JSONDecoder()
 
 
 def _sorted_json(value: object) -> str:
@@ -75,22 +77,49 @@ def _canonical_call(call: object) -> object:
     return clone
 
 
-def _canonical_block(match: re.Match[str]) -> str:
-    try:
-        payload = cast(object, json.loads(match.group(1)))
-    except ValueError:
-        return match.group(0)
+def _canonical_payload(payload: object) -> str | None:
     arguments = cast(dict[str, object], payload).get("arguments") if isinstance(payload, dict) else None
     if not isinstance(arguments, dict):
-        return match.group(0)
+        return None
     cast(dict[str, object], payload)["arguments"] = cast(object, json.loads(_sorted_json(arguments)))
-    return f"<tool_call>{json.dumps(payload, ensure_ascii=False)}</tool_call>"
+    return json.dumps(payload, ensure_ascii=False)
+
+
+def _parse_tool_call_at(text: str, start: int) -> tuple[str, int] | None:
+    """JSON-aware разбор тела `<tool_call>` с позиции `start`: (канонический блок, конец) либо `None`."""
+    while start < len(text) and text[start].isspace():
+        start += 1
+    try:
+        payload, end = cast(tuple[object, int], _JSON_DECODER.raw_decode(text, start))
+    except ValueError:
+        return None
+    if not text.startswith(_TOOL_CALL_CLOSE, end):
+        return None
+    body = _canonical_payload(payload)
+    return None if body is None else (f"{_TOOL_CALL_OPEN}{body}{_TOOL_CALL_CLOSE}", end + len(_TOOL_CALL_CLOSE))
+
+
+def _canonicalize_tool_calls_text(text: str) -> str:
+    """Канонизирует `arguments` во всех неэкранированных `<tool_call>{json}</tool_call>`; чужой текст не трогает."""
+    out: list[str] = []
+    pos = 0
+    while (idx := text.find(_TOOL_CALL_OPEN, pos)) != -1:
+        parsed = None if text[idx - 1 : idx] == "\\" else _parse_tool_call_at(text, idx + len(_TOOL_CALL_OPEN))
+        if parsed is None:
+            out.append(text[pos : idx + len(_TOOL_CALL_OPEN)])
+            pos = idx + len(_TOOL_CALL_OPEN)
+        else:
+            out.append(text[pos:idx])
+            out.append(parsed[0])
+            pos = parsed[1]
+    out.append(text[pos:])
+    return "".join(out)
 
 
 def _canonical_item_digest(item: TranscriptItem) -> str:
     """Digest входящего assistant-item, инвариантный к порядку ключей `arguments`."""
     if item.role == "assistant":
-        canon = _TOOL_CALL_BLOCK_RE.sub(_canonical_block, item.text)
+        canon = _canonicalize_tool_calls_text(item.text)
         if canon != item.text:
             return hashlib.sha256(f"[assistant]\n{canon}".encode("utf-8")).hexdigest()
     return item.digest
@@ -109,7 +138,7 @@ def build_assistant_transcript_item(text: str, tool_calls: list[dict[str, object
 
 
 def _render_delta_item(item: TranscriptItem, bare_tool_results: bool) -> str:
-    bare = bare_tool_results and item.role == "user" and _TOOL_RESULT_MARKER_RE.match(item.text) is not None
+    bare = bare_tool_results and item.origin_role == "tool"
     return item.text if bare or item.role not in ("user", "assistant") else f"[{item.role}]\n{item.text}"
 
 
@@ -120,8 +149,6 @@ def render_delta_prompt(items: tuple[TranscriptItem, ...]) -> str:
 
 def _base_state(envelope: ResidentTurnEnvelope) -> CommittedSessionState:
     items = envelope.rpc.items if envelope.rpc else ()
-    integrity = is_warm_delta_integrity_enabled()
-    digests = (_canonical_item_digest(item) if integrity else item.digest for item in items)
     return CommittedSessionState(
         "",
         0,
@@ -134,7 +161,9 @@ def _base_state(envelope: ResidentTurnEnvelope) -> CommittedSessionState:
         envelope.effort,
         envelope.cwd_norm,
         envelope.review_profile,
-        tuple(digests),
+        tuple(item.digest for item in items),
+        tuple(_canonical_item_digest(item) for item in items),
+        is_warm_delta_integrity_enabled(),
     )
 
 
@@ -193,9 +222,11 @@ def _plan_warm(committed: CommittedSessionState | None, envelope: ResidentTurnEn
     else:
         c_state = cast(CommittedSessionState, committed)
         count = len(c_state.item_digests)
-        incoming = next_base.item_digests
+        use_canon = (next_base.integrity_enabled or c_state.integrity_enabled) and bool(c_state.canonical_digests)
+        incoming = next_base.canonical_digests if use_canon else next_base.item_digests
+        known = c_state.canonical_digests if use_canon else c_state.item_digests
         delta_items = envelope.rpc.items[count:] if envelope.rpc else ()
-        extends = all((bool(c_state.item_digests), len(incoming) > count, incoming[:count] == c_state.item_digests))
+        extends = all((bool(known), len(incoming) > count, incoming[:count] == known))
         has_assistant = any(not bool({item.role} - {"assistant"}) for item in delta_items)
         if all((extends, not has_assistant)):
             result = _plan("delta", render_delta_prompt(delta_items), next_base, (False, False, "history_extended"))
@@ -285,9 +316,16 @@ class ResidentHistoryTracker:
             evicted: list[tuple[str, SlotBinding]] = []
             if state:
                 extra = (assistant_item.digest,) if assistant_item else ()
+                canon_extra = (_canonical_item_digest(assistant_item),) if assistant_item else ()
                 digests = state.item_digests + extra
                 if digests:
-                    self._states[key] = replace(state, slot_id=slot_binding.slot_id, generation=slot_binding.generation, item_digests=digests)
+                    self._states[key] = replace(
+                        state,
+                        slot_id=slot_binding.slot_id,
+                        generation=slot_binding.generation,
+                        item_digests=digests,
+                        canonical_digests=state.canonical_digests + canon_extra,
+                    )
                     self._has_assistant[key] = bool(assistant_item)
                     self._states.move_to_end(key)
                     evicted = self._evict_locked()
@@ -303,11 +341,13 @@ class ResidentHistoryTracker:
             state = self._states.get(key)
             if state is None or (state.slot_id, state.generation) != (slot_binding.slot_id, slot_binding.generation):
                 return False
-            if self._has_assistant.get(key) and state.item_digests:
-                new_digests = state.item_digests[:-1] + (assistant_item.digest,)
-            else:
-                new_digests = state.item_digests + (assistant_item.digest,)
-            self._states[key] = replace(state, item_digests=new_digests)
+            replace_last = bool(self._has_assistant.get(key)) and bool(state.item_digests)
+            keep = -1 if replace_last else None
+            self._states[key] = replace(
+                state,
+                item_digests=state.item_digests[:keep] + (assistant_item.digest,),
+                canonical_digests=state.canonical_digests[:keep] + (_canonical_item_digest(assistant_item),),
+            )
             self._has_assistant[key] = True
             self._states.move_to_end(key)
             return True
