@@ -94,7 +94,7 @@ def bind_resident_slot_pgid(handle: Any, turn_ctx: Mapping[str, Any] | None) -> 
         return 0
     if not get_hub_p12_seam().resident_wiring_enabled():
         return 0
-    reg = turn_ctx.get("register_pgid")
+    reg = turn_ctx.get("_register_pgid") or turn_ctx.get("register_pgid")
     if not callable(reg):
         return 0
     pgid = extract_resident_handle_pgid(handle)

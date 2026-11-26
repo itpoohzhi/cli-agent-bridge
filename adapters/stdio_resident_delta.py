@@ -185,10 +185,11 @@ def _attach_p12_resident_cancel(request: dict[str, Any], ctx: TurnContext) -> No
         request["_cancel_event"] = ctx.cancel_event
     if ctx.register_pgid is not None:
         tctx = request.get("turn_context")
-        if not isinstance(tctx, dict):
+        if tctx is None:
             tctx = {}
             request["turn_context"] = tctx
-        tctx.setdefault("register_pgid", ctx.register_pgid)
+        if isinstance(tctx, dict):
+            tctx.setdefault("_register_pgid", ctx.register_pgid)
 
 
 def execute_stdio_turn(adapter: Any, protocol: str, ctx: TurnContext, sse_writer: StreamSink | None) -> TurnResult:

@@ -7183,8 +7183,10 @@ class Handler(BaseHTTPRequestHandler):
                     and callable(emitted)
                     and bool(emitted()),
                 )
-            _p12_seam().release_slot_after_run(_slots.release, self._metric_run, str(ctx.get("turn_id") or tag))
-            slot_and_session.release_admission_for_state(_hygiene_rt().release, adm_dec.ticket_id, cast("dict[str, object]", out), run=self._metric_run)
+            def _release_resources(_out=cast("dict[str, object]", out), _run=self._metric_run) -> None:
+                try: _slots.release()
+                finally: slot_and_session.release_admission_for_state(_hygiene_rt().release, adm_dec.ticket_id, _out, run=_run)
+            _p12_seam().release_slot_after_run(_release_resources, self._metric_run, str(ctx.get("turn_id") or tag))
         self._log_done(cast(str, ctx["model"]), cast("dict[str, object]", out), t0, cast(str, ctx["tag"]))
         return out
 

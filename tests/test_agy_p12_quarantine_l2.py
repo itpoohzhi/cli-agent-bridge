@@ -102,3 +102,70 @@ def test_agy_seam_flag_false_releases_immediately_and_orphan_coordinator_authori
     assert seam.decide_disconnect(DisconnectInput("t4", 1, 0, False, 0, 0, 5, False, True)) is None
     assert seam.cleanup_state_for("missing", 1) is CleanupState.LIVE
     seam.shutdown()
+
+
+def test_rw001_default_waiter_eperm_fail_closed_escalates_to_sigkill(monkeypatch: pytest.MonkeyPatch) -> None:
+    from agy_runtime import hygiene_runtime as hr
+    import signal
+
+    monkeypatch.setattr(hr.os, "killpg", lambda _pgid, _sig: (_ for _ in ()).throw(PermissionError("EPERM")))
+    assert hr._default_waiter(999999, 0.03) is False
+
+    signals_sent: list[int] = []
+    hr._bounded_teardown(
+        999999,
+        kill_fn=lambda _pgid, sig: signals_sent.append(sig),
+        waiter=lambda pgid, _t: hr._default_waiter(pgid, 0.02),
+    )
+    assert signals_sent == [signal.SIGTERM, signal.SIGKILL]
+
+
+def test_rw002_quarantine_holds_both_slot_and_admission_ticket_until_dead(tmp_path: Path) -> None:
+    from core.pgid_cleanup_driver import ProcessIdentity
+
+    cfg_path = tmp_path / "dynamic_config.json"
+    cfg_path.write_text(json.dumps({FLAG_AGY_PGID_QUARANTINE: True}), encoding="utf-8")
+
+    class _SwitchableProbe:
+        def __init__(self) -> None:
+            self.alive = True
+            self.t = 0.0
+
+        def probe_live(self, pid: int) -> ProcessIdentity | None:
+            return ProcessIdentity(pid, pid, 501, 777) if self.alive else None
+
+        def probe_group(self, pgid: int) -> GroupProbeStatus:
+            return GroupProbeStatus.EPERM if self.alive else GroupProbeStatus.GONE_ESRCH
+
+        def signal_group(self, pgid: int, sig: int) -> None:
+            pass
+
+        def now_s(self) -> float:
+            self.t += 0.1
+            return self.t
+
+    probe = _SwitchableProbe()
+    params = sourced_agy_cleanup_params(ProcessSupervisorConfig(kill_term_grace_s=0.05, poll_interval_s=0.01, kill_wait_s=0.1))
+    seam = AgyP12CleanupSeam(config_path=cfg_path, params_snapshot=params, probe=probe)
+
+    slot_released = threading.Event()
+    ticket_released = threading.Event()
+
+    def _release_both() -> None:
+        slot_released.set()
+        ticket_released.set()
+
+    fake_proc = SimpleNamespace(pid=88888, poll=lambda: None if probe.alive else 0)
+    run = SimpleNamespace(proc=fake_proc, _p12_start_time_us=777)
+    try:
+        assert seam.release_slot_after_run(_release_both, run, "rw002-turn", attempt_epoch=1) is False
+        # While PGID is EPERM/quarantined, NEITHER slot NOR admission ticket is released
+        assert not slot_released.wait(timeout=0.12)
+        assert not ticket_released.is_set()
+        # Once PGID confirms dead -> BOTH release together atomically
+        probe.alive = False
+        assert slot_released.wait(timeout=2.0)
+        assert ticket_released.is_set()
+    finally:
+        seam.shutdown()
+

@@ -60,9 +60,8 @@ def _default_waiter(pgid: int, timeout_s: float, reap_leader: Callable[[], int |
             try: _ = reap_leader()
             except OSError: pass
         try: os.killpg(pgid, 0)
-        except PermissionError:
-            if reap_leader is None: return True
-        except OSError: return True
+        except ProcessLookupError: return True
+        except OSError: pass
         time.sleep(0.01)
     return False
 

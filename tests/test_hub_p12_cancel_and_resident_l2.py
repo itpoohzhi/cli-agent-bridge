@@ -110,7 +110,7 @@ def test_l2_open16_resident_wiring_registers_pgid_only_when_flag_on(
 
     registered: list[int] = []
     handle = SimpleNamespace(pid=42424)
-    ctx = {"register_pgid": registered.append}
+    ctx = {"_register_pgid": registered.append}
     assert bind_resident_slot_pgid(handle, ctx) == 0
     assert registered == []
 
