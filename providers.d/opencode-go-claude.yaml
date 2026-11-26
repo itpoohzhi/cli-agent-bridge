@@ -44,5 +44,6 @@ models_overrides:
     input: [text]
     images: {cli_registry: implicit_supported, status: unverified, method: null, proof: null}
 params:
-  effort_field: none
-  adaptive_whitelist: [thinking]
+  effort_field: reasoning_effort
+  adaptive_whitelist: [reasoning_effort]
+  strip_always: [thinking]

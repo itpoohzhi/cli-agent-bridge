@@ -134,8 +134,8 @@ def test_effort_specs_are_cached_until_catalog_or_aliases_change(flag_env: pytes
 
 DROID_FLAG = "BRIDGE_DROID_CATALOG_ENABLED"
 HAIKU = "claude-haiku-5-5"
-# Эталон из каталога: droid ON даёт haiku [low, medium, high]/low, droid OFF — claude-p [high]/high.
-HAIKU_BY_DROID = {True: (["low", "medium", "high"], "low"), False: (["high"], "high")}
+# AD-005: droid_off не затирает haiku — kill-switch droid оставляет [low, medium, high]/low в обоих состояниях.
+HAIKU_BY_DROID = {True: (["low", "medium", "high"], "low"), False: (["low", "medium", "high"], "low")}
 
 
 def _haiku_card() -> tuple[list[str], str]:

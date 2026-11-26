@@ -7,8 +7,8 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any, TypeAlias, TypedDict
 
-from core.model_lifecycle import STATUS_CONFIRMED, STATUS_QUARANTINE, STATUS_STALE
-from core.model_lifecycle import LifecycleRegistry, ModelRecord
+from core.backend_params import extract_backend_params
+from core.model_lifecycle import STATUS_CONFIRMED, STATUS_QUARANTINE, STATUS_STALE, LifecycleRegistry, ModelRecord
 from core.provider_manifest import failover_backend_entry
 
 # Входные DTO принадлежат HOST: здесь нет зависимости от загрузчика манифестов.
@@ -245,8 +245,8 @@ def backend_entry(manifest: ManifestLike) -> dict[str, Any]:
         value = getattr(bridge, key)
         if value is not None and value != {}:
             entry[key] = deepcopy(value)
-    entry.update(failover_backend_entry(getattr(manifest, "failover", None)))
-    entry.update(upstream_params(manifest))
+    for part in (failover_backend_entry(getattr(manifest, "failover", None)), upstream_params(manifest), extract_backend_params(manifest)):
+        entry.update(part)
     return entry
 
 

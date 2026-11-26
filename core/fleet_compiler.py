@@ -36,8 +36,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, Unpack
 
 from core.backend_adapter import FleetViolation, build_catalog
-from core.compile_model_records import CompileOptions, CompileResult
-from core.compile_model_records import model_record as model_record
+from core.backend_params import extract_backend_params
+from core.compile_model_records import CompileOptions, CompileResult, model_record as model_record
 from core.compile_routes_pipeline import compile_catalog as _compile_catalog
 from core.compile_routes_pipeline import render_fleet_json as _render_fleet_json
 from core.model_lifecycle import (
@@ -221,8 +221,8 @@ def backend_entry(manifest: ProviderManifest) -> Dict[str, Any]:
         entry["idle_timeout_s"] = bridge.idle_timeout_s
     if bridge.safety_cap_s is not None:
         entry["safety_cap_s"] = bridge.safety_cap_s
-    entry.update(failover_backend_entry(getattr(manifest, "failover", None)))
-    entry.update(_upstream_params(manifest))
+    for part in (failover_backend_entry(getattr(manifest, "failover", None)), _upstream_params(manifest), extract_backend_params(manifest)):
+        entry.update(part)
     return entry
 
 

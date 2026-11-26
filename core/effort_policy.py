@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import logging
 from bisect import bisect_left
 from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, replace
 from typing import cast
 
+from core.effort_errors import EffortBelowFloorError as EffortBelowFloorError
 from core.route_health_policy import normalize_model_route
 
 FLAG_EFFORT_CATALOG = "BRIDGE_EFFORT_CATALOG_ENABLED"
@@ -12,12 +14,17 @@ EFFORT_LEVELS: tuple[str, ...] = ("minimal", "low", "medium", "high", "xhigh", "
 EFFORT_ORDER: tuple[str, ...] = ("off", *EFFORT_LEVELS, "ultra")
 _RANK = {name: rank for rank, name in enumerate(EFFORT_ORDER)}
 DEFAULT_LOG_EFFORT_MAX_CHARS = 32
+_LOG = logging.getLogger(__name__)
 
 
 def clamp_effort_downward(
     candidate: str, allowed: Sequence[str], default: str
 ) -> tuple[str, bool]:
-    """Кламп вниз к allowed; True — был кламп."""
+    """Кламп вниз к allowed; True — был кламп.
+
+    Известный уровень шкалы ниже минимума `allowed` не повышается:
+    `EffortBelowFloorError`. Неизвестные и пустые строки дают `(default, True)`.
+    """
     key = candidate.lower()
     named = {item.lower(): item for item in reversed(allowed)}
     ranked = {_RANK[name]: item for name, item in named.items() if name in _RANK}
@@ -27,6 +34,11 @@ def clamp_effort_downward(
         pass
     try:
         ranks = sorted(ranked)
+        if _RANK[key] < ranks[0]:
+            raise EffortBelowFloorError(
+                f"reasoning_effort '{sanitize_effort_for_log(candidate)}' is below "
+                f"the minimum '{ranked[ranks[0]]}' supported by this model"
+            )
         return ranked[ranks[max(bisect_left(ranks, _RANK[key]) - 1, 0)]], True
     except (KeyError, IndexError):
         return default, True
@@ -133,11 +145,25 @@ def catalog_effort_specs(
     }
     without_efforts = entries.keys() - specs.keys()
     pins = {
-        alias: specs.get(base, ModelEffortSpec()).pinned_to(effort)
+        alias: pin
         for alias, (base, effort) in aliases.items()
         if base not in without_efforts
+        and (pin := _pin_or_skip(alias, specs.get(base, ModelEffortSpec()), effort))
     }
     return {**specs, **pins}
+
+
+def _pin_or_skip(
+    alias: str, spec: ModelEffortSpec, effort: str
+) -> ModelEffortSpec | None:
+    """Fail-closed: алиас ниже floor не регистрируется (без повышения вверх)."""
+    try:
+        return spec.pinned_to(effort)
+    except EffortBelowFloorError as exc:
+        _LOG.warning(
+            "effort alias skipped alias=%s: %s", sanitize_effort_for_log(alias), exc
+        )
+        return None
 
 
 def _clamped_resolution(

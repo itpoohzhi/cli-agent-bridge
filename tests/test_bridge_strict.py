@@ -19,6 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import server  # noqa: E402
+from core.effort_errors import EffortBelowFloorError  # noqa: E402
 from bridge_testlib import (  # noqa: E402
     _DROID_LEGACY_MODELS,
     BridgeCase,
@@ -716,18 +717,16 @@ class TestClampEffortDownward(unittest.TestCase):
             server.clamp_effort_downward("ultra", ["high", "max"], "high"),
             ("max", True),
         )
-        self.assertEqual(
-            server.clamp_effort_downward("medium", ["high"], "high"), ("high", True)
-        )
 
-    def test_upward_fallback_when_no_lower(self):
-        self.assertEqual(
-            server.clamp_effort_downward("low", ["max", "high"], "max"),
-            ("high", True),
-        )
-        self.assertEqual(
-            server.clamp_effort_downward("off", ["high"], "high"), ("high", True)
-        )
+    def test_no_upward_clamp_below_floor_fails_closed(self):
+        # Ниже минимума модели уровень не повышается молча (AD-006).
+        for candidate, allowed in (
+            ("medium", ["high"]),
+            ("low", ["max", "high"]),
+            ("off", ["high"]),
+        ):
+            with self.assertRaises(EffortBelowFloorError):
+                server.clamp_effort_downward(candidate, allowed, "high")
 
     def test_unknown_candidate_falls_back_to_default(self):
         self.assertEqual(
@@ -824,12 +823,9 @@ class TestEffortAndModel(BridgeCase):
             ("claude-sonnet-5-5", "max", "max"),  # exact allowed
             ("claude-sonnet-5-5", "max\n", "max"),  # strip до проверки
             ("gemini-3.8-flash", "medium", "medium"),  # exact allowed effort
-            ("gemini-4-argon", "minimal", "low"),
             ("gemini-4-argon", "xhigh", "high"),
             ("claude-sonnet-5-5", "HIGH", "high"),  # case-insensitive exact
-            ("claude-sonnet-5-5", "off", "low"),  # нет нижнего -> upward
             ("claude-sonnet-5-5", "none", "high"),  # unknown -> default (high)
-            ("gpt-6.1-sol", "off", "low"),  # нет нижнего -> upward
             ("gpt-6.1-sol", "xhigh", "high"),  # nearest lower
             ("gpt-6.1-sol", "max", "high"),  # nearest lower
         ]
@@ -843,6 +839,17 @@ class TestEffortAndModel(BridgeCase):
             self.assertEqual(init["reasoningEffort"], expected, (model, effort))
             self.assertEqual(source, "request", (model, effort))
             self.assertGreater(len(self.hub.inits()), before_inits)
+        # Ниже минимума модели уровень не повышается: 400 без запуска (AD-006).
+        for model, effort in (
+            ("gemini-4-argon", "minimal"),
+            ("claude-sonnet-5-5", "off"),
+            ("gpt-6.1-sol", "off"),
+        ):
+            before = len(self.hub.spawns())
+            status, body = self._post_json(chat_body(model=model, effort=effort))
+            self.assertEqual(status, 400, (model, effort))
+            self.assertEqual(body["error"]["type"], "unsupported_reasoning_effort")
+            self.assertEqual(len(self.hub.spawns()), before)
         # Кламп пишется в лог только при фактическом клампе.
         status, init, source, _ = self._post_logged(
             chat_body(model="claude-sonnet-5-5", effort="xhigh")

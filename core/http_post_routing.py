@@ -15,6 +15,7 @@ from core import zero_canon_routing as _zcr
 from core.http_post_context import PostRequestContext
 from core.http_post_ingress import clean_transport_request
 from core.muse_usage_client import MuseUsageClient
+from core.native_effort import native_effort as native_effort
 from core.passthrough_autonomy import PassthroughOptions, prepare_passthrough_request, resolve_target_model
 from core.runtime_env import flag_enabled as _env_flag_enabled
 from core.zero_canon_http import ZERO_CANON_HEADER_VALUE, ZeroCanonHttpError, filter_zero_canon_providers, parse_review_profile_headers
@@ -294,29 +295,6 @@ def log_route(route: PostRoute, mode: str) -> None:
     """Сохраняет прежнюю запись выбранного пути в существующем host logger."""
     alias = route.model_id + "-" + route.alias[1] if route.alias else "-"
     route.host._log(f"chat route={mode} model={route.model_id} alias={alias} {route.handler._trace_log_fields()}")
-
-
-def native_effort(route: PostRoute) -> tuple[str, str] | None:
-    """Сохраняет строгий тип effort и прежний downward clamp CLI.
-
-    Каталог не обязан объявлять `default_effort`/`efforts` для каждого слота:
-    отсутствующие поля дают fail-safe "high" вместо падения маршрута.
-    """
-    value = route.request.get("reasoning_effort")
-    source = "alias" if value is None and route.alias_effort is not None else "request"
-    value = route.alias_effort if source == "alias" else value
-    declared = route.model.get("efforts")
-    efforts = declared if isinstance(declared, (list, tuple)) and declared else ["high"]
-    default_effort = route.model.get("default_effort") or efforts[0]
-    if value is None or isinstance(value, str) and not value.strip():
-        return default_effort, "default"
-    if not isinstance(value, str):
-        route.reject(400, "unsupported_reasoning_effort", "reasoning_effort must be a string")
-        return None
-    effort, clamped = route.host.clamp_effort_downward(value.strip(), efforts, default_effort)
-    if clamped:
-        route.host._log(route.host.describe_clamp("reasoning_effort", value.strip(), effort, route.model_id, route.host._LOG_EFFORT_MAX))
-    return effort, source
 
 
 def native_autonomy(route: PostRoute) -> tuple[Any, str] | None:

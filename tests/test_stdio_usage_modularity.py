@@ -42,12 +42,14 @@ PURE_NO_ENV_FILES = (
 )
 
 ZERO_DIFF_MONOLITHS = (
-    "core/backend_adapter.py",
     "adapters/stdio_drivers/muse_driver.py",
     "core/stdio_resident/session_manager.py",
 )
 
 TOUCHED_MONOLITHS = (
+    "core/backend_adapter.py",  # REQ-004: `params` в BACKEND_KEYS, added <= deleted
+    "core/fleet_compiler.py",
+    "core/http_post_routing.py",
     "core/stdio_resident/codex_driver.py",
     "core/stdio_resident/zero_canon_router.py",
     "adapters/stdio_resident_adapter.py",

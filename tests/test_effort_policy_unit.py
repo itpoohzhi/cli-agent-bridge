@@ -17,6 +17,7 @@ from core.effort_policy import (  # noqa: E402
     EFFORT_LEVELS,
     EFFORT_ORDER,
     FLAG_EFFORT_CATALOG,
+    EffortBelowFloorError,
     EffortResolution,
     ModelEffortCardFields,
     ModelEffortSpec,
@@ -24,6 +25,7 @@ from core.effort_policy import (  # noqa: E402
     resolve_alias_effort,
     resolve_passthrough_effort,
 )
+from core.effort_errors import EffortValidationError  # noqa: E402
 
 LMH = ("low", "medium", "high")
 
@@ -34,8 +36,6 @@ LMH = ("low", "medium", "high")
         ("HIGH", ["low", "high"], "x", ("high", False)),
         ("high", ["High"], "x", ("High", False)),
         ("bogus", ["bogus"], "x", ("bogus", False)),
-        ("off", LMH, "x", ("low", True)),
-        ("off", ["high"], "low", ("high", True)),
         ("medium", ["low", "high"], "x", ("low", True)),
         ("xhigh", LMH, "x", ("high", True)),
         ("bogus", LMH, "dflt", ("dflt", True)),
@@ -49,6 +49,17 @@ def test_clamp_effort_downward_boundaries(
     candidate: str, allowed: list[str], default: str, expected: tuple[str, bool]
 ) -> None:
     assert clamp_effort_downward(candidate, allowed, default) == expected
+
+
+@pytest.mark.parametrize(
+    "candidate,allowed",
+    [("off", LMH), ("off", ["high"]), ("low", ["high"]), ("minimal", ["low", "high"])],
+)
+def test_clamp_below_floor_fails_closed(candidate: str, allowed: list[str]) -> None:
+    """Известный уровень ниже min(allowed) не повышается молча (AD-006)."""
+    with pytest.raises(EffortBelowFloorError):
+        clamp_effort_downward(candidate, allowed, "high")
+    assert issubclass(EffortBelowFloorError, EffortValidationError)
 
 
 @pytest.mark.parametrize(
@@ -194,7 +205,6 @@ def test_effort_scale_ranks_follow_order() -> None:
         ("bogus", ["low", "high"], ("high", True)),
         ("bogus", ["weird"], ("high", True)),
         ("medium", ["weird"], ("high", True)),
-        ("off", ["low", "high"], ("low", True)),
         ("ultra", ["low", "high"], ("high", True)),
         ("HIGH", ["low", "High"], ("High", False)),
     ],
