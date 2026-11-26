@@ -493,3 +493,18 @@ def test_f012_progressive_trace_records_to_collector() -> None:
     assert body.trace(event) is True
     assert rec.call_count == 1
     assert rec.call_args[0][0]["tool_name"] == "read_file"
+
+
+def test_f014_drain_traces_propagates_backpressure_and_stops_on_failure() -> None:
+    """F-014: _drain_traces() останавливается на первом False от on_tool_trace и возвращает False из stage()."""
+    body = _direct_runner()
+    body.progressive = body.buffering = True
+    body.delivery_fsm = initial_delivery_state(True)
+    assert body.trace({"step_index": 1, "tool_name": "read_file"}) is True
+    assert body.trace({"step_index": 2, "tool_name": "grep"}) is True
+    trace_mock = Mock(side_effect=[False, True])
+    body.s.on_tool_trace = trace_mock
+
+    assert body.stage("Первый чанк") is False
+    assert trace_mock.call_count == 1
+    assert body.delivery_fsm.wire_committed is True

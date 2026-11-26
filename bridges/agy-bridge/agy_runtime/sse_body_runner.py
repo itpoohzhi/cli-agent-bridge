@@ -70,7 +70,7 @@ class _SseBodyRunner:
                 ok = self._deliver_direct(json.loads(value) if channel == "tool_calls" else value, channel)
                 if ok:
                     self._mark_wire_sent()
-                    self._drain_traces()
+                    ok = self._drain_traces()
                 return ok
             return False
         self.s.buffer.stage_fragment(value, channel)
@@ -87,11 +87,13 @@ class _SseBodyRunner:
         return True
     def _deliver_direct(self, value: Any, channel: str) -> bool:
         return dict(content=self.s.on_text, reasoning_content=self.s.on_reasoning, tool_calls=self.s.on_calls)[channel](value)
-    def _drain_traces(self) -> None:
+    def _drain_traces(self) -> bool:
         pending, self._pending_traces = (self._pending_traces if self.delivery_fsm.wire_committed else []), []
         for event in pending:
             if self.delivery_fsm.wire_committed and not self.cancelled() and not self.expired() and self.s.ledger.should_forward_step(event.get("step_index")):
-                _ = self.s.on_tool_trace(event)
+                if not self.s.on_tool_trace(event):
+                    return False
+        return True
     def stage_reasoning(self, value: str) -> bool: return self.stage(value, "reasoning_content")
     def stage_calls(self, value: list[dict[str, Any]]) -> bool: return self.stage(json.dumps(value, ensure_ascii=False), "tool_calls")
     def cancelled(self) -> bool: return self.s.disconnected
