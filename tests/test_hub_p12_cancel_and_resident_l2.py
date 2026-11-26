@@ -152,3 +152,24 @@ def test_l2_hub_slot_release_gate_holds_slot_until_pgid_dead_confirmed(tmp_path:
             proc.wait(timeout=1.0)
         except OSError:
             pass
+
+
+def test_f002_cancel_turn_runs_callbacks_before_release_and_protects_slot_on_unreg_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from core.turn_session_manager import TurnSessionManager
+
+    reset_hub_p12_seam_for_tests()
+    mgr = TurnSessionManager(state_root=tmp_path, persist_children_file=False)
+    order: list[str] = []
+    turn, _ = mgr.create_or_attach_turn(
+        model="m1", backend="b1", cwd=str(tmp_path), messages=[{"role": "user", "content": "hi"}],
+        owner_token_hash="h1", rid="r1", slot_release_fn=lambda: order.append("release"),
+    )
+    turn.add_cancel_callback(lambda: order.append("cb"))
+    turn.pgid = None
+    monkeypatch.setattr(mgr, "unregister_child_pgid", lambda _p: (_ for _ in ()).throw(RuntimeError("boom")))
+    mgr.cancel_turn(turn.turn_id, reason="client_disconnected")
+    assert order == ["cb", "release"]
+    reset_hub_p12_seam_for_tests()
+

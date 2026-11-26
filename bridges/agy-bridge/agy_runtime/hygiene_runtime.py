@@ -65,10 +65,10 @@ def _default_waiter(pgid: int, timeout_s: float, reap_leader: Callable[[], int |
         time.sleep(0.01)
     return False
 
-def _bounded_teardown(pgid: int, kill_fn: Callable[[int, int], None] | None, waiter: Callable[[int, float], bool] | None) -> None:
-    if _invalid_pgid(pgid):
-        return
-    k, w = kill_fn or _safe_kill, waiter or _default_waiter
+def _bounded_teardown(pgid: int, kill_fn: Callable[[int, int], None] | None, waiter: Callable[[int, float], bool] | None, reap_leader: Callable[[], int | None] | None = None) -> None:
+    if _invalid_pgid(pgid): return
+    k = kill_fn or _safe_kill
+    w = waiter or (lambda p, t: _default_waiter(p, t, reap_leader))
     k(pgid, signal.SIGTERM)
     if not w(pgid, 0.4):
         k(pgid, signal.SIGKILL)
@@ -166,6 +166,7 @@ class HygieneRuntime:
         self._orphan_lock, self._pool_lock = threading.Lock(), threading.Lock()
         self._config_path, self._flags, self._epoch = config_path, HygieneFlags(), 0
         self._detached, self._cancelling = dict[int, tuple[float, float]](), set[int]()
+        self._reapers = dict[int, Callable[[], int | None]]()
         self._orphan_fsm, self._reg = OrphanFsm(), AdaptiveAdmissionRegistry()
         self._legacy_adm, self._legacy_hits = admission, list[float]()
         self._sha, self._session = _DualCache(sha_cache_config()), _DualCache(session_store_config())
@@ -223,12 +224,11 @@ class HygieneRuntime:
         if self._legacy_adm is not None:
             with self._admission_lock:
                 self._legacy_adm.release(key)
-    def handle_disconnect(
-        self, pgid: int, ttfc_received: bool, tools_count: int,
-        kill_fn: Callable[[int, int], None] | None = None, waiter: Callable[[int, float], bool] | None = None,
-    ) -> bool:
-        if _invalid_pgid(pgid):
-            return False
+    def bind_reaper(self, pgid: int, reap_leader: Callable[[], int | None] | None) -> None:
+        with self._orphan_lock:
+            self._reapers.pop(pgid, None) if reap_leader is None else self._reapers.__setitem__(pgid, reap_leader)
+    def handle_disconnect(self, pgid: int, ttfc_received: bool, tools_count: int, kill_fn: Callable[[int, int], None] | None = None, waiter: Callable[[int, float], bool] | None = None) -> bool:
+        if _invalid_pgid(pgid): return False
         fast = self.snapshot_flags(self._config_path).fast_client_gone_enabled if self._config_path else self._cur_flags().fast_client_gone_enabled
         now_s = time.monotonic()
         with self._orphan_lock:
@@ -237,8 +237,9 @@ class HygieneRuntime:
                 return True
             self._cancelling.add(pgid)
             _ = self._detached.pop(pgid, None)
+            reap_fn = self._reapers.pop(pgid, None)
         try:
-            _bounded_teardown(pgid, kill_fn, waiter)
+            _bounded_teardown(pgid, kill_fn, waiter, reap_leader=reap_fn)
         finally:
             with self._orphan_lock:
                 self._cancelling.discard(pgid)

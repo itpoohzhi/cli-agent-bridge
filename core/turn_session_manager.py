@@ -1365,13 +1365,15 @@ class TurnSessionManager:
             pgid = turn.pgid
             callbacks = list(turn._cancel_callbacks)
 
-        from core.p12_hub_cancel_seam import get_hub_p12_seam
-        from core.turn_mode_cancel_policy import SlotReleaseDecision
-        rel_dec = get_hub_p12_seam().gate_slot_release(turn.turn_id, pgid, lambda: (self.unregister_child_pgid(pgid), turn.release_slot_once()))
         for cb in callbacks:
             try: cb()
             except Exception: pass
-        if pgid is not None and rel_dec is SlotReleaseDecision.RELEASE_IMMEDIATE:
+        def _release_turn() -> None:
+            try: (self.unregister_child_pgid(pgid) if pgid is not None else None)
+            finally: turn.release_slot_once()
+        from core.p12_hub_cancel_seam import get_hub_p12_seam
+        from core.turn_mode_cancel_policy import SlotReleaseDecision
+        if get_hub_p12_seam().gate_slot_release(turn.turn_id, pgid, _release_turn) is SlotReleaseDecision.RELEASE_IMMEDIATE and pgid is not None:
             self._terminate_pgid(pgid, self.cancel_grace_s)
 
         with self._lock:

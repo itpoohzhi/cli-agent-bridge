@@ -7031,6 +7031,7 @@ class Handler(BaseHTTPRequestHandler):
                 job = getattr(self, "_registry_job", None)
                 if job is not None:
                     job.pgid = int(getattr(run.proc, "pid", 0) or 0)
+                    _hygiene_rt().bind_reaper(job.pgid, run.proc.poll)
                     _JOB_REGISTRY.bind_cancel(job, lambda: _kill_group(run.proc))
                 stop_hook = ctx.get("tool_stop")
                 try:

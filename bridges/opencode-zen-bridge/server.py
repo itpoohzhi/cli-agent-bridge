@@ -84,12 +84,14 @@ from core.chat_key import resolve_chat_key  # noqa: E402
 from core.proc_groups import live_proc_groups  # noqa: E402
 from zen_bridge.adapters.zero_canon_runtime import apply_serve_zero_canon_env, apply_zero_canon_env, spawn_registered, zero_canon_scope  # noqa: E402
 from zen_bridge.p12_cleanup_seam import ZenP12CleanupSeam, capture_proc_identity  # noqa: E402
+_ZEN_P12_LOCK = threading.Lock()
 _ZEN_P12_SEAM: ZenP12CleanupSeam | None = None
 def _zen_p12_seam() -> ZenP12CleanupSeam:
     global _ZEN_P12_SEAM
-    if _ZEN_P12_SEAM is None:
-        _ZEN_P12_SEAM = ZenP12CleanupSeam()
-    return _ZEN_P12_SEAM
+    if (s := _ZEN_P12_SEAM) is not None: return s
+    with _ZEN_P12_LOCK:
+        if _ZEN_P12_SEAM is None: _ZEN_P12_SEAM = ZenP12CleanupSeam()
+        return _ZEN_P12_SEAM
 from core.runtime_env import synthesize_required_bash_desc_enabled  # noqa: E402
 from core.subbridge_lifecycle import SubbridgeHooks, SubbridgeLifecycle  # noqa: E402
 from core.tool_call_schema_policy import canonicalize_tool_invocation  # noqa: E402
@@ -2192,7 +2194,7 @@ def _log(msg: str) -> None:
         pass
 
 
-_LIFECYCLE = SubbridgeLifecycle(hooks=SubbridgeHooks(procs_fn=live_proc_groups, active_procs_fn=lambda: max(len(_active), len(live_proc_groups())), log_fn=_log), workspace=WORKSPACE)
+_LIFECYCLE = SubbridgeLifecycle(hooks=SubbridgeHooks(procs_fn=live_proc_groups, active_procs_fn=lambda: max(len(_active), len(live_proc_groups())), cleanup_fn=lambda: _ZEN_P12_SEAM.shutdown() if _ZEN_P12_SEAM is not None else None, log_fn=_log), workspace=WORKSPACE)
 
 
 class _RequestAttempts(_RequestAttemptsBase):
@@ -7354,23 +7356,18 @@ class Handler(BaseHTTPRequestHandler):
             self._first_visible = None
             if gate is not None:
                 gate.release()
+            p12_q = _zen_p12_seam().pgid_quarantine_enabled()
             if proc is not None:
-                if feed is not None:
-                    feed.close()
+                if feed is not None: feed.close()
                 try:
-                    if proc.stderr is not None:
-                        proc.stderr.close()
-                except OSError:
-                    pass
-                if proc.poll() is None and not _zen_p12_seam().pgid_quarantine_enabled():
-                    try:
-                        proc.kill()
-                    except OSError:
-                        pass
-            with _active_lock:
-                _active.pop(run_id, None)
+                    if proc.stderr is not None: proc.stderr.close()
+                except OSError: pass
+                if proc.poll() is None and not p12_q:
+                    try: proc.kill()
+                    except OSError: pass
+            with _active_lock: _active.pop(run_id, None)
             attempts.commit()
-            _zen_p12_seam().release_slot_after_proc(res.slots.release, proc, run_id)
+            _zen_p12_seam().release_slot_after_proc(res.slots.release, proc, run_id) if p12_q else res.slots.release()
 
     def _serve_json_serve(
         self,

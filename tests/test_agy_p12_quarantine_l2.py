@@ -120,6 +120,31 @@ def test_rw001_default_waiter_eperm_fail_closed_escalates_to_sigkill(monkeypatch
     assert signals_sent == [signal.SIGTERM, signal.SIGKILL]
 
 
+def test_f001_bounded_teardown_reaps_zombie_via_reap_leader_without_sigkill() -> None:
+    from agy_runtime import hygiene_runtime as hr
+    import signal
+
+    proc = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)"],
+        start_new_session=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    signals_sent: list[int] = []
+    try:
+        def _kill(pgid: int, sig: int) -> None:
+            signals_sent.append(sig)
+            os.killpg(pgid, sig)
+
+        hr._bounded_teardown(proc.pid, kill_fn=_kill, waiter=None, reap_leader=proc.poll)
+        assert signals_sent == [signal.SIGTERM]
+        assert proc.poll() is not None
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=1.0)
+
+
 def test_rw002_quarantine_holds_both_slot_and_admission_ticket_until_dead(tmp_path: Path) -> None:
     from core.pgid_cleanup_driver import ProcessIdentity
 

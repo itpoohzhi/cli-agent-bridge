@@ -118,8 +118,7 @@ def begin_post(handler: PostHandler, host: PostHost) -> PostRequestContext | Non
     handler._trace = None
     handler._response_status = 0
     host._enforce_forward_kill_switch()
-    handler._active_managed_turn = None
-    handler._context_pruned = None
+    handler._active_managed_turn = handler._turn_mode = handler._context_pruned = None
     return context
 
 

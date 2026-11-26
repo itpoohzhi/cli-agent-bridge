@@ -5349,8 +5349,8 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
         super().end_headers()
 
     def handle_one_request(self) -> None:
-        try:
-            super().handle_one_request()
+        self._turn_mode = None
+        try: super().handle_one_request()
         finally:
             tracking = getattr(self.server, "set_connection_active", None)
             if tracking is not None and not tracking(self.connection, False):
@@ -5780,7 +5780,7 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
                     if not sse_writer("content", piece):
                         self._client_write_dead = True
                         get_hub_p12_seam().on_client_disconnect(managed_turn, TURN_MANAGER, turn_mode)
-                        if turn_mode is not TurnMode.DETACHED:
+                        if not (managed_turn is not None and turn_mode is TurnMode.DETACHED):
                             break
             elif managed_turn is not None and not managed_turn.buffer.sealed:
                 for piece in _text_slices(text):
@@ -5803,7 +5803,7 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
                     if not sse_writer("reasoning", piece):
                         self._client_write_dead = True
                         get_hub_p12_seam().on_client_disconnect(managed_turn, TURN_MANAGER, turn_mode)
-                        if turn_mode is not TurnMode.DETACHED:
+                        if not (managed_turn is not None and turn_mode is TurnMode.DETACHED):
                             break
             elif managed_turn is not None and not managed_turn.buffer.sealed:
                 for piece in _text_slices(text):
