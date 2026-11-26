@@ -19,6 +19,7 @@ from core import defaults as D, passthrough_precommit
 from core.backend_adapter import PreSendTransientError
 from core.liveness_signals import LivenessWindow, passthrough_window
 from core.nonstream_aggregator import internal_stream_body, request_deadlines
+from core.nonstream_usage import internal_usage_injected
 from core.passthrough_abort_fsm import PassthroughAbortFSM, abort_socket_locked, fsm_enabled, pick_reopen_fn
 from core.passthrough_sliding_window import FLAG_PASSTHROUGH_SLIDING_WINDOW, open_sliding_deadline
 from core.passthrough_stream_options import (BoundedNegativeCache, model_scope_hash, prepare_stream_usage_body, should_retry_stream_options, strip_stream_options)
@@ -114,24 +115,23 @@ def _response_reusable(response: http.client.HTTPResponse) -> bool:
 
 @final
 class _RequestRuntime:
-    """Владеет только сокетом текущей попытки и ограниченным watcher-потоком."""
     def __init__(self, adapter: Any, exchange: PassthroughRequest, options: RuntimeOptions) -> None:
         self.adapter = adapter
         raw = adapter._with_body_defaults(exchange.raw_body)
         supports_fn = getattr(adapter, "_supports_stream_options", None)
         supports = bool(supports_fn(exchange.path, exchange.request)) if callable(supports_fn) else True
-        internal = internal_stream_body(exchange.path, exchange.request, raw, supports_stream_options=supports)
-        self.internal = internal is not None
         cache = getattr(adapter, "_stream_opt_neg_cache", None)
         if cache is None:
             cache = BoundedNegativeCache(ttl_s=D.BRIDGE_PASSTHROUGH_STREAM_OPTIONS_NEG_TTL_S, max_entries=D.BRIDGE_PASSTHROUGH_STREAM_OPTIONS_NEG_CACHE_MAX)
             setattr(adapter, "_stream_opt_neg_cache", cache)
         self._stream_opt_cache = cache
         self._stream_opt_key = (str(getattr(adapter, "id", "")), str(getattr(adapter, "_port", "")), model_scope_hash(exchange.request.get("model")), str(exchange.path))
+        internal = internal_stream_body(exchange.path, exchange.request, raw, supports_stream_options=supports and not cache.is_rejected(self._stream_opt_key, time.monotonic()))
+        self.internal = internal is not None
         window = exchange.window
         if internal is not None:
             window = window or passthrough_window(adapter.limits, exchange.path, exchange.request)
-            raw, self._stream_options_injected = internal, False
+            raw, self._stream_options_injected = internal, internal_usage_injected(raw, internal)
         else:
             enabled = flag_enabled("BRIDGE_PASSTHROUGH_STREAM_USAGE_ENABLED") if os.getenv("BRIDGE_PASSTHROUGH_STREAM_USAGE_ENABLED") is not None else D.BRIDGE_PASSTHROUGH_STREAM_USAGE_ENABLED
             raw, self._stream_options_injected = prepare_stream_usage_body(
