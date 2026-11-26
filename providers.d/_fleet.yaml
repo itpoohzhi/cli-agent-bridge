@@ -70,6 +70,15 @@ aliases:
   glm-5.3-flash-low: {backend_id: glm-5.3-flash, backend: neuralwatt, effort: low}
   glm-5.3-flash-high: {backend_id: glm-5.3-flash, backend: neuralwatt, effort: high}
   glm-5.3-flash-max: {backend_id: glm-5.3-flash, backend: neuralwatt, effort: max}
+  qwen4-max-off: {backend_id: qwen4-max, backend: dashscope-intl, effort: 'off'}
+  qwen4-max-low: {backend_id: qwen4-max, backend: dashscope-intl, effort: low}
+  qwen4-max-high: {backend_id: qwen4-max, backend: dashscope-intl, effort: high}
+  qwen4-max-xhigh: {backend_id: qwen4-max, backend: dashscope-intl, effort: xhigh}
+  kimi-k3.1-pro-off: {backend_id: kimi-k3.1-pro, backend: dashscope-intl, effort: 'off'}
+  kimi-k3.1-pro-low: {backend_id: kimi-k3.1-pro, backend: dashscope-intl, effort: low}
+  kimi-k3.1-pro-medium: {backend_id: kimi-k3.1-pro, backend: dashscope-intl, effort: medium}
+  kimi-k3.1-pro-high: {backend_id: kimi-k3.1-pro, backend: dashscope-intl, effort: high}
+  kimi-k3.1-pro-xhigh: {backend_id: kimi-k3.1-pro, backend: dashscope-intl, effort: xhigh}
 default_model: muse-wonder-full-1.0
 policy_ref:
   path: ~/Мой диск/Context/models.md

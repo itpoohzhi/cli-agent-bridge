@@ -1,0 +1,59 @@
+# Alibaba DashScope International (qwen4-max, kimi-k3.1-pro) строго через model-georouter :10830/sg-qwen -> пул SG-прокси route-sg.
+# Первичный ключ 1/4 (priority 10, weight 100); автоматический failover -> dashscope-intl-k2 -> k3 -> k4 (failover.pool=dashscope-intl).
+# Ключ хранится только в файле 0600 вне Google Drive: ~/.config/opencode/dashscope-intl.key.
+manifest_version: 1
+provider_id: dashscope-intl
+kind: passthrough
+enabled: true
+required: false
+priority: 10
+routing: {weight: 100}
+owned_by: dashscope-intl
+failover: {statuses: [401, 402, 403, 429, 503], error_types: [permission_error, credit_exhausted, payment_required, rate_limit_error, authentication_error], message_markers: [credit, quota, payment, insufficient, 'rate limit', Arrearage], pool: dashscope-intl, pool_label: 'Alibaba DashScope (SG)'}
+transport:
+  bridge: {base_url: 'http://127.0.0.1:10830/sg-qwen'}
+  direct:
+    type: http
+    http:
+      base_url: http://127.0.0.1:10830/sg-qwen
+      path: /chat/completions
+      api_key_ref:
+        fallback_file: ~/.config/opencode/dashscope-intl.key
+      stream: true
+      response: {field: 'choices[0].message.content'}
+allow_base_url:
+- {scheme: http, host: 127.0.0.1, port: 10830, path_prefix: /sg-qwen}
+# Квота (2026-11-25, /sg-qwen): DashScope не отдаёт /v1/rate_limits и x-ratelimit-* заголовки.
+# Консервативный лимит на ключ: 4 (bridge) + 3 (OpenCode CLI/судьи) + 2 (DSH) = 9 суммарно на 4 независимых ключа (<= 4 на ключ).
+limits: {max_concurrent: 4, quota_group: dashscope-intl, timeout_s: 300}
+discovery:
+  method: static
+  static: [qwen4-max, kimi-k3.1-pro]
+family_rule:
+  type: exact_map
+  exact_map:
+    qwen4-max: Alibaba
+    kimi-k3.1-pro: Moonshot
+models_overrides:
+  qwen4-max:
+    name: Qwen4 Max (DashScope SG)
+    efforts: ['off', low, high, xhigh]
+    default_effort: high
+    context_window: 984000
+    max_tokens: 65536
+    input: [text]
+    images: {cli_registry: implicit_supported, status: unverified, method: null, proof: null}
+  kimi-k3.1-pro:
+    name: Kimi K3.1 Pro (DashScope SG)
+    efforts: ['off', low, medium, high, xhigh]
+    default_effort: high
+    context_window: 1000000
+    max_tokens: 65536
+    input: [text]
+    images: {cli_registry: implicit_supported, status: unverified, method: null, proof: null}
+params:
+  effort_field: reasoning_effort
+  effort_map:
+    'off':
+      reasoning_effort: none
+  adaptive_whitelist: [reasoning_effort, temperature, top_p]

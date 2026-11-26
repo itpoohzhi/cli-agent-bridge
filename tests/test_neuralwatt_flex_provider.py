@@ -33,7 +33,7 @@ def test_neuralwatt_flex_compiled_into_fleet_json() -> None:
 
     models_by_id = {m["id"]: m for m in fleet["models"]}
     assert "kimi-k3.1-pro-flex" in models_by_id
-    assert "kimi-k3.1-pro" not in models_by_id
+    assert models_by_id["kimi-k3.1-pro"]["backend"] == "dashscope-intl"
     kimi = models_by_id["kimi-k3.1-pro-flex"]
     assert kimi["backend"] == "neuralwatt-flex"
     assert kimi["name"] == "Kimi K3.1 Pro Flex (NeuralWatt)"

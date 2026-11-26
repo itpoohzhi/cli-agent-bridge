@@ -336,6 +336,51 @@
       "backend_id": "glm-5.3-flash",
       "backend": "neuralwatt",
       "effort": "max"
+    },
+    "qwen4-max-off": {
+      "backend_id": "qwen4-max",
+      "backend": "dashscope-intl",
+      "effort": "off"
+    },
+    "qwen4-max-low": {
+      "backend_id": "qwen4-max",
+      "backend": "dashscope-intl",
+      "effort": "low"
+    },
+    "qwen4-max-high": {
+      "backend_id": "qwen4-max",
+      "backend": "dashscope-intl",
+      "effort": "high"
+    },
+    "qwen4-max-xhigh": {
+      "backend_id": "qwen4-max",
+      "backend": "dashscope-intl",
+      "effort": "xhigh"
+    },
+    "kimi-k3.1-pro-off": {
+      "backend_id": "kimi-k3.1-pro",
+      "backend": "dashscope-intl",
+      "effort": "off"
+    },
+    "kimi-k3.1-pro-low": {
+      "backend_id": "kimi-k3.1-pro",
+      "backend": "dashscope-intl",
+      "effort": "low"
+    },
+    "kimi-k3.1-pro-medium": {
+      "backend_id": "kimi-k3.1-pro",
+      "backend": "dashscope-intl",
+      "effort": "medium"
+    },
+    "kimi-k3.1-pro-high": {
+      "backend_id": "kimi-k3.1-pro",
+      "backend": "dashscope-intl",
+      "effort": "high"
+    },
+    "kimi-k3.1-pro-xhigh": {
+      "backend_id": "kimi-k3.1-pro",
+      "backend": "dashscope-intl",
+      "effort": "xhigh"
     }
   },
   "default_model": "muse-wonder-full-1.0",
@@ -501,6 +546,38 @@
         "strip_always": []
       }
     },
+    "dashscope-intl": {
+      "kind": "passthrough",
+      "enabled": true,
+      "owned_by": "dashscope-intl",
+      "max_concurrent": 4,
+      "base_url": "http://127.0.0.1:10830/sg-qwen",
+      "failover_statuses": [
+        401,
+        402,
+        403,
+        429,
+        503
+      ],
+      "failover_error_types": [
+        "permission_error",
+        "credit_exhausted",
+        "payment_required",
+        "rate_limit_error",
+        "authentication_error"
+      ],
+      "failover_message_markers": [
+        "credit",
+        "quota",
+        "payment",
+        "insufficient",
+        "rate limit",
+        "arrearage"
+      ],
+      "failover_pool": "dashscope-intl",
+      "failover_pool_label": "Alibaba DashScope (SG)",
+      "api_key_ref": "file:~/.config/opencode/dashscope-intl.key"
+    },
     "muse": {
       "kind": "stdio_resident",
       "enabled": true,
@@ -577,6 +654,38 @@
         "strip_always": []
       }
     },
+    "dashscope-intl-k2": {
+      "kind": "passthrough",
+      "enabled": true,
+      "owned_by": "dashscope-intl",
+      "max_concurrent": 4,
+      "base_url": "http://127.0.0.1:10830/sg-qwen",
+      "failover_statuses": [
+        401,
+        402,
+        403,
+        429,
+        503
+      ],
+      "failover_error_types": [
+        "permission_error",
+        "credit_exhausted",
+        "payment_required",
+        "rate_limit_error",
+        "authentication_error"
+      ],
+      "failover_message_markers": [
+        "credit",
+        "quota",
+        "payment",
+        "insufficient",
+        "rate limit",
+        "arrearage"
+      ],
+      "failover_pool": "dashscope-intl",
+      "failover_pool_label": "Alibaba DashScope (SG)",
+      "api_key_ref": "file:~/.config/opencode/dashscope-intl-k2.key"
+    },
     "opencode-go-sub1": {
       "kind": "passthrough",
       "enabled": false,
@@ -632,6 +741,38 @@
         "strip_always": []
       }
     },
+    "dashscope-intl-k3": {
+      "kind": "passthrough",
+      "enabled": true,
+      "owned_by": "dashscope-intl",
+      "max_concurrent": 4,
+      "base_url": "http://127.0.0.1:10830/sg-qwen",
+      "failover_statuses": [
+        401,
+        402,
+        403,
+        429,
+        503
+      ],
+      "failover_error_types": [
+        "permission_error",
+        "credit_exhausted",
+        "payment_required",
+        "rate_limit_error",
+        "authentication_error"
+      ],
+      "failover_message_markers": [
+        "credit",
+        "quota",
+        "payment",
+        "insufficient",
+        "rate limit",
+        "arrearage"
+      ],
+      "failover_pool": "dashscope-intl",
+      "failover_pool_label": "Alibaba DashScope (SG)",
+      "api_key_ref": "file:~/.config/opencode/dashscope-intl-k3.key"
+    },
     "opencode-go-sub2": {
       "kind": "passthrough",
       "enabled": false,
@@ -686,6 +827,38 @@
         ],
         "strip_always": []
       }
+    },
+    "dashscope-intl-k4": {
+      "kind": "passthrough",
+      "enabled": true,
+      "owned_by": "dashscope-intl",
+      "max_concurrent": 4,
+      "base_url": "http://127.0.0.1:10830/sg-qwen",
+      "failover_statuses": [
+        401,
+        402,
+        403,
+        429,
+        503
+      ],
+      "failover_error_types": [
+        "permission_error",
+        "credit_exhausted",
+        "payment_required",
+        "rate_limit_error",
+        "authentication_error"
+      ],
+      "failover_message_markers": [
+        "credit",
+        "quota",
+        "payment",
+        "insufficient",
+        "rate limit",
+        "arrearage"
+      ],
+      "failover_pool": "dashscope-intl",
+      "failover_pool_label": "Alibaba DashScope (SG)",
+      "api_key_ref": "file:~/.config/opencode/dashscope-intl-k4.key"
     },
     "neuralwatt-flex": {
       "kind": "passthrough",
@@ -1243,6 +1416,107 @@
       "max_tokens": 128000,
       "images": {
         "status": "unverified"
+      }
+    },
+    {
+      "id": "kimi-k3.1-pro",
+      "backend": "dashscope-intl",
+      "name": "Kimi K3.1 Pro (DashScope SG)",
+      "efforts": [
+        "off",
+        "low",
+        "medium",
+        "high",
+        "xhigh"
+      ],
+      "default_effort": "high",
+      "context_window": 1000000,
+      "max_tokens": 65536,
+      "images": {
+        "status": "unverified"
+      },
+      "routing": {
+        "algorithm": "weighted-sha256-v1",
+        "enabled": true,
+        "catalog_hash": "faa3e07a817b6e67fea86ef65822db8fe57507c79c8a6c576dd7d8aae2445ec8",
+        "legacy_backend": "dashscope-intl",
+        "disabled_backend": "dashscope-intl",
+        "routes": [
+          {
+            "route_id": "dashscope-intl",
+            "backend": "dashscope-intl",
+            "weight": 100,
+            "priority": 10
+          },
+          {
+            "route_id": "dashscope-intl-k2",
+            "backend": "dashscope-intl-k2",
+            "weight": 0,
+            "priority": 11
+          },
+          {
+            "route_id": "dashscope-intl-k3",
+            "backend": "dashscope-intl-k3",
+            "weight": 0,
+            "priority": 12
+          },
+          {
+            "route_id": "dashscope-intl-k4",
+            "backend": "dashscope-intl-k4",
+            "weight": 0,
+            "priority": 13
+          }
+        ]
+      }
+    },
+    {
+      "id": "qwen4-max",
+      "backend": "dashscope-intl",
+      "name": "Qwen4 Max (DashScope SG)",
+      "efforts": [
+        "off",
+        "low",
+        "high",
+        "xhigh"
+      ],
+      "default_effort": "high",
+      "context_window": 984000,
+      "max_tokens": 65536,
+      "images": {
+        "status": "unverified"
+      },
+      "routing": {
+        "algorithm": "weighted-sha256-v1",
+        "enabled": true,
+        "catalog_hash": "faa3e07a817b6e67fea86ef65822db8fe57507c79c8a6c576dd7d8aae2445ec8",
+        "legacy_backend": "dashscope-intl",
+        "disabled_backend": "dashscope-intl",
+        "routes": [
+          {
+            "route_id": "dashscope-intl",
+            "backend": "dashscope-intl",
+            "weight": 100,
+            "priority": 10
+          },
+          {
+            "route_id": "dashscope-intl-k2",
+            "backend": "dashscope-intl-k2",
+            "weight": 0,
+            "priority": 11
+          },
+          {
+            "route_id": "dashscope-intl-k3",
+            "backend": "dashscope-intl-k3",
+            "weight": 0,
+            "priority": 12
+          },
+          {
+            "route_id": "dashscope-intl-k4",
+            "backend": "dashscope-intl-k4",
+            "weight": 0,
+            "priority": 13
+          }
+        ]
       }
     },
     {

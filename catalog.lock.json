@@ -1,22 +1,26 @@
 {
-  "compiled_at": "2026-11-24T16:10:13+0300",
+  "compiled_at": "2026-11-25T16:51:26+0300",
   "compiler_version": 1,
-  "fleet_sha256": "8e7c97211aef1047cda7bcaed18c5d098df09242767483bab0a2147dee7c5bb8",
+  "fleet_sha256": "b4d39545abad48eb08e4b4e3f36f2fea7e12bde79ffeee142f3be43503857857",
   "inputs": {
     "discovery_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
     "manifests": {
-      "_fleet.yaml": "52a73ffeedc5b77e10c61f198186639ba0dabdd8f2b81f9dc10f473a1038736a",
+      "_fleet.yaml": "e879bcc77f92f6e375e17113d82321fde0aaae3a36de54aaeb283e6e590bf5bf",
       "agy-passthrough.yaml": "7a05b980065274efc347c8c7b6bcce95c58a01954ac4b53083ab840d0118915f",
       "agy.yaml": "b469a3321a89a32e65a219c0de5e924ed77bf4b5a6000561b25a5e4523a06917",
       "claude-p.yaml": "8ac948e1049b2ca703b010f4f54a5bec01d334caf75fd805f54fef47561246f7",
-      "codex.yaml": "e298517b1e092d62c100cdd8bb8c5710ff848d2940ca3ef06597ae886ec77581",
+      "codex.yaml": "6b8e9f74ab5d2725ae5075018eb35108eb43839b4b4e9959468a09cc37f96500",
+      "dashscope-intl-k2.yaml": "a2094274c6e68140707cff55ebe2a5a9900251935e8cfe96319103e397392fc9",
+      "dashscope-intl-k3.yaml": "5ae75195bc228384621e3b8be92c8205c73cda335450c76a111be2de8366413e",
+      "dashscope-intl-k4.yaml": "817b95657f520d056498146bd4ac62e26fa0ca020a71f1317992cff86dd87527",
+      "dashscope-intl.yaml": "a2e543b5ceefbf5b1e6613c571e8170fe484a4ef8abb0b89a24ab9aee44b021b",
       "deepseek-direct.yaml": "cd2e158fdebdc918910d2a99650b0bd9613fab3743ba93e7b698df544d2f20c9",
       "droid.yaml": "d2e2381093c695824123749e302d57028a113b7a522d7b29a8cdcc6b1c661e47",
       "muse.yaml": "5e7b7200e37d0bf99afd88f59a55239736617a29d096ae6729f8273bf05a81a6",
       "neuralwatt-flex.yaml": "7ec06964bdc72b4a89de8645a02d81b0ea4c1ab5ee17e7f29575dd0c01b33385",
       "neuralwatt.yaml": "590b843f107c6b13abc6d42638cd7b9e22f9147360bd38def4add1eb268a2ee0",
       "openai-key-2.yaml": "e9755fd06af82a3bb341122afd0d5c3e9b2504ef190ecb8fe751495d357e57a3",
-      "openai-key-3.yaml": "eccc73e68769ab0d742b5ace825af8bbcb2d02f07068e272c608ddefd1b2177e",
+      "openai-key-3.yaml": "2108dc7da2c07a740132cd7656d8bb30368c86d4465b9116f1818dacdfc4e2b6",
       "opencode-go-claude.yaml": "dc9ae65179f1fc5a8d0287956cb70ac1f905a47ec4fcebb831c9ce4cc7d6ad38",
       "opencode-go-sub1.yaml": "cfec5e987e81f50f9e2f1db08296d7b39ce6a91c53f1ff09d52f34a31a2d9913",
       "opencode-go-sub2.yaml": "a0a9a852f7751c54d875ebb71e526a585b263e85bebd9cb9d2533f3fdb5faea7",
@@ -24,7 +28,7 @@
       "opencode-resident.yaml": "26bb3cdf0249498e7974181d77265a4db3774dad9ff92dd9e00ca1eff7b08c22",
       "opencode-zen.yaml": "9239b0e1c543c23037f5407b6c64a0db04735d092ba7ccc53d197f83f91d1636"
     },
-    "manifests_sha256": "91e58f68086e04a20483bdd86393df73c5e145b3ed0d22bb74d4054de59fd200"
+    "manifests_sha256": "4c7891d016d83565ec46dbc5ff86122e9492efd13f7edf43a1a8c6a2b16d426d"
   },
   "models": {
     "beam-free": {
@@ -357,10 +361,10 @@
     "gpt-6.1-sol": {
       "alternates": [
         {
-          "provider": "codex"
+          "provider": "openai-key-2"
         },
         {
-          "provider": "openai-key-2"
+          "provider": "openai-key-3"
         },
         {
           "provider": "droid"
@@ -368,12 +372,12 @@
       ],
       "efforts_proven": [],
       "family": "OpenAI",
-      "family_source": "exact_map",
+      "family_source": "prefix",
       "history": [],
       "in_fleet": true,
-      "provider": "openai-key-3",
+      "provider": "codex",
       "quorum_eligible": false,
-      "quota_group": "openai-key-3",
+      "quota_group": "openai-codex",
       "status": "quarantine"
     },
     "gpt-6.1-sol-droid": {
@@ -391,20 +395,32 @@
     "gpt-6.1-terra": {
       "alternates": [
         {
-          "provider": "codex"
+          "provider": "openai-key-2"
         },
         {
-          "provider": "openai-key-2"
+          "provider": "openai-key-3"
         }
       ],
       "efforts_proven": [],
       "family": "OpenAI",
-      "family_source": "exact_map",
+      "family_source": "prefix",
       "history": [],
       "in_fleet": true,
-      "provider": "openai-key-3",
+      "provider": "codex",
       "quorum_eligible": false,
-      "quota_group": "openai-key-3",
+      "quota_group": "openai-codex",
+      "status": "quarantine"
+    },
+    "gpt-6.2-sol": {
+      "alternates": [],
+      "efforts_proven": [],
+      "family": "OpenAI",
+      "family_source": "prefix",
+      "history": [],
+      "in_fleet": true,
+      "provider": "codex",
+      "quorum_eligible": false,
+      "quota_group": "openai-codex",
       "status": "quarantine"
     },
     "iceman-free": {
@@ -429,6 +445,28 @@
       "provider": "opencode-zen",
       "quorum_eligible": false,
       "quota_group": "opencode-zen",
+      "status": "quarantine"
+    },
+    "kimi-k3.1-pro": {
+      "alternates": [
+        {
+          "provider": "dashscope-intl-k2"
+        },
+        {
+          "provider": "dashscope-intl-k3"
+        },
+        {
+          "provider": "dashscope-intl-k4"
+        }
+      ],
+      "efforts_proven": [],
+      "family": "Moonshot",
+      "family_source": "exact_map",
+      "history": [],
+      "in_fleet": true,
+      "provider": "dashscope-intl",
+      "quorum_eligible": false,
+      "quota_group": "dashscope-intl",
       "status": "quarantine"
     },
     "kimi-k3.1-pro-flex": {
@@ -574,6 +612,28 @@
       "quorum_eligible": false,
       "quota_group": "opencode-zen",
       "status": "quarantine"
+    },
+    "qwen4-max": {
+      "alternates": [
+        {
+          "provider": "dashscope-intl-k2"
+        },
+        {
+          "provider": "dashscope-intl-k3"
+        },
+        {
+          "provider": "dashscope-intl-k4"
+        }
+      ],
+      "efforts_proven": [],
+      "family": "Alibaba",
+      "family_source": "exact_map",
+      "history": [],
+      "in_fleet": true,
+      "provider": "dashscope-intl",
+      "quorum_eligible": false,
+      "quota_group": "dashscope-intl",
+      "status": "quarantine"
     }
   },
   "providers": {
@@ -687,6 +747,126 @@
       "quota_group": "openai-codex",
       "timeout_s": 180.0
     },
+    "dashscope-intl": {
+      "allow_base_url": [
+        {
+          "host": "127.0.0.1",
+          "path_prefix": "/sg-qwen",
+          "port": 10830,
+          "scheme": "http"
+        }
+      ],
+      "bridge": true,
+      "direct": {
+        "http": {
+          "api_key_ref": {
+            "fallback_file": "~/.config/opencode/dashscope-intl.key"
+          },
+          "base_url": "http://127.0.0.1:10830/sg-qwen",
+          "path": "/chat/completions",
+          "response": {
+            "field": "choices[0].message.content"
+          },
+          "stream": true
+        },
+        "type": "http"
+      },
+      "enabled": true,
+      "kind": "passthrough",
+      "max_concurrent": 4,
+      "quota_group": "dashscope-intl",
+      "timeout_s": 300.0
+    },
+    "dashscope-intl-k2": {
+      "allow_base_url": [
+        {
+          "host": "127.0.0.1",
+          "path_prefix": "/sg-qwen",
+          "port": 10830,
+          "scheme": "http"
+        }
+      ],
+      "bridge": true,
+      "direct": {
+        "http": {
+          "api_key_ref": {
+            "fallback_file": "~/.config/opencode/dashscope-intl-k2.key"
+          },
+          "base_url": "http://127.0.0.1:10830/sg-qwen",
+          "path": "/chat/completions",
+          "response": {
+            "field": "choices[0].message.content"
+          },
+          "stream": true
+        },
+        "type": "http"
+      },
+      "enabled": true,
+      "kind": "passthrough",
+      "max_concurrent": 4,
+      "quota_group": "dashscope-intl-k2",
+      "timeout_s": 300.0
+    },
+    "dashscope-intl-k3": {
+      "allow_base_url": [
+        {
+          "host": "127.0.0.1",
+          "path_prefix": "/sg-qwen",
+          "port": 10830,
+          "scheme": "http"
+        }
+      ],
+      "bridge": true,
+      "direct": {
+        "http": {
+          "api_key_ref": {
+            "fallback_file": "~/.config/opencode/dashscope-intl-k3.key"
+          },
+          "base_url": "http://127.0.0.1:10830/sg-qwen",
+          "path": "/chat/completions",
+          "response": {
+            "field": "choices[0].message.content"
+          },
+          "stream": true
+        },
+        "type": "http"
+      },
+      "enabled": true,
+      "kind": "passthrough",
+      "max_concurrent": 4,
+      "quota_group": "dashscope-intl-k3",
+      "timeout_s": 300.0
+    },
+    "dashscope-intl-k4": {
+      "allow_base_url": [
+        {
+          "host": "127.0.0.1",
+          "path_prefix": "/sg-qwen",
+          "port": 10830,
+          "scheme": "http"
+        }
+      ],
+      "bridge": true,
+      "direct": {
+        "http": {
+          "api_key_ref": {
+            "fallback_file": "~/.config/opencode/dashscope-intl-k4.key"
+          },
+          "base_url": "http://127.0.0.1:10830/sg-qwen",
+          "path": "/chat/completions",
+          "response": {
+            "field": "choices[0].message.content"
+          },
+          "stream": true
+        },
+        "type": "http"
+      },
+      "enabled": true,
+      "kind": "passthrough",
+      "max_concurrent": 4,
+      "quota_group": "dashscope-intl-k4",
+      "timeout_s": 300.0
+    },
     "deepseek-direct": {
       "allow_base_url": [
         {
@@ -779,7 +959,7 @@
         }
       ],
       "bridge": true,
-      "enabled": true,
+      "enabled": false,
       "kind": "passthrough",
       "max_concurrent": 1,
       "quota_group": "openai-key-3",
