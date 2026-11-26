@@ -1,14 +1,16 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import threading
+from collections.abc import Sequence
 from collections import OrderedDict
 from dataclasses import dataclass, replace
 from typing import cast
 
 from core.backend_routing_models import TranscriptItem
 from core.resident_canonical import _fail_if
-from core.resident_turn_envelope import ResidentTurnEnvelope
+from core.resident_turn_envelope import ResidentTurnEnvelope, is_warm_delta_integrity_enabled
 from core.stdio_resident.types import SlotBinding
 from core.tool_emulation import _render_message
 
@@ -27,6 +29,8 @@ class CommittedSessionState:
     cwd_norm: str
     review_profile: str
     item_digests: tuple[str, ...]
+    canonical_digests: tuple[str, ...] = ()
+    integrity_enabled: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -39,9 +43,103 @@ class HistoryPlan:
     reason: str
 
 
+_TOOL_CALL_OPEN = "<tool_call>"
+_TOOL_CALL_CLOSE = "</tool_call>"
+_JSON_DECODER = json.JSONDecoder()
+
+
+def _sorted_json(value: object) -> str:
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def _canonical_arguments(raw: object) -> object:
+    parsed: object = raw
+    if isinstance(raw, str):
+        try:
+            parsed = cast(object, json.loads(raw.strip()))
+        except (ValueError, RecursionError):
+            return raw
+    if not isinstance(parsed, dict):
+        return raw
+    try:
+        return _sorted_json(parsed)
+    except RecursionError:
+        return raw
+
+
+def _canonical_call(call: object) -> object:
+    if not isinstance(call, dict):
+        return call
+    clone = dict(cast(dict[str, object], call))
+    function = clone.get("function")
+    if isinstance(function, dict):
+        function = dict(cast(dict[str, object], function))
+        if "arguments" in function:
+            function["arguments"] = _canonical_arguments(function["arguments"])
+        clone["function"] = function
+    if "arguments" in clone:
+        clone["arguments"] = _canonical_arguments(clone["arguments"])
+    return clone
+
+
+def _canonical_payload(payload: object) -> str | None:
+    arguments = cast(dict[str, object], payload).get("arguments") if isinstance(payload, dict) else None
+    if not isinstance(arguments, dict):
+        return None
+    try:
+        cast(dict[str, object], payload)["arguments"] = cast(object, json.loads(_sorted_json(arguments)))
+        return json.dumps(payload, ensure_ascii=False)
+    except RecursionError:
+        return None
+
+
+def _parse_tool_call_at(text: str, start: int) -> tuple[str, int] | None:
+    """JSON-aware разбор тела `<tool_call>` с позиции `start`: (канонический блок, конец) либо `None`."""
+    while start < len(text) and text[start].isspace():
+        start += 1
+    try:
+        payload, end = cast(tuple[object, int], _JSON_DECODER.raw_decode(text, start))
+    except (ValueError, RecursionError):
+        return None
+    while end < len(text) and text[end].isspace():
+        end += 1
+    if not text.startswith(_TOOL_CALL_CLOSE, end):
+        return None
+    body = _canonical_payload(payload)
+    return None if body is None else (f"{_TOOL_CALL_OPEN}{body}{_TOOL_CALL_CLOSE}", end + len(_TOOL_CALL_CLOSE))
+
+
+def _canonicalize_tool_calls_text(text: str) -> str:
+    """Канонизирует `arguments` во всех неэкранированных `<tool_call>{json}</tool_call>`; чужой текст не трогает."""
+    out: list[str] = []
+    pos = 0
+    while (idx := text.find(_TOOL_CALL_OPEN, pos)) != -1:
+        parsed = None if text[idx - 1 : idx] == "\\" else _parse_tool_call_at(text, idx + len(_TOOL_CALL_OPEN))
+        if parsed is None:
+            out.append(text[pos : idx + len(_TOOL_CALL_OPEN)])
+            pos = idx + len(_TOOL_CALL_OPEN)
+        else:
+            out.append(text[pos:idx])
+            out.append(parsed[0])
+            pos = parsed[1]
+    out.append(text[pos:])
+    return "".join(out)
+
+
+def _canonical_item_digest(item: TranscriptItem) -> str:
+    """Digest входящего assistant-item, инвариантный к порядку ключей `arguments`."""
+    if item.role == "assistant":
+        canon = _canonicalize_tool_calls_text(item.text)
+        if canon != item.text:
+            return hashlib.sha256(f"[assistant]\n{canon}".encode("utf-8")).hexdigest()
+    return item.digest
+
+
 def build_assistant_transcript_item(text: str, tool_calls: list[dict[str, object]] | None = None) -> TranscriptItem | None:
-    calls = tool_calls if tool_calls else []
-    rendered = _render_message({"role": "assistant", "content": text, "tool_calls": calls})
+    calls: Sequence[object] = tool_calls if tool_calls else []
+    if calls and is_warm_delta_integrity_enabled():
+        calls = [_canonical_call(call) for call in calls]
+    rendered = _render_message({"role": "assistant", "content": text, "tool_calls": list(calls)})
     item: TranscriptItem | None = None
     if rendered:
         digest = hashlib.sha256(rendered.encode("utf-8")).hexdigest()
@@ -49,10 +147,14 @@ def build_assistant_transcript_item(text: str, tool_calls: list[dict[str, object
     return item
 
 
+def _render_delta_item(item: TranscriptItem, bare_tool_results: bool) -> str:
+    bare = bare_tool_results and item.origin_role == "tool"
+    return item.text if bare or item.role not in ("user", "assistant") else f"[{item.role}]\n{item.text}"
+
+
 def render_delta_prompt(items: tuple[TranscriptItem, ...]) -> str:
-    chat_roles = frozenset({"user", "assistant"})
-    rendered = (f"[{item.role}]\n{item.text}" if bool({item.role} & chat_roles) else item.text for item in items)
-    return "\n\n".join(rendered)
+    bare_tool_results = is_warm_delta_integrity_enabled()
+    return "\n\n".join(_render_delta_item(item, bare_tool_results) for item in items)
 
 
 def _base_state(envelope: ResidentTurnEnvelope) -> CommittedSessionState:
@@ -70,6 +172,8 @@ def _base_state(envelope: ResidentTurnEnvelope) -> CommittedSessionState:
         envelope.cwd_norm,
         envelope.review_profile,
         tuple(item.digest for item in items),
+        tuple(_canonical_item_digest(item) for item in items),
+        is_warm_delta_integrity_enabled(),
     )
 
 
@@ -128,9 +232,11 @@ def _plan_warm(committed: CommittedSessionState | None, envelope: ResidentTurnEn
     else:
         c_state = cast(CommittedSessionState, committed)
         count = len(c_state.item_digests)
-        incoming = next_base.item_digests
+        use_canon = (next_base.integrity_enabled or c_state.integrity_enabled) and bool(c_state.canonical_digests)
+        incoming = next_base.canonical_digests if use_canon else next_base.item_digests
+        known = c_state.canonical_digests if use_canon else c_state.item_digests
         delta_items = envelope.rpc.items[count:] if envelope.rpc else ()
-        extends = all((bool(c_state.item_digests), len(incoming) > count, incoming[:count] == c_state.item_digests))
+        extends = all((bool(known), len(incoming) > count, incoming[:count] == known))
         has_assistant = any(not bool({item.role} - {"assistant"}) for item in delta_items)
         if all((extends, not has_assistant)):
             result = _plan("delta", render_delta_prompt(delta_items), next_base, (False, False, "history_extended"))
@@ -220,9 +326,16 @@ class ResidentHistoryTracker:
             evicted: list[tuple[str, SlotBinding]] = []
             if state:
                 extra = (assistant_item.digest,) if assistant_item else ()
+                canon_extra = (_canonical_item_digest(assistant_item),) if assistant_item else ()
                 digests = state.item_digests + extra
                 if digests:
-                    self._states[key] = replace(state, slot_id=slot_binding.slot_id, generation=slot_binding.generation, item_digests=digests)
+                    self._states[key] = replace(
+                        state,
+                        slot_id=slot_binding.slot_id,
+                        generation=slot_binding.generation,
+                        item_digests=digests,
+                        canonical_digests=state.canonical_digests + canon_extra,
+                    )
                     self._has_assistant[key] = bool(assistant_item)
                     self._states.move_to_end(key)
                     evicted = self._evict_locked()
@@ -238,11 +351,13 @@ class ResidentHistoryTracker:
             state = self._states.get(key)
             if state is None or (state.slot_id, state.generation) != (slot_binding.slot_id, slot_binding.generation):
                 return False
-            if self._has_assistant.get(key) and state.item_digests:
-                new_digests = state.item_digests[:-1] + (assistant_item.digest,)
-            else:
-                new_digests = state.item_digests + (assistant_item.digest,)
-            self._states[key] = replace(state, item_digests=new_digests)
+            replace_last = bool(self._has_assistant.get(key)) and bool(state.item_digests)
+            keep = -1 if replace_last else None
+            self._states[key] = replace(
+                state,
+                item_digests=state.item_digests[:keep] + (assistant_item.digest,),
+                canonical_digests=state.canonical_digests[:keep] + (_canonical_item_digest(assistant_item),),
+            )
             self._has_assistant[key] = True
             self._states.move_to_end(key)
             return True

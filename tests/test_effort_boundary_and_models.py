@@ -16,6 +16,7 @@ import server  # noqa: E402
 from core import backend_adapter  # noqa: E402
 from core import effort_policy  # noqa: E402
 from core import quarantine_gate as qg  # noqa: E402
+from core.effort_errors import EffortBelowFloorError  # noqa: E402
 from core.effort_policy import (  # noqa: E402
     DEFAULT_LOG_EFFORT_MAX_CHARS,
     ModelEffortSpec,
@@ -43,9 +44,10 @@ def test_catalog_effort_levels_extend_policy_scale_with_off() -> None:
 
 def test_clamp_off_maps_to_lowest_allowed() -> None:
     assert server.clamp_effort_downward is clamp_effort_downward
-    assert clamp_effort_downward("off", LMH, "high") == ("low", True)
+    for allowed in (LMH, ["high"]):
+        with pytest.raises(EffortBelowFloorError):
+            clamp_effort_downward("off", allowed, "high")
     assert clamp_effort_downward("max", LMH, "high") == ("high", True)
-    assert clamp_effort_downward("off", ["high"], "high") == ("high", True)
 
 
 def test_passthrough_stays_transparent_without_effort() -> None:
@@ -56,7 +58,6 @@ def test_passthrough_stays_transparent_without_effort() -> None:
 @pytest.mark.parametrize(
     "requested,allowed,value",
     [
-        ("off", LMH, "low"),
         ("max", LMH, "high"),
         ("max", ["high"], "high"),
         ("xhigh", LMH, "high"),

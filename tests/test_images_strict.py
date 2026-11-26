@@ -523,7 +523,7 @@ class TestProofFailClosed(ImageCase):
         status, _ = self.request("gpt-6.1-sol", "high")
         self.assertEqual(status, 200)
         with self.capture_logs() as lines:
-            status, body = self.request("gpt-6.1-sol", "off")
+            status, body = self.request("gpt-6.1-sol", "low")  # допустимый, но не доказанный уровень
         self.assertEqual(status, 400)
         self.assertEqual(body["error"]["type"], "image_input_not_supported")
         self.assertTrue(any("reason=effort" in ln for ln in lines))

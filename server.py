@@ -3825,7 +3825,7 @@ def _transcribe(messages: list, tools: list, tool_choice: Any, images: list) -> 
             )
         else:  # tool и редкие mid-conversation system: как user с меткой роли
             items.append(
-                {"role": "user", "text": rendered, "digest": _digest(rendered)}
+                {"role": "user", "text": rendered, "digest": _digest(rendered), "origin_role": role}
             )
     if tools and not _tool_choice_none(tool_choice):
         section = _tools_section(tools, tool_choice, bool(images))

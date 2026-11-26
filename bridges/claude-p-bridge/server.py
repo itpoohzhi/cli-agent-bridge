@@ -8,6 +8,7 @@ Reasoning нормализуется всегда; теги инструмент
 
 from __future__ import annotations
 
+import contextlib
 import hmac
 import json
 import os
@@ -28,12 +29,18 @@ from pathlib import Path
 from typing import Any, NamedTuple, cast
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
-for _p in (_REPO_ROOT, Path(__file__).resolve().parents[1]):
+for _p in (_REPO_ROOT, Path(__file__).resolve().parents[1], Path(__file__).resolve().parent):
     if str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
 
-from core.chat_key import resolve_chat_key  # noqa: E402
 from core.admission_idle_policy import format_claude_done_fields  # noqa: E402
+from core.chat_key import SOURCES_SESSION_ID, resolve_chat_key  # noqa: E402
+from core.claude_bridge_telemetry import format_done_usage_suffix, project_wire_usage  # noqa: E402
+from core.claude_prompt import PromptBudgetConfig, prepare_prompt_with_cap, wire_cache_creation_enabled  # noqa: E402
+from core.claude_session import (  # noqa: E402
+    NO_PERSISTENCE_FLAG, SessionConfig, SessionMode, SessionPlan, SessionStore,
+    assert_zero_canon_argv_safe, build_session_argv, is_session_reuse_allowed_profile,
+)
 from core.http_accept import load_admission_idle_config  # noqa: E402
 from core.claude_zero_canon import (  # noqa: E402
     CLAUDE_PRESERVED_CA_FILES, build_claude_zero_canon_env, build_claude_zero_canon_flags,
@@ -54,17 +61,9 @@ try:
     from core.runtime_env import resolve_toolless_tag_policy, synthesize_required_bash_desc_enabled
     from core.stream_framing import format_stream_error_sse
     from core.tool_emulation import (  # noqa: E402
-        DEFAULT_MAX_IMAGE_BYTES,
-        DEFAULT_MAX_IMAGES,
-        DEFAULT_MAX_TOTAL_IMAGE_BYTES,
-        ImageInputError,
-        LiveParserError,
-        StreamNormalizer,
-        _messages_to_prompt,
-        build_tool_schemas,
-        extract_data_url_images,
-        extract_thinking_delta,
-        sanitize_tool_call,
+        DEFAULT_MAX_IMAGE_BYTES, DEFAULT_MAX_IMAGES, DEFAULT_MAX_TOTAL_IMAGE_BYTES, ImageInputError,
+        LiveParserError, StreamNormalizer, _messages_to_prompt, build_tool_schemas,
+        extract_data_url_images, extract_thinking_delta, sanitize_tool_call,
     )
     from core.tool_mode import (
         TOOLLESS_PURE_TEXT_HINT, NormalizerModeSpec, NormalizerSinks, ToolMode,
@@ -91,7 +90,8 @@ def _raw_cache_read(usage: dict) -> object:
 def _wire_usage(usage: dict) -> dict:
     """Кэш исключён из Claude input_tokens (fixtures/claude_result_usage.json).
 
-    core.usage_wire единолично фильтрует и прибавляет сырой cache-read/creation.
+    core.usage_wire единолично фильтрует и прибавляет сырой cache-read/creation;
+    top-level `cache_creation_input_tokens` — только по opt-in флагу (AD-002).
     """
     wire, inconsistent = build_wire_usage(
         usage.get("input_tokens", 0),
@@ -102,7 +102,7 @@ def _wire_usage(usage: dict) -> dict:
     )
     if inconsistent:
         _log("usage_cache_inconsistent in claude result usage")
-    return wire
+    return project_wire_usage(wire, usage, include_cache_creation=wire_cache_creation_enabled())
 
 
 def _env_positive_int(name: str, default: int) -> int:
@@ -118,17 +118,10 @@ def _env_positive_int(name: str, default: int) -> int:
 
 
 _ALLOWED_SETTINGS_KEYS = frozenset({
-    "CLAUDE_P_BRIDGE_WATCHDOG_ENABLED",
-    "CLAUDE_P_BRIDGE_IDLE_TIMEOUT_S",
-    "CLAUDE_P_BRIDGE_IO_WAIT_CAP_S",
-    "CLAUDE_P_BRIDGE_SAFETY_CAP_S",
-    "CLAUDE_P_BRIDGE_WATCHDOG_INTERVAL_S",
-    "BRIDGE_IDLE_TIMEOUT_S",
-    "BRIDGE_IO_WAIT_CAP_S",
-    "BRIDGE_SAFETY_CAP_S",
-    "BRIDGE_WATCHDOG_INTERVAL_S",
+    "CLAUDE_P_BRIDGE_WATCHDOG_ENABLED", "CLAUDE_P_BRIDGE_IDLE_TIMEOUT_S", "CLAUDE_P_BRIDGE_IO_WAIT_CAP_S",
+    "CLAUDE_P_BRIDGE_SAFETY_CAP_S", "CLAUDE_P_BRIDGE_WATCHDOG_INTERVAL_S", "BRIDGE_IDLE_TIMEOUT_S",
+    "BRIDGE_IO_WAIT_CAP_S", "BRIDGE_SAFETY_CAP_S", "BRIDGE_WATCHDOG_INTERVAL_S",
 })
-
 
 def _read_dsh_env_file() -> dict[str, str]:
     """Безопасно читает только несекретные настройки из ~/.dsh/.env.
@@ -159,7 +152,6 @@ def _read_dsh_env_file() -> dict[str, str]:
 
 _DSH_ENV = _read_dsh_env_file()
 
-
 def _get_setting(name: str, fallback_name: str | None = None, default: str = "") -> str:
     """Двухступенчатый каскад чтения: os.environ -> _DSH_ENV -> fallback -> default."""
     for k in (name, fallback_name) if fallback_name else (name,):
@@ -188,17 +180,10 @@ def _is_watchdog_enabled() -> bool:
     return raw not in ("0", "false", "no", "off")
 
 
-CLAUDE_P_BRIDGE_IDLE_TIMEOUT_S = _get_positive_float(
-    "CLAUDE_P_BRIDGE_IDLE_TIMEOUT_S", "BRIDGE_IDLE_TIMEOUT_S", 600.0
-)
-CLAUDE_P_BRIDGE_IO_WAIT_CAP_S = _get_positive_float(
-    "CLAUDE_P_BRIDGE_IO_WAIT_CAP_S", "BRIDGE_IO_WAIT_CAP_S", 900.0
-)
-CLAUDE_P_BRIDGE_SAFETY_CAP_S = _get_positive_float(
-    "CLAUDE_P_BRIDGE_SAFETY_CAP_S", "BRIDGE_SAFETY_CAP_S", 3600.0
-)
-CLAUDE_P_BRIDGE_WATCHDOG_INTERVAL_S = _get_positive_float("CLAUDE_P_BRIDGE_WATCHDOG_INTERVAL_S", "BRIDGE_WATCHDOG_INTERVAL_S", 5.0)  # fmt: skip
-
+CLAUDE_P_BRIDGE_IDLE_TIMEOUT_S = _get_positive_float("CLAUDE_P_BRIDGE_IDLE_TIMEOUT_S", "BRIDGE_IDLE_TIMEOUT_S", 600.0)
+CLAUDE_P_BRIDGE_IO_WAIT_CAP_S = _get_positive_float("CLAUDE_P_BRIDGE_IO_WAIT_CAP_S", "BRIDGE_IO_WAIT_CAP_S", 900.0)
+CLAUDE_P_BRIDGE_SAFETY_CAP_S = _get_positive_float("CLAUDE_P_BRIDGE_SAFETY_CAP_S", "BRIDGE_SAFETY_CAP_S", 3600.0)
+CLAUDE_P_BRIDGE_WATCHDOG_INTERVAL_S = _get_positive_float("CLAUDE_P_BRIDGE_WATCHDOG_INTERVAL_S", "BRIDGE_WATCHDOG_INTERVAL_S", 5.0)
 
 ROOT = Path(__file__).resolve().parent
 HOST = os.environ.get("CLAUDE_P_BRIDGE_HOST", "127.0.0.1")
@@ -206,11 +191,7 @@ PORT = int(os.environ.get("CLAUDE_P_BRIDGE_PORT", "9881"))
 AUTH_KEY = os.environ.get("CLAUDE_P_BRIDGE_KEY", "").strip()
 MODEL_ID = os.environ.get("CLAUDE_P_BRIDGE_MODEL", "claude-sonnet-5-5")
 # Поддерживаемые модели -> уровень effort по умолчанию (если reasoning_effort не задан).
-SUPPORTED_MODELS = {
-    "claude-opus-5-5": "high",
-    "claude-sonnet-5-5": "high",
-    "claude-haiku-5-5": "high",
-}
+SUPPORTED_MODELS = {"claude-opus-5-5": "high", "claude-sonnet-5-5": "high", "claude-haiku-5-5": "high"}
 CLAUDE_BIN = os.environ.get(
     "CLAUDE_P_BRIDGE_BIN",
     shutil.which("claude") or os.path.expanduser("~/.local/bin/claude")
@@ -242,17 +223,13 @@ def _read_json_dict(path: Path) -> dict | None:
 
 def _sync_ca_files(real_claude: Path, claude_dir: Path) -> None:
     claude_dir.mkdir(parents=True, exist_ok=True)
-    try:
+    with contextlib.suppress(OSError):
         os.chmod(claude_dir, 0o700)
-    except OSError:
-        pass
     for name in _CLAUDE_CA_FILES:
-        try:
+        with contextlib.suppress(OSError):
             src = real_claude / name
             if src.is_file():
                 _write_atomic(claude_dir / name, src.read_bytes())
-        except OSError:
-            pass
     for src in (real_claude / ".claude.json", real_claude.parent / ".claude.json"):
         if src.is_file():
             st = _read_json_dict(src)
@@ -300,14 +277,10 @@ HTTP_TIMEOUT_S = float(os.environ.get("CLAUDE_P_BRIDGE_HTTP_TIMEOUT_S", "1800"))
 HTTP_BACKLOG = _env_positive_int("CLAUDE_P_BRIDGE_HTTP_BACKLOG", 64)
 # Лимиты изображений — env с безопасными значениями по умолчанию из core.
 MAX_IMAGES = _env_positive_int("CLAUDE_P_BRIDGE_MAX_IMAGES", DEFAULT_MAX_IMAGES)
-MAX_IMAGE_BYTES = _env_positive_int("CLAUDE_P_BRIDGE_MAX_IMAGE_BYTES", DEFAULT_MAX_IMAGE_BYTES)  # fmt: skip
-MAX_TOTAL_IMAGE_BYTES = _env_positive_int("CLAUDE_P_BRIDGE_MAX_TOTAL_IMAGE_BYTES", DEFAULT_MAX_TOTAL_IMAGE_BYTES)  # fmt: skip
+MAX_IMAGE_BYTES = _env_positive_int("CLAUDE_P_BRIDGE_MAX_IMAGE_BYTES", DEFAULT_MAX_IMAGE_BYTES)
+MAX_TOTAL_IMAGE_BYTES = _env_positive_int("CLAUDE_P_BRIDGE_MAX_TOTAL_IMAGE_BYTES", DEFAULT_MAX_TOTAL_IMAGE_BYTES)
 IMAGE_TMP_ROOT = Path(os.environ.get("CLAUDE_P_BRIDGE_TMPDIR", "/tmp"))
-MODEL_CONTEXT = {
-    "claude-sonnet-5-5": 1_000_000,
-    "claude-opus-5-5": 1_000_000,
-    "claude-haiku-5-5": 200_000,
-}
+MODEL_CONTEXT = {"claude-sonnet-5-5": 1_000_000, "claude-opus-5-5": 1_000_000, "claude-haiku-5-5": 200_000}
 CONTEXT_LENGTH = 1_000_000  # fallback для неизвестных моделей
 TOOL_CALL_OPEN = "<tool_call>"
 TOOL_CALL_CLOSE = "</tool_call>"
@@ -384,11 +357,17 @@ def _cleanup_img_dir(img_dir: Path | None) -> None:
     shutil.rmtree(img_dir, ignore_errors=True)
 
 
-def _build_claude_cmd(model: str, effort: str, img_dir: Path | None = None) -> list:
-    """argv `claude -p`; Zero-Canon флаги из core, с картинками — Read по `--add-dir` (AD-003)."""
+def _build_claude_cmd(model: str, effort: str, img_dir: Path | None = None,
+                      session_plan: SessionPlan | None = None) -> list:
+    """argv `claude -p`; Zero-Canon флаги из core, с картинками — Read по `--add-dir` (AD-003).
+
+    Флаги сессии — `build_session_argv`; без плана -> `--no-session-persistence` (AD-004).
+    """
+    flags = filter(NO_PERSISTENCE_FLAG.__ne__, build_claude_zero_canon_flags(bool(img_dir)))
     cmd = [CLAUDE_BIN, "-p", "--model", model, "--effort", effort,
            "--output-format", "stream-json", "--verbose", "--include-partial-messages",
-           "--mcp-config", str(MCP_CONFIG), *build_claude_zero_canon_flags(img_dir is not None)]
+           "--mcp-config", str(MCP_CONFIG), *flags, *build_session_argv(session_plan)]
+    assert_zero_canon_argv_safe(cmd, zero_canon=not session_plan)  # fail-closed до spawn_registered
     if img_dir is None:  # встроенные инструменты отключены: действия только через DSH
         return cmd + ["--permission-mode", "bypassPermissions"]
     return cmd + ["--permission-mode", "dontAsk", "--allowedTools", f"Read({img_dir}/**)",
@@ -453,11 +432,11 @@ class Run:
     """Один процесс `claude -p`; поток-читатель превращает stdout в события очереди."""
 
     def __init__(self, prompt: str, model: str, effort: str, tag: str,
-                 img_dir: Path | None = None):
+                 img_dir: Path | None = None, **opts: Any):
         WORKSPACE.mkdir(parents=True, exist_ok=True)
         # С картинками Claude работает из сессионного каталога вложений: пути
         # в секции [attachments] относительные, Read ограничен этим каталогом.
-        cmd = _build_claude_cmd(model, effort, img_dir)
+        cmd = _build_claude_cmd(model, effort, img_dir, opts.get("session_plan"))
         self.cmd = cmd
         self.img_dir = img_dir
         _log(f"exec model={model} effort={effort} prompt_bytes={len(prompt.encode())} {tag}")
@@ -581,6 +560,8 @@ class _Turn(NamedTuple):
     images: list
     tools: list
     mode_spec: NormalizerModeSpec
+    chat_digest: str | None = None
+    session_plan: SessionPlan | None = None
 
 
 def _failed(state: str, err: str = "") -> dict:
@@ -766,20 +747,23 @@ class Handler(BaseHTTPRequestHandler):
 
     def _execute(self, run: Run, callbacks: _Callbacks,
                  mode_spec: NormalizerModeSpec, tools: list | None = None) -> dict:
-        """AD-002/004: reasoning (REASONING_TAGS + feed_thinking) всегда включён.
-
-        Теги инструментов fail-closed в EMULATE/FORBID/OFF+ERROR;
-        OFF+TEXT передаёт их байт-в-байт. False от callback означает уход клиента.
-        """
+        """AD-002/004: reasoning всегда включён; теги инструментов fail-closed (OFF+TEXT — байт-в-байт)."""
         return _Execution(run, callbacks, mode_spec, tools).execute(self.connection)
 
-    def _run_once(self, req: dict, callbacks: _Callbacks) -> dict:
+    def _prepare(self, req: dict, images: list) -> tuple[str, list, NormalizerModeSpec]:
+        """Prompt, tools и режим одним проходом (do_POST проверяет лимит до SSE/spawn)."""
         raw_tools = req.get("tools")
         tools = [t for t in raw_tools if isinstance(t, dict)] if isinstance(raw_tools, list) else []
-        tool_choice = req.get("tool_choice")
-        mode = resolve_tool_mode(tools, tool_choice)
-        policy = resolve_toolless_tag_policy(os.environ)
-        mode_spec = build_mode_spec(mode, policy)
+        spec = build_mode_spec(resolve_tool_mode(tools, req.get("tool_choice")), resolve_toolless_tag_policy(os.environ))
+        return _prompt_for(req, tools, images, spec), tools, spec
+
+    def _session_key(self, req: dict) -> str | None:
+        """Opt-in reuse (AD-004): только явный session-id и профиль standard/без профиля."""
+        extra = req.get("extra_body")
+        chat = resolve_chat_key(req, self.headers, extra if isinstance(extra, dict) else None, sources=SOURCES_SESSION_ID)
+        return chat.digest if (SessionConfig.from_env().enabled and is_session_reuse_allowed_profile(self.headers) and chat.keyed) else None
+
+    def _run_once(self, req: dict, callbacks: _Callbacks, chat: Any = None) -> dict:
         model, model_err = _resolve_model(req)
         if model_err is not None:
             return _failed("bad_model", model_err["message"])
@@ -787,22 +771,36 @@ class Handler(BaseHTTPRequestHandler):
             images = _extract_request_images(req)
         except ImageInputError as exc:
             return _failed("bad_image", exc.code)
-        prompt = _prompt_for(req, tools, images, mode_spec)
+        prompt, tools, mode_spec = self.__dict__.pop("_prep", None) or self._prepare(req, images)
         effort = _effort(req.get("reasoning_effort"), model)
         tag = (f"client={self.client_address[0]}:{self.client_address[1]} "
                f"ua={(self.headers.get('User-Agent') or '-')[:60]}")
-        _log(f"request model={model} effort={effort} {format_tool_mode_log(tools, tool_choice, mode_spec)} {tag}")
-        turn = _Turn(prompt, model, effort, tag, images, tools, mode_spec)
-        reason = self._acquire_slot(callbacks.keepalive)
+        _log(f"request model={model} effort={effort} {format_tool_mode_log(tools, req.get('tool_choice'), mode_spec)} {tag}")
+        turn = _Turn(prompt, model, effort, tag, images, tools, mode_spec, getattr(chat, "digest", None))
+        over = prepare_prompt_with_cap(prompt, PromptBudgetConfig.from_env()).exceeded  # страховка: 413 уже в do_POST
+        reason = "prompt_too_large" if over else self._acquire_slot(callbacks.keepalive)
         if reason:
             _log(f"no slot ({reason}) model={model} effort={effort} {tag}")
             return _failed(reason)
         t0 = time.monotonic()
         try:
-            out = self._run_staged(turn, callbacks)
+            out = self._run_session(turn, callbacks, self._session_key(req))
         finally:
             _slots.release()
         self._log_turn_done(turn, out, t0)
+        return out
+
+    def _run_session(self, turn: _Turn, callbacks: _Callbacks, key_digest: str | None) -> dict:
+        """Сериализованный per-key lock до CREATE/RESUME; RESUME-сбой до вывода -> stateless-повтор."""
+        if not key_digest:
+            return self._run_staged(turn, callbacks)
+        store = cast("Server", self.server).session_store
+        with store.lease(key_digest) as lease:
+            out = self._run_staged(turn._replace(session_plan=SessionPlan(lease.mode, lease.session_id)), callbacks)
+            if self._error_body(out):
+                store.invalidate(lease.key_digest, lease.session_id)
+                if lease.mode is SessionMode.RESUME and out["state"] == "done" and not any(map(out.get, ("text", "reasoning", "tool_calls"))):
+                    out = self._run_staged(turn, callbacks)
         return out
 
     def _run_staged(self, turn: _Turn, callbacks: _Callbacks) -> dict:
@@ -811,7 +809,8 @@ class Handler(BaseHTTPRequestHandler):
         try:
             try:
                 img_dir = _stage_images(turn.images)
-                run = Run(turn.prompt, turn.model, turn.effort, turn.tag, img_dir=img_dir)
+                kw = {"session_plan": turn.session_plan} if turn.session_plan else {}
+                run = Run(turn.prompt, turn.model, turn.effort, turn.tag, img_dir=img_dir, **kw)
                 can_cleanup = False
             except OSError as exc:
                 _log(f"image stage/spawn failed model={turn.model} err={exc!r:.200} {turn.tag}")
@@ -830,8 +829,8 @@ class Handler(BaseHTTPRequestHandler):
 
     @staticmethod
     def _log_turn_done(turn: _Turn, out: dict, t0: float) -> None:
-        cfg = load_admission_idle_config()
-        _log(format_claude_done_fields((turn.model, turn.effort, turn.tag), out, time.monotonic() - t0, cfg))  # fmt: skip
+        tag = f"{format_done_usage_suffix(out.get('usage'), getattr(turn, 'chat_digest', ''))} {turn.tag}"
+        _log(format_claude_done_fields((turn.model, turn.effort, tag), out, time.monotonic() - t0, load_admission_idle_config()))  # fmt: skip
 
     @staticmethod
     def _error_body(out: dict) -> Any:
@@ -878,11 +877,9 @@ class Handler(BaseHTTPRequestHandler):
             with _active_lock:
                 active = len(_active)
             self._send(200, {
-                "ok": True, "transport": "claude-p", "model": MODEL_ID,
-                "models": list(SUPPORTED_MODELS),
-                "active": active, "max_concurrent": MAX_CONCURRENT,
-                "tool_emulation": True, "images": True, "live_reasoning": True,
-                "uptime_s": int(time.time() - _started),
+                "ok": True, "transport": "claude-p", "model": MODEL_ID, "models": list(SUPPORTED_MODELS),
+                "active": active, "max_concurrent": MAX_CONCURRENT, "tool_emulation": True, "images": True,
+                "live_reasoning": True, "uptime_s": int(time.time() - _started),
             })
             return
         if not _auth_ok(self):
@@ -890,8 +887,8 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path in ("/v1/models", "/models"):
             self._send(200, {"object": "list", "data": [{
-                "id": model_id, "object": "model", "owned_by": "anthropic",
-                "created": 0, "context_length": MODEL_CONTEXT.get(model_id, CONTEXT_LENGTH),
+                "id": model_id, "object": "model", "owned_by": "anthropic", "created": 0,
+                "context_length": MODEL_CONTEXT.get(model_id, CONTEXT_LENGTH),
             } for model_id in SUPPORTED_MODELS]})
             return
         self._send(404, {"error": {"message": f"not found: {path}"}})
@@ -914,42 +911,44 @@ class Handler(BaseHTTPRequestHandler):
             return
         raw = self.rfile.read(length) if length else b"{}"
         try:
-            req = json.loads(raw.decode("utf-8") or "{}")
+            req = json.loads(raw.decode("utf-8"))
         except ValueError:
             self._send(400, {"error": {"message": "invalid json"}})
             return
         if path not in ("/v1/chat/completions", "/chat/completions"):
             self._send(404, {"error": {"message": f"not found: {path}"}})
             return
-        # Идентичность чата (x-dsh-chat-id / prompt_cache_key) — только для лога и
-        # корреляции; генерация от неё не зависит. Невалидный ключ — как без ключа (без 400).
-        body = req if isinstance(req, dict) else {}
-        extra_body = body.get("extra_body")
-        chat = resolve_chat_key(
-            body, self.headers, extra_body if isinstance(extra_body, dict) else None
-        )
+        self._dispatch(req)
+
+    def _dispatch(self, req: dict) -> None:
+        """Валидация до SSE-заголовков и spawn (модель, картинки, лимит prompt), затем ответ."""
+        # Идентичность чата — для лога/корреляции; невалидный ключ — как без ключа (без 400).
+        extra_body = req.get("extra_body")
+        chat = resolve_chat_key(req, self.headers, extra_body if isinstance(extra_body, dict) else None)
         if chat.keyed:
             _log(f"chat key={chat.digest[:16]} source={chat.source}")
-        # Невалидную модель отсекаем до SSE-заголовков, иначе 400 уже не отправить.
-        _model, model_err = _resolve_model(req)
-        if model_err is not None:
-            self._send(400, {"error": {"message": model_err["message"],
-                                       "type": model_err["type"]}})
+        model_err = _resolve_model(req)[1]
+        if model_err:
+            self._send(400, {"error": {"message": model_err["message"], "type": model_err["type"]}})
             return
-        # Невалидные изображения отсекаем там же, до спавна и SSE-заголовков.
         try:
-            _extract_request_images(req)
+            images = _extract_request_images(req)
         except ImageInputError as exc:
             self._send(400, {"error": {"message": f"invalid image input: {exc.code}",
                                        "type": "invalid_request_error"}})
             return
-        if req.get("stream"):
-            self._serve_sse(req)
+        prep = self._prepare(req, images)  # AD-006: лимит prompt -> 413 до SSE и spawn, без усечения
+        cap_err = prepare_prompt_with_cap(prep[0], PromptBudgetConfig.from_env()).error_body
+        self._prep = None if cap_err else prep
+        if cap_err:
+            self._send(413, cap_err)
+        elif req.get("stream"):
+            self._serve_sse(req, chat)
         else:
-            self._serve_json(req)
+            self._serve_json(req, chat)
 
-    def _serve_json(self, req: dict) -> None:
-        out = self._run_once(req, _Callbacks(lambda _v: True, lambda _v: True, lambda _e: True))
+    def _serve_json(self, req: dict, chat: Any = None) -> None:
+        out = self._run_once(req, _Callbacks(lambda _v: True, lambda _v: True, lambda _e: True), chat)
         if out.get("state") == "client_gone":
             return
         err = self._error_body(out)
@@ -972,7 +971,7 @@ class Handler(BaseHTTPRequestHandler):
             "usage": wire_usage,
         })
 
-    def _serve_sse(self, req: dict) -> None:
+    def _serve_sse(self, req: dict, chat: Any = None) -> None:
         completion_id = f"chatcmpl-claudep-{uuid.uuid4().hex[:12]}"
         created = int(time.time())
         shown_model = str(req.get("model") or MODEL_ID)
@@ -997,7 +996,7 @@ class Handler(BaseHTTPRequestHandler):
         )
         if not self._emit(chunk({"role": "assistant", "content": ""})):
             return
-        self._finish_sse(req, self._run_once(req, callbacks), chunk)
+        self._finish_sse(req, self._run_once(req, callbacks, chat), chunk)
 
     def _start_sse(self) -> bool:
         try:
@@ -1035,6 +1034,10 @@ class Server(ThreadingHTTPServer):
     daemon_threads = True
     request_queue_size = HTTP_BACKLOG
     allow_reuse_address = True
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.session_store = SessionStore(SessionConfig.from_env())  # владелец состояния reuse (AD-004)
 
 
 def main() -> None:

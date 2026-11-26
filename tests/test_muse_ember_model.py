@@ -13,6 +13,7 @@ import server
 from adapters import ADAPTER_KINDS
 from adapters.muse_adapter import MuseAdapter
 from adapters.muse_msp import MspEvents
+from core.effort_errors import EffortBelowFloorError
 from core.fleet_compiler import compile_from_disk
 from core.tool_emulation import StreamNormalizer
 
@@ -85,7 +86,8 @@ def test_effort_resolution_for_all_tiers() -> None:
     allowed, default = entry["efforts"], entry["default_effort"]
     for tier in TIERS:
         assert server.clamp_effort_downward(tier, allowed, default) == (tier, False)
-    assert server.clamp_effort_downward("off", allowed, default) == ("minimal", True)
+    with pytest.raises(EffortBelowFloorError):
+        server.clamp_effort_downward("off", allowed, default)
     assert server.clamp_effort_downward("ultra", allowed, default) == ("max", True)
     assert server.clamp_effort_downward("bogus", allowed, default) == ("high", True)
     assert server.clamp_effort_downward("", allowed, default) == ("high", True)

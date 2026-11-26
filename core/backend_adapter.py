@@ -30,6 +30,7 @@ from typing import (
 )
 from urllib.parse import unquote, urlsplit
 from core import backend_routing_models as _routing_models
+from core.backend_params import validate_backend_params
 from core.effort_policy import EFFORT_LEVELS as _RANKED_EFFORT_LEVELS
 from core.route_attempts import ALLOWED_FAILOVER_STATUSES
 from core.routing_contract import FleetViolation as FleetViolation
@@ -177,29 +178,11 @@ class BackendModel:
 # `fleet_check`: обе стороны обязаны принимать ровно одно множество каталогов.
 BACKEND_KEYS = frozenset(
     {
-        "kind",
-        "enabled",
-        "required",
-        "owned_by",
-        "max_concurrent",
-        "wrapper",
-        "technical_ref",
-        "proxy_port",
-        "idle_timeout_s",
-        "safety_cap_s",
-        "base_url",
-        "api_key_env",
-        "api_key",
-        "options",
-        "api_key_ref",
-        "headers_from_json",
-        "per_request_headers",
-        "default_body_extra",
-        "failover_statuses",
-        "failover_error_types",
-        "failover_message_markers",
-        "failover_pool",
-        "failover_pool_label",
+        "kind", "enabled", "required", "owned_by", "max_concurrent", "wrapper", "technical_ref",
+        "proxy_port", "idle_timeout_s", "safety_cap_s", "base_url", "api_key_env", "api_key",
+        "options", "api_key_ref", "headers_from_json", "per_request_headers", "default_body_extra",
+        "failover_statuses", "failover_error_types", "failover_message_markers", "failover_pool",
+        "failover_pool_label", "params",
     }
 )
 # Необязательные upstream-параметры raw-HTTP шва (только виды с `base_url`): откуда брать ключ и
@@ -406,6 +389,8 @@ def backend_entry_error(
         return "backend_invalid"
     if set(entry) - BACKEND_KEYS:
         return "backend_key_unknown"
+    if reason := validate_backend_params(entry.get("params")):
+        return reason
     kind = entry.get("kind")
     if not isinstance(kind, str) or kind not in kinds:
         return "backend_kind_unknown"

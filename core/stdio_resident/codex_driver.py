@@ -12,15 +12,28 @@ from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from typing import Any, ClassVar, Final, cast, override
 
+from core.stdio_resident.codex_cli_args import (  # noqa: F401  (приватные алиасы для обратной совместимости)
+    append_cli_args as _append_cli_args,
+    build_codex_argv as _build_codex_argv,
+    build_zero_canon_argv as _build_zero_canon_argv,
+    extract_cfg_arg as _extract_cfg_arg,
+    has_flag as _has_flag,
+    is_denied_cfg_key as _is_denied_cfg_key,
+    zero_canon_overrides as _zero_canon_overrides,
+)
 from core.stdio_resident.codex_protocol_fsm import (
     EffectKind, EventKind, ProtocolEffect, ProtocolEvent, ProtocolPhase, ProtocolState, transition,
+)
+from core.stdio_resident.codex_std_home import (
+    is_codex_std_clean_home_enabled,
+    is_codex_usage_frame_guard_enabled,
+    prepare_codex_std_home,
 )
 from core.stdio_resident.codex_usage import codex_v2_effects_to_chunk, extract_codex_legacy_usage
 from core.stdio_resident.protocol_driver import DecodedChunk, DriverCapabilities, StreamJsonDriver
 from core.subbridge_zero_canon import is_zero_canon_profile
 from core.zero_canon_fs import prepare_codex_zero_canon_home
 
-_DENIED_ZC_CFG = ("mcp_servers", "plugins", "notify", "hooks")
 _TERMINAL_STATUSES = frozenset({"completed", "failed", "interrupted"})
 
 
@@ -30,75 +43,6 @@ def _mapping(value: object) -> dict[str, Any] | None:
 
 def _encode_frame(payload: Mapping[str, object]) -> bytes:
     return (json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")
-
-
-def _has_flag(argv: list[str], flag: str) -> bool:
-    return any(item == flag or item.startswith(f"{flag}=") for item in argv)
-
-
-def _append_cli_args(argv: list[str], raw_args: object) -> None:
-    if not isinstance(raw_args, list | tuple):
-        return
-    for raw in raw_args:
-        arg = str(raw)
-        if arg and arg not in argv:
-            argv.append(arg)
-
-
-def _build_codex_argv(base_argv: list[str], options: Mapping[str, Any]) -> list[str]:
-    argv = list(base_argv) if "app-server" in base_argv else [*base_argv, "app-server"]
-    _append_cli_args(argv, options.get("cli_args"))
-    for name, value in options.items():
-        if not isinstance(name, str) or not name.startswith("--"):
-            continue
-        if value is None or value is False or _has_flag(argv, name):
-            continue
-        argv.append(name)
-        if value is not True:
-            argv.append(str(value))
-    return argv
-
-
-def _extract_cfg_arg(argv: list[str], idx: int) -> tuple[str | None, int]:
-    tok = argv[idx]
-    if tok in ("-c", "--config") and idx + 1 < len(argv):
-        return argv[idx + 1], 2
-    if tok.startswith(("-c=", "--config=")):
-        return tok.split("=", 1)[1], 1
-    return None, 1
-
-
-def _is_denied_cfg_key(key: str) -> bool:
-    return any(key == d or key.startswith(f"{d}.") for d in _DENIED_ZC_CFG)
-
-
-def _zero_canon_overrides(model: str, effort: str) -> dict[str, str]:
-    overrides = {"project_doc_max_bytes": "0"}
-    if model and model != "default":
-        overrides["model"] = json.dumps(model)
-    if effort and effort != "default":
-        overrides["model_reasoning_effort"] = json.dumps(effort)
-    return overrides
-
-
-def _build_zero_canon_argv(argv: list[str], model: str = "", effort: str = "") -> list[str]:
-    overrides = _zero_canon_overrides(model, effort)
-    cleaned, idx = [], 0
-    while idx < len(argv):
-        cfg_val, step = _extract_cfg_arg(argv, idx)
-        if cfg_val is not None:
-            key = cfg_val.split("=", 1)[0].strip()
-            if _is_denied_cfg_key(key):
-                raise ValueError(f"forbidden_codex_zero_canon_config:{key}")
-            if key in overrides:
-                idx += step
-                continue
-        cleaned.append(argv[idx])
-        idx += 1
-    res = cleaned if "app-server" in cleaned else [*cleaned, "app-server"]
-    for k, v in overrides.items():
-        res.extend(("-c", f"{k}={v}"))
-    return res
 
 
 def _read_stdout_frame(handle: Any, timeout_s: float) -> Any:
@@ -429,6 +373,12 @@ class CodexAppServerV2Driver(StreamJsonDriver):
     def build_argv(self, base_argv: list[str], options: Mapping[str, Any]) -> list[str]:
         return _build_codex_argv(base_argv, options)
 
+    @override
+    def build_env(self, base_env: Mapping[str, str], turn_sandbox: str | None = None) -> dict[str, str]:
+        if is_codex_std_clean_home_enabled(base_env):
+            return prepare_codex_std_home(base_env, turn_sandbox)
+        return dict(base_env)
+
     def build_zero_canon_env(self, base_env: Mapping[str, str], root: str) -> dict[str, str]:
         return prepare_codex_zero_canon_home(base_env, root)
 
@@ -520,7 +470,11 @@ class CodexAppServerV2Driver(StreamJsonDriver):
             if self._state.phase is not ProtocolPhase.IDLE
             else self._probe_effects(payload)
         )
-        return codex_v2_effects_to_chunk(effects, payload)
+        return codex_v2_effects_to_chunk(
+            effects, payload,
+            active_thread_id=self._state.thread_id, active_turn_id=self._state.turn_id,
+            guard_enabled=is_codex_usage_frame_guard_enabled(),
+        )
 
     @override
     def is_terminal(self, raw_line: str, decoded: DecodedChunk | None) -> bool:

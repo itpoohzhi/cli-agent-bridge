@@ -136,10 +136,10 @@ def _tool_choice_name(tool_choice: Any) -> str:
 
 
 def _tools_section(
-    tools: list, tool_choice: Any = None, has_attachments: bool = False
+    tools: list, tool_choice: Any = None, has_attachments: bool = False, sort_keys: bool = False
 ) -> str:
     """Английская секция протокола и схем инструментов для промпта."""
-    return _render_tools_section(tools, tool_choice, has_attachments)
+    return _render_tools_section(tools, tool_choice, has_attachments, sort_keys=sort_keys)
 
 
 def tools_protocol_section(
@@ -148,11 +148,12 @@ def tools_protocol_section(
     *,
     has_attachments: bool = False,
     attachment_tool: str = "Read",
+    sort_keys: bool = False,
 ) -> str:
     """Секция протокола `<tool_call>`; при `has_attachments` запрет исключает чтение вложений `attachment_tool`."""
     if not tools or _tool_choice_none(tool_choice):
         return ""
-    return _render_tools_section(tools, tool_choice, has_attachments, attachment_tool)
+    return _render_tools_section(tools, tool_choice, has_attachments, attachment_tool, sort_keys=sort_keys)
 
 
 def pure_text_protocol_instruction(
@@ -178,6 +179,7 @@ def _render_message(msg: Any, counter: list | None = None) -> str:
         counter if counter is not None else [0],
         escape_roles=cfg.enabled,
         prune_marker=cfg.prune_marker,
+        sort_keys=cfg.tools_sort_keys,
     )[1]
 
 
@@ -209,14 +211,10 @@ def _messages_to_prompt(
     tool_choice: Any = None,
     images: list | None = None,
 ) -> str:
-    """Собрать единый текстовый промпт; при наличии tools — с секцией протокола.
-
-    При наличии изображений в конец добавляется секция [attachments], а строка
-    протокола инструментов получает исключение для Read (C-09).
-    """
+    """Единый текстовый промпт; с tools — секция протокола, с images — [attachments] (C-09)."""
     cfg = PrefixStabilityConfig.from_env()
     t_sec = (
-        _tools_section(tools, tool_choice, bool(images))
+        _tools_section(tools, tool_choice, bool(images), cfg.tools_sort_keys)
         if tools and not _tool_choice_none(tool_choice)
         else ""
     )

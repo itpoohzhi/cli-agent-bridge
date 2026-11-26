@@ -10,6 +10,7 @@ from typing import Any, cast
 
 from core.backend_adapter import StreamSink, TurnContext
 from core.backend_routing_models import ImageAttachment, Transcript
+from core.native_turn_context import get_current_native_payload
 from core.resident_canonical import (
     DEFAULT_SAFE_FWD_ENV_KEYS,
     _fail_if,
@@ -28,7 +29,11 @@ from core.resident_identity import (
 )
 from core.resident_turn_envelope import ResidentTurnEnvelope
 from core.stdio_resident.runtime_types import ResourceLimitError
-from core.subbridge_zero_canon import normalize_review_profile
+from core.stdio_resident.codex_std_home import (
+    create_neutral_fallback_cwd,
+    is_codex_std_neutral_cwd_enabled,
+)
+from core.subbridge_zero_canon import is_zero_canon_profile, normalize_review_profile
 
 VENDOR_DENIED_ENV_PREFIXES = (
     "DROID_", "FACTORY_", "AWS_", "AZURE_", "CLOUDSDK_", "GRPC_",
@@ -170,6 +175,22 @@ def _resolve_identity_for_chat(data: Mapping[str, Any], secret: bytes, trust: Re
     return res
 
 
+def _principal_key(scope: object, principal_hash: object, subagent_id: object) -> str:
+    return f"{scope}|{principal_hash}|{subagent_id}"
+
+
+def _resolve_default_cwd(
+    adapter_id: str, raw_cwd: str, review_profile: str = "standard", principal_key: str = ""
+) -> str:
+    """Явный `cwd` — как есть; пустой — neutral каталог для Codex Standard (флаг on), иначе `os.getcwd()`."""
+    if raw_cwd:
+        return raw_cwd
+    is_codex = "codex" in str(adapter_id).lower()
+    if is_codex and not is_zero_canon_profile(review_profile) and is_codex_std_neutral_cwd_enabled():
+        return create_neutral_fallback_cwd(principal_key)
+    return os.getcwd()
+
+
 def build_resident_envelope_from_chat(
     adapter_id: str,
     data: Mapping[str, Any],
@@ -179,12 +200,18 @@ def build_resident_envelope_from_chat(
     validate_hmac_secret(secret)
     trust = _pick(trust_cfg, ResidentTrustConfig())
     raw_ctx = _pick(_as_mapping(data.get("turn_context")), {})
-    cwd = _text(data.get("cwd"), os.getcwd())
+    review_profile = normalize_review_profile(_text(data.get("review_profile"), ""))
+    identity = _resolve_identity_for_chat(data, secret, trust)
+    cwd = _resolve_default_cwd(
+        adapter_id,
+        _text(data.get("cwd"), ""),
+        review_profile,
+        _principal_key(identity.scope, identity.principal_hash, identity.subagent_id),
+    )
     raw_rpc = data.get("rpc", raw_ctx.get("rpc"))
     rpc = raw_rpc if isinstance(raw_rpc, Transcript) else Transcript()
     raw_prompt = _prompt(data)
     emulate, schemas, choice, images, child_env = _validated_tools_and_env(data, trust)
-    identity = _resolve_identity_for_chat(data, secret, trust)
     envelope = ResidentTurnEnvelope(
         identity=identity,
         backend_id=_text(adapter_id, ""),
@@ -211,7 +238,14 @@ def build_turn_request_from_ctx(adapter_id: str, ctx: TurnContext, profile: str)
         "backend_id": adapter_id,
         "model": ctx.model,
         "effort": ctx.effort,
-        "cwd": ctx.cwd if ctx.cwd else os.getcwd(),
+        "cwd": _resolve_default_cwd(
+            adapter_id,
+            ctx.cwd or "",
+            profile,
+            _principal_key(
+                getattr(ctx, "scope", ""), getattr(ctx, "principal_hash", ""), getattr(ctx, "subagent_id", "")
+            ),
+        ),
         "prompt": ctx.prompt,
         "env": ctx.fwd_env,
         "rpc": ctx.rpc,
@@ -220,6 +254,8 @@ def build_turn_request_from_ctx(adapter_id: str, ctx: TurnContext, profile: str)
         "emulate_tools": ctx.emulate_tools,
         "tool_choice": thaw_frozen_value(getattr(ctx, "tool_choice", None)),
         "conversation_id": ctx.conversation_id,
+        "prompt_cache_key": getattr(ctx, "cache_key", ""),
+        "native_payload": getattr(ctx, "native_payload", None) if getattr(ctx, "native_payload", None) else get_current_native_payload(),
         "force_ephemeral": ctx.conversation_ephemeral,
         "review_profile": profile,
         "turn_context": {"model": ctx.model, "effort": ctx.effort, "review_profile": profile, "rpc": ctx.rpc},

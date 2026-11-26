@@ -10,11 +10,19 @@ import sys
 from pathlib import Path
 from typing import cast
 
+import pytest
+
 _REPO_ROOT = str(Path(__file__).resolve().parents[1])
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
 import core.prompt_rendering as prompt_rendering  # noqa: E402
+from core.prompt_prefix_stability import (  # noqa: E402
+    PrefixStabilityConfig,
+    assemble_prompt_blocks,
+    compute_tools_budget_overhead,
+)
+from core.tool_emulation import _messages_to_prompt  # noqa: E402
 from core.prompt_rendering import (  # noqa: E402
     _render_assistant,
     _render_message,
@@ -195,3 +203,60 @@ def test_prompt_rendering_is_pure_domain_no_os_or_environ() -> None:
         elif isinstance(node, ast.Attribute):
             assert node.attr != "environ"
     assert "os" not in vars(prompt_rendering)
+
+
+_SORT_ENV = "BRIDGE_PROMPT_TOOLS_SORT_KEYS"
+_HISTORY: list[object] = [{"role": "user", "content": "hi"}]
+
+
+def _tools_digest_set(monkeypatch: pytest.MonkeyPatch, value: str | None, shuffles: int = 20) -> set[str]:
+    if value is None:
+        monkeypatch.delenv(_SORT_ENV, raising=False)
+    else:
+        monkeypatch.setenv(_SORT_ENV, value)
+    rng = random.Random(7)
+    tools = _sample_tools()
+    digests: set[str] = set()
+    for _ in range(shuffles):
+        shuffled = [_shuffle_dict_keys(tool, rng) for tool in tools]
+        rng.shuffle(shuffled)
+        digests.add(_sha256(_messages_to_prompt(list(_HISTORY), cast(list[object], shuffled), "auto")))
+    return digests
+
+
+def test_tools_sort_keys_default_off_preserves_input_order(monkeypatch: pytest.MonkeyPatch) -> None:
+    assert PrefixStabilityConfig.from_env({}).tools_sort_keys is False
+    monkeypatch.delenv(_SORT_ENV, raising=False)
+    tools: list[object] = [
+        {"name": "zeta", "parameters": {"z": 1, "a": 2}},
+        {"name": "alpha", "parameters": {"b": 1, "a": 2}},
+    ]
+    prompt = _messages_to_prompt(list(_HISTORY), tools, "auto")
+    assert prompt.index("- zeta:") < prompt.index("- alpha:")
+    assert '{"z": 1, "a": 2}' in prompt and '{"b": 1, "a": 2}' in prompt
+    assert len(_tools_digest_set(monkeypatch, None)) > 1
+    assert len(_tools_digest_set(monkeypatch, "0")) > 1
+
+
+def test_tools_sort_keys_env_canonicalizes_messages_to_prompt(monkeypatch: pytest.MonkeyPatch) -> None:
+    assert len(_tools_digest_set(monkeypatch, "1")) == 1
+    tools: list[object] = [{"name": "zeta", "parameters": {"z": 1, "a": 2}}, {"name": "alpha", "parameters": {}}]
+    prompt = _messages_to_prompt(list(_HISTORY), tools, "auto")
+    assert prompt.index("- alpha:") < prompt.index("- zeta:") and '{"a": 2, "z": 1}' in prompt
+
+
+def test_tools_sort_keys_config_canonicalizes_assemble_and_budget() -> None:
+    cfg_on = PrefixStabilityConfig.from_env({_SORT_ENV: "1"})
+    cfg_off = PrefixStabilityConfig.from_env({_SORT_ENV: "0"})
+    assert cfg_on.tools_sort_keys is True and cfg_off.tools_sort_keys is False
+    rng = random.Random(11)
+    base = _sample_tools()
+    outputs: set[str] = set()
+    for _ in range(10):
+        shuffled = cast(list[object], [_shuffle_dict_keys(tool, rng) for tool in base])
+        rng.shuffle(shuffled)
+        outputs.add(assemble_prompt_blocks(_HISTORY, shuffled, "auto", config=cfg_on))
+    assert len(outputs) == 1
+    expected = _render_tools_section(base, "auto", False, sort_keys=True)
+    assert expected in outputs.pop()
+    assert compute_tools_budget_overhead(base, "auto", config=cfg_on) == len(expected.encode("utf-8")) + 2

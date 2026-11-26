@@ -369,30 +369,11 @@
         "max_concurrent": 64
       },
       "models": {
-        "claude-sonnet-5-5": {
-          "backend": "claude-p",
-          "name": "Claude Sonnet 5.5 (Claude-p bridge)",
-          "efforts": [
-            "high"
-          ]
-        },
         "gemini-3.8-flash": {
           "backend": "agy",
           "name": "Gemini 3.8 Flash (AGY bridge)"
-        },
-        "claude-opus-5-5": {
-          "efforts": [
-            "high"
-          ]
-        },
-        "claude-haiku-5-5": {
-          "efforts": [
-            "high"
-          ],
-          "default_effort": "high"
         }
-      },
-      "aliases": {}
+      }
     }
   },
   "image_limits": {
@@ -444,7 +425,23 @@
         "insufficient"
       ],
       "failover_pool": "neuralwatt",
-      "failover_pool_label": "NeuralWatt"
+      "failover_pool_label": "NeuralWatt",
+      "params": {
+        "effort_field": "reasoning_effort",
+        "effort_map": {
+          "off": {
+            "reasoning_effort": "none"
+          }
+        },
+        "adaptive_whitelist": [
+          "reasoning_effort",
+          "temperature",
+          "top_p"
+        ],
+        "strip_always": [
+          "thinking"
+        ]
+      }
     },
     "agy": {
       "kind": "passthrough",
@@ -452,21 +449,57 @@
       "owned_by": "agy-bridge",
       "max_concurrent": 128,
       "base_url": "http://127.0.0.1:9887/v1",
-      "api_key_env": "AGY_BRIDGE_KEY"
+      "api_key_env": "AGY_BRIDGE_KEY",
+      "params": {
+        "effort_field": "reasoning_effort",
+        "effort_map": {},
+        "adaptive_whitelist": [
+          "reasoning_effort",
+          "thinking",
+          "temperature",
+          "top_p",
+          "max_tokens",
+          "max_completion_tokens",
+          "tools",
+          "tool_choice"
+        ],
+        "strip_always": []
+      }
     },
     "claude-p": {
       "kind": "stdio_resident",
       "enabled": true,
       "owned_by": "claude-p-bridge",
       "max_concurrent": 10,
-      "wrapper": "claude --print --input-format stream-json --output-format stream-json --verbose"
+      "wrapper": "claude --print --input-format stream-json --output-format stream-json --verbose",
+      "params": {
+        "effort_field": "none",
+        "effort_map": {},
+        "adaptive_whitelist": [
+          "thinking",
+          "temperature",
+          "top_p"
+        ],
+        "strip_always": []
+      }
     },
     "codex": {
       "kind": "stdio_resident",
       "enabled": true,
       "owned_by": "openai-codex",
       "max_concurrent": 10,
-      "wrapper": "codex app-server"
+      "wrapper": "codex app-server",
+      "params": {
+        "effort_field": "reasoning_effort",
+        "effort_map": {},
+        "adaptive_whitelist": [
+          "reasoning_effort",
+          "thinking",
+          "temperature",
+          "top_p"
+        ],
+        "strip_always": []
+      }
     },
     "muse": {
       "kind": "stdio_resident",
@@ -479,7 +512,15 @@
         "binary_sha256": "ffb95b823e2a71f49ce98f9ddcb7cd7c731b77615aae9f5f253819c69453079f",
         "binary_path": "~/.local/bin/muse"
       },
-      "proxy_port": 10820
+      "proxy_port": 10820,
+      "params": {
+        "effort_field": "reasoning_effort",
+        "effort_map": {},
+        "adaptive_whitelist": [
+          "reasoning_effort"
+        ],
+        "strip_always": []
+      }
     },
     "opencode-go": {
       "kind": "passthrough",
@@ -520,6 +561,20 @@
       },
       "per_request_headers": {
         "x-opencode-session": "{session_affinity}"
+      },
+      "params": {
+        "effort_field": "none",
+        "effort_map": {
+          "off": {
+            "thinking": {
+              "type": "disabled"
+            }
+          }
+        },
+        "adaptive_whitelist": [
+          "thinking"
+        ],
+        "strip_always": []
       }
     },
     "opencode-go-sub1": {
@@ -561,6 +616,20 @@
       },
       "per_request_headers": {
         "x-opencode-session": "{session_affinity}"
+      },
+      "params": {
+        "effort_field": "none",
+        "effort_map": {
+          "off": {
+            "thinking": {
+              "type": "disabled"
+            }
+          }
+        },
+        "adaptive_whitelist": [
+          "thinking"
+        ],
+        "strip_always": []
       }
     },
     "opencode-go-sub2": {
@@ -602,6 +671,20 @@
       },
       "per_request_headers": {
         "x-opencode-session": "{session_affinity}"
+      },
+      "params": {
+        "effort_field": "none",
+        "effort_map": {
+          "off": {
+            "thinking": {
+              "type": "disabled"
+            }
+          }
+        },
+        "adaptive_whitelist": [
+          "thinking"
+        ],
+        "strip_always": []
       }
     },
     "neuralwatt-flex": {
@@ -610,7 +693,23 @@
       "owned_by": "neuralwatt-flex",
       "max_concurrent": 8,
       "base_url": "http://127.0.0.1:10830/neuralwatt/v1",
-      "api_key_env": "NEURALWATT_API_KEY"
+      "api_key_env": "NEURALWATT_API_KEY",
+      "params": {
+        "effort_field": "reasoning_effort",
+        "effort_map": {
+          "off": {
+            "reasoning_effort": "none"
+          }
+        },
+        "adaptive_whitelist": [
+          "reasoning_effort",
+          "temperature",
+          "top_p"
+        ],
+        "strip_always": [
+          "thinking"
+        ]
+      }
     },
     "opencode-go-claude": {
       "kind": "passthrough",
@@ -633,6 +732,16 @@
       },
       "per_request_headers": {
         "x-opencode-session": "{session_affinity}"
+      },
+      "params": {
+        "effort_field": "reasoning_effort",
+        "effort_map": {},
+        "adaptive_whitelist": [
+          "reasoning_effort"
+        ],
+        "strip_always": [
+          "thinking"
+        ]
       }
     },
     "deepseek-direct": {
@@ -641,7 +750,21 @@
       "owned_by": "deepseek",
       "max_concurrent": 1,
       "base_url": "http://127.0.0.1:10830/sg-deepseek",
-      "api_key_env": "DEEPSEEK_API_KEY"
+      "api_key_env": "DEEPSEEK_API_KEY",
+      "params": {
+        "effort_field": "none",
+        "effort_map": {
+          "off": {
+            "thinking": {
+              "type": "disabled"
+            }
+          }
+        },
+        "adaptive_whitelist": [
+          "thinking"
+        ],
+        "strip_always": []
+      }
     },
     "openai-key-2": {
       "kind": "passthrough",
@@ -649,7 +772,23 @@
       "owned_by": "openai-direct",
       "max_concurrent": 1,
       "base_url": "http://127.0.0.1:10830/sg-openai",
-      "api_key_env": "OPENAI_API_KEY_2"
+      "api_key_env": "OPENAI_API_KEY_2",
+      "params": {
+        "effort_field": "reasoning_effort",
+        "effort_map": {
+          "off": {
+            "reasoning_effort": "none"
+          }
+        },
+        "adaptive_whitelist": [
+          "reasoning_effort",
+          "temperature",
+          "top_p"
+        ],
+        "strip_always": [
+          "thinking"
+        ]
+      }
     },
     "openai-key-3": {
       "kind": "passthrough",
@@ -657,7 +796,23 @@
       "owned_by": "openai-direct",
       "max_concurrent": 1,
       "base_url": "http://127.0.0.1:10830/sg-openai",
-      "api_key_env": "OPENAI_API_KEY_3"
+      "api_key_env": "OPENAI_API_KEY_3",
+      "params": {
+        "effort_field": "reasoning_effort",
+        "effort_map": {
+          "off": {
+            "reasoning_effort": "none"
+          }
+        },
+        "adaptive_whitelist": [
+          "reasoning_effort",
+          "temperature",
+          "top_p"
+        ],
+        "strip_always": [
+          "thinking"
+        ]
+      }
     },
     "droid": {
       "kind": "droid",
@@ -671,7 +826,18 @@
       "owned_by": "opencode-zen-bridge",
       "max_concurrent": 128,
       "base_url": "http://127.0.0.1:9883/v1",
-      "api_key_env": "OPENCODE_ZEN_BRIDGE_KEY"
+      "api_key_env": "OPENCODE_ZEN_BRIDGE_KEY",
+      "params": {
+        "effort_field": "reasoning_effort",
+        "effort_map": {},
+        "adaptive_whitelist": [
+          "reasoning_effort",
+          "thinking",
+          "temperature",
+          "top_p"
+        ],
+        "strip_always": []
+      }
     },
     "agy-passthrough": {
       "kind": "passthrough",
@@ -679,7 +845,22 @@
       "owned_by": "agy-bridge",
       "max_concurrent": 128,
       "base_url": "http://127.0.0.1:9887/v1",
-      "api_key_env": "AGY_BRIDGE_KEY"
+      "api_key_env": "AGY_BRIDGE_KEY",
+      "params": {
+        "effort_field": "reasoning_effort",
+        "effort_map": {},
+        "adaptive_whitelist": [
+          "reasoning_effort",
+          "thinking",
+          "temperature",
+          "top_p",
+          "max_tokens",
+          "max_completion_tokens",
+          "tools",
+          "tool_choice"
+        ],
+        "strip_always": []
+      }
     }
   },
   "models": [

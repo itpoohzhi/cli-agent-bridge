@@ -22,6 +22,7 @@ __all__ = [
 ]
 
 _FLAG_NAME = "BRIDGE_STABLE_PROMPT_PREFIX_ENABLED"
+_SORT_FLAG_NAME = "BRIDGE_PROMPT_TOOLS_SORT_KEYS"
 _TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
 _FALSE_VALUES = frozenset({"0", "false", "no", "off"})
 _DEFAULT_PRUNE_MARKER = "[context pruned]"
@@ -39,16 +40,15 @@ class PrefixStabilityConfig:
     enabled: bool = True
     prune_marker: str = _DEFAULT_PRUNE_MARKER
     hysteresis_ratio: float = _DEFAULT_HYSTERESIS_RATIO
+    tools_sort_keys: bool = False
 
     @classmethod
     def from_env(cls, environ: _Environment | None = None) -> PrefixStabilityConfig:
         source = os.environ if environ is None else environ
         raw = str(source.get(_FLAG_NAME, "")).strip().lower()
-        if raw in _TRUE_VALUES:
-            return cls(enabled=True)
-        if raw in _FALSE_VALUES:
-            return cls(enabled=False)
-        return cls()
+        sort_keys = str(source.get(_SORT_FLAG_NAME, "")).strip().lower() in _TRUE_VALUES
+        enabled = raw not in _FALSE_VALUES
+        return cls(enabled=enabled, tools_sort_keys=sort_keys)
 
 
 def compute_tools_budget_overhead(
@@ -84,7 +84,8 @@ def _budget_section(
         return ""
     images = options.get("images")
     sequence = cast("list[object] | tuple[object, ...]", source)
-    return _render_tools_section(sequence, tool_choice, bool(has_attachments or images))
+    sort_keys = _assembly_config(options)[0].tools_sort_keys
+    return _render_tools_section(sequence, tool_choice, bool(has_attachments or images), sort_keys=sort_keys)
 
 
 def assemble_prompt_blocks(
@@ -96,7 +97,7 @@ def assemble_prompt_blocks(
 ) -> str:
     """Собирает стабильный префикс ``[System + Tools + History]`` за один проход."""
     config, stable = _assembly_config(options)
-    tools_section = _assembly_tools(tools, tool_choice, images, options)
+    tools_section = _assembly_tools(tools, tool_choice, images, options, config.tools_sort_keys)
     text = _assemble_message_blocks(messages, tools_section, config, stable)
     return _append_attachments(text, images)
 
@@ -119,6 +120,7 @@ def _assembly_tools(
     tool_choice: object,
     images: list[dict[str, object]] | tuple[dict[str, object], ...] | None,
     options: dict[str, object],
+    sort_keys: bool = False,
 ) -> str:
     is_none, _, _ = _tool_choice_info(tool_choice)
     if is_none:
@@ -126,7 +128,7 @@ def _assembly_tools(
     section = options.get("tools_section")
     if isinstance(section, str):
         return section
-    return _render_tools_section(tools or (), tool_choice, bool(images))
+    return _render_tools_section(tools or (), tool_choice, bool(images), sort_keys=sort_keys)
 
 
 def _assemble_message_blocks(
@@ -143,6 +145,7 @@ def _assemble_message_blocks(
             counter,
             escape_roles=True,
             prune_marker=config.prune_marker,
+            sort_keys=config.tools_sort_keys,
         )
         if block:
             target = system_blocks if in_system_prefix and is_system else history_blocks
