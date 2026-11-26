@@ -8,13 +8,14 @@ from pathlib import Path
 from typing import Any, Final, TypeVar, cast
 from urllib.parse import ParseResult, unquote, urlparse
 
-from core.codex_zero_canon_policy import CODEX_EFFORT_MATRIX
+from core.codex_zero_canon_policy import CODEX_DEFAULT_EFFORTS, CODEX_EFFORT_MATRIX
 from core.subbridge_zero_canon import (
     EXTERNAL_TRUST_PROFILE,
     REVIEW_PROFILE_HEADER,
     STANDARD_PROFILE,
     should_forward_review_profile,
 )
+from core.zc_admission import ZeroCanonAdmissionError, decide_ingress
 from core.zero_canon_attestation_http import (
     KIND_EPHEMERAL as KIND_EPHEMERAL,
 )
@@ -158,6 +159,10 @@ def _is_codex_meta(meta: _ProviderMeta) -> bool:
     return meta.backend in _CODEX_IDS or meta.route_id in _CODEX_IDS
 
 
+def _is_codex_model_id(model_id: str | None) -> bool:
+    return isinstance(model_id, str) and model_id.strip().lower() in CODEX_EFFORT_MATRIX
+
+
 def _is_stateless_georouter_url(parsed: ParseResult, decoded: str, port: int | None) -> bool:
     """Exact allowlist of stateless georouter gateways on :10830 (DashScope SG / neuralwatt / go)."""
     if parsed.scheme != "http" or port != _GEOROUTER_PORT:
@@ -219,18 +224,35 @@ def filter_zero_canon_providers(
     codex_v2_enabled: bool | None = None,
     provider_configs: Mapping[str, Mapping[str, Any]] | None = None,
     model_id: str | None = None,
+    reasoning_effort: str | None = None,
 ) -> list[_T]:
     """Filter routes/providers for strict Zero-Canon; fail closed with 503 for Codex when V2 is off."""
     if parse_strict_review_profile(review_profile) != ZERO_CANON_HEADER_VALUE:
         return list(providers)
     v2_on = is_codex_app_server_v2_enabled() if codex_v2_enabled is None else bool(codex_v2_enabled)
     kept: list[_T] = []
-    saw_codex = bool(model_id and model_id.strip().lower() in CODEX_EFFORT_MATRIX)
+    saw_codex = _is_codex_model_id(model_id)
     for item in providers:
         meta = _provider_meta(item, provider_configs)
-        saw_codex = saw_codex or _is_codex_meta(meta)
+        saw_codex |= _is_codex_meta(meta)
         if _is_provider_allowed(meta, v2_on):
             kept.append(item)
     if not kept and saw_codex and not v2_on:
         raise ZeroCanonHttpError("zero_canon_unsupported_by_driver", "Codex Zero-Canon requires V2 enabled", http_status=503)
+    _validate_codex_ingress(kept, provider_configs, model_id, reasoning_effort)
     return kept
+
+
+def _validate_codex_ingress(
+    kept: Sequence[object],
+    provider_configs: Mapping[str, Mapping[str, Any]] | None,
+    model_id: str | None,
+    reasoning_effort: str | None,
+) -> None:
+    """Fail closed with HTTP 400 when a Codex-routed model/effort is unsupported."""
+    mid = model_id.strip() if isinstance(model_id, str) else ""
+    if kept and mid and all(_is_codex_meta(_provider_meta(it, provider_configs)) for it in kept):
+        try:
+            decide_ingress(mid, reasoning_effort, CODEX_EFFORT_MATRIX, CODEX_DEFAULT_EFFORTS)
+        except ZeroCanonAdmissionError as exc:
+            raise ZeroCanonHttpError(exc.code, str(exc), http_status=exc.http_status) from exc
