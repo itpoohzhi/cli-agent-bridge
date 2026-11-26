@@ -6,7 +6,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final, TypeVar, cast
-from urllib.parse import unquote, urlparse
+from urllib.parse import ParseResult, unquote, urlparse
 
 from core.codex_zero_canon_policy import CODEX_EFFORT_MATRIX
 from core.subbridge_zero_canon import (
@@ -59,6 +59,7 @@ _LEGACY_CONTRACTS: Final[tuple[str, ...]] = (
 _LOOPBACK_HOSTS: Final[frozenset[str]] = frozenset({"127.0.0.1", "localhost", "::1"})
 _GEOROUTER_PORT: Final[int] = 10830
 _STATELESS_GEOROUTER_SEGMENTS: Final[frozenset[str]] = frozenset({"neuralwatt", "go"})
+_SG_QWEN_PATHS: Final[frozenset[str]] = frozenset(("/sg-qwen", "/sg-qwen/", "/sg-qwen/v1"))
 _T = TypeVar("_T")
 
 
@@ -157,6 +158,23 @@ def _is_codex_meta(meta: _ProviderMeta) -> bool:
     return meta.backend in _CODEX_IDS or meta.route_id in _CODEX_IDS
 
 
+def _is_stateless_georouter_url(parsed: ParseResult, decoded: str, port: int | None) -> bool:
+    """Exact allowlist of stateless georouter gateways on :10830 (DashScope SG / neuralwatt / go)."""
+    if parsed.scheme != "http" or port != _GEOROUTER_PORT:
+        return False
+    if parsed.params or parsed.query or parsed.fragment:
+        return False
+    if parsed.path in _SG_QWEN_PATHS:
+        return True
+    if "/sg-" in decoded.lower():
+        return False
+    segments = (*decoded.split("/"), *parsed.path.split("/"))
+    if any(seg in (".", "..") for seg in segments):
+        return False
+    first_seg = parsed.path.strip().strip("/").split("/", 1)[0].lower()
+    return first_seg in _STATELESS_GEOROUTER_SEGMENTS
+
+
 def _url_allowed(url: str, trust_profile: str) -> bool:
     if trust_profile == EXTERNAL_TRUST_PROFILE:
         return False
@@ -170,15 +188,12 @@ def _url_allowed(url: str, trust_profile: str) -> bool:
     if parsed.hostname not in _LOOPBACK_HOSTS or parsed.username is not None or parsed.password is not None:
         return False
     decoded = unquote(parsed.path)
-    if "/sg-" in decoded.lower() or port == 2455:
+    if port == 2455:
         return False
-    first_seg = parsed.path.strip().strip("/").split("/", 1)[0].lower()
-    if (
-        parsed.scheme == "http" and port == _GEOROUTER_PORT and first_seg in _STATELESS_GEOROUTER_SEGMENTS
-        and not parsed.query and not parsed.fragment
-        and all(seg not in (".", "..") for seg in decoded.split("/"))
-    ):
+    if _is_stateless_georouter_url(parsed, decoded, port):
         return True
+    if "/sg-" in decoded.lower():
+        return False
     return should_forward_review_profile(parsed.path, trust_profile)
 
 
