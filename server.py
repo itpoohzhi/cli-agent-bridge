@@ -131,8 +131,10 @@ from core.prompt_prefix_stability import (  # noqa: E402
 from core.log_redaction import (  # noqa: E402
     mask_credential_context,
     mask_long_tokens,
+    redact_log_text,
     safe_log_tokens,
 )
+from core.log_rotation_adapters import emit_service_log as _emit_rotated_log  # noqa: E402
 from core.runtime_build_info import RuntimeBuildInfo  # noqa: E402
 from core.tool_emulation import (  # noqa: E402,F401  - общая эмуляция tools (MB-REQ-007), реэкспорт имён
     TOOL_CALL_CLOSE,
@@ -303,12 +305,7 @@ def _bridge_env(name: str, default: str = "") -> str:
 
 
 def _log(msg: str) -> None:
-    """Диагностика в stderr (файлы вне каталога моста не создаём)."""
-    try:
-        sys.stderr.write(f"{time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())} {msg}\n")
-        sys.stderr.flush()
-    except OSError:
-        pass
+    _emit_rotated_log("hub", f"{time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())} {msg}", ROOT, redact_fn=redact_log_text)
 
 
 HOST = _bridge_env("HOST", "127.0.0.1")

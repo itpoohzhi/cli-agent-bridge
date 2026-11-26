@@ -81,6 +81,7 @@ for _p in (str(_BRIDGE_DIR), str(_REPO_ROOT)):
 
 import zen_catalog as zc  # noqa: E402
 from core.chat_key import resolve_chat_key  # noqa: E402
+from core.log_rotation_adapters import emit_service_log as _emit_rotated_log  # noqa: E402
 from core.proc_groups import live_proc_groups  # noqa: E402
 from zen_bridge.adapters.zero_canon_runtime import apply_serve_zero_canon_env, apply_zero_canon_env, spawn_registered, zero_canon_scope  # noqa: E402
 from core.runtime_env import synthesize_required_bash_desc_enabled  # noqa: E402
@@ -2174,15 +2175,7 @@ _active_lock = threading.Lock()
 _LOG_LOCK = threading.Lock()
 
 def _log(msg: str) -> None:
-    line = f"{time.strftime('%Y-%m-%d %H:%M:%S')} {_mask_secrets(msg)}"
-    sys.stderr.write(line + "\n")
-    sys.stderr.flush()
-    try:
-        LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
-        with _LOG_LOCK, LOG_PATH.open("a", encoding="utf-8") as fh:
-            fh.write(line + "\n")
-    except OSError:
-        pass
+    _emit_rotated_log("zen", f"{time.strftime('%Y-%m-%d %H:%M:%S')} {_mask_secrets(msg)}", _ZEN_ROOT, legacy_target=(LOG_PATH, _LOG_LOCK))
 
 
 _LIFECYCLE = SubbridgeLifecycle(hooks=SubbridgeHooks(procs_fn=live_proc_groups, active_procs_fn=lambda: max(len(_active), len(live_proc_groups())), log_fn=_log), workspace=WORKSPACE)

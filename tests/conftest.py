@@ -232,31 +232,26 @@ def isolated_gateway_policy(
 
     srv = sys.modules.get("server")
     if srv is not None:
-        monkeypatch.setattr(
-            srv, "_PENALTY_TRACKER", ModelPenaltyTracker(tmp_path / "penalties.json")
-        )
-        monkeypatch.setattr(
-            srv,
-            "_QUOTA_CB_CACHE",
-            srv.QuotaCircuitBreakerCache(tmp_path / "quota.json"),
-        )
-        monkeypatch.setattr(
-            srv, "_MODEL_NOTES_FILTER", srv.ModelNotesFilter(tmp_path / "notes.md")
-        )
+        monkeypatch.setattr(srv, "_PENALTY_TRACKER", ModelPenaltyTracker(tmp_path / "penalties.json"))
+        monkeypatch.setattr(srv, "_QUOTA_CB_CACHE", srv.QuotaCircuitBreakerCache(tmp_path / "quota.json"))
+        monkeypatch.setattr(srv, "_MODEL_NOTES_FILTER", srv.ModelNotesFilter(tmp_path / "notes.md"))
     monkeypatch.setenv("BRIDGE_DYNAMIC_CONFIG_PATH", str(tmp_path / "dynamic.json"))
+    monkeypatch.setenv("CLAUDE_P_BRIDGE_DYNAMIC_CONFIG_PATH", str(tmp_path / "claude_p_dynamic.json"))
     yield
 
 
 @pytest.fixture(autouse=True)
 def _fresh_config_snapshots(
-    monkeypatch: pytest.MonkeyPatch,
+    guarded_monkeypatch: None, monkeypatch: pytest.MonkeyPatch
 ) -> Generator[None, None, None]:
-    """Снимки динамического конфига: пустой кэш и TTL=0 — тест меняет файл и сразу видит значение."""
-    from core import runtime_env
+    """Снимки динамического конфига и ротаторы P1.3: пустой кэш и закрытые FD до и после теста."""
+    from core import log_rotation_adapters, runtime_env
 
     runtime_env._SNAPSHOTS.clear()
+    log_rotation_adapters.reset_for_tests()
     monkeypatch.setattr(runtime_env, "_SNAP_TTL_S", 0.0)
     yield
+    log_rotation_adapters.reset_for_tests()
     runtime_env._SNAPSHOTS.clear()
 
 
