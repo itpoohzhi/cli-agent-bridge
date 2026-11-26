@@ -31,7 +31,7 @@ PERR, HERR = pol.CodexZeroCanonPolicyError, zhttp.ZeroCanonHttpError
 
 
 def test_effort_matrix_immutable_and_rejects_unsupported_without_clamp() -> None:
-    """ADR-001 Policy: immutable Sol/Terra effort matrix, no clamp, no 6.2 alias."""
+    """ADR-001 Policy: immutable Sol/Terra effort matrix, no clamp, unknown model rejected."""
     assert pol.CODEX_EFFORT_MATRIX[SOL] == ("low", "medium", "high", "xhigh", "max")
     assert pol.CODEX_EFFORT_MATRIX[TERRA] == ("low", "medium", "high")
     with pytest.raises(TypeError, match="item assignment"):
@@ -46,7 +46,7 @@ def test_effort_matrix_immutable_and_rejects_unsupported_without_clamp() -> None
         (TERRA, "xhigh", "unsupported_model_effort"),
         (TERRA, "max", "unsupported_model_effort"),
         (SOL, "ultra", "unsupported_model_effort"),
-        ("gpt-6.2-sol", "high", "unsupported_model"),
+        ("gpt-6.9-sol", "high", "unsupported_model"),
     )
     for model, effort, code in bad_pairs:
         with pytest.raises(PERR, match="Unsupported") as exc:
