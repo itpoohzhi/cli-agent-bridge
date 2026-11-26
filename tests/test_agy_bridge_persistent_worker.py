@@ -23,7 +23,7 @@ if str(AGY_BRIDGE_DIR) not in sys.path:
 
 from agy_runtime.persistent_run_hooks import (  # noqa: E402
     RunSpawnContext,
-    persistent_health_fields,
+    resolve_run_chat_key,
     start_run_process,
 )
 from agy_runtime.persistent_worker_adapter import (  # noqa: E402
@@ -235,7 +235,7 @@ class TestAgyPersistentWorkerPool(unittest.TestCase):
         return lease.handle.pid, int(res.get("num_turns", 0)), cid or resp
 
     def test_multi_turn_same_pid_and_cid_lookup(self) -> None:
-        lease1 = self._acquire(chat_key="", cid="")
+        lease1 = self._acquire(chat_key="hermes-session-1", cid="")
         assert lease1 is not None
         self.assertFalse(lease1.reused)
         pid1, t1, cid = self._run_turn_on_lease(lease1, "hello-1")
@@ -256,6 +256,13 @@ class TestAgyPersistentWorkerPool(unittest.TestCase):
         self.assertEqual(snap["hits"], 1)
         self.assertEqual(snap["misses"], 1)
         self.assertEqual(snap["slots"], 1)
+
+    def test_stateless_empty_chat_key_and_cid_returns_none_no_slot_pollution(self) -> None:
+        lease = self._acquire(chat_key="", cid="")
+        self.assertIsNone(lease)
+        snap = self.pool.health_snapshot(enabled=True)
+        self.assertEqual(snap["slots"], 0)
+        self.assertEqual(snap["misses"], 0)
 
     def test_max_turns_rotation_tears_down_worker(self) -> None:
         # cfg.max_turns = 3 -> turn 3 triggers rotation (teardown after release)
@@ -552,32 +559,80 @@ class TestRunPersistentIntegration(unittest.TestCase):
             finally:
                 srv._PERSISTENT_POOL.shutdown()
 
-    def test_health_fields_empty_when_default_off_and_present_when_enabled(self) -> None:
-        pool = AgyPersistentWorkerPool()
+    def test_resolve_run_chat_key_priority_and_explicit_state(self) -> None:
+        class _Exp:
+            handled: bool = True
+            session_key: str = "exp-key-42"
+
+        self.assertEqual(
+            resolve_run_chat_key({"sess_key": ("m", "c"), "explicit_state": _Exp(), "chat_id": "cid"}),
+            "('m', 'c')",
+        )
+        self.assertEqual(
+            resolve_run_chat_key({"sess_key": None, "explicit_state": _Exp(), "chat_id": ""}),
+            "exp-key-42",
+        )
+        self.assertEqual(
+            resolve_run_chat_key({"sess_key": None, "explicit_state": None, "chat_id": "chat-99"}),
+            "chat-99",
+        )
+        self.assertEqual(resolve_run_chat_key({}), "")
+
+    def test_reconcile_disabled_shuts_down_idle_workers_on_next_start_run(self) -> None:
+        srv = _load_agy_server()
         with tempfile.TemporaryDirectory() as td:
-            cfg_path = Path(td) / "dynamic_config.json"
-            cfg_path.write_text("{}", encoding="utf-8")
-            with mock.patch.dict(os.environ, {}, clear=False):
-                os.environ.pop("AGY_BRIDGE_PERSISTENT_WORKER_ENABLED", None)
-                self.assertEqual(persistent_health_fields(pool, cfg_path), {})
-            cfg_path.write_text(json.dumps({"BRIDGE_AGY_PERSISTENT_WORKER_ENABLED": True}), encoding="utf-8")
-            # wait past cache TTL or use fresh path
-            cfg_on = Path(td) / "dynamic_config_on.json"
-            cfg_on.write_text(json.dumps({"BRIDGE_AGY_PERSISTENT_WORKER_ENABLED": True}), encoding="utf-8")
-            fields = persistent_health_fields(pool, cfg_on)
-            self.assertIs(fields["persistent_worker_enabled"], True)
-            self.assertIn("persistent_pool", fields)
-        pool.shutdown()
+            td_path = Path(td)
+            launcher = _write_fake_launcher(td_path)
+            dyn_cfg = td_path / "dynamic_config.json"
+            dyn_cfg.write_text(
+                json.dumps({"BRIDGE_AGY_PERSISTENT_WORKER_ENABLED": True, "persistent_drain_window_s": 0.02}),
+                encoding="utf-8",
+            )
+            srv._PERSISTENT_POOL.shutdown()
+            try:
+                with (
+                    mock.patch.object(srv, "DYNAMIC_CONFIG_PATH", dyn_cfg),
+                    mock.patch.object(srv, "_launcher", return_value=str(launcher)),
+                    mock.patch.object(srv, "_launch_env", return_value=os.environ.copy()),
+                ):
+                    run1 = srv.Run("hi-1", "gemini-4-neon", "high", "req", str(td_path), "r1", chat_key="ks-live")
+                    while True:
+                        kind, _ = run1.q.get(timeout=5.0)
+                        if kind == "done":
+                            break
+                    lease1 = run1._persistent_lease
+                    assert lease1 is not None
+                    run1.close()
+                    self.assertTrue(lease1.handle.is_alive())
+
+                    # Flip flag OFF on a fresh config file -> next Run reconciles & tears down idle worker!
+                    dyn_off = td_path / "dynamic_config_off.json"
+                    dyn_off.write_text(json.dumps({"BRIDGE_AGY_PERSISTENT_WORKER_ENABLED": False}), encoding="utf-8")
+                    with mock.patch.object(srv, "DYNAMIC_CONFIG_PATH", dyn_off):
+                        run2 = srv.Run("hi-2", "gemini-4-neon", "high", "req", str(td_path), "r2", chat_key="ks-live")
+                        while True:
+                            kind, _ = run2.q.get(timeout=5.0)
+                            if kind == "done":
+                                break
+                        self.assertIsNone(run2._persistent_lease)
+                        run2.close()
+                    self.assertFalse(lease1.handle.is_alive())
+                    self.assertEqual(srv._PERSISTENT_POOL.health_snapshot(enabled=False)["slots"], 0)
+            finally:
+                srv._PERSISTENT_POOL.shutdown()
 
     def test_start_run_process_releases_cid_on_acquire_exception(self) -> None:
         class _BoomPool:
-            def acquire(self, *_a, **_kw):
+            def reconcile_disabled(self) -> None:
+                return None
+
+            def acquire(self, *_a: object, **_kw: object) -> None:
                 raise RuntimeError("boom acquire")
 
         class _DummyRun:
-            run_cid = "cid-boom"
+            run_cid: str = "cid-boom"
 
-        released = []
+        released: list[str] = []
         with tempfile.TemporaryDirectory() as td:
             cfg_on = Path(td) / "dynamic_config.json"
             cfg_on.write_text(json.dumps({"BRIDGE_AGY_PERSISTENT_WORKER_ENABLED": True}), encoding="utf-8")

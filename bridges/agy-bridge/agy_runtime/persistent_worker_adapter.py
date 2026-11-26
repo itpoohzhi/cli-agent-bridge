@@ -5,7 +5,6 @@ from __future__ import annotations
 import collections
 import logging
 import threading
-import uuid
 from typing import final
 
 from core.stdio_resident.config import StdioPoolConfig
@@ -117,11 +116,15 @@ class AgyPersistentWorkerPool:
         if cid and cid in self._cid_to_chat_key:
             self._cid_to_chat_key.move_to_end(cid)
             return self._cid_to_chat_key[cid]
-        if chat_key:
-            return chat_key
-        if cid:
-            return cid
-        return f"ephem-{uuid.uuid4().hex[:12]}"
+        return chat_key or cid
+
+    def reconcile_disabled(self) -> None:
+        """Мгновенно отцепить и остановить idle-пул при live-откате флага в False (O(1) fast-path)."""
+        if self._pool is None:
+            return
+        with self._lock:
+            to_shutdown = self._detach_current_locked()
+        self._safe_shutdown_pool(to_shutdown)
 
     def _record_cid_locked(self, cid: str, chat_key: str, max_slots: int) -> None:
         if not cid or not chat_key:
@@ -166,6 +169,8 @@ class AgyPersistentWorkerPool:
             return None
         with self._lock:
             eff_chat_key = self._resolve_chat_key_locked(req.chat_key, req.cid)
+        if not eff_chat_key:
+            return None
         affinity = SlotAffinityKey(
             owner_hash=_OWNER_HASH, chat_key=eff_chat_key, backend_id=_BACKEND_ID,
             model=req.model, effort=req.effort, cwd_norm=req.cwd,

@@ -150,7 +150,7 @@ from agy_runtime.hygiene_runtime import HygieneRuntime, ManagedSqliteRoPool  # n
 from agy_runtime.persistent_run_hooks import (  # noqa: E402
     RunCloseContext, RunPumpDrainContext, RunSpawnContext, cancel_run_persistent, close_run_resources,
     drain_run_stderr, feed_run_stdin, finish_run_pump_drain, iter_run_stdout_lines, join_run_source,
-    release_run_persistent, start_run_process,
+    release_run_persistent, resolve_run_chat_key, start_run_process,
 )
 from agy_runtime.persistent_worker_adapter import AgyPersistentWorkerPool  # noqa: E402
 from agy_runtime.legacy_session_helpers import (  # noqa: E402
@@ -6990,7 +6990,7 @@ class Handler(BaseHTTPRequestHandler):
                         **({"zero_canon": True} if ctx.get("zero_canon") else {}),
                         req_id=str(ctx.get("req_id") or ""),
                         extra_env=ctx.get("extra_env"),
-                        chat_key=str(ctx.get("sess_key") or ctx.get("chat_id") or ""),
+                        chat_key=resolve_run_chat_key(ctx),
                     )
                     self._metric_run = run
                 except LauncherUnavailable:

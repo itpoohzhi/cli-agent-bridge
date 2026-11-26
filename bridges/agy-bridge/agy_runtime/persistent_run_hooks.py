@@ -7,7 +7,7 @@ import re
 import subprocess
 import threading
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from pathlib import Path
 from typing import IO, cast
 
@@ -28,19 +28,10 @@ from .persistent_worker_config import (
 )
 
 __all__ = [
-    "RunCloseContext",
-    "RunPumpDrainContext",
-    "RunSpawnContext",
-    "cancel_run_persistent",
-    "close_run_resources",
-    "drain_run_stderr",
-    "feed_run_stdin",
-    "finish_run_pump_drain",
-    "iter_run_stdout_lines",
-    "join_run_source",
-    "persistent_health_fields",
-    "release_run_persistent",
-    "start_run_process",
+    "RunCloseContext", "RunPumpDrainContext", "RunSpawnContext", "cancel_run_persistent",
+    "close_run_resources", "drain_run_stderr", "feed_run_stdin", "finish_run_pump_drain",
+    "iter_run_stdout_lines", "join_run_source", "release_run_persistent",
+    "resolve_run_chat_key", "start_run_process",
 ]
 
 _LOGGER = logging.getLogger(__name__)
@@ -65,6 +56,9 @@ def start_run_process(run: object, ctx: RunSpawnContext) -> float:
     ):
         setattr(run, k, v)
     pw_cfg = persistent_worker_settings(config_path=ctx.config_path)
+    pool = cast(AgyPersistentWorkerPool, ctx.pool)
+    if not pw_cfg.enabled:
+        pool.reconcile_disabled()
     t0 = time.monotonic()
     try:
         lease: PersistentLease | None = None
@@ -78,7 +72,7 @@ def start_run_process(run: object, ctx: RunSpawnContext) -> float:
                 review_profile="zero-canon" if ctx.zero_canon else "standard",
                 argv_builder=lambda: list(ctx.cmd), env=ctx.launch_env,
             )
-            lease = cast(AgyPersistentWorkerPool, ctx.pool).acquire(req, pw_cfg)
+            lease = pool.acquire(req, pw_cfg)
         if lease is not None:
             setattr(run, "_persistent_lease", lease)
             setattr(run, "_persistent_reused", lease.reused)
@@ -287,12 +281,14 @@ def close_run_resources(run: object, ctx: RunCloseContext) -> None:
         cast(Callable[..., None], getattr(thread, "join"))(timeout=ctx.join_timeout_s)
 
 
-def persistent_health_fields(
-    pool: AgyPersistentWorkerPool, config_path: Path
-) -> dict[str, object]:
-    """Поля телеметрии для `/health`: строго `{}` при default-OFF и 0 слотах (SK-R-B17)."""
-    enabled = persistent_worker_settings(config_path=config_path).enabled
-    snap = pool.health_snapshot(enabled=enabled)
-    if not enabled and snap.get("slots") == 0:
-        return {}
-    return {"persistent_worker_enabled": enabled, "persistent_pool": snap}
+def resolve_run_chat_key(ctx: Mapping[str, object]) -> str:
+    """Извлечь стабильный ключ сессии хода (sess_key > explicit_state.session_key > chat_id)."""
+    sess_key = ctx.get("sess_key")
+    if sess_key:
+        return str(sess_key)
+    exp_st = ctx.get("explicit_state")
+    if exp_st is not None and bool(getattr(exp_st, "handled", False)):
+        exp_key = str(cast(object, getattr(exp_st, "session_key", "")) or "")
+        if exp_key:
+            return exp_key
+    return str(ctx.get("chat_id") or "")
