@@ -36,7 +36,7 @@ class _SseBodyRunner:
         self.s, self.time = session, _owner_time(session.handler)
         self.replay = MidstreamReplayOrchestrator(session.config, clock=self.time.monotonic, sleeper=self.time.sleep)
         self.replay.buffer, self.collector = session.buffer, AgyToolTraceCollector(session.ledger)
-        self.buffering = self.progressive = self._post_live_replay_attempted = False
+        self.buffering = self.progressive = self._post_live_replay_attempted = self._direct_finalize = False
         self.delivery_fsm, self._pending_traces, self._delivery_seq = initial_delivery_state(False), [], 0
         self._turn_started_at, self._ttft_ms, self.deadline = self.time.monotonic(), None, float("inf")
         self.cid = str(next(filter(None, (session.ctx.get("conversation_id"),)), ""))
@@ -53,26 +53,27 @@ class _SseBodyRunner:
         try:
             payload = json.loads(value) if channel == "tool_calls" else value
         except (ValueError, TypeError):
-            payload = value.strip()
-        self._note_progress(channel, payload)
+            payload = None if channel == "tool_calls" else value.strip()
+        self._note_progress(channel, payload if payload is not None else value.strip())
         if self.cancelled():
             return False
+        bad_tc = channel == "tool_calls" and not isinstance(payload, list)
+        wire_val = payload if channel == "tool_calls" else value
+        if getattr(self, "_direct_finalize", False):
+            return not bad_tc and self._deliver_direct(wire_val, channel)
         if getattr(self, "progressive", False):
             kind = dict(tool_calls=DeliveryEventKind.TOOL_CALLS, reasoning_content=DeliveryEventKind.REASONING).get(channel, DeliveryEventKind.CONTENT)
-            self.delivery_fsm, actions = step_delivery(self.delivery_fsm, DeliveryEvent(epoch=self.delivery_fsm.epoch, seq=self._delivery_seq, kind=kind, channel=channel, payload=value, deliverable=bool(payload) if channel == "tool_calls" else bool(value.strip())))
+            deliverable = (not bad_tc and bool(payload)) if channel == "tool_calls" else bool(value.strip())
+            self.delivery_fsm, actions = step_delivery(self.delivery_fsm, DeliveryEvent(epoch=self.delivery_fsm.epoch, seq=self._delivery_seq, kind=kind, channel=channel, payload=value, deliverable=deliverable))
             act = actions[0].kind if actions else "drop_stale"
-            if act == "stage":
-                self.s.buffer.stage_fragment(value, channel)
-                return self.s.commit()
             if act in ("flush_and_emit", "emit"):
-                if act == "flush_and_emit" and not self._flush_precommit():
-                    return False
-                ok = self._deliver_direct(json.loads(value) if channel == "tool_calls" else value, channel)
+                ok = not bad_tc and (act != "flush_and_emit" or self._flush_precommit()) and self._deliver_direct(wire_val, channel)
                 if ok:
                     self._mark_wire_sent()
                     ok = self._drain_traces()
                 return ok
-            return False
+            if act != "stage":
+                return False
         self.s.buffer.stage_fragment(value, channel)
         return self.s.commit()
     def _mark_wire_sent(self) -> None:
@@ -93,7 +94,7 @@ class _SseBodyRunner:
             return True
         pending, self._pending_traces = list(self._pending_traces), []
         for event in pending:
-            if self.cancelled() or self.expired() or (self.s.ledger.should_forward_step(event.get("step_index")) and not self.s.on_tool_trace(event)):
+            if self.cancelled() or (not force and self.expired()) or (self.s.ledger.should_forward_step(event.get("step_index")) and not self.s.on_tool_trace(event)):
                 return False
         return True
     def stage_reasoning(self, value: str) -> bool: return self.stage(value, "reasoning_content")
@@ -121,10 +122,7 @@ class _SseBodyRunner:
             act = actions[0].kind if actions else "drop_stale"
             if act == "emit":
                 return not self.expired() and not self.cancelled() and self.s.on_tool_trace(event)
-            if act == "stage":
-                self._pending_traces.append(event)
-                return True
-            return False
+            return (self._pending_traces.append(event) is None) if act == "stage" else False
         ok = True
         if any((not self.buffering, forward)):
             ok = self.s.on_tool_trace(event) if not self.expired() else False
@@ -151,16 +149,14 @@ class _SseBodyRunner:
         self._activity_window = self._activity_runtime = None
         self._attempt_started_at, self._attempt_budget = self.time.monotonic(), budget
         if index > 0:
-            if can_retry_after_failure(self.delivery_fsm):
-                if self.buffering:
-                    s.buffer.rollback_uncommitted()
-                if self.progressive:
-                    self.delivery_fsm = next_retry_epoch(self.delivery_fsm, self.time.monotonic() * 1000)
-                    s.reset_precommit_emitted()
-                    self._pending_traces.clear()
-            else:
+            if not can_retry_after_failure(self.delivery_fsm):
                 self._post_live_replay_attempted = True
                 return dict(self._last_out) if self._last_out else dict(state="pump_error", rc=1, err="post_live_replay_blocked")
+            s.buffer.rollback_uncommitted()
+            if self.progressive:
+                self.delivery_fsm = next_retry_epoch(self.delivery_fsm, self.time.monotonic() * 1000)
+                s.reset_precommit_emitted()
+                self._pending_traces.clear()
         if self.buffering:
             self.prepare_buffer()
             ctx.update(conversation_id=self.cid, attempt_budget_s=budget, attempt_index=index)
@@ -273,11 +269,14 @@ class _SseBodyRunner:
                 if not self.cancelled():
                     proceed = self.drain()
             else:
+                raw_ret = out.get("retained_events")
+                can_graceful = self.progressive and out.get("state") in ("timeout", "idle_timeout") and s.hooks[0]("graceful_timeout_on_partial") and isinstance(raw_ret, (list, tuple)) and any(k == "text" and str(p).strip() for k, p in raw_ret)
                 if self.delivery_fsm.wire_committed:
                     s.ledger.client_delivery_reconciled = False
-                else:
+                elif not can_graceful:
                     s.buffer.rollback_uncommitted()
                     _ = out.pop("retained_events", None)
+                    self._pending_traces.clear()
         else:
             out = self.attempt(0, self.replay.attempt_budget_s(0) if s.config.flag_enabled("sliding_activity_window_enabled") else s.config.first_event_timeout_s)
         if proceed:
@@ -286,18 +285,20 @@ class _SseBodyRunner:
             else:
                 if self.progressive and not self.delivery_fsm.wire_committed and self._flush_precommit():
                     _ = self._drain_traces(force=out.get("state") == "done")
-                if self.progressive and self._pending_traces and not self.delivery_fsm.wire_committed and out.get("state") in ("timeout", "idle_timeout"):
-                    retained = list(out.get("retained_events") or ())
-                    if any(k == "text" and str(p).strip() for k, p in retained):
-                        seen = {canonical_trace_key(p) for k, p in retained if k == "tool_trace"} | set(s.emitted_tool_trace_keys)
-                        traces, self._pending_traces = [ev for ev in self._pending_traces if s.ledger.should_forward_step(ev.get("step_index")) and canonical_trace_key(ev) not in seen], []
-                        out["retained_events"] = [*retained, *(("tool_trace", ev) for ev in traces)]
-                ctx["finalize_timeout"] = s.finalize_stream
-                s.finalize_stream(out)
+                raw_ret2 = out.get("retained_events")
+                if self.progressive and self._pending_traces and not self.delivery_fsm.wire_committed and out.get("state") in ("timeout", "idle_timeout") and isinstance(raw_ret2, (list, tuple)) and any(k == "text" and str(p).strip() for k, p in raw_ret2):
+                    seen = {canonical_trace_key(p) for k, p in raw_ret2 if k == "tool_trace"} | set(s.emitted_tool_trace_keys)
+                    traces, self._pending_traces = [ev for ev in self._pending_traces if s.ledger.should_forward_step(ev.get("step_index")) and canonical_trace_key(ev) not in seen], []
+                    out["retained_events"] = [*raw_ret2, *(("tool_trace", ev) for ev in traces)]
+                ctx["finalize_timeout"], self._direct_finalize = s.finalize_stream, True
+                try:
+                    s.finalize_stream(out)
+                finally:
+                    self._direct_finalize = False
                 if self.progressive and not self.delivery_fsm.wire_committed and any((s.emitted_content, s.emitted_reasoning_or_tool)):
                     self._mark_wire_sent()
                 if self.progressive and self._pending_traces and self.delivery_fsm.wire_committed and not out.get("graceful_done"):
-                    _ = self._drain_traces()
+                    _ = self._drain_traces(force=True)
                 if not out.get("graceful_done"):
                     self.finish(out)
         self._log_turn_summary(out)

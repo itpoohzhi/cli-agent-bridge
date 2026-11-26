@@ -612,3 +612,105 @@ def test_c4_f015_trace_only_precommit_done_delivers_trace_exactly_once() -> None
     assert joined.count("tool — done") == 1
     assert joined.index("tool — done") < joined.index("data: [DONE]\n\n")
     assert body.delivery_fsm.wire_committed is True
+
+
+def test_c5_f007_precommit_timeout_through_serve_sse_body_preserves_retained_and_traces(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """F-007: через полный serve_sse_body() pre-commit timeout с retained text не съедает ход и трейсы."""
+    _config(monkeypatch, tmp_path, True)
+
+    def once(
+        _ctx: dict[str, Any], _text: Any, trace: Any, *_rest: Any
+    ) -> dict[str, Any]:
+        assert trace({"step_index": 11, "tool_name": "grep"}) is True
+        return {
+            "state": "idle_timeout",
+            "rc": 124,
+            "timeout_limit_s": 15,
+            "retained_events": [("text", "Успел до таймаута")],
+        }
+
+    wire, _logs, _ctx = _serve(once)
+    joined = "".join(wire)
+    assert "Успел до таймаута" in joined
+    assert "tool — done" in joined
+    assert joined.index("tool — done") < joined.index("data: [DONE]\n\n")
+
+
+def test_c5_f008_finalize_stream_with_tool_turn_routes_directly_to_wire_in_legacy_buffered() -> (
+    None
+):
+    """F-008: в legacy default-off буферизации finalize_stream() с emulate_tools=True доставляет хвост на wire."""
+    from resilience_wiring_support import load_server
+
+    srv = load_server()
+    wire: list[str] = []
+    logs: list[str] = []
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "read",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"path": {"type": "string"}},
+                },
+            },
+        }
+    ]
+    ctx: dict[str, Any] = {
+        "model": "m",
+        "conversation_id": "bbdb91e5",
+        "emulate_tools": True,
+        "tools": tools,
+    }
+    hooks = (
+        lambda key, default=False: (
+            key in ("graceful_timeout_on_partial", "graceful_interruption_on_partial")
+            or default
+        ),
+        logs.append,
+        lambda: "stop",
+        srv._ToolTurn,
+    )
+    session = runner.SseStreamSession(_handler(wire, Mock()), ctx, hooks)
+    body = runner._SseBodyRunner(session)
+    body.progressive = False
+    body.buffering = True
+    body.prepare_buffer()
+    body._invoke = lambda: {
+        "state": "idle_timeout",
+        "rc": 124,
+        "timeout_limit_s": 10,
+        "retained_events": [
+            (
+                "text",
+                'Ответ <tool_call>{"name":"read","arguments":{"path":"z.py"}}</tool_call>',
+            )
+        ],
+    }
+    body.replay.run_with_resilience = lambda *_a, **_k: body._invoke()
+    # Симулируем ситуацию, когда wire уже был закоммичен (retained_events сохраняется)
+    body.delivery_fsm = runner.mark_sent(body.delivery_fsm, 0)
+    body._run_body()
+    joined = "".join(wire)
+    assert '"path": "z.py"' in joined or '\\"path\\": \\"z.py\\"' in joined
+    assert "data: [DONE]\n\n" in joined
+    assert session.buffer.commit_fragments() == ()
+
+
+def test_c5_f003_drain_and_post_finalize_traces_ignore_expired_deadline() -> None:
+    """F-003: при force=True (drain и пост-таймаут финализация) _drain_traces не срывается из-за expired()."""
+    body = _direct_runner()
+    body.progressive = body.buffering = True
+    body.delivery_fsm = initial_delivery_state(True)
+    trace_mock = Mock(return_value=True)
+    body.s.on_tool_trace = trace_mock
+    assert body.trace({"step_index": 12, "tool_name": "read_file"}) is True
+    # Имитируем истёкший deadline на границе успешного завершения
+    body.deadline = body.time.monotonic() - 1.0
+    assert body.expired() is True
+    assert body.drain() is True
+    assert trace_mock.call_count == 1
+    assert body._pending_traces == []
