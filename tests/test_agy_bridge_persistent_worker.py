@@ -21,6 +21,11 @@ if str(REPO_ROOT) not in sys.path:
 if str(AGY_BRIDGE_DIR) not in sys.path:
     sys.path.insert(0, str(AGY_BRIDGE_DIR))
 
+from agy_runtime.persistent_run_hooks import (  # noqa: E402
+    RunSpawnContext,
+    persistent_health_fields,
+    start_run_process,
+)
 from agy_runtime.persistent_worker_adapter import (  # noqa: E402
     AgyPersistentWorkerPool,
     PersistentAcquireRequest,
@@ -546,6 +551,55 @@ class TestRunPersistentIntegration(unittest.TestCase):
                     self.assertGreaterEqual(int(snap["teardowns_error"]), 1)
             finally:
                 srv._PERSISTENT_POOL.shutdown()
+
+    def test_health_fields_empty_when_default_off_and_present_when_enabled(self) -> None:
+        pool = AgyPersistentWorkerPool()
+        with tempfile.TemporaryDirectory() as td:
+            cfg_path = Path(td) / "dynamic_config.json"
+            cfg_path.write_text("{}", encoding="utf-8")
+            with mock.patch.dict(os.environ, {}, clear=False):
+                os.environ.pop("AGY_BRIDGE_PERSISTENT_WORKER_ENABLED", None)
+                self.assertEqual(persistent_health_fields(pool, cfg_path), {})
+            cfg_path.write_text(json.dumps({"BRIDGE_AGY_PERSISTENT_WORKER_ENABLED": True}), encoding="utf-8")
+            # wait past cache TTL or use fresh path
+            cfg_on = Path(td) / "dynamic_config_on.json"
+            cfg_on.write_text(json.dumps({"BRIDGE_AGY_PERSISTENT_WORKER_ENABLED": True}), encoding="utf-8")
+            fields = persistent_health_fields(pool, cfg_on)
+            self.assertIs(fields["persistent_worker_enabled"], True)
+            self.assertIn("persistent_pool", fields)
+        pool.shutdown()
+
+    def test_start_run_process_releases_cid_on_acquire_exception(self) -> None:
+        class _BoomPool:
+            def acquire(self, *_a, **_kw):
+                raise RuntimeError("boom acquire")
+
+        class _DummyRun:
+            run_cid = "cid-boom"
+
+        released = []
+        with tempfile.TemporaryDirectory() as td:
+            cfg_on = Path(td) / "dynamic_config.json"
+            cfg_on.write_text(json.dumps({"BRIDGE_AGY_PERSISTENT_WORKER_ENABLED": True}), encoding="utf-8")
+            ctx = RunSpawnContext(
+                pool=_BoomPool(),
+                config_path=cfg_on,
+                cmd=["true"],
+                work_dir=td,
+                launch_env={},
+                model="gemini-4-neon",
+                effort="high",
+                cli_mode="plan",
+                zero_canon=False,
+                settings_arg="",
+                add_dir=None,
+                chat_key="c",
+                spawn_cold=lambda: None,  # type: ignore[return-value]
+                on_cold_fail=lambda: released.append("released"),
+            )
+            with self.assertRaises(RuntimeError):
+                start_run_process(_DummyRun(), ctx)
+        self.assertEqual(released, ["released"])
 
 
 if __name__ == "__main__":

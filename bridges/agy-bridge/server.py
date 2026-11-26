@@ -103,7 +103,7 @@ import sys
 import threading
 import time
 import uuid
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, replace
 from functools import partial
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -150,7 +150,7 @@ from agy_runtime.hygiene_runtime import HygieneRuntime, ManagedSqliteRoPool  # n
 from agy_runtime.persistent_run_hooks import (  # noqa: E402
     RunCloseContext, RunPumpDrainContext, RunSpawnContext, cancel_run_persistent, close_run_resources,
     drain_run_stderr, feed_run_stdin, finish_run_pump_drain, iter_run_stdout_lines, join_run_source,
-    persistent_health_fields, release_run_persistent, start_run_process,
+    release_run_persistent, start_run_process,
 )
 from agy_runtime.persistent_worker_adapter import AgyPersistentWorkerPool  # noqa: E402
 from agy_runtime.legacy_session_helpers import (  # noqa: E402
@@ -5871,7 +5871,7 @@ class Run:
                 _add_preamble_bounded(preambles, key_idx)
                 return True
 
-    def _iter_stdout_lines(self):
+    def _iter_stdout_lines(self) -> Iterator[str]:
         return iter_run_stdout_lines(self)
 
     def _pump(self) -> None:
@@ -5913,8 +5913,12 @@ class Run:
                         if isinstance(tools_raw, list)
                         else []
                     )
-                    init_cid = str(ev.get("conversation_id") or init.get("conversation_id") or "")
-                    if init_cid:
+                    init_cid = str(
+                        ev.get("conversation_id")
+                        or (init.get("conversation_id") if lease is not None else "")
+                        or ""
+                    )
+                    if lease is not None and init_cid:
                         self._persistent_resolved_cid = init_cid
                     self.q.put(
                         (
@@ -6022,7 +6026,7 @@ class Run:
                     result_ev = result
                     final_text = str(result.get("response") or "")
                     res_cid = str(result.get("conversation_id") or ev.get("conversation_id") or "")
-                    if res_cid:
+                    if lease is not None and res_cid:
                         self._persistent_resolved_cid = res_cid
                         self._tail.bind(res_cid)
                     if str(result.get("status") or "").upper() == "ERROR":
@@ -7326,7 +7330,6 @@ class Handler(BaseHTTPRequestHandler):
                 ),
                 "uptime_s": int(time.time() - _started),
                 "hygiene_health": _hygiene_rt().health_snapshot(DYNAMIC_CONFIG_PATH),
-                **persistent_health_fields(_PERSISTENT_POOL, DYNAMIC_CONFIG_PATH),
             }
             health.update(_sqlite_health_fields())
             health.update(_runtime_build_fields())

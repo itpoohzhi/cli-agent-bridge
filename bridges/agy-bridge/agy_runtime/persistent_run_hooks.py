@@ -58,33 +58,32 @@ def _proc_of(run: object) -> subprocess.Popen[bytes]:
 def start_run_process(run: object, ctx: RunSpawnContext) -> float:
     """Арендовать persistent-слот или запустить cold-процесс; вернуть monotonic-время старта."""
     run_cid = str(cast(object, getattr(run, "run_cid", "")))
-    setattr(run, "_release_lock", threading.Lock())
-    setattr(run, "_persistent_lease", None)
-    setattr(run, "_persistent_reused", False)
-    setattr(run, "_persistent_turn_ok", False)
-    setattr(run, "_persistent_cancelled", False)
-    setattr(run, "_persistent_resolved_cid", run_cid)
+    for k, v in (
+        ("_release_lock", threading.Lock()), ("_persistent_lease", None),
+        ("_persistent_reused", False), ("_persistent_turn_ok", False),
+        ("_persistent_cancelled", False), ("_persistent_resolved_cid", run_cid),
+    ):
+        setattr(run, k, v)
     pw_cfg = persistent_worker_settings(config_path=ctx.config_path)
     t0 = time.monotonic()
-    lease: PersistentLease | None = None
-    if pw_cfg.enabled and ctx.add_dir is None:
-        digest = compute_env_digest(
-            ctx.cli_mode, ctx.zero_canon, str(ctx.launch_env.get("HOME") or ""), ctx.settings_arg
-        )
-        req = PersistentAcquireRequest(
-            chat_key=ctx.chat_key, cid=run_cid, model=ctx.model, effort=ctx.effort,
-            cwd=ctx.work_dir, env_digest=digest,
-            review_profile="zero-canon" if ctx.zero_canon else "standard",
-            argv_builder=lambda: list(ctx.cmd), env=ctx.launch_env,
-        )
-        pool = cast(AgyPersistentWorkerPool, ctx.pool)
-        lease = pool.acquire(req, pw_cfg)
-    if lease is not None:
-        setattr(run, "_persistent_lease", lease)
-        setattr(run, "_persistent_reused", lease.reused)
-        setattr(run, "proc", lease.handle.proc)
-        return t0
     try:
+        lease: PersistentLease | None = None
+        if pw_cfg.enabled and ctx.add_dir is None:
+            digest = compute_env_digest(
+                ctx.cli_mode, ctx.zero_canon, str(ctx.launch_env.get("HOME") or ""), ctx.settings_arg
+            )
+            req = PersistentAcquireRequest(
+                chat_key=ctx.chat_key, cid=run_cid, model=ctx.model, effort=ctx.effort,
+                cwd=ctx.work_dir, env_digest=digest,
+                review_profile="zero-canon" if ctx.zero_canon else "standard",
+                argv_builder=lambda: list(ctx.cmd), env=ctx.launch_env,
+            )
+            lease = cast(AgyPersistentWorkerPool, ctx.pool).acquire(req, pw_cfg)
+        if lease is not None:
+            setattr(run, "_persistent_lease", lease)
+            setattr(run, "_persistent_reused", lease.reused)
+            setattr(run, "proc", lease.handle.proc)
+            return t0
         setattr(run, "proc", ctx.spawn_cold())
     except BaseException:
         ctx.on_cold_fail()
@@ -291,9 +290,9 @@ def close_run_resources(run: object, ctx: RunCloseContext) -> None:
 def persistent_health_fields(
     pool: AgyPersistentWorkerPool, config_path: Path
 ) -> dict[str, object]:
-    """Сформировать поля телеметрии persistent-пула для `/health`."""
+    """Поля телеметрии для `/health`: строго `{}` при default-OFF и 0 слотах (SK-R-B17)."""
     enabled = persistent_worker_settings(config_path=config_path).enabled
-    return {
-        "persistent_worker_enabled": enabled,
-        "persistent_pool": pool.health_snapshot(enabled=enabled),
-    }
+    snap = pool.health_snapshot(enabled=enabled)
+    if not enabled and snap.get("slots") == 0:
+        return {}
+    return {"persistent_worker_enabled": enabled, "persistent_pool": snap}
