@@ -64,7 +64,7 @@ class _SseBodyRunner:
             payload = value.strip()
         self._note_progress(channel, payload)
         ok = False
-        if self.progressive and any((channel == "tool_calls", bool(value.strip()))):
+        if getattr(self, "progressive", False) and any((channel == "tool_calls", bool(value.strip()))):
             self._flush_precommit()
             ok = self._deliver_direct(json.loads(value) if channel == "tool_calls" else value, channel)
             if ok:
@@ -110,7 +110,7 @@ class _SseBodyRunner:
         return self.time.monotonic() >= self.deadline
     def trace(self, event: dict[str, Any]) -> bool:
         self._note_progress("tool_calls", event)
-        if self.progressive:
+        if getattr(self, "progressive", False):
             if self.delivery_fsm.wire_committed:
                 return self.s.on_tool_trace(event)
             self._pending_traces.append(event)
