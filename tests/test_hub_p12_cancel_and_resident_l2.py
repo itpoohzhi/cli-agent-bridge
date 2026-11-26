@@ -173,3 +173,39 @@ def test_f002_cancel_turn_runs_callbacks_before_release_and_protects_slot_on_unr
     assert order == ["cb", "release"]
     reset_hub_p12_seam_for_tests()
 
+
+def test_f006_cancel_turn_flag_on_live_pgid_reaps_without_reap_leader(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from core.turn_session_manager import TurnSessionManager
+
+    reset_hub_p12_seam_for_tests()
+    flags_file = tmp_path / "hub-flags.json"
+    flags_file.write_text(json.dumps({FLAG_HUB_NONDETACHED_CANCEL: True}), encoding="utf-8")
+    monkeypatch.setenv("BRIDGE_DYNAMIC_FLAGS_PATH", str(flags_file))
+
+    mgr = TurnSessionManager(state_root=tmp_path, persist_children_file=False)
+    released = threading.Event()
+    turn, _ = mgr.create_or_attach_turn(
+        model="m1", backend="b1", cwd=str(tmp_path), messages=[{"role": "user", "content": "hi"}],
+        owner_token_hash="h1", rid="r-f006", slot_release_fn=released.set,
+    )
+    proc = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)"],
+        start_new_session=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        turn.pgid = proc.pid
+        mgr.cancel_turn(turn.turn_id, reason="client_disconnected")
+        assert released.wait(timeout=4.0), "slot must release after TERM->ESRCH+reap even with reap_leader=None"
+        assert PosixProcProbe().probe_group(proc.pid) is GroupProbeStatus.GONE_ESRCH
+    finally:
+        reset_hub_p12_seam_for_tests()
+        try:
+            proc.kill()
+            proc.wait(timeout=1.0)
+        except OSError:
+            pass
+
