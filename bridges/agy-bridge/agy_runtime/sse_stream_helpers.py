@@ -269,7 +269,8 @@ class SseStreamSession:
             self._flush_partial_timeout(out, retained)
     def _flush_partial_timeout(self, out: dict[str, Any], retained: Any) -> None:
         self.handler._arm_flush_window(self.ctx)
-        has_open = bool(self.tool_turn._normalizer.has_open_tool_call()) if self.tool_turn is not None else False
+        open_fn = getattr(getattr(self.tool_turn, "_normalizer", None), "has_open_tool_call", None)
+        has_open = bool(open_fn()) if callable(open_fn) else False
         emitted_text = (self.fed_raw_text if (self.tool_turn is not None and self.fed_raw_text
             and any((self.emitted_stream_text, self.emitted_tool_calls, has_open))) else self.emitted_stream_text)
         retained, skipped = filter_unemitted_retained( retained,
@@ -277,7 +278,7 @@ class SseStreamSession:
             emitted_reasoning=self.emitted_reasoning_text,
             emitted_tool_traces=self.emitted_tool_trace_keys, )
         rem_text = "".join(str(p) for k, p in retained if k == "text")
-        if has_open and "<tool_call>" in rem_text:
+        if has_open and "<tool_call>" in rem_text.split("</tool_call>", 1)[0]:
             self._bind_stream_targets()
         self.b05_skipped_chars += skipped
         self.b05_flushed_tail_chars += sum( len(str(p)) for k, p in retained

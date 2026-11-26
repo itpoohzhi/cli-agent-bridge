@@ -449,3 +449,36 @@ def test_c4_f002_chunk_split_open_tool_tag_in_retained_does_not_corrupt() -> Non
     assert len(tool_calls) == 1
     assert json.loads(tool_calls[0]["function"]["arguments"]) == {"path": "c.py"}
     assert "<tool_ca" not in "".join(d.get("content", "") for d in deltas)
+
+
+def test_c4_cycle3_f001_open_first_tool_call_and_second_tool_call_in_retained() -> None:
+    """F-001 (c4-c3): открытый 1-й <tool_call> завершается из retained и 2-й <tool_call> не сбрасывает 1-й."""
+    srv = load_server()
+    session, handler, _ctx = _make_session(
+        emulate_tools=True, tool_turn_cls=srv._ToolTurn
+    )
+    prefix = '<tool_call>{"name":"read","arguments":'
+    full = (
+        '<tool_call>{"name":"read","arguments":{"path":"t1.py"}}</tool_call>'
+        ' next <tool_call>{"name":"read","arguments":{"path":"t2.py"}}</tool_call>'
+    )
+    assert session.stream_text(prefix) is True
+    assert session.tool_turn is not None
+    assert session.tool_turn._normalizer.has_open_tool_call() is True
+    out: dict[str, Any] = {
+        "state": "idle_timeout",
+        "timeout_limit_s": 10,
+        "retained_events": [("text", full)],
+    }
+    session.finalize_timeout(out)
+    assert out["graceful_done"] is True
+    deltas = _parse_deltas(handler.emitted)
+    tool_calls = [tc for d in deltas for tc in (d.get("tool_calls") or [])]
+    content = "".join(d.get("content", "") for d in deltas)
+    assert len(tool_calls) == 2
+    assert [json.loads(tc["function"]["arguments"])["path"] for tc in tool_calls] == [
+        "t1.py",
+        "t2.py",
+    ]
+    assert "</tool_call>" not in content
+    assert "<tool_call>" not in content

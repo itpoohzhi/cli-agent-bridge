@@ -289,7 +289,7 @@ class _SseBodyRunner:
                 if self.progressive and self._pending_traces and not self.delivery_fsm.wire_committed and out.get("state") in ("timeout", "idle_timeout"):
                     retained = list(out.get("retained_events") or ())
                     if any(k == "text" and str(p).strip() for k, p in retained):
-                        seen = {canonical_trace_key(p) for k, p in retained if k == "tool_trace"}
+                        seen = {canonical_trace_key(p) for k, p in retained if k == "tool_trace"} | set(s.emitted_tool_trace_keys)
                         traces, self._pending_traces = [ev for ev in self._pending_traces if s.ledger.should_forward_step(ev.get("step_index")) and canonical_trace_key(ev) not in seen], []
                         out["retained_events"] = [*retained, *(("tool_trace", ev) for ev in traces)]
                 ctx["finalize_timeout"] = s.finalize_stream
