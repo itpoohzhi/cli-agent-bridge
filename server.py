@@ -200,6 +200,7 @@ from core.liveness_signals import (  # noqa: E402
 )
 from core.runtime_env import DynamicFlagSource, allow_hub_client_response_header, flag_enabled  # noqa: E402
 from core import zero_canon_http as _zc_http  # noqa: E402
+from core import zc_http_barrier as _zc_barrier  # noqa: E402
 from core.stdio_resident import codex_attestation_wire as _zc_wire  # noqa: E402
 from core.stdio_resident.turn_error_sse import ResidentTurnError  # noqa: E402
 from core.http_usage import (  # noqa: E402
@@ -7345,12 +7346,8 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
         for value in values:
             for piece in _text_slices(value):
                 total += len(_escape_json_piece(piece))
-        self._response_status = 200
-        self._telemetry_note(total, first_byte=True)
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Content-Length", str(total))
-        _zc_http.emit_turn_headers(self, getattr(self, "_active_managed_turn", None), _trace_headers(self._trace), (ctxres.PRUNED_HEADER, self._context_pruned), attestation=(None if out.get("tool_calls") else (out.get("zero_canon_completion") or getattr(self, "_zero_canon_completion", None)), "completed"))
+        if not _zc_barrier.emit_nonstream_headers(self, total, _trace_headers(self._trace), (ctxres.PRUNED_HEADER, self._context_pruned), out):
+            return
         for index, value in enumerate(values):
             self.wfile.write(segments[index] + b'"')
             for piece in _text_slices(value):
