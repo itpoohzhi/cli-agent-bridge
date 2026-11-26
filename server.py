@@ -7690,7 +7690,7 @@ class Server(ThreadingHTTPServer):
 
     def admission_snapshot(self) -> dict[str, int | float]:
         """Снимок admission для телеметрии (только при включённом флаге)."""
-        return self._connections.snapshot(self._admission_budget.limit, self._overloaded_rejects)
+        return self._connections.snapshot(self._admission_budget.limit)
 
     def set_connection_active(self, request: socket.socket, active: bool) -> bool:
         """Атомарно отделяет обработку HTTP-запроса от ожидания keepalive."""

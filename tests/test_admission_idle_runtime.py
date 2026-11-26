@@ -254,6 +254,8 @@ def test_phase_edges_closing_and_signal_zero(srv, monkeypatch) -> None:
     assert sanitize_stderr_tail("ab", 1) == "...b"
     assert summarize_admission_snapshot({"c": (False, float("-inf"))}, 1.0, 1, 0)["max_idle_age_s"] == 0.0
     tracker = http_accept.ConnectionTracker()
+    _ = tracker.record_overload_reject()
+    assert tracker.snapshot(8)["overloaded_rejects"] == 1 and tracker.snapshot(8, 7)["overloaded_rejects"] == 7
     with socket.socket() as sock:
         tracker.close_idle()
         assert tracker.set_active(sock, True) is False

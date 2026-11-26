@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 
@@ -23,14 +25,13 @@ def test_config_defaults_fail_closed() -> None:
     cfg = P.AdmissionIdleConfig()
     assert not cfg.phase_idle_timeout_enabled and not cfg.active_ttl_sweep_enabled
     assert not cfg.admission_telemetry_enabled and not cfg.claude_stderr_log_enabled
-    assert cfg.phase_idle_timeout_s == 30.0 and cfg.active_socket_timeout_s == 3600.0
-    assert cfg.claude_stderr_max_chars == 240
+    assert (cfg.phase_idle_timeout_s, cfg.active_socket_timeout_s, cfg.claude_stderr_max_chars) == (30.0, 3600.0, 240)
 
 
 def test_admission_budget_limit_and_config_properties() -> None:
     budget = bridge_io_config.AdmissionBudget()
-    assert budget.limit == 128 and budget.config.admission_limit == 128
-    assert budget.config.ui_reserve == 2 and budget.config.header_headroom == 2
+    assert (budget.limit, budget.config.admission_limit) == (128, 128)
+    assert (budget.config.ui_reserve, budget.config.header_headroom) == (2, 2)
 
 
 @pytest.mark.parametrize("phase", ["idle", "active"])
@@ -83,14 +84,20 @@ def test_legacy_knob_warning_matrix() -> None:
 
 
 def test_sanitize_stderr_tail_matrix() -> None:
-    cases = [("", ""), ("line1\nline2", "line1 line2"), ("Bearer sk-secret123", "[REDACTED]"),
-             ("api_key=abc", "[REDACTED]"), ("ghp_abcdef123456", "[REDACTED]")]
-    for raw, needle in cases:
-        out = P.sanitize_stderr_tail(raw)
-        assert "\n" not in out and "\r" not in out and "sk-secret123" not in out
-        if needle:
-            assert needle in out
+    assert P.sanitize_stderr_tail("") == "" and P.sanitize_stderr_tail("line1\nline2") == "line1 line2"
+    assert P.sanitize_stderr_tail("api_key=abc") == P.sanitize_stderr_tail("ghp_abcdef123456") == "[REDACTED]"
     assert P.sanitize_stderr_tail("x" * 500, 40) == "..." + "x" * 40
+
+
+@pytest.mark.parametrize("raw,bad", [
+    ("Authorization: Bearer sk-abc12345", "sk-abc12345"), ("Bearer tok123456", "tok123456"),
+    ("x sk-abc12345 y", "sk-abc12345"), ("BRIDGE_KEY=supersecret OPENAI_API_KEY=xyz", "supersecret"),
+    ("OPENAI_API_KEY=xyz", "xyz"), ("AWS_SECRET_ACCESS_KEY=foo", "foo"), ("\x1b[31merr\x1b[0m", "\x1b"),
+    ("a\r\nb\x00c", "\x00"), ("\x1b]0;title\x07ok", "title"),
+    ("Authorization: Bearer sk-abc12345\r\nBRIDGE_KEY=topsecret \x1b[31mERR\x1b[0m\x00", "topsecret")])
+def test_sanitize_stderr_tail_negative(raw: str, bad: str) -> None:
+    out = P.sanitize_stderr_tail(raw)
+    assert bad not in out and "sk-abc12345" not in out and not any(c in out for c in "\r\n\x1b\x00")
 
 
 def test_summarize_snapshot_empty_clamp_mixed() -> None:
@@ -158,32 +165,16 @@ def test_attach_admission_telemetry_flag_gate(monkeypatch: pytest.MonkeyPatch) -
 
 
 class _FakeClock:
-    def __init__(self) -> None:
-        self.t = 0.0
-
-    def __call__(self) -> float:
-        return self.t
-
-    def advance(self, dt: float) -> None:
-        self.t += dt
-
-
-class _FakeSock:
-    def settimeout(self, t: float) -> None:
-        self.timeout = t
+    def __init__(self) -> None: self.t = 0.0
+    def __call__(self) -> float: return self.t
+    def advance(self, dt: float) -> None: self.t += dt
 
 
 class _FakeConn:
     def __init__(self) -> None:
-        self.sock = _FakeSock()
-        self.closed = 0
-        self.timeout = None
-
-    def connect(self) -> None:
-        pass
-
-    def close(self) -> None:
-        self.closed += 1
+        self.sock, self.closed, self.timeout = SimpleNamespace(settimeout=lambda t: None), 0, None
+    def connect(self) -> None: pass
+    def close(self) -> None: self.closed += 1
 
 
 def _pool(clock: _FakeClock, **kw) -> PassthroughConnectionPool:
@@ -195,12 +186,18 @@ def _pool(clock: _FakeClock, **kw) -> PassthroughConnectionPool:
     return pool
 
 
-def test_passthrough_pool_sweep_empty_and_all_alive() -> None:
-    clock = _FakeClock()
-    pool = _pool(clock, active_ttl_sweep=True)
+@pytest.fixture
+def sweep_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("BRIDGE_PASSTHROUGH_ACTIVE_TTL_SWEEP_ENABLED", "1")
+
+
+def test_passthrough_pool_sweep_empty_alive_and_after_close_all(sweep_env) -> None:
+    pool = _pool(_FakeClock(), active_ttl_sweep=True)
     assert pool.sweep_expired() == 0
     pool.release_connection("a", 1, _FakeConn())
     assert pool.sweep_expired() == 0 and pool.idle_count == 1
+    pool.close_all()
+    assert pool.sweep_expired() == 0 and pool.idle_count == 0
 
 
 def test_passthrough_pool_sweep_expired_other_host() -> None:
@@ -214,27 +211,19 @@ def test_passthrough_pool_sweep_expired_other_host() -> None:
     assert pool.idle_count == 1 and pool.stats()["evicted_expired"] == 1
 
 
-def test_passthrough_pool_sweep_after_close_all() -> None:
-    clock = _FakeClock()
-    pool = _pool(clock, active_ttl_sweep=True)
-    pool.release_connection("a", 1, _FakeConn())
-    pool.close_all()
-    assert pool.sweep_expired() == 0 and pool.idle_count == 0
-
-
 def test_passthrough_pool_sweep_closes_outside_lock() -> None:
     clock = _FakeClock()
     pool = _pool(clock, active_ttl_sweep=False)
     conn = _FakeConn()
     pool.release_connection("a", 1, conn)
     clock.advance(2.0)
-    seen = []
+    seen: list[bool] = []
     orig = conn.close
-    conn.close = lambda: (seen.append(pool._lock.locked()), orig())
+    conn.close = Mock(side_effect=lambda: (seen.append(pool._lock.locked()), orig()))
     assert pool.sweep_expired() == 1 and seen == [False]
 
 
-def test_passthrough_pool_release_and_get_trigger_sweep() -> None:
+def test_passthrough_pool_release_and_get_trigger_sweep(sweep_env) -> None:
     clock = _FakeClock()
     pool = _pool(clock, active_ttl_sweep=True)
     old = _FakeConn()
@@ -244,17 +233,49 @@ def test_passthrough_pool_release_and_get_trigger_sweep() -> None:
     assert old.closed == 1 and pool.idle_count == 1
     clock.advance(2.0)
     conn, _ = pool.get_connection("c", 3, 5.0, fresh=True)
-    assert conn.closed == 0 and pool.idle_count == 0
+    assert getattr(conn, "closed") == 0 and pool.idle_count == 0
 
 
-def test_passthrough_pool_disabled_no_sweep() -> None:
+@pytest.mark.parametrize("active", [False, True])
+def test_pool_disabled_and_env_off_overrides_active_true(active: bool, monkeypatch: pytest.MonkeyPatch) -> None:
     clock = _FakeClock()
-    pool = _pool(clock, active_ttl_sweep=False)
+    pool = _pool(clock, active_ttl_sweep=active)
+    monkeypatch.setenv("BRIDGE_PASSTHROUGH_ACTIVE_TTL_SWEEP_ENABLED", "0")
     old = _FakeConn()
     pool.release_connection("a", 1, old)
     clock.advance(2.0)
     pool.release_connection("b", 2, _FakeConn())
-    assert old.closed == 0 and pool.idle_count == 2
+    _ = pool.get_connection("c", 3, 5.0, fresh=True)
+    assert pool._sweep_enabled() is False and old.closed == 0 and pool.idle_count == 2
+
+
+def test_pool_fifo_head_batch_and_oserror() -> None:
+    clock = _FakeClock()
+    pool = _pool(clock, max_keepalive=200, active_ttl_sweep=False)
+    olds = [_FakeConn() for _ in range(5)]
+    _ = [pool.release_connection(f"o{i}", 1, c) for i, c in enumerate(olds)]
+    clock.advance(2.0)
+    _ = [pool.release_connection(f"l{i}", 1, _FakeConn()) for i in range(120)]
+    olds[0].close = Mock(side_effect=OSError("close"))
+    assert (pool.sweep_expired(max_items=32), pool.sweep_expired(32)) == (5, 0)
+    assert [c.closed for c in olds[1:]] == [1] * 4
+    assert (len(pool._fifo), pool.idle_count, pool.stats()["evicted_expired"]) == (120, 120, 5)
+    _ = pool.get_connection("l0", 1, 5.0)
+    clock.advance(2.0)
+    assert (pool.sweep_expired(max_items=3), pool.idle_count, len(pool._fifo)) == (3, 116, 116)
+
+
+def test_pool_fifo_compaction() -> None:
+    clock = _FakeClock()
+    c_pool = _pool(clock, max_keepalive=1, active_ttl_sweep=False)
+    for _ in range(34):
+        c_pool.release_connection("h", 1, _FakeConn())
+        _ = c_pool.get_connection("h", 1, 5.0)
+    last = _FakeConn()
+    assert len(c_pool._fifo) == 34
+    c_pool.release_connection("h", 1, last)
+    clock.advance(2.0)
+    assert (len(c_pool._fifo), c_pool.sweep_expired(), last.closed) == (1, 1, 1)
 
 
 def test_passthrough_pool_none_reads_fresh_switch(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -274,7 +295,5 @@ def test_passthrough_pool_lifo_reuse_preserved() -> None:
     a, b = _FakeConn(), _FakeConn()
     pool.release_connection("h", 1, a)
     pool.release_connection("h", 1, b)
-    conn, reused = pool.get_connection("h", 1, 5.0)
-    assert reused is True and conn is b
-    conn2, reused2 = pool.get_connection("h", 1, 5.0)
-    assert reused2 is True and conn2 is a
+    assert pool.get_connection("h", 1, 5.0) == (b, True)
+    assert pool.get_connection("h", 1, 5.0) == (a, True)

@@ -30,8 +30,13 @@ PHASE_IDLE_TIMEOUT_BOUNDS = (0.02, 3600.0)
 ACTIVE_SOCKET_TIMEOUT_BOUNDS = (1.0, 86400.0)
 CLAUDE_STDERR_MAX_BOUNDS = (32.0, 2048.0)
 
+_CTRL_RE = re.compile(
+    r"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[^\s]*|[\x00-\x1f\x7f-\x9f]"
+)
 _SECRET_RE = re.compile(
-    r"(?i)\b(?:bearer|basic)\s+\S+"
+    r"(?i)\bauthorization\s*[:=]\s*(?:(?:bearer|basic)\s+)?\S+"
+    r"|\b[A-Z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|AUTH|COOKIE)\s*=\s*\S+"
+    r"|\b(?:bearer|basic)\s+\S+"
     r"|\b(?:sk|pk|rk)[-_][A-Za-z0-9_.-]{4,}"
     r"|\b(?:ghp|github_pat)_[A-Za-z0-9_]{4,}"
     r"|\bAIza[0-9A-Za-z_-]{8,}"
@@ -76,8 +81,8 @@ def resolve_socket_timeout_for_phase(
 
 
 def sanitize_stderr_tail(raw: str, max_chars: int = 240) -> str:
-    """Однострочный хвост: CRLF→пробел, секреты→[REDACTED], усечение хвоста с '...'."""
-    redacted = _SECRET_RE.sub("[REDACTED]", raw.replace("\r", " ").replace("\n", " "))
+    """Однострочный хвост: ANSI/control→пробел, секреты→[REDACTED], усечение с '...'."""
+    redacted = _SECRET_RE.sub("[REDACTED]", _CTRL_RE.sub(" ", raw))
     return (
         "..." + redacted[-max_chars:]
         if (max_chars > 0 and len(redacted) > max_chars)

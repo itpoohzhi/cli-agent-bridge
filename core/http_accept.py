@@ -207,15 +207,19 @@ class ConnectionTracker:
             except OSError:
                 pass
 
-    def snapshot(self, limit: int, overloaded_rejects: int) -> dict[str, int | float]:
-        """Снимок admission для телеметрии (чистый расчёт по копии под lock)."""
+    def snapshot(
+        self, limit: int, overloaded_rejects: int | None = None
+    ) -> dict[str, int | float]:
+        """Снимок admission для телеметрии (копия и счётчик под одним lock)."""
         with self._lock:
             conns = dict(self._connections)
+            rej = self._overloaded_rejects
+            rejects = rej if overloaded_rejects is None else overloaded_rejects
         return summarize_admission_snapshot(
             cast("Mapping[object, tuple[bool, float]]", conns),
             time.monotonic(),
             limit,
-            overloaded_rejects,
+            rejects,
         )
 
     def as_bool_map(self) -> dict[socket.socket, bool]:
