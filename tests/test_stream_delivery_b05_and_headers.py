@@ -390,3 +390,62 @@ def test_f001_open_tool_tag_prefix_does_not_corrupt_full_retained_tool_call() ->
     assert len(tool_calls) == 1
     assert json.loads(tool_calls[0]["function"]["arguments"]) == {"path": "b.py"}
     assert "<tool_ca" not in "".join(d.get("content", "") for d in deltas)
+
+
+def test_c4_f002_f011_mixed_prose_and_second_tool_call_preserved_on_partial_timeout() -> (
+    None
+):
+    """F-002/F-011: после 1-го tool_call хвост retained сохраняет 2-ю прозу и 2-й tool_call без дубля 1-го."""
+    srv = load_server()
+    session, handler, _ctx = _make_session(
+        emulate_tools=True, tool_turn_cls=srv._ToolTurn
+    )
+    raw1 = 'План. <tool_call>{"name":"read","arguments":{"path":"a.py"}}</tool_call>'
+    tail = ' Проза 2. <tool_call>{"name":"read","arguments":{"path":"b.py"}}</tool_call> Финал.'
+    assert session.stream_text(raw1) is True
+    assert session.emitted_tool_calls == 1
+    out: dict[str, Any] = {
+        "state": "idle_timeout",
+        "timeout_limit_s": 10,
+        "retained_events": [("text", raw1 + tail)],
+    }
+    session.finalize_timeout(out)
+    assert out["graceful_done"] is True
+    deltas = _parse_deltas(handler.emitted)
+    tool_calls = [tc for d in deltas for tc in (d.get("tool_calls") or [])]
+    all_text = "".join(
+        d.get("content", "") + d.get("reasoning_content", "") for d in deltas
+    )
+    assert len(tool_calls) == 2
+    assert [json.loads(tc["function"]["arguments"])["path"] for tc in tool_calls] == [
+        "a.py",
+        "b.py",
+    ]
+    assert all_text.count("План.") == 1
+    assert "Проза 2." in all_text and "Финал." in all_text
+    assert session.b05_skipped_chars == len(raw1)
+    assert session.b05_flushed_tail_chars == len(tail)
+
+
+def test_c4_f002_chunk_split_open_tool_tag_in_retained_does_not_corrupt() -> None:
+    """F-002: разбиение <tool_call> на чанки ('<tool', '_call>...') корректно сбрасывает незакрытый буфер."""
+    srv = load_server()
+    session, handler, _ctx = _make_session(
+        emulate_tools=True, tool_turn_cls=srv._ToolTurn
+    )
+    assert session.stream_text("Привет <tool_ca") is True
+    out: dict[str, Any] = {
+        "state": "idle_timeout",
+        "timeout_limit_s": 10,
+        "retained_events": [
+            ("text", "<tool"),
+            ("text", '_call>{"name":"read","arguments":{"path":"c.py"}}</tool_call>'),
+        ],
+    }
+    session.finalize_timeout(out)
+    assert out["graceful_done"] is True
+    deltas = _parse_deltas(handler.emitted)
+    tool_calls = [tc for d in deltas for tc in (d.get("tool_calls") or [])]
+    assert len(tool_calls) == 1
+    assert json.loads(tool_calls[0]["function"]["arguments"]) == {"path": "c.py"}
+    assert "<tool_ca" not in "".join(d.get("content", "") for d in deltas)

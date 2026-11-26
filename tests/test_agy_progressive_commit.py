@@ -548,3 +548,67 @@ def test_f002_finalize_stream_in_precommit_flushes_and_marks_wire_committed() ->
     body._run_body()
     assert body.delivery_fsm.wire_committed is True
     assert body.s.buffer.commit_fragments() == ()
+
+
+def test_c4_f001_precommit_pending_traces_delivered_before_done_on_empty_buffer_timeout() -> (
+    None
+):
+    """F-001: _pending_traces в PRECOMMIT с пустым s.buffer не теряются и доставляются до [DONE]."""
+    wire: list[str] = []
+    logs: list[str] = []
+    ctx: dict[str, Any] = {"model": "m", "conversation_id": "bbdb91e5"}
+    hooks = (
+        lambda key, default=False: (
+            key in ("emit_tool_trace", "graceful_timeout_on_partial") or default
+        ),
+        logs.append,
+        lambda: "stop",
+        Mock(),
+    )
+    session = runner.SseStreamSession(_handler(wire, Mock()), ctx, hooks)
+    body = runner._SseBodyRunner(session)
+    body.progressive = True
+    body.buffering = False
+    body.delivery_fsm = initial_delivery_state(True)
+    assert body.trace({"step_index": 5, "tool_name": "read_file"}) is True
+    assert len(body._pending_traces) == 1
+    body._invoke = lambda: {
+        "state": "idle_timeout",
+        "rc": 124,
+        "timeout_limit_s": 10,
+        "retained_events": [("text", "хвост")],
+    }
+
+    body._run_body()
+    joined = "".join(wire)
+    assert body._pending_traces == []
+    assert body.delivery_fsm.wire_committed is True
+    assert "tool — done" in joined
+    assert joined.index("tool — done") < joined.index("data: [DONE]\n\n")
+
+
+def test_c4_f015_trace_only_precommit_done_delivers_trace_exactly_once() -> None:
+    """F-015: trace-only PRECOMMIT ход на state=done доставляет trace ровно 1 раз до [DONE]."""
+    wire: list[str] = []
+    logs: list[str] = []
+    ctx: dict[str, Any] = {"model": "m", "conversation_id": "bbdb91e5"}
+    hooks = (
+        lambda key, default=False: key == "emit_tool_trace" or default,
+        logs.append,
+        lambda: "stop",
+        Mock(),
+    )
+    session = runner.SseStreamSession(_handler(wire, Mock()), ctx, hooks)
+    body = runner._SseBodyRunner(session)
+    body.progressive = True
+    body.buffering = False
+    body.delivery_fsm = initial_delivery_state(True)
+    assert body.trace({"step_index": 9, "tool_name": "grep"}) is True
+    body._invoke = lambda: {"state": "done", "rc": 0}
+
+    body._run_body()
+    joined = "".join(wire)
+    assert body._pending_traces == []
+    assert joined.count("tool — done") == 1
+    assert joined.index("tool — done") < joined.index("data: [DONE]\n\n")
+    assert body.delivery_fsm.wire_committed is True

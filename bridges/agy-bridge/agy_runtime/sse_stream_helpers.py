@@ -68,26 +68,35 @@ class SseStreamSession:
         self.coordinator = EarlyCommitSinkCoordinator(
             self, self.config, clock=_owner_time(handler).monotonic )
         self._emulate_tools = bool(ctx.get("emulate_tools"))
-        self.emitted_stream_text = ""
-        self.emitted_reasoning_text = ""
+        self.emitted_stream_text = self.emitted_reasoning_text = self.fed_raw_text = ""
         self.emitted_tool_trace_keys: list[str] = []
         self.b05_skipped_chars = self.b05_flushed_tail_chars = 0
+        self._tool_targets: tuple[Any, Any, Any] = (self.on_text, self.on_reasoning, self.on_calls)
         self._bind_stream_targets()
         ctx["finalize_timeout"] = self.finalize_stream
-    def _bind_stream_targets(self) -> None:
+    def _bind_stream_targets(self, on_text: Any = None, on_reasoning: Any = None, on_calls: Any = None) -> None:
+        if all((on_text, on_reasoning, on_calls)):
+            self._tool_targets = (on_text, on_reasoning, on_calls)
+        on_t, on_r, on_c = self._tool_targets
         self.tool_turn = None
-        if self._emulate_tools:
+        if self._emulate_tools and len(self.hooks) > 3:
             self.tool_turn = self.hooks[3](
                 next(filter(None, (self.ctx.get("tools"),)), list[dict[str, Any]]()),
-                self.on_text, self.on_reasoning, self.on_calls, )
+                on_t, on_r, on_c, )
             self.ctx.update(tool_stop=self.tool_turn.turn_complete, tool_calls_emitted=lambda: bool(self.tool_turn.calls),
                 emitted_call_ids=lambda: [str(c.get("id", "")) for c in self.tool_turn.calls])
-        self.stream_text = self.tool_turn.feed if self.tool_turn else self.on_text
+        self.stream_text = self._feed_tool_text if self.tool_turn is not None else on_t
         self.stream_reasoning = (
-            self.tool_turn.feed_reasoning if self.tool_turn else self.on_reasoning )
+            self.tool_turn.feed_reasoning if self.tool_turn is not None else on_r )
+    def _feed_tool_text(self, value: str) -> bool:
+        if self.tool_turn is None:
+            return self._tool_targets[0](value)
+        ok = self.tool_turn.feed(value)
+        if ok:
+            self.fed_raw_text += value
+        return ok
     def reset_precommit_emitted(self) -> None:
-        self.emitted_stream_text = ""
-        self.emitted_reasoning_text = ""
+        self.emitted_stream_text = self.emitted_reasoning_text = self.fed_raw_text = ""
         self.emitted_tool_trace_keys.clear()
         if self._emulate_tools and len(self.hooks) > 3:
             self._bind_stream_targets()
@@ -260,21 +269,22 @@ class SseStreamSession:
             self._flush_partial_timeout(out, retained)
     def _flush_partial_timeout(self, out: dict[str, Any], retained: Any) -> None:
         self.handler._arm_flush_window(self.ctx)
+        has_open = bool(self.tool_turn._normalizer.has_open_tool_call()) if self.tool_turn is not None else False
+        emitted_text = (self.fed_raw_text if (self.tool_turn is not None and self.fed_raw_text
+            and any((self.emitted_stream_text, self.emitted_tool_calls, has_open))) else self.emitted_stream_text)
         retained, skipped = filter_unemitted_retained( retained,
-            emitted_content=self.emitted_stream_text,
+            emitted_content=emitted_text,
             emitted_reasoning=self.emitted_reasoning_text,
             emitted_tool_traces=self.emitted_tool_trace_keys, )
-        if self.tool_turn and self.emitted_tool_calls:
-            retained = [(k, p) for k, p in retained if k != "text"]
-        elif (self.tool_turn and self.tool_turn._normalizer.has_open_tool_call()
-              and any(k == "text" and "<tool_call>" in str(p) for k, p in retained)):
+        rem_text = "".join(str(p) for k, p in retained if k == "text")
+        if has_open and "<tool_call>" in rem_text:
             self._bind_stream_targets()
         self.b05_skipped_chars += skipped
         self.b05_flushed_tail_chars += sum( len(str(p)) for k, p in retained
             if k in ("text", "reasoning") )
         ok = True
-        callbacks = dict( text=self.tool_turn.feed if self.tool_turn else self.on_text,
-            reasoning=self.tool_turn.feed_reasoning if self.tool_turn else self.on_reasoning,
+        callbacks = dict( text=self._feed_tool_text if self.tool_turn is not None else self.on_text,
+            reasoning=self.tool_turn.feed_reasoning if self.tool_turn is not None else self.on_reasoning,
             tool_trace=self.on_tool_trace, )
         for kind, payload in retained:
             callback = callbacks.get(kind)
