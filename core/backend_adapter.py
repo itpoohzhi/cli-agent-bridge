@@ -182,7 +182,7 @@ BACKEND_KEYS = frozenset(
         "proxy_port", "idle_timeout_s", "safety_cap_s", "base_url", "api_key_env", "api_key",
         "options", "api_key_ref", "headers_from_json", "per_request_headers", "default_body_extra",
         "failover_statuses", "failover_error_types", "failover_message_markers", "failover_pool",
-        "failover_pool_label", "params",
+        "failover_pool_label", "params", "trusted_tool_sanitizer",
     }
 )
 # Необязательные upstream-параметры raw-HTTP шва (только виды с `base_url`): откуда брать ключ и
@@ -404,7 +404,7 @@ def backend_entry_error(
                 return "backend_key_unknown"
             if not isinstance(entry[key], str):
                 return f"backend_{key}_invalid"
-    for flag, default in (("enabled", True), ("required", False)):
+    for flag, default in (("enabled", True), ("required", False), ("trusted_tool_sanitizer", False)):
         if not isinstance(entry.get(flag, default), bool):
             return "backend_invalid"
     cap = entry.get("max_concurrent", 1)

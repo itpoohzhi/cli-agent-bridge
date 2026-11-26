@@ -445,6 +445,7 @@
     },
     "agy": {
       "kind": "passthrough",
+      "trusted_tool_sanitizer": true,
       "enabled": true,
       "owned_by": "agy-bridge",
       "max_concurrent": 128,
