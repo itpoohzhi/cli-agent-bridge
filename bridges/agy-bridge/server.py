@@ -147,6 +147,8 @@ from agy_runtime import (  # noqa: E402
 )
 from agy_runtime.explicit_turn_commit import abort_explicit_turn_safe, finalize_deferred_explicit_turn  # noqa: E402
 from agy_runtime.hygiene_runtime import HygieneRuntime, ManagedSqliteRoPool  # noqa: E402
+from agy_runtime.orphan_coordinator import CoordinatorDecision  # noqa: E402
+from agy_runtime.p12_cleanup_seam import AgyP12CleanupSeam, DisconnectInput, capture_run_identity  # noqa: E402
 from agy_runtime.legacy_session_helpers import (  # noqa: E402
     LegacyLoadSpec, atomic_write_sessions_json, load_sessions_json_entries, normalize_request_cwd,
     session_entry_from_json, session_key_from_json, session_key_to_json, session_key_valid, validate_clean_cid,
@@ -159,8 +161,8 @@ from core.adaptive_admission import AdmissionKey, OutcomeKind  # noqa: E402
 from core.prompt_rendering import render_tools_section  # noqa: E402
 
 _HYGIENE_RT: HygieneRuntime | None = None
+_P12_SEAM: AgyP12CleanupSeam | None = None
 _HYGIENE_LOCK = threading.Lock()
-
 
 def _hygiene_rt() -> HygieneRuntime:
     global _HYGIENE_RT
@@ -170,6 +172,15 @@ def _hygiene_rt() -> HygieneRuntime:
         if _HYGIENE_RT is None:
             _HYGIENE_RT = slot_and_session.start_orphan_reaper(HygieneRuntime(config_path=DYNAMIC_CONFIG_PATH))
         return _HYGIENE_RT
+
+def _p12_seam() -> AgyP12CleanupSeam:
+    global _P12_SEAM
+    if (s := _P12_SEAM) is not None:
+        return s
+    with _HYGIENE_LOCK:
+        if _P12_SEAM is None:
+            _P12_SEAM = AgyP12CleanupSeam(config_path=DYNAMIC_CONFIG_PATH)
+        return _P12_SEAM
 
 
 from agy_runtime import history_compaction_adapter as _hca  # noqa: E402
@@ -3168,9 +3179,11 @@ def _lifecycle_cleanup() -> None:
         )
     finally:
         with _HYGIENE_LOCK:
-            rt = _HYGIENE_RT
+            rt, p12 = _HYGIENE_RT, _P12_SEAM
         if rt is not None:
             slot_and_session.shutdown_hygiene_runtime(rt)
+        if p12 is not None:
+            p12.shutdown()
 
 
 _LIFECYCLE = SubbridgeLifecycle(
@@ -3188,7 +3201,7 @@ _LIFECYCLE = SubbridgeLifecycle(
 
 def _reset_sqlite_guards_for_tests() -> None:
     """Сбросить процессные глобалы guardrails (хелпер тестов)."""
-    global _HYGIENE_RT, _breaker_state, _breaker_failures, _breaker_opened_at, _breaker_probe_gen
+    global _HYGIENE_RT, _P12_SEAM, _breaker_state, _breaker_failures, _breaker_opened_at, _breaker_probe_gen
     global _breaker_active_probe_gen, _breaker_probe_started_at, _retry_tenths
     global _compat_ident, _compat_state, _flag_value, _flag_key, _flag_checked_at
     global _sqlite_divergence_count, _sqlite_drain_deadline_count
@@ -3197,7 +3210,9 @@ def _reset_sqlite_guards_for_tests() -> None:
     with _HYGIENE_LOCK:
         if _HYGIENE_RT is not None:
             slot_and_session.shutdown_hygiene_runtime(_HYGIENE_RT)
-        _HYGIENE_RT = None
+        if _P12_SEAM is not None:
+            _P12_SEAM.shutdown()
+        _HYGIENE_RT = _P12_SEAM = None
     with _cfg_lock:
         _cfg_snapshot = _COLD_FLAGS
         _cfg_key = _cfg_checked_at = None
@@ -5065,9 +5080,9 @@ class JobRegistry:
             job = self.jobs.get(key)
             if job is not None:
                 if job.identity != identity:
-                    raise JobConflict(
-                        "idempotency key is bound to another model or prompt"
-                    )
+                    raise JobConflict("idempotency key is bound to another model or prompt")
+                if _p12_seam().decide_attach(job.key, int(getattr(job, "pgid", 0) or 0)) is CoordinatorDecision.REJECT_409_CANCELLING:
+                    raise JobConflict("job is cancelling or quarantined")
                 job.readers += 1
                 if job.orphan and not job.cancelled.is_set():
                     job.orphan = False
@@ -5161,14 +5176,17 @@ class JobRegistry:
             job.readers = max(0, job.readers - 1)
             if job.readers or job.result is not None or job.orphan:
                 return
-            orphan_ok = (
-                slot_and_session.should_detach_job_orphan(
-                    job.tools_count, job.ttfc_received,
-                    active_orphans=self.orphans, fast_enabled=fast, orphan_max=self.orphan_max,
-                )
-                if fast
-                else (allow_orphan and self.orphans < self.orphan_max)
+            coord = _p12_seam().decide_disconnect(
+                DisconnectInput(job.key, int(getattr(job, "pgid", 0) or 0), job.tools_count, job.ttfc_received, job.readers, self.orphans, self.orphan_max, allow_orphan, fast)
             )
+            if coord is not None:
+                orphan_ok = coord is CoordinatorDecision.ORPHAN_KEEP
+            else:
+                orphan_ok = (
+                    slot_and_session.should_detach_job_orphan(job.tools_count, job.ttfc_received, active_orphans=self.orphans, fast_enabled=fast, orphan_max=self.orphan_max)
+                    if fast
+                    else (allow_orphan and self.orphans < self.orphan_max)
+                )
             if allow_orphan and orphan_ok:
                 job.orphan = True
                 self.orphans += 1
@@ -6852,7 +6870,7 @@ class Handler(BaseHTTPRequestHandler):
                         return {"state": "client_gone", "text": "", "rc": 1}
                     last_delivery = time.monotonic()
         finally:
-            if job.result is None:
+            if job.result is None and not _p12_seam().orphan_coordinator_enabled():
                 _hygiene_rt().handle_disconnect(job.pgid, job.ttfc_received, job.tools_count)
             registry.detach(job, allow_orphan=allow_orphan)
 
@@ -7002,14 +7020,9 @@ class Handler(BaseHTTPRequestHandler):
                         extra_env=ctx.get("extra_env"),
                     )
                     self._metric_run = run
+                    capture_run_identity(run)
                 except LauncherUnavailable:
-                    self._reject(
-                        503,
-                        "launcher_unavailable",
-                        "canonical launcher is missing or not executable",
-                        model=model,
-                        model_len=ctx["model_len"],
-                    )
+                    self._reject(503, "launcher_unavailable", "canonical launcher is missing or not executable", model=model, model_len=ctx["model_len"])
                     out = _terminal_state("launcher_unavailable")
                     break
                 except OSError as exc:
@@ -7018,21 +7031,11 @@ class Handler(BaseHTTPRequestHandler):
                 job = getattr(self, "_registry_job", None)
                 if job is not None:
                     job.pgid = int(getattr(run.proc, "pid", 0) or 0)
+                    _hygiene_rt().bind_reaper(job.pgid, run.proc.poll)
                     _JOB_REGISTRY.bind_cancel(job, lambda: _kill_group(run.proc))
                 stop_hook = ctx.get("tool_stop")
                 try:
-                    out = self._execute(
-                        run,
-                        on_text,
-                        on_tool_trace,
-                        on_reasoning,
-                        keepalive,
-                        **(
-                            {"turn_complete": stop_hook}
-                            if stop_hook is not None
-                            else {}
-                        ),
-                    )
+                    out = self._execute(run, on_text, on_tool_trace, on_reasoning, keepalive, **({"turn_complete": stop_hook} if stop_hook is not None else {}))
                     d_en, d_max = _lsc.usage_drain_settings(config_path=DYNAMIC_CONFIG_PATH)
                     _u_fin.ensure_drained_before_usage(run, out, drain_max_s=d_max, enabled=d_en)
                     self._attach_resolved_usage(run, out, model)
@@ -7051,6 +7054,7 @@ class Handler(BaseHTTPRequestHandler):
                 finally:
                     run.close()
                     if job is not None:
+                        _hygiene_rt().bind_reaper(job.pgid, None)
                         _JOB_REGISTRY.bind_cancel(job, None)
                 if out["state"] == "done":
                     break
@@ -7181,16 +7185,11 @@ class Handler(BaseHTTPRequestHandler):
                     and callable(emitted)
                     and bool(emitted()),
                 )
-            _slots.release()
-            slot_and_session.release_admission_for_state(
-                _hygiene_rt().release, adm_dec.ticket_id, cast("dict[str, object]", out), run=self._metric_run
-            )
-        self._log_done(
-            cast(str, ctx["model"]),
-            cast("dict[str, object]", out),
-            t0,
-            cast(str, ctx["tag"]),
-        )
+            def _release_resources(_out=cast("dict[str, object]", out), _run=self._metric_run) -> None:
+                try: _slots.release()
+                finally: slot_and_session.release_admission_for_state(_hygiene_rt().release, adm_dec.ticket_id, _out, run=_run)
+            _p12_seam().release_slot_after_run(_release_resources, self._metric_run, str(ctx.get("turn_id") or tag))
+        self._log_done(cast(str, ctx["model"]), cast("dict[str, object]", out), t0, cast(str, ctx["tag"]))
         return out
 
     @staticmethod

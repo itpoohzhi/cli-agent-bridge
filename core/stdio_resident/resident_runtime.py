@@ -21,6 +21,7 @@ from core.resident_history import (
 )
 from core.resident_identity import ResidentAuthError as ResidentAuthError
 from core.resident_identity import ResidentRequestError as ResidentRequestError
+from core.p12_hub_cancel_seam import bind_resident_slot_pgid
 from core.resident_turn_envelope import ResidentTurnEnvelope
 from core.stdio_resident.config import StdioPoolConfig
 from core.stdio_resident.process_pool import ResidentProcessPool, SlotLeaseTimeoutError
@@ -86,6 +87,7 @@ class ResidentBridgeRuntime:
             opts = replace(options, extra_turn_context=turn_ctx)
             try:
                 slot, plan = self._acquire_checked_slot(current, committed, affinity_key, (any((eph, bool(iso.active))), argv, cwd, spawn_env))
+                bind_resident_slot_pgid(slot.handle, turn_ctx)
                 runnable = bool(current.rpc.runnable) if current.rpc else False
                 state = _TurnState(current, opts, session_key, slot, plan, any((eph, bool(iso.active), not runnable)))
                 yield from self._stream_and_commit_turn(state)

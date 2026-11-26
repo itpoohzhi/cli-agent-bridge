@@ -44,43 +44,35 @@ class LegacyAdmissionLike(Protocol):
 
 
 def _invalid_pgid(pgid: int) -> bool:
-    try:
-        return pgid <= 1 or pgid == os.getpgrp()
-    except OSError:
-        return True
-
+    try: return pgid <= 1 or pgid == os.getpgrp()
+    except OSError: return True
 
 def _safe_kill(pgid: int, sig: int) -> None:
     if not _invalid_pgid(pgid):
-        try:
-            os.killpg(pgid, sig)
-        except OSError:
-            pass
+        try: os.killpg(pgid, sig)
+        except OSError: pass
 
-def _default_waiter(pgid: int, timeout_s: float) -> bool:
+def _default_waiter(pgid: int, timeout_s: float, reap_leader: Callable[[], int | None] | None = None) -> bool:
+    """Popen-safe PGID waiter without raw waitpid(-pgid) (W06, CLM-P03)."""
     deadline = time.monotonic() + max(0.0, timeout_s)
     while time.monotonic() < deadline:
-        try:
-            if os.waitpid(-pgid, os.WNOHANG)[0] != 0:
-                return True
-            os.killpg(pgid, 0)
-        except OSError:
-            return True
+        if reap_leader is not None:
+            try: _ = reap_leader()
+            except OSError: pass
+        try: os.killpg(pgid, 0)
+        except ProcessLookupError: return True
+        except OSError: pass
         time.sleep(0.01)
     return False
 
-def _bounded_teardown(pgid: int, kill_fn: Callable[[int, int], None] | None, waiter: Callable[[int, float], bool] | None) -> None:
-    if _invalid_pgid(pgid):
-        return
-    k, w = kill_fn or _safe_kill, waiter or _default_waiter
+def _bounded_teardown(pgid: int, kill_fn: Callable[[int, int], None] | None, waiter: Callable[[int, float], bool] | None, reap_leader: Callable[[], int | None] | None = None) -> None:
+    if _invalid_pgid(pgid): return
+    k = kill_fn or _safe_kill
+    w = waiter or (lambda p, t: _default_waiter(p, t, reap_leader))
     k(pgid, signal.SIGTERM)
     if not w(pgid, 0.4):
         k(pgid, signal.SIGKILL)
         _ = w(pgid, 0.6)
-    try:
-        _ = os.waitpid(-pgid, os.WNOHANG)
-    except OSError:
-        pass
 
 
 @final
@@ -123,23 +115,27 @@ class ManagedSqliteRoPool:
             if self._enabled and not enabled:
                 self._fsm.reset()
             self._enabled = enabled
-    def _exec(self, call: Callable[[PoolLike], _T], db_path: Path | None = None) -> _T:
+    def _allow_checkout(self) -> bool:
         with self._lock:
-            allowed = True if not self._enabled else self._fsm.can_checkout(time.monotonic())
-        if not allowed:
-            raise SqliteRoPoolBackoffError("sqlite_ro_pool_backoff")
-        if self._inner is None:
-            raise RuntimeError("sqlite_ro_pool_unavailable")
+            return True if not self._enabled else self._fsm.can_checkout(time.monotonic())
+    def _record_result(self, exc: BaseException | None, db_path: Path | None) -> None:
+        if exc is None:
+            with self._lock:
+                _ = self._fsm.record_success() if self._enabled else None
+            return
+        if not is_cold_sqlite_wal_wait(exc, db_path):
+            with self._lock:
+                _ = self._fsm.record_error(time.monotonic()) if self._enabled else None
+        self.release_thread()
+    def _exec(self, call: Callable[[PoolLike], _T], db_path: Path | None = None) -> _T:
+        if not self._allow_checkout(): raise SqliteRoPoolBackoffError("sqlite_ro_pool_backoff")
+        if self._inner is None: raise RuntimeError("sqlite_ro_pool_unavailable")
         try:
             res = call(self._inner)
         except Exception as exc:
-            if not is_cold_sqlite_wal_wait(exc, db_path):
-                with self._lock:
-                    _ = self._fsm.record_error(time.monotonic()) if self._enabled else None
-            self.release_thread()
+            self._record_result(exc, db_path)
             raise
-        with self._lock:
-            _ = self._fsm.record_success() if self._enabled else None
+        self._record_result(None, db_path)
         return res
     def query_rows(self, db_path: Path | str, sql: str, params: tuple[object, ...] = ()) -> list[tuple[object, ...]]:
         path = Path(db_path) if isinstance(db_path, str) else db_path
@@ -170,6 +166,7 @@ class HygieneRuntime:
         self._orphan_lock, self._pool_lock = threading.Lock(), threading.Lock()
         self._config_path, self._flags, self._epoch = config_path, HygieneFlags(), 0
         self._detached, self._cancelling = dict[int, tuple[float, float]](), set[int]()
+        self._reapers = dict[int, Callable[[], int | None]]()
         self._orphan_fsm, self._reg = OrphanFsm(), AdaptiveAdmissionRegistry()
         self._legacy_adm, self._legacy_hits = admission, list[float]()
         self._sha, self._session = _DualCache(sha_cache_config()), _DualCache(session_store_config())
@@ -227,12 +224,12 @@ class HygieneRuntime:
         if self._legacy_adm is not None:
             with self._admission_lock:
                 self._legacy_adm.release(key)
-    def handle_disconnect(
-        self, pgid: int, ttfc_received: bool, tools_count: int,
-        kill_fn: Callable[[int, int], None] | None = None, waiter: Callable[[int, float], bool] | None = None,
-    ) -> bool:
-        if _invalid_pgid(pgid):
-            return False
+    def bind_reaper(self, pgid: int, reap_leader: Callable[[], int | None] | None) -> None:
+        if reap_leader is not None and _invalid_pgid(pgid): return
+        with self._orphan_lock:
+            self._reapers.pop(pgid, None) if reap_leader is None else self._reapers.__setitem__(pgid, reap_leader)
+    def handle_disconnect(self, pgid: int, ttfc_received: bool, tools_count: int, kill_fn: Callable[[int, int], None] | None = None, waiter: Callable[[int, float], bool] | None = None) -> bool:
+        if _invalid_pgid(pgid): return False
         fast = self.snapshot_flags(self._config_path).fast_client_gone_enabled if self._config_path else self._cur_flags().fast_client_gone_enabled
         now_s = time.monotonic()
         with self._orphan_lock:
@@ -241,8 +238,9 @@ class HygieneRuntime:
                 return True
             self._cancelling.add(pgid)
             _ = self._detached.pop(pgid, None)
+            reap_fn = self._reapers.pop(pgid, None)
         try:
-            _bounded_teardown(pgid, kill_fn, waiter)
+            _bounded_teardown(pgid, kill_fn, waiter, reap_leader=reap_fn)
         finally:
             with self._orphan_lock:
                 self._cancelling.discard(pgid)
@@ -253,13 +251,13 @@ class HygieneRuntime:
                 self._detached[pgid] = (e[0], time.monotonic())
     def release_detached(self, pgid: int) -> bool:
         with self._orphan_lock:
+            self._reapers.pop(pgid, None)
             return self._detached.pop(pgid, None) is not None
     def _drain_pgids(self, pgids: list[int], kill_fn: Callable[[int, int], None] | None, waiter: Callable[[int, float], bool] | None) -> int:
-        for pgid in pgids:
-            _bounded_teardown(pgid, kill_fn, waiter)
+        with self._orphan_lock: reapers = {p: self._reapers.pop(p, None) for p in pgids}
+        for pgid in pgids: _bounded_teardown(pgid, kill_fn, waiter, reap_leader=reapers.get(pgid))
         with self._orphan_lock:
-            for pgid in pgids:
-                _ = (self._detached.pop(pgid, None), self._cancelling.discard(pgid))
+            for pgid in pgids: _ = (self._detached.pop(pgid, None), self._cancelling.discard(pgid))
         return len(pgids)
     def sweep_orphans(self, kill_fn: Callable[[int, int], None] | None = None, waiter: Callable[[int, float], bool] | None = None) -> int:
         now_s = time.monotonic()
