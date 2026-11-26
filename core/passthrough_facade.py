@@ -305,7 +305,7 @@ def _run_routes(route: Any, routes: Any, seed: str, policy: Any) -> None:
                 continue
             candidate = RouteCandidate(route_id=spec.backend, origin=route.model_id, node=spec.backend, credential_scope=_credential_scope(route, spec), identity=f"{route.model_id}:{_effort(route)}")
             failover = _route_failover(route, backend)
-            guard = acquire_cb_guard(breakers, candidate, (resolve_provider(route, spec), route.model_id, spec.backend), now, len(parse_routes(route.model) if "routes" in route.model["routing"] else ()))
+            guard = acquire_cb_guard(breakers, candidate, (resolve_provider(route, spec), route.model_id, spec.backend), now, len(parse_routes(route.model) if "routes" in (route.model.get("routing") or {}) else ()))
             if guard.blocked:
                 if guard.quota_refusal is not None:
                     quota_skipped.append((backend, guard.quota_refusal, failover))

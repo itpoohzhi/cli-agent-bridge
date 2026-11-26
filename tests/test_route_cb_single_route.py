@@ -262,3 +262,28 @@ def test_concurrent_stress_128_threads() -> None:
         list(ex.map(worker, range(128)))
     assert cb.sink_errors == 0
     assert _cb_seq_strictly_increases(events)
+
+
+def test_route_cb_public_exports_preserved() -> None:
+    import core.route_cb as route_cb_mod
+
+    expected = (
+        "FailureOutcome",
+        "PROVIDER_AUTH_MARKERS",
+        "ROUTE_LOCAL_MARKERS",
+        "RouteCB",
+        "RouteCBConfig",
+        "RouteCircuitBreaker",
+        "RouteProbeLease",
+        "RouteTupleKey",
+        "_with_retry_after",
+        "classify_auth_failure",
+        "is_client_gone",
+        "is_recordable_failure",
+        "is_route_cb_enabled",
+        "load_route_cb_config",
+        "resolve_provider",
+    )
+    assert set(expected) <= set(route_cb_mod.__all__)
+    for name in expected:
+        assert getattr(route_cb_mod, name, None) is not None

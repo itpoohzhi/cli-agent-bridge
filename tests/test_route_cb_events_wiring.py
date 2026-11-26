@@ -86,7 +86,7 @@ def test_queue_full_and_reset_have_exact_loss_accounting(
 ) -> None:
     sink = BoundedRouteCBSink(lambda _line: None, maxsize=2)
     try:
-        monkeypatch.setattr(sink, "_ensure_started", lambda: None)
+        monkeypatch.setattr(sink, "_ensure_started", lambda: True)
         for seq in range(5):
             sink.emit(_event(seq))
         assert sink.route_cb_events_dropped == 3
@@ -256,3 +256,41 @@ def test_guard_outcomes_carry_route_count() -> None:
     assert first.route_count == second.route_count == 2
     assert [outcome.route_count for outcome in outcomes] == [2, 2]
     assert len(parse_routes(_facade_route(2, SimpleNamespace()).model)) == 2
+
+
+def test_sink_rejects_non_positive_maxsize() -> None:
+    for maxsize in (0, -1):
+        with pytest.raises(ValueError, match="maxsize must be >= 1"):
+            BoundedRouteCBSink(lambda _line: None, maxsize=maxsize)
+
+
+def test_thread_start_failure_keeps_sink_safe_and_closeable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def boom(_self: threading.Thread) -> None:
+        raise RuntimeError("cannot start thread")
+
+    monkeypatch.setattr(threading.Thread, "start", boom)
+    sink = BoundedRouteCBSink(lambda _line: None)
+    sink.emit(_event())
+    assert sink._thread is None
+    assert sink.route_cb_events_dropped == 1
+    sink.close()
+
+
+def test_thread_start_never_holds_state_lock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sink = BoundedRouteCBSink(lambda _line: None)
+    orig_start = threading.Thread.start
+    seen: list[bool] = []
+
+    def spy(self: threading.Thread) -> None:
+        assert not sink._state_lock.locked()
+        seen.append(True)
+        orig_start(self)
+
+    monkeypatch.setattr(threading.Thread, "start", spy)
+    sink.emit(_event())
+    assert seen == [True]
+    sink.close()

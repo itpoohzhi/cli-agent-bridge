@@ -26,6 +26,8 @@ from core.route_cb_policy import FailureOutcome, RouteProbeLease, RouteTupleKey,
 class BoundedRouteCBSink:
     """Non-blocking bounded event sink with exact dropped-event accounting."""
     def __init__(self, log_fn: Callable[[str], None], maxsize: int = 256, allowed_ids: frozenset[str] | None = None) -> None:
+        if maxsize < 1:
+            raise ValueError("maxsize must be >= 1")
         self._log_fn = log_fn
         self._allowed_ids = allowed_ids
         self._queue: queue.Queue[RouteCBEvent] = queue.Queue(maxsize=maxsize)
@@ -42,18 +44,32 @@ class BoundedRouteCBSink:
     def _add_dropped(self, count: int = 1) -> None:
         with self._state_lock:
             self._dropped += count
-    def _ensure_started(self) -> None:
-        if self._thread is None:
-            with self._start_lock:
-                if self._thread is None:
-                    self._thread = threading.Thread(target=self._run, daemon=True)
-                    self._thread.start()
+    def _ensure_started(self) -> bool:
+        if self._thread is not None:
+            return True
+        with self._start_lock:
+            if self._thread is not None:
+                return True
+            if self._stop_event.is_set():
+                return False
+            t = threading.Thread(target=self._run, daemon=True)
+            try:
+                t.start()
+            except RuntimeError:
+                return False
+            self._thread = t
+            return True
     def __call__(self, ev: RouteCBEvent) -> None:
+        if self._stop_event.is_set():
+            self._add_dropped()
+            return
+        if not self._ensure_started():
+            self._add_dropped()
+            return
         with self._state_lock:
             if self._closed:
                 self._dropped += 1
                 return
-            self._ensure_started()
             try:
                 self._queue.put_nowait(ev)
             except queue.Full:
@@ -87,8 +103,10 @@ class BoundedRouteCBSink:
         with self._state_lock:
             self._closed = True
             self._stop_event.set()
-        if self._thread is not None and self._thread.is_alive():
-            self._thread.join(timeout=timeout_s)
+        with self._start_lock:
+            thread = self._thread
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=timeout_s)
         self._drain_remaining()
 
 

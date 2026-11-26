@@ -16,8 +16,28 @@ from core.route_cb_decisions import transition as decide_transition
 from core.route_cb_policy import RouteCBConfig, RouteProbeLease, RouteTupleKey
 from core.route_cb_policy import FailureOutcome, is_recordable_failure, resolve_provider
 from core.route_cb_policy import _ProviderState, _TupleState, _UNPROVEN_DEQUE_MAX
+from core.route_cb_policy import PROVIDER_AUTH_MARKERS, ROUTE_LOCAL_MARKERS
+from core.route_cb_policy import _with_retry_after, classify_auth_failure
+from core.route_cb_policy import is_client_gone, is_route_cb_enabled
+from core.route_cb_policy import load_route_cb_config
 
-__all__ = ["RouteCB", "RouteCBConfig", "RouteCircuitBreaker", "resolve_provider"]
+__all__ = [
+    "FailureOutcome",
+    "PROVIDER_AUTH_MARKERS",
+    "ROUTE_LOCAL_MARKERS",
+    "RouteCB",
+    "RouteCBConfig",
+    "RouteCircuitBreaker",
+    "RouteProbeLease",
+    "RouteTupleKey",
+    "_with_retry_after",
+    "classify_auth_failure",
+    "is_client_gone",
+    "is_recordable_failure",
+    "is_route_cb_enabled",
+    "load_route_cb_config",
+    "resolve_provider",
+]
 
 EventList = list[RouteCBEvent]
 LeaseN = RouteProbeLease | None
@@ -49,7 +69,8 @@ class RouteCB:
 
     @property
     def sink_errors(self) -> int:
-        return self._sink_errors
+        with self._lock:
+            return self._sink_errors
 
     def _emit_events(self, events: EventList) -> None:
         if self._event_sink is not None and self._config.events_enabled:
