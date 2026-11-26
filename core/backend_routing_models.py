@@ -116,6 +116,7 @@ class TranscriptItem:
     role: str
     text: str
     digest: str
+    origin_role: str = ""
 
 
 @dataclass(frozen=True)

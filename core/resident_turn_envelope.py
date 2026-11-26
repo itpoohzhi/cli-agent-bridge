@@ -6,8 +6,9 @@ import hmac
 import uuid
 from collections.abc import Mapping
 from dataclasses import InitVar, dataclass, field
+from pathlib import Path
 from types import MappingProxyType
-from typing import Any, cast
+from typing import Any, Final, cast
 
 from core.backend_routing_models import ImageAttachment, Transcript
 from core.resident_canonical import (
@@ -25,6 +26,17 @@ from core.resident_canonical import (
 )
 from core.resident_identity import ResidentIdentity, ResidentRequestError, validate_hmac_secret
 from core.stdio_resident.types import SlotAffinityKey
+from core.zero_canon_fs import read_gigarc_bool, resolve_hub_dynamic_config
+
+WARM_DELTA_INTEGRITY_FLAG: Final[str] = "BRIDGE_CODEX_WARM_DELTA_INTEGRITY_ENABLED"
+
+
+def is_warm_delta_integrity_enabled(
+    environ: Mapping[str, str] | None = None, config_path: Path | None = None
+) -> bool:
+    """Kill-switch целостности warm delta (`dynamic_config.json > env > False`)."""
+    path = config_path if config_path is not None else resolve_hub_dynamic_config(environ)
+    return read_gigarc_bool(WARM_DELTA_INTEGRITY_FLAG, path, environ=environ, default=False)
 
 
 def _system_digest(rpc: Transcript | None, supplied: str) -> str:
@@ -32,6 +44,9 @@ def _system_digest(rpc: Transcript | None, supplied: str) -> str:
     if not res:
         items = rpc.items if rpc else ()
         texts = [item.text for item in items if not bool({item.role} - {"system"})]
+        lead = getattr(rpc, "system", None)
+        if lead and is_warm_delta_integrity_enabled():
+            texts = [lead, *texts]
         res = hashlib.sha256("\n\n".join(texts).encode("utf-8")).hexdigest()
     return res
 

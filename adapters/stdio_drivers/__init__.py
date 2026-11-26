@@ -45,6 +45,7 @@ register_protocol_driver("agy-stream-json", AgyStreamJsonDriver)
 __all__ = [
     "AgyStreamJsonDriver",
     "CODEX_APP_SERVER_V2_FLAG",
+    "CODEX_POOL_UNIFIED_CAP_FLAG",
     "MuseMspDriver",
     "OpenCodeAcpDriver",
     "build_affinity_key",
@@ -65,6 +66,9 @@ _SESSION_ID_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,128}\Z")
 _ENV_MUSE_RESIDENT_ENABLED = "BRIDGE_MUSE_RESIDENT_ENABLED"
 _ENV_OPENCODE_RESIDENT_ENABLED = "BRIDGE_OPENCODE_RESIDENT_ENABLED"
 CODEX_APP_SERVER_V2_FLAG = "BRIDGE_CODEX_APP_SERVER_V2_ENABLED"
+CODEX_POOL_UNIFIED_CAP_FLAG = "BRIDGE_CODEX_POOL_UNIFIED_CAP_ENABLED"
+_ENV_CODEX_POOL_TOTAL_CAP = "BRIDGE_CODEX_POOL_TOTAL_CAP"
+_DEFAULT_CODEX_POOL_TOTAL_CAP = 20
 _AGY_IDS = frozenset({"agy", "antigravity", "agy-bridge", "agy-cli"})
 _CLAUDE_IDS = frozenset({"claude", "claude-p", "claude_p"})
 _CODEX_IDS = frozenset({"codex", "codex-cli", "codex-app-server"})
@@ -268,29 +272,65 @@ def infer_protocol(
     )
 
 
+def _is_codex_pool_unified_cap_enabled(env: Mapping[str, str]) -> bool:
+    return read_gigarc_bool(
+        CODEX_POOL_UNIFIED_CAP_FLAG,
+        resolve_hub_dynamic_config(env),
+        environ=env,
+        default=False,
+    )
+
+
+def _provider_max_concurrent(driver_config: Mapping[str, Any], *, flat: bool) -> int | None:
+    """`limits.max_concurrent`; при `flat=True` — также плоское `max_concurrent` fleet.json."""
+    limits = driver_config.get("limits")
+    raw = limits.get("max_concurrent") if isinstance(limits, Mapping) else None
+    if raw is None and flat:
+        raw = driver_config.get("max_concurrent")
+    if isinstance(raw, bool) or not isinstance(raw, int) or raw < 2:
+        return None
+    return raw
+
+
+def _total_cap(env: Mapping[str, str]) -> int:
+    raw = (env.get(_ENV_CODEX_POOL_TOTAL_CAP) or "").strip()
+    return max(2, min(int(raw), 64)) if raw.isascii() and raw.isdigit() else _DEFAULT_CODEX_POOL_TOTAL_CAP
+
+
+def _codex_pool_target(env: Mapping[str, str], driver_config: Mapping[str, Any]) -> int | None:
+    unified = _is_codex_pool_unified_cap_enabled(env)
+    raw_mc = _provider_max_concurrent(driver_config, flat=unified)
+    if raw_mc is None:
+        return None
+    target = max(2, min(raw_mc, 64))
+    return min(target, _total_cap(env)) if unified else target
+
+
+def _env_unset(env: Mapping[str, str], name: str) -> bool:
+    return not (env.get(name) or "").strip()
+
+
 def _align_codex_v2_pool_slots(
     pool_cfg: StdioPoolConfig,
     env: Mapping[str, str],
     driver_config: Mapping[str, Any] | None,
 ) -> StdioPoolConfig:
-    """Align Codex v2 ephemeral/hot slot caps with provider limits.max_concurrent unless env overrides."""
-    if not isinstance(driver_config, Mapping):
+    """Align Codex v2 ephemeral/hot slot caps with provider max_concurrent unless env overrides.
+
+    Плоское поле `max_concurrent` (реальный fleet.json) читается только при
+    `BRIDGE_CODEX_POOL_UNIFIED_CAP_ENABLED`; иначе поведение прежнее (`limits.max_concurrent`).
+    """
+    target = _codex_pool_target(env, driver_config) if isinstance(driver_config, Mapping) else None
+    if target is None:
         return pool_cfg
-    limits = driver_config.get("limits")
-    if not isinstance(limits, Mapping):
-        return pool_cfg
-    raw_mc = limits.get("max_concurrent")
-    if isinstance(raw_mc, bool) or not isinstance(raw_mc, int) or raw_mc < 2:
-        return pool_cfg
-    target = max(2, min(raw_mc, 64))
     updates: dict[str, Any] = {}
-    if not (env.get("BRIDGE_STDIO_MAX_EPHEMERAL_SLOTS") or "").strip():
-        updates["max_ephemeral_slots"] = target
-    if not (env.get("BRIDGE_STDIO_MAX_SLOTS") or "").strip():
+    if _env_unset(env, "BRIDGE_STDIO_MAX_SLOTS"):
         new_max = max(pool_cfg.max_slots, target)
         updates["max_slots"] = new_max
-        if not (env.get("BRIDGE_STDIO_MAX_SLOTS_PER_PRINCIPAL") or "").strip():
+        if _env_unset(env, "BRIDGE_STDIO_MAX_SLOTS_PER_PRINCIPAL"):
             updates["max_slots_per_principal"] = new_max
+    if _env_unset(env, "BRIDGE_STDIO_MAX_EPHEMERAL_SLOTS"):
+        updates["max_ephemeral_slots"] = min(target, updates.get("max_slots", pool_cfg.max_slots))
     return dataclasses.replace(pool_cfg, **updates) if updates else pool_cfg
 
 
@@ -335,12 +375,15 @@ def build_affinity_key(
     effort: str,
     cwd_norm: str,
     *,
-    env_digest: str,
-    is_ephemeral: bool = False,
-    driver_fingerprint: str = "",
+    env_digest: str = "",
     review_profile: str = "standard",
+    **_legacy: object,
 ) -> SlotAffinityKey:
-    """Construct a complete resident-process affinity key."""
+    """Construct a complete resident-process affinity key.
+
+    Устаревшие kwargs (`is_ephemeral`, `driver_fingerprint`) принимаются и игнорируются:
+    в `SlotAffinityKey` таких полей нет.
+    """
     return SlotAffinityKey(
         owner_hash=owner_hash,
         chat_key=chat_key,
@@ -348,8 +391,6 @@ def build_affinity_key(
         model=model,
         effort=effort,
         cwd_norm=cwd_norm,
-        is_ephemeral=is_ephemeral,
-        review_profile=normalize_review_profile(review_profile),
-        driver_fingerprint=driver_fingerprint,
         env_digest=env_digest,
+        review_profile=normalize_review_profile(review_profile),
     )
