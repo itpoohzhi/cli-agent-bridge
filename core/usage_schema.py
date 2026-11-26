@@ -5,13 +5,14 @@ from __future__ import annotations
 import math
 from collections.abc import Iterable, Mapping
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, TypeGuard
 
 USAGE_LOG_FIELDS: tuple[str, ...] = (
     "ts", "request_id", "model", "subagent_id", "subagent_role",
     "route", "backend_id", "stream", "http_status", "elapsed_ms",
     "prompt_tokens", "completion_tokens", "total_tokens",
     "cached_tokens", "reasoning_tokens", "usage_present",
+    "cache_creation_tokens", "usage_missing_reason",
 )
 
 USAGE_LOG_V2_OPTIONAL_FIELDS: tuple[str, ...] = (
@@ -100,7 +101,7 @@ def compute_uncached_prompt_tokens(prompt_tokens: Any, cached_tokens: Any) -> in
     return max(0, _nonneg_int(prompt_tokens) - _nonneg_int(cached_tokens))
 
 
-def _is_int(value: Any) -> bool:
+def _is_int(value: Any) -> TypeGuard[int]:
     """True для int, исключая bool."""
     return isinstance(value, int) and not isinstance(value, bool)
 
@@ -139,7 +140,7 @@ def eligible_cache_stats(records: Iterable[Mapping[str, Any]]) -> tuple[int, int
         validity = classify_usage_validity(rec)
         invalid += int(validity == "invalid_cached_gt_prompt")
         cached, prompt = rec.get("cached_tokens"), rec.get("prompt_tokens")
-        if validity != "valid" or not _is_int(cached) or not is_cache_eligible(prompt):
+        if validity != "valid" or not _is_int(cached) or not _is_int(prompt) or not is_cache_eligible(prompt):
             continue
         if 0 <= cached <= prompt:
             eligible_cached += cached

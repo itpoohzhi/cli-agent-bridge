@@ -34,7 +34,7 @@ def _resolve_raw(row_map: Mapping[str, Any], field: str) -> Any:
 
 
 def row_to_usage_record(row_map: Mapping[str, Any]) -> dict[str, Any]:
-    """Преобразует строку телеметрии в словарь строго из 16 allowlist-полей."""
+    """Преобразует строку телеметрии в словарь строго из allowlist-полей USAGE_LOG_FIELDS (18)."""
     record: dict[str, Any] = {}
     for field in USAGE_LOG_FIELDS:
         clean = sanitize_scalar(_resolve_raw(row_map, field))

@@ -108,8 +108,9 @@ def test_normalize_usage_record_aliases_keeps_legacy_and_adds_v2() -> None:
 
 
 def test_usage_log_fields_untouched_and_v2_fields_additive() -> None:
-    """Базовые 16 полей на местах; v2-поля — отдельный аддитивный кортеж."""
-    assert len(USAGE_LOG_FIELDS) == 16
+    """Базовые 16 полей на местах + 2 хвостовых (cache_creation_tokens, usage_missing_reason); v2 — отдельный кортеж."""
+    assert len(USAGE_LOG_FIELDS) == 18
+    assert USAGE_LOG_FIELDS[16:] == ("cache_creation_tokens", "usage_missing_reason")
     assert USAGE_LOG_FIELDS[5] == "route"
     assert "usage_validity" in USAGE_LOG_V2_OPTIONAL_FIELDS
     assert "pck_digest" in USAGE_LOG_V2_OPTIONAL_FIELDS

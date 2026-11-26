@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any, TypeGuard
 
 VALID_USAGE_SOURCES: frozenset[str] = frozenset(
@@ -13,6 +14,9 @@ VALID_USAGE_MISSING_REASONS: frozenset[str] = frozenset(
 _SOURCE_PAIRS: tuple[tuple[str, str], ...] = (
     ("codex_app_server_v2", "codex_v2_turn"),
     ("codex_app_server", "codex_legacy"),
+)
+CACHE_CREATION_RAW_KEYS: tuple[str, ...] = (
+    "cache_creation_tokens", "cache_creation_input_tokens", "cacheCreationTokens", "cacheWriteTokens",
 )
 _COUNTER_KEYS: tuple[str, ...] = (
     "input_tokens", "output_tokens", "prompt_tokens", "completion_tokens",
@@ -33,6 +37,15 @@ def _is_number(value: Any) -> TypeGuard[int | float]:
 
 def _is_positive(value: Any) -> bool:
     return _is_number(value) and value > 0
+
+
+def extract_cache_creation(raw: Mapping[str, Any]) -> int | None:
+    """cache_creation_tokens из usage по известным ключам (без импорта usage_wire); нет валидного счётчика — None."""
+    for key in CACHE_CREATION_RAW_KEYS:
+        value = raw.get(key)
+        if _is_counter(value):
+            return value
+    return None
 
 
 def _resolve_usage_source(raw_source: Any) -> str | None:
@@ -87,21 +100,24 @@ def finalize_event_usage(meta: dict[str, Any]) -> dict[str, Any]:
     completion = meta.pop("completion_tokens", None)
     cached = meta.pop("cached_tokens", None)
     reasoning = meta.pop("reasoning_tokens", None)
+    cache_creation = meta.pop("cache_creation_tokens", None)
     reported_total = meta.pop("total_tokens", None)
     explicit_present = meta.pop("usage_present", None)
     raw_source = meta.pop("usage_source", None)
     raw_reason = meta.pop("usage_missing_reason", None)
     total = _total_tokens(prompt, completion, reported_total)
-    has_positive = any(_is_positive(value) for value in (prompt, completion, cached, reasoning, total))
+    has_positive = any(_is_positive(value) for value in (prompt, completion, cached, reasoning, cache_creation, total))
     if explicit_present is not False and has_positive:
         return {
             "prompt_tokens": prompt, "completion_tokens": completion, "cached_tokens": cached,
-            "reasoning_tokens": reasoning, "total_tokens": total, "usage_present": True,
+            "reasoning_tokens": reasoning, "cache_creation_tokens": cache_creation,
+            "total_tokens": total, "usage_present": True,
             "usage_source": _resolve_usage_source(raw_source) or "upstream_report", "usage_missing_reason": None,
         }
-    has_zero_num = any(_is_number(value) for value in (prompt, completion, cached, reasoning, reported_total)) and not has_positive
+    zero_fields = (prompt, completion, cached, reasoning, cache_creation, reported_total)
+    has_zero_num = any(_is_number(value) for value in zero_fields) and not has_positive
     reason = _absent_reason(raw_reason, has_zero_num, explicit_present is False)
     return {
         "prompt_tokens": None, "completion_tokens": None, "cached_tokens": None, "reasoning_tokens": None,
-        "total_tokens": None, "usage_present": False, "usage_source": None, "usage_missing_reason": reason,
+        "cache_creation_tokens": None, "total_tokens": None, "usage_present": False, "usage_source": None, "usage_missing_reason": reason,
     }

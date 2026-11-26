@@ -80,6 +80,7 @@ def test_finalize_absent_usage_block_is_all_none() -> None:
         "completion_tokens": None,
         "cached_tokens": None,
         "reasoning_tokens": None,
+        "cache_creation_tokens": None,
         "total_tokens": None,
         "usage_present": False,
         "usage_source": None,

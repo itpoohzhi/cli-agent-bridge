@@ -25,9 +25,11 @@ from adapters.stdio_drivers.muse_env import (
     resolve_pinned_path,
     verify_binary,
 )
+from core.stdio_resident.muse_teardown_usage import dedup_item_chunk, late_usage_from_frame
 from core.stdio_resident.process_io import StdioIoError
 from core.stdio_resident.protocol_driver import DecodedChunk, DriverCapabilities, StdioProtocolDriver
 from core.stdio_resident.rpc_drivers import register_protocol_driver
+from core.turn_usage import UsageUpdate
 
 _DEFAULT_SANDBOX_FLAGS: tuple[str, ...] = ("--sandbox",)
 _DEFAULT_CLI_ARGS: tuple[str, ...] = ("--stdio",)
@@ -50,6 +52,7 @@ class MuseMspDriver(StdioProtocolDriver):
         self._id_lock = threading.Lock()
         self._last_session_id: str | None = None
         self._streamed_items: dict[str, set[str]] = {}
+        self.last_late_usage: UsageUpdate | None = None
 
     @property
     def capabilities(self) -> DriverCapabilities:
@@ -190,42 +193,15 @@ class MuseMspDriver(StdioProtocolDriver):
 
     def decode_line(self, raw_line: str) -> DecodedChunk | None:
         """Decode one stdout NDJSON line, deduplicating item/completed after item/delta."""
-        if not raw_line.strip():
-            return None
-        chunk = decode_msp_line(raw_line)
-        if chunk is None:
+        if not raw_line.strip() or (chunk := decode_msp_line(raw_line)) is None:
             return None
         raw = chunk.raw if isinstance(chunk.raw, Mapping) else {}
-        method = raw.get("method")
         params = raw.get("params") if isinstance(raw.get("params"), Mapping) else {}
-        sid = str(params.get("sessionId") or "")
-        if sid and method in {"item.delta", "item/delta"} and (chunk.text or chunk.reasoning):
-            if item_id := str(params.get("itemId") or ""):
+        if sid := str(params.get("sessionId") or ""):
+            chunk = dedup_item_chunk(chunk, sid, raw.get("method"), params, (self._id_lock, self._streamed_items))
+            if chunk.is_terminal:
                 with self._id_lock:
-                    self._streamed_items.setdefault(sid, set()).add(item_id)
-        elif sid and method == "item/completed":
-            item = params.get("item") if isinstance(params.get("item"), Mapping) else {}
-            item_id = str(item.get("itemId") or "")
-            if item_id:
-                with self._id_lock:
-                    seen = self._streamed_items.get(sid)
-                    already_streamed = bool(seen and item_id in seen)
-                    if seen is not None:
-                        seen.discard(item_id)
-                if already_streamed:
-                    chunk = MuseDecodedChunk(
-                        text="",
-                        reasoning="",
-                        tool_calls=chunk.tool_calls,
-                        is_terminal=chunk.is_terminal,
-                        is_tool_stop=chunk.is_tool_stop,
-                        raw=chunk.raw,
-                        error=getattr(chunk, "error", None),
-                        reply_bytes=getattr(chunk, "reply_bytes", None),
-                    )
-        if chunk.is_terminal and sid:
-            with self._id_lock:
-                self._streamed_items.pop(sid, None)
+                    self._streamed_items.pop(sid, None)
         return chunk
 
     def is_terminal(self, raw_line: str, decoded: DecodedChunk | None) -> bool:
@@ -248,6 +224,15 @@ class MuseMspDriver(StdioProtocolDriver):
         payload = build_session_leave_msg(self._ensure_session_id(turn_context), uuid7(), request_id=req_id)
         return self._send_and_wait_ack(handle, payload, lambda p: self._is_teardown_ack(p, req_id), timeout_s)
 
+    def _check_ack_frame(self, stripped: str, match_fn: Callable[[Mapping[str, Any]], bool]) -> bool | None:
+        """Проверить одну непустую строку ack; попутно сохранить поздний tokenUsage."""
+        is_err, parsed = self._parse_rpc_line(stripped)
+        if parsed is not None and (late := late_usage_from_frame(parsed)) is not None:
+            self.last_late_usage = late
+        if is_err:
+            return False
+        return True if parsed is not None and match_fn(parsed) else None
+
     def _send_and_wait_ack(
         self, handle: Any, payload: bytes, match_fn: Callable[[Mapping[str, Any]], bool], timeout_s: float
     ) -> bool:
@@ -259,11 +244,8 @@ class MuseMspDriver(StdioProtocolDriver):
         while (remaining := deadline - time.monotonic()) > 0:
             if (line := self._read_ack_line(read_fn, stdout, remaining, callable(read_fn))) is None:
                 break
-            if not (stripped := line.strip()):
-                continue
-            is_err, parsed = self._parse_rpc_line(stripped)
-            if is_err or (parsed is not None and match_fn(parsed)):
-                return not is_err
+            if (stripped := line.strip()) and (verdict := self._check_ack_frame(stripped, match_fn)) is not None:
+                return verdict
         return False
 
     @staticmethod

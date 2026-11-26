@@ -194,3 +194,38 @@ def test_usage_analytics_is_pure_module() -> None:
     for node in tree.body:
         if isinstance(node, (ast.Assign, ast.AnnAssign)) and node.value is not None:
             assert not isinstance(node.value, (ast.Dict, ast.List, ast.Set))
+
+
+def test_cache_creation_tokens_aggregation_and_legacy_records() -> None:
+    """cache_creation_tokens суммируется во всех разрезах; старые записи (нет поля/None/мусор) дают 0."""
+    records: list[dict[str, Any]] = [
+        {"ts": "2026-11-20T10:00:00Z", "model": "m", "backend_id": "b", "route": "r1", "subagent_role": "coder",
+         "prompt_tokens": 100, "cached_tokens": 40, "cache_creation_tokens": 10, "usage_present": True},
+        {"ts": "2026-11-20T11:00:00Z", "model": "m", "backend_id": "b", "route": "r1", "subagent_role": "coder",
+         "prompt_tokens": 100, "cached_tokens": 10, "cache_creation_tokens": None, "usage_present": True},
+        {"ts": "2026-11-21T11:00:00Z", "model": "m2", "backend_id": "b2", "route_mode": "r2",
+         "prompt_tokens": 50, "cached_tokens": 0, "cache_creation_tokens": "oops", "usage_present": True},
+        {"ts": "2026-11-21T12:00:00Z", "model": "m2", "backend_id": "b2", "prompt_tokens": 50, "usage_present": True},
+    ]
+    report = aggregate_records(records)
+    summary = report["summary"]
+    assert summary["cache_creation_tokens"] == 10
+    assert summary["cache_hit_pct"] == round(100.0 * 50 / 300, 2)
+    assert 0.0 <= summary["cache_hit_pct"] <= 100.0
+    assert {r["model"]: r["cache_creation_tokens"] for r in report["by_model"]} == {"m": 10, "m2": 0}
+    assert {r["subagent_role"]: r["cache_creation_tokens"] for r in report["by_role"]} == {"coder": 10, "interactive": 0}
+    assert {r["day"]: r["cache_creation_tokens"] for r in report["by_day"]} == {"2026-11-20": 10, "2026-11-21": 0}
+    assert {r["route"]: r["cache_creation_tokens"] for r in report["by_route"]} == {"r1": 10, "r2": 0, "": 0}
+
+
+def test_usage_missing_reasons_summary() -> None:
+    """usage_missing_reasons считает только записи без usage с непустой причиной."""
+    records: list[dict[str, Any]] = [
+        {"usage_present": False, "usage_missing_reason": "no_usage"},
+        {"usage_present": False, "usage_missing_reason": "no_usage"},
+        {"usage_present": False, "usage_missing_reason": " parse_error "},
+        {"usage_present": False, "usage_missing_reason": ""},
+        {"usage_present": True, "usage_missing_reason": "ignored"},
+    ]
+    assert aggregate_records(records)["summary"]["usage_missing_reasons"] == {"no_usage": 2, "parse_error": 1}
+    assert aggregate_records([])["summary"]["usage_missing_reasons"] == {}

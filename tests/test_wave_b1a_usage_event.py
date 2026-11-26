@@ -34,7 +34,7 @@ def test_b1a_total_tokens_and_finalize_positive() -> None:
     meta = {"prompt_tokens": 10, "completion_tokens": 5, "usage_source": "codex_app_server_v2", "keep": "x"}
     ev = finalize_event_usage(meta)
     assert (ev, meta) == (
-        {"prompt_tokens": 10, "completion_tokens": 5, "cached_tokens": None, "reasoning_tokens": None, "total_tokens": 15, "usage_present": True, "usage_source": "codex_v2_turn", "usage_missing_reason": None},
+        {"prompt_tokens": 10, "completion_tokens": 5, "cached_tokens": None, "reasoning_tokens": None, "cache_creation_tokens": None, "total_tokens": 15, "usage_present": True, "usage_source": "codex_v2_turn", "usage_missing_reason": None},
         {"keep": "x"},
     )
     assert finalize_event_usage({"cached_tokens": 4})["usage_source"] == "upstream_report"
