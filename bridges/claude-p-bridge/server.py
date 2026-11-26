@@ -23,7 +23,6 @@ import threading
 import time
 import uuid
 from collections.abc import Callable
-from contextlib import nullcontext
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, NamedTuple, cast
@@ -37,7 +36,7 @@ from core.chat_key import SOURCES_SESSION_ID, resolve_chat_key  # noqa: E402
 from core.claude_bridge_telemetry import format_done_usage_suffix, project_wire_usage  # noqa: E402
 from core.claude_prompt import PromptBudgetConfig, prepare_prompt_with_cap, wire_cache_creation_enabled  # noqa: E402
 from core.claude_session import (  # noqa: E402
-    NO_PERSISTENCE_FLAG, SessionConfig, SessionLease, SessionMode, SessionPlan, SessionStore,
+    NO_PERSISTENCE_FLAG, SessionConfig, SessionMode, SessionPlan, SessionStore,
     assert_zero_canon_argv_safe, build_session_argv, is_session_reuse_allowed_profile,
 )
 from core.claude_zero_canon import (  # noqa: E402
@@ -756,11 +755,11 @@ class Handler(BaseHTTPRequestHandler):
         spec = build_mode_spec(resolve_tool_mode(tools, req.get("tool_choice")), resolve_toolless_tag_policy(os.environ))
         return _prompt_for(req, tools, images, spec), tools, spec
 
-    def _session_lease(self, req: dict) -> SessionLease | None:
+    def _session_key(self, req: dict) -> str | None:
         """Opt-in reuse (AD-004): только явный session-id и профиль standard/без профиля."""
         extra = req.get("extra_body")
         chat = resolve_chat_key(req, self.headers, extra if isinstance(extra, dict) else None, sources=SOURCES_SESSION_ID)
-        return cast("Server", self.server).session_store.begin(chat.digest) if (SessionConfig.from_env().enabled and is_session_reuse_allowed_profile(self.headers) and chat.keyed) else None
+        return chat.digest if (SessionConfig.from_env().enabled and is_session_reuse_allowed_profile(self.headers) and chat.keyed) else None
 
     def _run_once(self, req: dict, callbacks: _Callbacks, chat: Any = None) -> dict:
         model, model_err = _resolve_model(req)
@@ -783,19 +782,21 @@ class Handler(BaseHTTPRequestHandler):
             return _failed(reason)
         t0 = time.monotonic()
         try:
-            out = self._run_session(turn, callbacks, self._session_lease(req))
+            out = self._run_session(turn, callbacks, self._session_key(req))
         finally:
             _slots.release()
         self._log_turn_done(turn, out, t0)
         return out
 
-    def _run_session(self, turn: _Turn, callbacks: _Callbacks, lease: SessionLease | None) -> dict:
-        """RESUME-сбой до публичного вывода -> invalidate и один локальный stateless-повтор."""
-        plan = SessionPlan(lease.mode, lease.session_id) if lease else None
-        with (lease.lock if lease else nullcontext()):  # per-key lock на весь ход
-            out = self._run_staged(turn._replace(session_plan=plan), callbacks)
-            if lease and self._error_body(out):
-                cast("Server", self.server).session_store.invalidate(lease.key_digest, lease.session_id)
+    def _run_session(self, turn: _Turn, callbacks: _Callbacks, key_digest: str | None) -> dict:
+        """Сериализованный per-key lock до CREATE/RESUME; RESUME-сбой до вывода -> stateless-повтор."""
+        if not key_digest:
+            return self._run_staged(turn, callbacks)
+        store = cast("Server", self.server).session_store
+        with store.lease(key_digest) as lease:
+            out = self._run_staged(turn._replace(session_plan=SessionPlan(lease.mode, lease.session_id)), callbacks)
+            if self._error_body(out):
+                store.invalidate(lease.key_digest, lease.session_id)
                 if lease.mode is SessionMode.RESUME and out["state"] == "done" and not any(map(out.get, ("text", "reasoning", "tool_calls"))):
                     out = self._run_staged(turn, callbacks)
         return out
