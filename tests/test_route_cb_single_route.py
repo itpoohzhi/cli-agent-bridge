@@ -119,7 +119,8 @@ def test_429_carveout_opens_tuple_despite_protection() -> None:
         cb.record_failure(K, FailureOutcome(status=429, route_count=1))
     t = cb._tuples[K]
     assert t.open_until is not None and t.open_until - now[0] == 90.0
-    assert cb.try_acquire(K) is None
+    assert t.open_status == 429
+    assert cb.try_acquire(K, route_count=1) is None
     assert cb.retry_after_s([K]) == 90
     assert [e.event for e in events] == ["open", "blocked"]
     assert events[0].state == "open" and events[0].retry_after_s == 90
@@ -136,6 +137,23 @@ def test_auth_401_provider_wide_no_bypass() -> None:
     assert cb.try_acquire(K, route_count=1) is None
     assert cb.retry_after_s([K]) == 90
     assert [e.event for e in events] == ["open", "blocked"]
+
+
+def test_auth_401_route_local_no_bypass_on_single_route() -> None:
+    events: list[RouteCBEvent] = []
+    now, cb = _cb(single_route_protect=True, event_sink=events.append)
+    for _ in range(3):
+        cb.record_failure(
+            K, FailureOutcome(status=401, detail="model_not_found", route_count=1)
+        )
+    t = cb._tuples[K]
+    assert t.open_until is not None and t.open_status == 401
+    p = cb._providers.get("p1")
+    assert p is None or p.open_until is None
+    assert cb.try_acquire(K, route_count=1) is None
+    assert [e.event for e in events] == ["open", "blocked"]
+    cb.record_success(K)
+    assert t.open_until is None and t.open_status is None
 
 
 def test_multi_route_failover_preserved() -> None:

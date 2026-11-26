@@ -81,6 +81,7 @@ class _TupleState:
     first_fail_ts: float | None = None
     open_until: float | None = None
     probe_in_flight: bool = False
+    open_status: int | None = None
 
 
 @dataclass(slots=True)

@@ -226,6 +226,39 @@ def test_facade_uses_declared_route_count_for_single_route_decision(
     assert counts == [declared] * 3
 
 
+def test_facade_single_route_429_carveout_blocks_fourth_attempt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(facade, "_RUNTIME", facade._RuntimeState())
+    monkeypatch.setenv("BRIDGE_ROUTE_CB_ENABLED", "1")
+    monkeypatch.setenv("BRIDGE_ROUTE_CB_EVENTS", "0")
+    monkeypatch.setenv("BRIDGE_ROUTE_CB_SINGLE_ROUTE_PROTECTION", "true")
+    statuses: list[int] = []
+    sink = SimpleNamespace(
+        start=lambda status, _headers: statuses.append(status),
+        write=lambda *_args: None,
+    )
+    route = _facade_route(1, sink)
+    spec = SimpleNamespace(backend="b1", provider="p1", credential_ref="c1")
+    monkeypatch.setattr(facade, "prepare_post_body", lambda _route: b"{}")
+    monkeypatch.setattr(facade, "route_order", lambda *_args: ("b1",))
+    monkeypatch.setattr(facade, "_eligible", lambda *_args: True)
+    attempts: list[int] = []
+
+    def fail(*_args: Any) -> None:
+        attempts.append(1)
+        raise RouteRefusal(429, (), b"{}")
+
+    monkeypatch.setattr(facade, "_attempt", fail)
+    for _ in range(4):
+        facade._run_routes(route, [spec], "seed", None)
+    assert len(attempts) == 3
+    assert statuses == [429, 429, 429, 503]
+    state = facade._RUNTIME.route_cb._tuples.get(KEY)
+    assert state is not None and state.open_until is not None
+    assert state.open_status == 429
+
+
 def test_guard_outcomes_carry_route_count() -> None:
     outcomes: list[Any] = []
     cb = SimpleNamespace(

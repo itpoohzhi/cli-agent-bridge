@@ -139,6 +139,7 @@ class RouteCB:
             return lease
         kw: dict[str, Any] = {"provider_open": p_blocks, "tuple_open": t_blocks}
         kw["route_count"], kw["failures"] = route_count, t.failures if t else 0
+        kw["status"] = t.open_status if t else None
         kw["retry_after_s"] = compute_retry_after_s(
             self._ctx[0], self._ctx[1], [key], ts
         )
@@ -173,6 +174,7 @@ class RouteCB:
             was_open = t.open_until is not None
             t.failures, t.first_fail_ts = 0, None
             t.open_until, t.probe_in_flight = None, False
+            t.open_status = None
             self._probes.pop(id(t), None)
         if p := self._providers.get(key[0]):
             if p.open_until is None:
@@ -212,6 +214,7 @@ class RouteCB:
             res = "ignored"
         elif eff.status in (401, 402, 403):
             res = handle_auth_failure(self._ctx, key, eff, eff_lease, ts)
+            self._mark_open_status(key, eff.status)
             if not was_open and self._any_open(key):
                 kw: dict[str, Any] = {"is_auth": True, "route_count": rc}
                 kw["retry_after_s"] = int(self._config.cooldown_s)
@@ -238,9 +241,15 @@ class RouteCB:
         action = self._decide(key, "record_failure", events, **kw)
         if action != "suppress_tuple_cooldown":
             bump_tuple_fail(self._ctx, key, ts, force_open)
+            self._mark_open_status(key, eff.status)
         if p_lease:
             open_provider_wide(self._ctx, key[0], ts)
         return "route_fail", events
+
+    def _mark_open_status(self, key: RouteTupleKey, status: int | None) -> None:
+        t = self._tuples.get(key)
+        if t is not None and t.open_until is not None:
+            t.open_status = status
 
     def _bump_would_open(self, key: RouteTupleKey, ts: float, force_open: bool) -> bool:
         t = self._tuples.get(key)
