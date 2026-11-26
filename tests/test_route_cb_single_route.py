@@ -126,6 +126,53 @@ def test_429_carveout_opens_tuple_despite_protection() -> None:
     assert events[0].state == "open" and events[0].retry_after_s == 90
 
 
+def test_429_open_status_not_downgraded_by_concurrent_500_or_timeout() -> None:
+    now, cb = _cb(single_route_protect=True)
+    for _ in range(3):
+        cb.record_failure(K, FailureOutcome(status=429, route_count=1))
+    assert cb._tuples[K].open_status == 429
+    cb.record_failure(K, FailureOutcome(status=500, route_count=2))
+    cb.record_failure(K, FailureOutcome(error=TimeoutError(), route_count=2))
+    assert cb._tuples[K].open_status == 429
+    assert cb.try_acquire(K, route_count=1) is None
+
+
+def test_500_open_status_escalates_to_429() -> None:
+    now, cb = _cb(single_route_protect=True)
+    for _ in range(3):
+        cb.record_failure(K, FailureOutcome(status=500, route_count=2))
+    assert cb._tuples[K].open_status == 500
+    cb.record_failure(K, FailureOutcome(status=429, route_count=1))
+    assert cb._tuples[K].open_status == 429
+    assert cb.try_acquire(K, route_count=1) is None
+
+
+def test_expired_429_cooldown_probe_fail_updates_open_status() -> None:
+    now, cb = _cb(single_route_protect=True)
+    for _ in range(3):
+        cb.record_failure(K, FailureOutcome(status=429, route_count=1))
+    now[0] += 91.0
+    lease = cb.try_acquire(K, route_count=2)
+    assert lease is not None and lease.tuple_lease
+    cb.record_failure(K, FailureOutcome(status=500, route_count=2), lease=lease)
+    t = cb._tuples[K]
+    assert t.open_until == now[0] + 90.0 and t.open_status == 500
+    fresh = cb.try_acquire(K, route_count=1)
+    assert fresh is not None and not fresh.tuple_lease
+
+
+def test_suppressed_expired_probe_clears_stale_open_status() -> None:
+    now, cb = _cb(single_route_protect=True)
+    for _ in range(3):
+        cb.record_failure(K, FailureOutcome(status=429, route_count=1))
+    now[0] += 91.0
+    lease = cb.try_acquire(K, route_count=1)
+    assert lease is not None and lease.tuple_lease
+    res = cb.record_failure(K, FailureOutcome(status=500, route_count=1), lease=lease)
+    assert res == "route_fail"
+    assert cb._tuples[K].open_status is None
+
+
 def test_auth_401_provider_wide_no_bypass() -> None:
     events: list[RouteCBEvent] = []
     now, cb = _cb(single_route_protect=True, event_sink=events.append)

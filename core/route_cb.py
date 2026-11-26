@@ -43,6 +43,7 @@ EventList = list[RouteCBEvent]
 LeaseN = RouteProbeLease | None
 StateN = _TupleState | _ProviderState | None
 Keys = Iterable[RouteTupleKey]
+_CARVE_OUT_STATUSES = frozenset({401, 402, 403, 429})
 
 
 def _can_reset(open_until: float | None, lease: LeaseN, eff: LeaseN, attr: str) -> bool:
@@ -210,11 +211,12 @@ class RouteCB:
         eff_lease = self._active_lease(lease, key)
         rc = eff.route_count or (lease.route_count if lease else 0)
         was_open = self._any_open(key)
+        was_active = self._tuple_cooldown_active(key, ts)
         if not is_recordable_failure(eff.status, eff.error, eff.reason):
             res = "ignored"
         elif eff.status in (401, 402, 403):
             res = handle_auth_failure(self._ctx, key, eff, eff_lease, ts)
-            self._mark_open_status(key, eff.status)
+            self._mark_open_status(key, eff.status, was_active)
             if not was_open and self._any_open(key):
                 kw: dict[str, Any] = {"is_auth": True, "route_count": rc}
                 kw["retry_after_s"] = int(self._config.cooldown_s)
@@ -235,21 +237,37 @@ class RouteCB:
         force_open = bool(eff_lease and eff_lease.tuple_lease)
         p_lease = bool(eff_lease and eff_lease.provider_lease)
         rc = eff.route_count or (lease.route_count if lease else 0)
+        was_active = self._tuple_cooldown_active(key, ts)
         kw: dict[str, Any] = {"route_count": rc, "status": eff.status}
         kw["opened_now"] = self._bump_would_open(key, ts, force_open)
         kw["retry_after_s"] = int(self._config.cooldown_s)
         action = self._decide(key, "record_failure", events, **kw)
         if action != "suppress_tuple_cooldown":
             bump_tuple_fail(self._ctx, key, ts, force_open)
-            self._mark_open_status(key, eff.status)
+            self._mark_open_status(key, eff.status, was_active)
+        elif not was_active:
+            self._clear_stale_open_status(key)
         if p_lease:
             open_provider_wide(self._ctx, key[0], ts)
         return "route_fail", events
 
-    def _mark_open_status(self, key: RouteTupleKey, status: int | None) -> None:
+    def _mark_open_status(
+        self, key: RouteTupleKey, status: int | None, was_active: bool
+    ) -> None:
         t = self._tuples.get(key)
-        if t is not None and t.open_until is not None:
+        if t is None or t.open_until is None:
+            return
+        if not was_active or status in _CARVE_OUT_STATUSES:
             t.open_status = status
+
+    def _tuple_cooldown_active(self, key: RouteTupleKey, ts: float) -> bool:
+        t = self._tuples.get(key)
+        return bool(t and t.open_until is not None and ts < t.open_until)
+
+    def _clear_stale_open_status(self, key: RouteTupleKey) -> None:
+        t = self._tuples.get(key)
+        if t is not None:
+            t.open_status = None
 
     def _bump_would_open(self, key: RouteTupleKey, ts: float, force_open: bool) -> bool:
         t = self._tuples.get(key)
