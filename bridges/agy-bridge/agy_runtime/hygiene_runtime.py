@@ -44,28 +44,25 @@ class LegacyAdmissionLike(Protocol):
 
 
 def _invalid_pgid(pgid: int) -> bool:
-    try:
-        return pgid <= 1 or pgid == os.getpgrp()
-    except OSError:
-        return True
-
+    try: return pgid <= 1 or pgid == os.getpgrp()
+    except OSError: return True
 
 def _safe_kill(pgid: int, sig: int) -> None:
     if not _invalid_pgid(pgid):
-        try:
-            os.killpg(pgid, sig)
-        except OSError:
-            pass
+        try: os.killpg(pgid, sig)
+        except OSError: pass
 
-def _default_waiter(pgid: int, timeout_s: float) -> bool:
+def _default_waiter(pgid: int, timeout_s: float, reap_leader: Callable[[], int | None] | None = None) -> bool:
+    """Popen-safe PGID waiter without raw waitpid(-pgid) (W06, CLM-P03)."""
     deadline = time.monotonic() + max(0.0, timeout_s)
     while time.monotonic() < deadline:
-        try:
-            if os.waitpid(-pgid, os.WNOHANG)[0] != 0:
-                return True
-            os.killpg(pgid, 0)
-        except OSError:
-            return True
+        if reap_leader is not None:
+            try: _ = reap_leader()
+            except OSError: pass
+        try: os.killpg(pgid, 0)
+        except PermissionError:
+            if reap_leader is None: return True
+        except OSError: return True
         time.sleep(0.01)
     return False
 
@@ -77,10 +74,6 @@ def _bounded_teardown(pgid: int, kill_fn: Callable[[int, int], None] | None, wai
     if not w(pgid, 0.4):
         k(pgid, signal.SIGKILL)
         _ = w(pgid, 0.6)
-    try:
-        _ = os.waitpid(-pgid, os.WNOHANG)
-    except OSError:
-        pass
 
 
 @final
@@ -123,23 +116,27 @@ class ManagedSqliteRoPool:
             if self._enabled and not enabled:
                 self._fsm.reset()
             self._enabled = enabled
-    def _exec(self, call: Callable[[PoolLike], _T], db_path: Path | None = None) -> _T:
+    def _allow_checkout(self) -> bool:
         with self._lock:
-            allowed = True if not self._enabled else self._fsm.can_checkout(time.monotonic())
-        if not allowed:
-            raise SqliteRoPoolBackoffError("sqlite_ro_pool_backoff")
-        if self._inner is None:
-            raise RuntimeError("sqlite_ro_pool_unavailable")
+            return True if not self._enabled else self._fsm.can_checkout(time.monotonic())
+    def _record_result(self, exc: BaseException | None, db_path: Path | None) -> None:
+        if exc is None:
+            with self._lock:
+                _ = self._fsm.record_success() if self._enabled else None
+            return
+        if not is_cold_sqlite_wal_wait(exc, db_path):
+            with self._lock:
+                _ = self._fsm.record_error(time.monotonic()) if self._enabled else None
+        self.release_thread()
+    def _exec(self, call: Callable[[PoolLike], _T], db_path: Path | None = None) -> _T:
+        if not self._allow_checkout(): raise SqliteRoPoolBackoffError("sqlite_ro_pool_backoff")
+        if self._inner is None: raise RuntimeError("sqlite_ro_pool_unavailable")
         try:
             res = call(self._inner)
         except Exception as exc:
-            if not is_cold_sqlite_wal_wait(exc, db_path):
-                with self._lock:
-                    _ = self._fsm.record_error(time.monotonic()) if self._enabled else None
-            self.release_thread()
+            self._record_result(exc, db_path)
             raise
-        with self._lock:
-            _ = self._fsm.record_success() if self._enabled else None
+        self._record_result(None, db_path)
         return res
     def query_rows(self, db_path: Path | str, sql: str, params: tuple[object, ...] = ()) -> list[tuple[object, ...]]:
         path = Path(db_path) if isinstance(db_path, str) else db_path

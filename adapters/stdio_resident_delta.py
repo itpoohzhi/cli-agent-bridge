@@ -176,6 +176,21 @@ def _rebind_tool_turn_slot(
             logger.debug("resident_rebind_assistant_item_skipped: slot_mismatch")
 
 
+def _attach_p12_resident_cancel(request: dict[str, Any], ctx: TurnContext) -> None:
+    """OPEN-16: wire TurnContext.cancel_event and register_pgid when flag #5 is on."""
+    from core.p12_hub_cancel_seam import get_hub_p12_seam
+    if not get_hub_p12_seam().resident_wiring_enabled():
+        return
+    if ctx.cancel_event is not None and "_cancel_event" not in request:
+        request["_cancel_event"] = ctx.cancel_event
+    if ctx.register_pgid is not None:
+        tctx = request.get("turn_context")
+        if not isinstance(tctx, dict):
+            tctx = {}
+            request["turn_context"] = tctx
+        tctx.setdefault("register_pgid", ctx.register_pgid)
+
+
 def execute_stdio_turn(adapter: Any, protocol: str, ctx: TurnContext, sse_writer: StreamSink | None) -> TurnResult:
     """Run one StdioResidentAdapter turn with turn-boundary kill-switch and typed TurnUsage."""
     usage_enabled = stdio_usage_contract_enabled()
@@ -183,6 +198,7 @@ def execute_stdio_turn(adapter: Any, protocol: str, ctx: TurnContext, sse_writer
     raw_headers = getattr(handler, "headers", None)
     profile = review_profile_from_headers(raw_headers)
     request = _build_turn_request(adapter.id, ctx, profile)
+    _attach_p12_resident_cancel(request, ctx)
     request["_usage_enabled"] = usage_enabled
     committed_slots = _attach_committed_slot_sink(request)
     hdr_map = dict(raw_headers.items()) if hasattr(raw_headers, "items") else None

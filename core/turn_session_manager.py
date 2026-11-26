@@ -1295,7 +1295,8 @@ class TurnSessionManager:
         """Гарантирует освобождение ресурсов хода при выходе потока-исполнителя до финализации."""
         if turn is None:
             return
-        turn.release_slot_once()
+        from core.p12_hub_cancel_seam import get_hub_p12_seam
+        get_hub_p12_seam().gate_slot_release(turn.turn_id, turn.pgid, turn.release_slot_once)
         with self._lock:
             if turn.is_terminal:
                 return
@@ -1364,16 +1365,13 @@ class TurnSessionManager:
             pgid = turn.pgid
             callbacks = list(turn._cancel_callbacks)
 
-        # Немедленно возвращаем слот MAX_CONCURRENT до ожидания завершения потомка.
-        turn.release_slot_once()
-
+        from core.p12_hub_cancel_seam import get_hub_p12_seam
+        from core.turn_mode_cancel_policy import SlotReleaseDecision
+        rel_dec = get_hub_p12_seam().gate_slot_release(turn.turn_id, pgid, lambda: (self.unregister_child_pgid(pgid), turn.release_slot_once()))
         for cb in callbacks:
-            try:
-                cb()
-            except Exception:  # noqa: BLE001
-                pass
-
-        if pgid is not None:
+            try: cb()
+            except Exception: pass
+        if pgid is not None and rel_dec is SlotReleaseDecision.RELEASE_IMMEDIATE:
             self._terminate_pgid(pgid, self.cancel_grace_s)
 
         with self._lock:
