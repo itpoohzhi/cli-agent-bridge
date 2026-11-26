@@ -16,6 +16,7 @@ from core import http_post_dispatch as dispatch  # noqa: E402
 from core import manifest_dialect_dispatch as mdd  # noqa: E402
 from core import param_adapter  # noqa: E402
 from core import passthrough_effort_map as pem  # noqa: E402
+from core.backend_params import validate_backend_params  # noqa: E402
 from core.effort_errors import EffortValidationError  # noqa: E402
 from core.http_post_routing import PreparedPostBody  # noqa: E402
 from core.logical_effort import canonicalize_logical_effort  # noqa: E402
@@ -216,3 +217,47 @@ def test_f011_manifest_strip_always_degrades_on_quorum_without_hardcode(monkeypa
     code, payload, headers = route.sent[0]
     assert code == 422 and payload["error"]["param"] == "thinking" and headers == {"X-Bridge-Degraded": "thinking"}
     assert _run(request, adapter, {"X-Subagent-Id": "worker-1"}, "neuralwatt") == {"reasoning_effort": "low"}
+
+
+def test_f002_quorum_enabled_thinking_not_masked_by_disabled_prepared() -> None:
+    request = {"thinking": {"type": "enabled", "budget_tokens": 512}}
+    route = _route(request, QUORUM, "neuralwatt", alias_effort="off")
+    prepared = {"thinking": {"type": "disabled"}}
+    with pytest.raises(mdd.ParamDegradedError):
+        mdd.apply_passthrough_transforms(prepared, route, SimpleNamespace(request=request), _adapter(NW, "neuralwatt"))
+
+
+def test_f002_translate_off_drops_residual_enabled_thinking() -> None:
+    adapter = _adapter({"effort_field": "reasoning_effort", "effort_map": {"off": {"reasoning_effort": "none"}}})
+    request = {"thinking": {"type": "disabled"}}
+    route = _route(request, QUORUM)
+    prepared = {"thinking": {"type": "enabled", "budget_tokens": 2048}}
+    out = mdd.apply_passthrough_transforms(prepared, route, SimpleNamespace(request=request), adapter)
+    assert "thinking" not in out and out["reasoning_effort"] == "none"
+
+
+def _fleet_drop_thinking_backends() -> list[tuple[str, dict[str, Any]]]:
+    fleet = json.loads((Path(__file__).resolve().parent.parent / "fleet.json").read_text(encoding="utf-8"))
+    found = []
+    for backend_id, entry in fleet["backends"].items():
+        adapter = _adapter(entry.get("params"), backend_id, **{k: v for k, v in entry.items() if k != "params"})
+        if pem.drops_thinking_route(adapter, backend_id):
+            found.append((backend_id, entry))
+    return found
+
+
+def test_fleet_parity_every_drops_thinking_backend_has_valid_manifest_params() -> None:
+    backends = _fleet_drop_thinking_backends()
+    assert {"neuralwatt", "neuralwatt-flex", "openai-key-2", "openai-key-3"} <= {b for b, _ in backends}
+    for backend_id, entry in backends:
+        params = entry.get("params")
+        assert params and not validate_backend_params(params), backend_id
+        assert "thinking" in params["strip_always"] and "thinking" not in params["adaptive_whitelist"], backend_id
+        assert "off" in params["effort_map"], backend_id
+        adapter = _adapter(params, backend_id, **{k: v for k, v in entry.items() if k != "params"})
+        enabled = {"thinking": {"type": "enabled", "budget_tokens": 512}}
+        with pytest.raises(mdd.ParamDegradedError):
+            mdd.apply_passthrough_transforms(dict(enabled), _route(enabled, QUORUM, backend_id), SimpleNamespace(request=enabled), adapter)
+        disabled = {"thinking": {"type": "disabled"}}
+        out = mdd.apply_passthrough_transforms(dict(disabled), _route(disabled, QUORUM, backend_id), SimpleNamespace(request=disabled), adapter)
+        assert out.get("reasoning_effort") == "none" and "thinking" not in out, backend_id

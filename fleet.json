@@ -775,10 +775,13 @@
       "api_key_env": "OPENAI_API_KEY_2",
       "params": {
         "effort_field": "reasoning_effort",
-        "effort_map": {},
+        "effort_map": {
+          "off": {
+            "reasoning_effort": "none"
+          }
+        },
         "adaptive_whitelist": [
           "reasoning_effort",
-          "thinking",
           "temperature",
           "top_p"
         ],
@@ -796,10 +799,13 @@
       "api_key_env": "OPENAI_API_KEY_3",
       "params": {
         "effort_field": "reasoning_effort",
-        "effort_map": {},
+        "effort_map": {
+          "off": {
+            "reasoning_effort": "none"
+          }
+        },
         "adaptive_whitelist": [
           "reasoning_effort",
-          "thinking",
           "temperature",
           "top_p"
         ],

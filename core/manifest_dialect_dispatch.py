@@ -63,8 +63,8 @@ def _is_quorum(route: Any) -> bool:
 
 
 def _translate_off(out: dict[str, Any]) -> None:
-    """Логический `off` -> эффорт `off` для `effort_map`; `thinking: disabled` поглощается переводом."""
-    for key in (*EFFORT_KEYS, *(("thinking",) if is_thinking_disabled(out) else ())):
+    """Логический `off` -> эффорт `off` для `effort_map`; любой `thinking` снимается при переводе в `off`."""
+    for key in (*EFFORT_KEYS, "thinking"):
         out.pop(key, None)
     out["reasoning_effort"] = LOGICAL_OFF
 
@@ -97,7 +97,7 @@ def _apply_manifest_dialect(
     logical = canonicalize_logical_effort(out, route.request, body.request, alias_effort=route.alias_effort)
     consumed: set[str] = set()
     if logical == LOGICAL_OFF and LOGICAL_OFF in effort_map:
-        if is_thinking_disabled(out) or is_thinking_disabled(explicit):
+        if is_thinking_disabled(explicit):
             consumed.add("thinking")
         _translate_off(out)
     _check_degrade(explicit, tuple(params.get("strip_always") or ()), consumed, route)
