@@ -89,7 +89,7 @@ from tools.receipt_schema import (  # noqa: E402,F401
     validate_model_catalog,
     validate_receipt_components,
 )
-from core.http_accept import AdmissionBudget, configure_accepted_socket  # noqa: E402
+from core.http_accept import AdmissionBudget, ConnectionTracker, apply_connection_phase_timeout, configure_accepted_socket, emit_legacy_knob_warning, send_overloaded_503  # noqa: E402
 from adapters import ADAPTER_KINDS  # noqa: E402  - реестр видов адаптеров задан в коде
 from adapters.passthrough_adapter import (  # noqa: E402
     ClientGone,
@@ -5340,6 +5340,7 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
     def setup(self) -> None:
         super().setup()
         configure_accepted_socket(self.connection)
+        apply_connection_phase_timeout(self.connection, "idle")
 
     def end_headers(self) -> None:
         if LIFECYCLE.is_draining():
@@ -5354,6 +5355,7 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
             tracking = getattr(self.server, "set_connection_active", None)
             if tracking is not None and not tracking(self.connection, False):
                 self.close_connection = True
+            apply_connection_phase_timeout(self.connection, "idle")
             # Drain мог начаться после отправки заголовков активного ответа.
             if LIFECYCLE.is_draining():
                 self.close_connection = True
@@ -5361,9 +5363,10 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
     def parse_request(self) -> bool:
         parsed = super().parse_request()
         tracking = getattr(self.server, "set_connection_active", None)
-        if parsed and tracking is not None:
-            return tracking(self.connection, True)
-        return parsed
+        admitted = tracking(self.connection, True) if parsed and tracking is not None else parsed
+        if admitted:
+            apply_connection_phase_timeout(self.connection, "active")
+        return admitted
 
     def _trace_log_fields(self) -> str:
         """Безопасные поля корреляции для журнала маршрута."""
@@ -7660,9 +7663,7 @@ class Server(ThreadingHTTPServer):
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         self._listener_close_lock = threading.Lock()
         self._listener_closed = False
-        self._connections_lock = threading.Lock()
-        self._connections: dict[socket.socket, bool] = {}
-        self._closing_connections = False
+        self._connections = ConnectionTracker()
         super().__init__(*args, **kwargs)
         # admission_limit и резервы UI/заголовков — из BridgeIOConfig/BRIDGE_*
         self._admission_budget = AdmissionBudget()
@@ -7682,24 +7683,22 @@ class Server(ThreadingHTTPServer):
         _log(f"socket_reuseport configured={enabled} enabled={actual} reason={reason}")
         super().server_bind()
 
+    @property
+    def _overloaded_rejects(self) -> int:
+        """Счётчик overload-отказов (владелец — трекер соединений)."""
+        return self._connections.overloaded_rejects
+
+    def admission_snapshot(self) -> dict[str, int | float]:
+        """Снимок admission для телеметрии (только при включённом флаге)."""
+        return self._connections.snapshot(self._admission_budget.limit)
+
     def set_connection_active(self, request: socket.socket, active: bool) -> bool:
         """Атомарно отделяет обработку HTTP-запроса от ожидания keepalive."""
-        with self._connections_lock:
-            if self._closing_connections:
-                return False
-            self._connections[request] = active
-            return True
+        return self._connections.set_active(request, active)
 
     def close_idle_connections(self) -> None:
         """Будит только idle-читателей; активные ответы завершаются своими потоками."""
-        with self._connections_lock:
-            self._closing_connections = True
-            for request, active in self._connections.items():
-                if not active:
-                    try:
-                        request.shutdown(socket.SHUT_RDWR)
-                    except OSError:
-                        pass
+        self._connections.close_idle()
 
     def graceful_close_listener(self) -> None:
         """Идемпотентно закрывает только listener, сохраняя принятые соединения."""
@@ -7711,45 +7710,20 @@ class Server(ThreadingHTTPServer):
             release_writer_lock()
 
     def _send_raw_503(self, request: socket.socket) -> None:
-        body = json.dumps(
-            {
-                "error": {
-                    "message": "bridge overloaded: connection limit",
-                    "type": "overloaded",
-                    "code": 503,
-                },
-            }
-        ).encode("utf-8")
-        head = (
-            b"HTTP/1.1 503 Service Unavailable\r\n"
-            b"Content-Type: application/json; charset=utf-8\r\n"
-            b"Content-Length: " + str(len(body)).encode() + b"\r\n"
-            b"Connection: close\r\n\r\n"
-        )
-        request.sendall(head + body)
+        """Legacy 503 без telemetry-контекста (совместимый делегат)."""
+        send_overloaded_503(request, ("unknown", 0), _log, self._connections, self._admission_budget)
 
     def process_request(self, request: Any, client_address: Any) -> None:
         ticket = str(id(request))
         if not self._admission_budget.acquire(ticket):
-            try:
-                peer = f"{client_address[0]}:{client_address[1]}"
-            except (TypeError, IndexError):
-                peer = "unknown"
-            _log(f"reject reason=overloaded model=unknown model_len=0 client={peer}")
-            try:
-                if isinstance(request, socket.socket):
-                    self._send_raw_503(request)
-            except OSError:
-                pass
+            send_overloaded_503(request, client_address, _log, self._connections, self._admission_budget)
             self.shutdown_request(request)
             return
-        with self._connections_lock:
-            self._connections[request] = False
+        self._connections.register(request)
         try:
             super().process_request(request, client_address)
         except Exception:
-            with self._connections_lock:
-                self._connections.pop(request, None)
+            self._connections.remove(request)
             self._admission_budget.release(ticket)
             self.shutdown_request(request)
             raise
@@ -7758,8 +7732,7 @@ class Server(ThreadingHTTPServer):
         try:
             super().process_request_thread(request, client_address)
         finally:
-            with self._connections_lock:
-                self._connections.pop(request, None)
+            self._connections.remove(request)
             self._admission_budget.release(str(id(request)))
 
 
@@ -7832,6 +7805,7 @@ def main() -> None:
             if reason:
                 _log(f"image_proof_invalid model={mid} reason={reason}")
     server = Server((HOST, PORT), Handler)
+    emit_legacy_knob_warning(_log, server._admission_budget.limit)
     if _is_drain_enabled():
         LIFECYCLE.install_signal_handlers()
         LIFECYCLE.start_signal_watcher(server)

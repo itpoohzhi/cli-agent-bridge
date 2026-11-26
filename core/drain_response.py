@@ -45,6 +45,7 @@ ALLOWED_EVENT_FIELDS: frozenset[str] = frozenset(
     {
         "active",
         "active_turns",
+        "actor",
         "budget_s",
         "clamped",
         "code",
@@ -61,6 +62,7 @@ ALLOWED_EVENT_FIELDS: frozenset[str] = frozenset(
         "is_subagent",
         "pgid",
         "pid",
+        "ppid",
         "reason",
         "retry_after_s",
         "rid",

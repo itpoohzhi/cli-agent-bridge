@@ -8,6 +8,7 @@ Reasoning нормализуется всегда; теги инструмент
 
 from __future__ import annotations
 
+import contextlib
 import hmac
 import json
 import os
@@ -32,6 +33,7 @@ for _p in (_REPO_ROOT, Path(__file__).resolve().parents[1], Path(__file__).resol
     if str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
 
+from core.admission_idle_policy import format_claude_done_fields  # noqa: E402
 from core.chat_key import SOURCES_SESSION_ID, resolve_chat_key  # noqa: E402
 from core.claude_bridge_telemetry import format_done_usage_suffix, project_wire_usage  # noqa: E402
 from core.claude_prompt import PromptBudgetConfig, prepare_prompt_with_cap, wire_cache_creation_enabled  # noqa: E402
@@ -39,6 +41,7 @@ from core.claude_session import (  # noqa: E402
     NO_PERSISTENCE_FLAG, SessionConfig, SessionMode, SessionPlan, SessionStore,
     assert_zero_canon_argv_safe, build_session_argv, is_session_reuse_allowed_profile,
 )
+from core.http_accept import load_admission_idle_config  # noqa: E402
 from core.claude_zero_canon import (  # noqa: E402
     CLAUDE_PRESERVED_CA_FILES, build_claude_zero_canon_env, build_claude_zero_canon_flags,
     filter_claude_settings, filter_claude_state, serialize_claude_json,
@@ -180,8 +183,7 @@ def _is_watchdog_enabled() -> bool:
 CLAUDE_P_BRIDGE_IDLE_TIMEOUT_S = _get_positive_float("CLAUDE_P_BRIDGE_IDLE_TIMEOUT_S", "BRIDGE_IDLE_TIMEOUT_S", 600.0)
 CLAUDE_P_BRIDGE_IO_WAIT_CAP_S = _get_positive_float("CLAUDE_P_BRIDGE_IO_WAIT_CAP_S", "BRIDGE_IO_WAIT_CAP_S", 900.0)
 CLAUDE_P_BRIDGE_SAFETY_CAP_S = _get_positive_float("CLAUDE_P_BRIDGE_SAFETY_CAP_S", "BRIDGE_SAFETY_CAP_S", 3600.0)
-CLAUDE_P_BRIDGE_WATCHDOG_INTERVAL_S = _get_positive_float(
-    "CLAUDE_P_BRIDGE_WATCHDOG_INTERVAL_S", "BRIDGE_WATCHDOG_INTERVAL_S", 5.0)
+CLAUDE_P_BRIDGE_WATCHDOG_INTERVAL_S = _get_positive_float("CLAUDE_P_BRIDGE_WATCHDOG_INTERVAL_S", "BRIDGE_WATCHDOG_INTERVAL_S", 5.0)
 
 ROOT = Path(__file__).resolve().parent
 HOST = os.environ.get("CLAUDE_P_BRIDGE_HOST", "127.0.0.1")
@@ -221,17 +223,18 @@ def _read_json_dict(path: Path) -> dict | None:
 
 def _sync_ca_files(real_claude: Path, claude_dir: Path) -> None:
     claude_dir.mkdir(parents=True, exist_ok=True)
-    try: os.chmod(claude_dir, 0o700)
-    except OSError: pass
+    with contextlib.suppress(OSError):
+        os.chmod(claude_dir, 0o700)
     for name in _CLAUDE_CA_FILES:
-        try:
+        with contextlib.suppress(OSError):
             src = real_claude / name
-            if src.is_file(): _write_atomic(claude_dir / name, src.read_bytes())
-        except OSError: pass
+            if src.is_file():
+                _write_atomic(claude_dir / name, src.read_bytes())
     for src in (real_claude / ".claude.json", real_claude.parent / ".claude.json"):
         if src.is_file():
             st = _read_json_dict(src)
-            if st is not None: _write_atomic(claude_dir / ".claude.json", serialize_claude_json(filter_claude_state(st)).encode("utf-8"))
+            if st is not None:
+                _write_atomic(claude_dir / ".claude.json", serialize_claude_json(filter_claude_state(st)).encode("utf-8"))
             break
 
 def spawn_registered(cmd: list, **kwargs: Any) -> subprocess.Popen:
@@ -240,7 +243,8 @@ def spawn_registered(cmd: list, **kwargs: Any) -> subprocess.Popen:
     h = env.get("HOME", "") if raw is not None else ""
     kwargs["env"] = build_claude_zero_canon_env(env, h if h and Path(h).resolve() != Path.home().resolve() else iso)
     return _spawn_registered(cmd, **kwargs)
-for _a in ("unregister", "set_blocked"): setattr(spawn_registered, _a, getattr(_spawn_registered, _a))
+for _a in ("unregister", "set_blocked"):
+    setattr(spawn_registered, _a, getattr(_spawn_registered, _a))
 
 def _prepare_claude_home(claude_home: Path | None = None, real_home: Path | None = None) -> Path:
     global _CLAUDE_HOME_INITIALIZED
@@ -256,7 +260,8 @@ def _prepare_claude_home(claude_home: Path | None = None, real_home: Path | None
         raw = _read_json_dict(src) if src.is_file() else {}
         if raw is not None:
             _write_atomic(claude_dir / "settings.json", serialize_claude_json(filter_claude_settings(raw)).encode("utf-8"))
-            if use_cache: _CLAUDE_HOME_INITIALIZED = True
+            if use_cache:
+                _CLAUDE_HOME_INITIALIZED = True
         return home
 MAX_CONCURRENT = int(os.environ.get("CLAUDE_P_BRIDGE_MAX_CONCURRENT", "32"))
 QUEUE_TIMEOUT_S = int(os.environ.get("CLAUDE_P_BRIDGE_QUEUE_TIMEOUT", "900"))
@@ -286,13 +291,10 @@ _active_img_dirs: set = set()
 _active_lock = threading.Lock()
 _started = time.time()
 
-
 def _log(msg: str) -> None:
     """Диагностика в stderr (файлы вне каталога моста не создаём)."""
     try:
-        sys.stderr.write(
-            f"{time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())} {msg}\n"
-        )
+        sys.stderr.write(f"{time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())} {msg}\n")  # fmt: skip
         sys.stderr.flush()
     except OSError:
         pass
@@ -827,12 +829,8 @@ class Handler(BaseHTTPRequestHandler):
 
     @staticmethod
     def _log_turn_done(turn: _Turn, out: dict, t0: float) -> None:
-        out_calls = out.get("tool_calls")
-        out_text = out.get("text")
-        _log(f"done model={turn.model} effort={turn.effort} rc={out['rc']} state={out['state']} "
-             f"tools={len(out_calls) if isinstance(out_calls, list) else 0} "
-             f"out_bytes={len(out_text.encode()) if isinstance(out_text, str) else 0} "
-             f"wall_s={time.monotonic() - t0:.1f} {format_done_usage_suffix(out.get('usage'), turn.chat_digest)} {turn.tag}")
+        tag = f"{format_done_usage_suffix(out.get('usage'), getattr(turn, 'chat_digest', ''))} {turn.tag}"
+        _log(format_claude_done_fields((turn.model, turn.effort, tag), out, time.monotonic() - t0, load_admission_idle_config()))  # fmt: skip
 
     @staticmethod
     def _error_body(out: dict) -> Any:

@@ -19,6 +19,7 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 from core import defaults as D
+from core.http_accept import attach_admission_telemetry
 from core.telemetry_usage import extract_usage, tail_limit
 from core.telemetry_util import as_int, as_str, first_truthy, header_value, origin_allowed
 from core.usage_fields import finalize_event_usage, telemetry_usage_updates
@@ -237,6 +238,7 @@ class TelemetryHooksMixin:
             window_hours=_query_number(qs, "window_hours", 24.0, float),
             limit=_query_number(qs, "limit", store.recent_limit, int),
         )
+        payload = attach_admission_telemetry(payload, getattr(self, "server", None))
         self._send(200, payload)
 
     def _telemetry_event(self, meta: dict[str, Any], status: int) -> dict[str, Any]:
