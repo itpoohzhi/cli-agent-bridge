@@ -297,8 +297,15 @@ class _RequestRuntime:
             connection, response, can_reuse = self.connection, self.response, self._can_reuse()
             self.connection, self.response = None, None
             self._fsm.clear_callback()
-            if response is not None and not can_reuse: response.close()
-            if connection is not None: self.adapter._pool.release_connection(self.adapter._host, self.adapter._port, connection, can_reuse=can_reuse)
+            if response is not None and not can_reuse:
+                response.close()
+            if connection is not None:
+                self.adapter._pool.release_connection(
+                    self.adapter._host,
+                    self.adapter._port,
+                    connection,
+                    can_reuse=can_reuse,
+                )
 
 
 def handle_request(
