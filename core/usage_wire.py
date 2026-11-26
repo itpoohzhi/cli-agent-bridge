@@ -213,7 +213,7 @@ def turn_usage_from_wire(value: object, source: str) -> TurnUsage | None:
         input_tokens=mapping.get("prompt_tokens"),
         output_tokens=mapping.get("completion_tokens"),
         cache_read_tokens=cached,
-        cache_creation_tokens=None,
+        cache_creation_tokens=extract_cache_creation_tokens(mapping),
         reasoning_tokens=reasoning,
         reported_total_tokens=mapping.get("total_tokens"),
         input_includes_cache=True,

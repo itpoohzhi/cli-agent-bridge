@@ -125,3 +125,33 @@ def test_frozen_monoliths_net_diff_non_positive() -> None:
         if rel in deltas:
             added, deleted = deltas[rel]
             assert added - deleted <= 0, f"Monolith {rel} grew: +{added}/-{deleted}"
+
+
+CLAUDE_BRIDGE_NEW_MODULES = (
+    "core/claude_bridge_telemetry.py",
+    "core/claude_prompt.py",
+    "core/claude_session.py",
+    "core/native_turn_context.py",
+    "core/stdio_resident/bridge_proxy_payload.py",
+    "core/stdio_resident/proxy_policy.py",
+)
+
+
+def test_claude_bridge_new_modules_loc_and_pure_no_env() -> None:
+    for rel in CLAUDE_BRIDGE_NEW_MODULES:
+        loc = len((ROOT / rel).read_text(encoding="utf-8").splitlines())
+        assert loc <= 300, f"{rel} has {loc} LOC (>300)"
+    for rel in ("core/claude_bridge_telemetry.py", "core/native_turn_context.py"):
+        src = (ROOT / rel).read_text(encoding="utf-8")
+        assert "os.environ" not in src, f"{rel} must not read os.environ"
+
+
+def test_claude_session_has_no_module_level_mutable_collections() -> None:
+    tree = ast.parse((ROOT / "core/claude_session.py").read_text(encoding="utf-8"))
+    mutable = (ast.List, ast.Dict, ast.Set, ast.ListComp, ast.DictComp, ast.SetComp)
+    for node in tree.body:
+        value = getattr(node, "value", None)
+        if isinstance(node, (ast.Assign, ast.AnnAssign)) and isinstance(value, mutable):
+            raise AssertionError(f"module-level mutable collection at line {node.lineno}")
+        if isinstance(value, ast.Call) and getattr(value.func, "id", "") in {"dict", "list", "set"}:
+            raise AssertionError(f"module-level mutable collection at line {node.lineno}")

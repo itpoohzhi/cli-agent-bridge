@@ -10,6 +10,7 @@ from typing import Any, cast
 
 from core.backend_adapter import StreamSink, TurnContext
 from core.backend_routing_models import ImageAttachment, Transcript
+from core.native_turn_context import get_current_native_payload
 from core.resident_canonical import (
     DEFAULT_SAFE_FWD_ENV_KEYS,
     _fail_if,
@@ -220,6 +221,8 @@ def build_turn_request_from_ctx(adapter_id: str, ctx: TurnContext, profile: str)
         "emulate_tools": ctx.emulate_tools,
         "tool_choice": thaw_frozen_value(getattr(ctx, "tool_choice", None)),
         "conversation_id": ctx.conversation_id,
+        "prompt_cache_key": ctx.cache_key,
+        "native_payload": getattr(ctx, "native_payload", None) if getattr(ctx, "native_payload", None) else get_current_native_payload(),
         "force_ephemeral": ctx.conversation_ephemeral,
         "review_profile": profile,
         "turn_context": {"model": ctx.model, "effort": ctx.effort, "review_profile": profile, "rpc": ctx.rpc},

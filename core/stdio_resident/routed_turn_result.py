@@ -4,24 +4,24 @@
 from __future__ import annotations
 
 import json
-import os
-import urllib.error
 import urllib.request
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass, replace
 from typing import Any, cast
 
+from core.stdio_resident.bridge_proxy_payload import (
+    BridgeProxyOptions,
+    build_bridge_proxy_body,
+    build_bridge_proxy_headers,
+)
+from core.stdio_resident.proxy_policy import NoRedirectHandler
 from core.stdio_resident.turn_error_sse import (
     DONE_FRAME,
     ResidentTurnError,
     TurnErrorResponse,
     build_turn_error,
 )
-from core.subbridge_zero_canon import (
-    REVIEW_PROFILE_HEADER,
-    ZERO_CANON_PROFILE,
-    is_zero_canon_profile,
-)
+from core.subbridge_zero_canon import is_zero_canon_profile
 from core.turn_usage import TurnUsage
 from core.usage_wire import build_turn_wire_usage, positive_wire_usage, turn_usage_from_wire  # pyright: ignore[reportUnknownVariableType]
 
@@ -47,6 +47,7 @@ class ProxyBridgeOptions:
     opener_factory: Callable[..., Any] = urllib.request.build_opener
     timeout_s: float | None = None
     usage_enabled: bool = True
+    proxy_options: BridgeProxyOptions | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,28 +57,14 @@ class RoutedExecOptions:
     bridge_proxy_fn: Callable[..., RoutedTurnResult]
     headers: Mapping[str, str] | None = None
     usage_enabled: bool = True
+    proxy_options: BridgeProxyOptions | None = None
 
 
-class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
-    def redirect_request(
-        self, req: Any, fp: Any, code: int, msg: str, headers: Any, newurl: str
-    ) -> None:
-        raise urllib.error.HTTPError(newurl, code, f"redirect blocked ({msg})", headers, fp)
-
-
-def _build_proxy_headers(headers: Mapping[str, str] | None) -> dict[str, str]:
-    req_headers: dict[str, str] = {
-        "Content-Type": "application/json",
-        REVIEW_PROFILE_HEADER: ZERO_CANON_PROFILE,
-    }
-    if headers:
-        for key, value in headers.items():
-            if key.lower() == "x-subagent-id" and value:
-                req_headers["X-Subagent-Id"] = value
-    bridge_key = os.environ.get("CLAUDE_P_BRIDGE_KEY") or os.environ.get("CLAUDE_BRIDGE_KEY") or ""
-    if bridge_key:
-        req_headers["Authorization"] = f"Bearer {bridge_key}"
-    return req_headers
+def _first_message(data: dict[str, Any]) -> dict[str, Any] | None:
+    choices = data.get("choices")
+    first = cast(list[object], choices)[0] if isinstance(choices, list) and choices else None
+    msg = cast(dict[str, Any], first).get("message") if isinstance(first, dict) else None
+    return cast(dict[str, Any], msg) if isinstance(msg, dict) else None
 
 
 def _parse_proxy_response(parsed: object, usage_enabled: bool) -> RoutedTurnResult:
@@ -85,20 +72,11 @@ def _parse_proxy_response(parsed: object, usage_enabled: bool) -> RoutedTurnResu
         return RoutedTurnResult("", "", None)
     data = cast(dict[str, Any], parsed)
     usage = turn_usage_from_wire(data.get("usage"), "claude_zero_canon_bridge") if usage_enabled else None
-    choices = data.get("choices")
-    first: object = cast(list[object], choices)[0] if isinstance(choices, list) and choices else None
-    msg = cast(dict[str, Any], first).get("message") if isinstance(first, dict) else None
-    if not isinstance(msg, dict):
+    if (msg := _first_message(data)) is None:
         return RoutedTurnResult("", "", usage)
-    msg_map = cast(dict[str, Any], msg)
-    raw_tc = msg_map.get("tool_calls")
-    tool_calls = (
-        tuple(cast(dict[str, Any], c) for c in cast(list[object], raw_tc) if isinstance(c, dict))
-        if isinstance(raw_tc, list) else ()
-    )
-    return RoutedTurnResult(
-        str(msg_map.get("content") or ""), str(msg_map.get("reasoning_content") or ""), usage, tool_calls
-    )
+    raw_tc = msg.get("tool_calls")
+    tool_calls = tuple(cast(dict[str, Any], c) for c in raw_tc if isinstance(c, dict)) if isinstance(raw_tc, list) else ()
+    return RoutedTurnResult(str(msg.get("content") or ""), str(msg.get("reasoning_content") or ""), usage, tool_calls)
 
 
 def proxy_zero_canon_bridge_turn_result(
@@ -111,12 +89,11 @@ def proxy_zero_canon_bridge_turn_result(
     """Proxy a Zero-Canon Claude turn to local :9881 and preserve OpenAI wire usage."""
     effective_timeout = options.resolve_timeout_fn(options.timeout_s)
     url = options.validate_url_fn(base_url) + "/chat/completions"
-    body = json.dumps(
-        {"model": model, "messages": [{"role": "user", "content": prompt}], "stream": False},
-        ensure_ascii=False,
-    ).encode("utf-8")
-    req = urllib.request.Request(url, data=body, headers=_build_proxy_headers(headers), method="POST")
-    opener = options.opener_factory(urllib.request.ProxyHandler({}), _NoRedirectHandler())
+    popts = options.proxy_options
+    body = json.dumps(build_bridge_proxy_body(model, prompt, popts), ensure_ascii=False).encode("utf-8")
+    req_headers = build_bridge_proxy_headers(headers, chat_id=popts.chat_id if popts else None)
+    req = urllib.request.Request(url, data=body, headers=req_headers, method="POST")
+    opener = options.opener_factory(urllib.request.ProxyHandler({}), NoRedirectHandler())
     with opener.open(req, timeout=effective_timeout) as resp:
         parsed = json.loads(resp.read().decode("utf-8"))
     return _parse_proxy_response(parsed, options.usage_enabled)
@@ -171,12 +148,14 @@ def _run_bridge_route(
 ) -> RoutedTurnResult:
     parts: dict[str, list[str]] = {"content": [], "reasoning_content": []}
     live_sent = 0
+    extra: dict[str, Any] = {"proxy_options": options.proxy_options} if options.proxy_options else {}
     proxied = options.bridge_proxy_fn(
         route.base_url,
         str(request.get("model") or "default"),
         str(request.get("prompt") or ""),
         options.headers,
         usage_enabled=options.usage_enabled,
+        **extra,
     )
     if proxied.text:
         live_sent = _emit_part("content", proxied.text, parts, sse_writer, live_sent)
