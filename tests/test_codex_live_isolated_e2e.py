@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import socket
 import stat
 import subprocess
@@ -12,6 +13,8 @@ import sys
 from pathlib import Path
 
 import pytest
+
+pytestmark = pytest.mark.skipif(shutil.which("codex") is None, reason="real codex binary not found in PATH")
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:

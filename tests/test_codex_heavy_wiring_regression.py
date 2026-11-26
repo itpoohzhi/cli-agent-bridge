@@ -80,7 +80,8 @@ def _seed_v2_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     dyn.write_text(json.dumps({"BRIDGE_CODEX_APP_SERVER_V2_ENABLED": True}), encoding="utf-8")
     for key, val in {
         "HOME": str(home), "CODEX_HOME": str(codex_dir), "BRIDGE_DYNAMIC_CONFIG_PATH": str(dyn),
-        "BRIDGE_STDIO_RESIDENT_ENABLED": "1", "BRIDGE_CODEX_APP_SERVER_V2_ENABLED": "1", "BRIDGE_STDIO_CANCEL_GRACE_S": "0.1",
+        "BRIDGE_STDIO_RESIDENT_ENABLED": "1", "BRIDGE_CODEX_APP_SERVER_V2_ENABLED": "1",
+        "BRIDGE_STDIO_CANCEL_GRACE_S": "0.1", "BRIDGE_ZC_STATIC_CWD_PATH": str(tmp_path / "zc-static-cwd"),
     }.items():
         monkeypatch.setenv(key, val)
     script = tmp_path / "fake_codex_v2.py"
