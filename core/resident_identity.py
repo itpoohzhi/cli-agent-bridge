@@ -11,8 +11,12 @@ from typing import Any, cast
 
 from core.chat_key import SOURCES_SESSION_ID, resolve_chat_key
 from core.resident_canonical import _fail_if
+from core.subbridge_zero_canon import is_zero_canon_profile
+from core.zero_canon_fs import read_gigarc_bool, resolve_hub_dynamic_config
 
 _FALLBACK_SECRET = b"resident-fallback-secret-v1"
+CODEX_PCK_V1_FLAG = "BRIDGE_CODEX_PCK_V1_ENABLED"
+_PCK_MAX_LEN = 512
 
 
 class ResidentAuthError(Exception):
@@ -66,7 +70,7 @@ class ResidentIdentity:
     principal_hash: str
     conversation_id: str
     ephemeral: bool
-    cache_key: str
+    cache_key: str = field(repr=False)
     turn_id: str
     scope: str
     subagent_id: str
@@ -102,31 +106,58 @@ def _validate_principal(inputs: IdentityInputs) -> str:
     return principal
 
 
+def derive_pck_digest(secret: bytes, key: str) -> str:
+    """Короткий HMAC-дайджест `prompt_cache_key` для логов (сырой ключ не раскрывается)."""
+    return hmac.new(secret, b"pck_v1_log\0" + key.encode("utf-8"), hashlib.sha256).hexdigest()[:16]
+
+
+def is_pck_v1_enabled() -> bool:
+    """Kill-switch opt-in аффинити по `prompt_cache_key` (`dynamic_config.json > env > False`)."""
+    return read_gigarc_bool(CODEX_PCK_V1_FLAG, resolve_hub_dynamic_config(None), default=False)
+
+
+def _pck_scoped_id(inputs: IdentityInputs, principal: str, raw_pck: str) -> str:
+    parts = ["pck_v1", inputs.scope, principal, inputs.subagent_id, inputs.review_profile, raw_pck]
+    payload = json.dumps(parts, separators=(",", ":"), ensure_ascii=True).encode("ascii")
+    return hmac.new(inputs.secret, payload, hashlib.sha256).hexdigest()[:32]
+
+
+def _no_chat_identity(inputs: IdentityInputs, principal: str) -> ResidentIdentity:
+    """Идентичность без валидного chat_id: эфемерная, либо `pck_v1` (opt-in, только с principal)."""
+    raw_pck = inputs.request.get("prompt_cache_key")
+    pck_ok = isinstance(raw_pck, str) and _valid_token(raw_pck) and len(raw_pck) <= _PCK_MAX_LEN
+    if not (pck_ok and is_pck_v1_enabled()):
+        return _ephemeral_identity(inputs, principal, "", "missing_or_invalid_chat_id")
+    pck = cast(str, raw_pck)
+    return ResidentIdentity(
+        principal, "", False, derive_pck_digest(inputs.secret, pck), inputs.turn_id,
+        inputs.scope, inputs.subagent_id, _pck_scoped_id(inputs, principal, pck), "pck_v1_affinity",
+    )
+
+
 def resolve_resident_identity(inputs: IdentityInputs) -> ResidentIdentity:
     principal = _validate_principal(inputs)
-    result: ResidentIdentity | None = None
     if not principal:
-        result = _ephemeral_identity(inputs, "", "", "unauthenticated_ephemeral")
-    else:
-        chat = resolve_chat_key(
-            inputs.request,
-            headers=inputs.headers,
-            extra=inputs.extra,
-            namespace="resident",
-            sources=SOURCES_SESSION_ID,
-            lenient=False,
-        )
-        chat_valid = all((not chat.invalid, chat.keyed, _valid_token(chat.value)))
-        conv = chat.value if chat_valid else ""
-        if inputs.force_ephemeral:
-            result = _ephemeral_identity(inputs, principal, conv, "forced_ephemeral")
-        elif not chat_valid:
-            result = _ephemeral_identity(inputs, principal, "", "missing_or_invalid_chat_id")
-        else:
-            raw_cache = inputs.request.get("prompt_cache_key")
-            cache_key = raw_cache if isinstance(raw_cache, str) else ""
-            result = ResidentIdentity(principal, conv, False, cache_key, inputs.turn_id, inputs.scope, inputs.subagent_id, _scoped_id(inputs, principal, conv))
-    return result
+        return _ephemeral_identity(inputs, "", "", "unauthenticated_ephemeral")
+    chat = resolve_chat_key(
+        inputs.request,
+        headers=inputs.headers,
+        extra=inputs.extra,
+        namespace="resident",
+        sources=SOURCES_SESSION_ID,
+        lenient=False,
+    )
+    chat_valid = all((not chat.invalid, chat.keyed, _valid_token(chat.value)))
+    conv = chat.value if chat_valid else ""
+    if is_zero_canon_profile(inputs.review_profile):
+        return _ephemeral_identity(inputs, principal, conv, "zero_canon_ephemeral")
+    if inputs.force_ephemeral:
+        return _ephemeral_identity(inputs, principal, conv, "forced_ephemeral")
+    if not chat_valid:
+        return _no_chat_identity(inputs, principal)
+    raw_cache = inputs.request.get("prompt_cache_key")
+    cache_key = raw_cache if isinstance(raw_cache, str) else ""
+    return ResidentIdentity(principal, conv, False, cache_key, inputs.turn_id, inputs.scope, inputs.subagent_id, _scoped_id(inputs, principal, conv))
 
 
 def _identity_config(adapter: Any) -> tuple[bytes, str, bool, bool]:
@@ -186,6 +217,7 @@ def populate_resident_ctx(route: Any, ctx: dict[str, Any], extra: Mapping[str, A
     raw_owner = _trusted_owner(route, handler, headers)
     secret, protocol, require_auth, config_ok = _identity_config(adapter)
     scope, subagent_id, force_ephemeral = _identity_extras(extra)
+    subagent_id = _nz(subagent_id, _header_val(route, "X-Subagent-Id").strip())
     identity = resolve_resident_identity(
         IdentityInputs(
             request=route.request,
