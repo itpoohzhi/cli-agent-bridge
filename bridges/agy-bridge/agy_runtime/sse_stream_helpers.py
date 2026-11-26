@@ -13,6 +13,11 @@ from typing import Any, cast, final
 from agy_runtime.content_arbiter import _ContentArbiter
 from agy_runtime.long_session_config import build_conv_headers, is_loopback_peer
 from agy_runtime.midstream_resilience import _owner_time
+from agy_runtime.stream_delivery_fsm import (
+    canonical_trace_key,
+    filter_unemitted_retained,
+    sanitizer_headers,
+)
 from agy_runtime.stream_relay import StreamRelay
 from agy_runtime.tool_progress import _ToolProgress
 from core.content_delivery_tracker import ContentDeliveryTracker
@@ -62,17 +67,36 @@ class SseStreamSession:
         self.emitted_tool_calls = 0
         self.coordinator = EarlyCommitSinkCoordinator(
             self, self.config, clock=_owner_time(handler).monotonic )
+        self._emulate_tools = bool(ctx.get("emulate_tools"))
+        self.emitted_stream_text = ""
+        self.emitted_reasoning_text = ""
+        self.emitted_tool_trace_keys: list[str] = []
+        self.b05_skipped_chars = self.b05_flushed_tail_chars = 0
+        self._bind_stream_targets()
+        ctx["finalize_timeout"] = self.finalize_stream
+    def _bind_stream_targets(self) -> None:
         self.tool_turn = None
-        if ctx.get("emulate_tools"):
-            self.tool_turn = hooks[3](
-                next(filter(None, (ctx.get("tools"),)), list[dict[str, Any]]()),
+        if self._emulate_tools:
+            self.tool_turn = self.hooks[3](
+                next(filter(None, (self.ctx.get("tools"),)), list[dict[str, Any]]()),
                 self.on_text, self.on_reasoning, self.on_calls, )
-            ctx.update(tool_stop=self.tool_turn.turn_complete, tool_calls_emitted=lambda: bool(self.tool_turn.calls),
+            self.ctx.update(tool_stop=self.tool_turn.turn_complete, tool_calls_emitted=lambda: bool(self.tool_turn.calls),
                 emitted_call_ids=lambda: [str(c.get("id", "")) for c in self.tool_turn.calls])
-        self.stream_text = self.tool_turn.feed if self.tool_turn else self.on_text
+        target = self.tool_turn.feed if self.tool_turn else self.on_text
+        self.stream_text = lambda text: self._feed_stream_text(target, text)
         self.stream_reasoning = (
             self.tool_turn.feed_reasoning if self.tool_turn else self.on_reasoning )
-        ctx["finalize_timeout"] = self.finalize_stream
+    def _feed_stream_text(self, target: Any, text: str) -> bool:
+        ok = target(text)
+        if ok:
+            self.emitted_stream_text += text
+        return ok
+    def reset_precommit_emitted(self) -> None:
+        self.emitted_stream_text = ""
+        self.emitted_reasoning_text = ""
+        self.emitted_tool_trace_keys.clear()
+        if self._emulate_tools and len(self.hooks) > 3:
+            self._bind_stream_targets()
     @property
     def client_gone(self) -> bool:
         return self.disconnected
@@ -87,6 +111,9 @@ class SseStreamSession:
         )
         seen = {k.lower() for k, _ in headers}
         extra = [(k, v) for k, v in conv_hdrs.items() if not seen.__contains__(k.lower())]
+        seen.update(k.lower() for k, _ in extra)
+        extra.extend( (k, v) for k, v in sanitizer_headers(self.tool_turn is not None)
+            if not seen.__contains__(k.lower()) )
         try:
             h.send_response(status)
             for key, value in ( *headers, *extra, ("Cache-Control", "no-cache"),
@@ -143,6 +170,8 @@ class SseStreamSession:
         else:
             self.emitted_reasoning_or_tool += 1
             self.emitted_tool_calls += int(dict(tool_calls=True).get(channel, False))
+        if channel == "reasoning_content" and isinstance(value, str):
+            self.emitted_reasoning_text += value
     def on_text(self, value: str) -> bool:
         return self._delta(value, "content")
     def on_reasoning(self, value: str) -> bool:
@@ -171,6 +200,7 @@ class SseStreamSession:
                     ok = self.on_reasoning(marker)
                 if ok:
                     self.progress.commit()
+                    self.emitted_tool_trace_keys.append(canonical_trace_key(event))
         return ok
     def keepalive(self) -> bool:
         ok = not self.disconnected
@@ -234,6 +264,13 @@ class SseStreamSession:
             self._flush_partial_timeout(out, retained)
     def _flush_partial_timeout(self, out: dict[str, Any], retained: Any) -> None:
         self.handler._arm_flush_window(self.ctx)
+        retained, skipped = filter_unemitted_retained( retained,
+            emitted_content=self.emitted_stream_text,
+            emitted_reasoning=self.emitted_reasoning_text,
+            emitted_tool_traces=self.emitted_tool_trace_keys, )
+        self.b05_skipped_chars += skipped
+        self.b05_flushed_tail_chars += sum( len(str(p)) for k, p in retained
+            if k in ("text", "reasoning") )
         ok = True
         callbacks = dict( text=self.stream_text, reasoning=self.on_reasoning,
             tool_trace=self.on_tool_trace, )
