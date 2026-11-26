@@ -110,6 +110,7 @@ class _SessionRecord:
 class _KeyGate:
     lock: threading.Lock
     refs: int = 0
+    in_flight: bool = False
 
 
 @final
@@ -138,7 +139,7 @@ class SessionStore:
             oldest_key, rec = next(iter(self._entries.items()))
             if now - rec.touched <= self.config.ttl_s:
                 break
-            if getattr(self._gates.get(oldest_key), "refs", 0):
+            if getattr(self._gates.get(oldest_key), "in_flight", False):
                 rec.touched = now
                 self._entries.move_to_end(oldest_key)
                 continue
@@ -146,7 +147,7 @@ class SessionStore:
             evicted += 1
         return evicted
 
-    def _open_locked(self, key_digest: str, lock: threading.Lock) -> SessionLease:
+    def _open_locked(self, key_digest: str, gate: _KeyGate) -> SessionLease:
         with self._guard:
             now = self._clock()
             _ = self._evict_expired_head(now)
@@ -156,9 +157,10 @@ class SessionStore:
             record.touched = now
             self._entries[key_digest] = record
             self._entries.move_to_end(key_digest)
+            gate.in_flight = True
             while len(self._entries) > self.config.max_entries:
                 self._drop_entry(next(iter(self._entries)))
-            return SessionLease(key_digest, record.session_id, mode, lock)
+            return SessionLease(key_digest, record.session_id, mode, gate.lock)
 
     def _acquire_gate(self, key_digest: str) -> _KeyGate:
         with self._guard:
@@ -166,12 +168,14 @@ class SessionStore:
             gate.refs += 1
             return gate
 
-    def _release_gate(self, key_digest: str, gate: _KeyGate) -> None:
+    def _release_gate(self, key_digest: str, gate: _KeyGate, *, acquired: bool) -> None:
         with self._guard:
-            rec = self._entries.get(key_digest)
-            if rec:
-                rec.touched = self._clock()
-                self._entries.move_to_end(key_digest)
+            if acquired:
+                gate.in_flight = False
+                rec = self._entries.get(key_digest)
+                if rec:
+                    rec.touched = self._clock()
+                    self._entries.move_to_end(key_digest)
             gate.refs -= 1
             self._maybe_gc_gate(key_digest)
 
@@ -179,14 +183,16 @@ class SessionStore:
     def lease(self, key_digest: str) -> Generator[SessionLease, None, None]:
         """Сериализует CREATE/RESUME per-key lock'ом и защищает gate refcount'ом."""
         gate = self._acquire_gate(key_digest)
-        _ = gate.lock.acquire()
+        acquired = False
         try:
-            yield self._open_locked(key_digest, gate.lock)
+            acquired = gate.lock.acquire()
+            yield self._open_locked(key_digest, gate)
         finally:
             try:
-                self._release_gate(key_digest, gate)
+                self._release_gate(key_digest, gate, acquired=acquired)
             finally:
-                gate.lock.release()
+                if acquired:
+                    gate.lock.release()
 
     def invalidate(self, key_digest: str, session_id: str | None = None) -> None:
         with self._guard:
@@ -243,7 +249,7 @@ def build_session_argv(plan: SessionPlan | None) -> tuple[str, ...]:
 def _is_forbidden_session_token(token: str) -> bool:
     head = token.split("=", 1)[0]
     is_long_abbrev = all((head.startswith("--"), len(head) >= 4, any(f.startswith(head) for f in _FORBIDDEN_LONG_FLAGS)))
-    is_short_bundle = all((head.startswith("-"), not head.startswith("--"), len(head) > 1, bool({"r", "c"}.intersection({head[1:2]}))))
+    is_short_bundle = all((head.startswith("-"), not head.startswith("--"), len(head) > 1, bool({"r", "c"}.intersection(head[1:]))))
     return any((bool(SESSION_FORBIDDEN_IN_ZERO_CANON.intersection({head})), is_long_abbrev, is_short_bundle))
 
 

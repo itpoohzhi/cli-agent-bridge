@@ -200,6 +200,20 @@ def test_monotonic_ttl_head_eviction_and_active_renewal() -> None:
         assert l2.mode == SessionMode.CREATE and l2.session_id != sid
 
 
+def test_lease_after_ttl_expiry_creates_fresh_session_for_same_key() -> None:
+    """RW-001 (C2 F-001): повторный lease по тому же ключу после TTL открывает CREATE без явного evict_expired."""
+    store, clock = _store(ttl_s=10.0)
+    with store.lease("solo") as first:
+        sid1 = first.session_id
+        assert first.mode == SessionMode.CREATE
+    clock.now += 10.0  # ровно граница TTL -> ещё валидна
+    with store.lease("solo") as second:
+        assert second.mode == SessionMode.RESUME and second.session_id == sid1
+    clock.now += 10.5  # просрочена, других ключей и evict_expired() не было!
+    with store.lease("solo") as third:
+        assert third.mode == SessionMode.CREATE and third.session_id != sid1
+
+
 def test_invalidate_respects_session_id_and_preserves_active_gate() -> None:
     store, _ = _store()
     with store.lease("a") as la:
@@ -248,6 +262,8 @@ def test_snapshot_is_immutable_and_per_key_locks_are_isolated() -> None:
         "-r=123",
         "-c1",
         "-c=1",
+        "-pr",
+        "-pc",
     ],
 )
 def test_zero_canon_guard_rejects_exact_equals_prefix_and_short_forms(bad_token: str) -> None:
