@@ -80,3 +80,34 @@ def test_f012_pending_adopt_survives_archive_unsafe_and_f001_nul_path_rejected(t
         w.close()
     finally:
         old_reader.close()
+
+
+def test_f001_concurrent_on_off_on_keeps_singleton_writer_and_zero_fd_leak(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import threading
+    cfg = tmp_path / "dyn.json"
+    cfg.write_text('{"BRIDGE_LOG_ROTATION_ENABLED": true}\n', encoding="utf-8")
+    monkeypatch.setenv("BRIDGE_DYNAMIC_CONFIG_PATH", str(cfg))
+    entered = threading.Event()
+    release = threading.Event()
+
+    def slow_redact(text: str) -> str:
+        entered.set()
+        release.wait(timeout=2.0)
+        return text
+
+    t = threading.Thread(target=adapters.emit_service_log, args=("hub", "in-flight", tmp_path, slow_redact))
+    t.start()
+    assert entered.wait(timeout=2.0)
+    w_before = adapters._WRITERS["hub"]
+    cfg.write_text('{"BRIDGE_LOG_ROTATION_ENABLED": false}\n', encoding="utf-8")
+    adapters.emit_service_log("hub", "off-during-redact", tmp_path)
+    cfg.write_text('{"BRIDGE_LOG_ROTATION_ENABLED": true}\n', encoding="utf-8")
+    adapters.emit_service_log("hub", "on-again", tmp_path)
+    assert adapters._WRITERS["hub"] is w_before  # zero split-brain!
+    release.set()
+    t.join(timeout=2.0)
+    cfg.write_text('{"BRIDGE_LOG_ROTATION_ENABLED": false}\n', encoding="utf-8")
+    adapters.emit_service_log("hub", "final-off", tmp_path)
+    assert not w_before.is_active() and w_before._dir_fd == -1 and w_before._file_fd == -1
