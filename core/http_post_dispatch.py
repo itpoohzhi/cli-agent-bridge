@@ -10,6 +10,7 @@ from core import passthrough_effort_map as _pem
 from core.http_post_context import PostRequestContext
 from core.http_post_ingress import begin_post, read_post_request
 from core.http_post_routing import PostRoute, PreparedPostBody, log_route, native_autonomy, native_effort, prepare_post_body, prepare_route_request, resolve_post_route, selected_route_allowed
+from core.native_turn_context import build_native_turn_payload, native_payload_scope
 from core.param_adapter import ThinkingBudgetConfigError, clamp_thinking_budget
 from core.resident_identity import turn_ids_and_resident_ctx
 
@@ -19,11 +20,9 @@ _NATIVE_SCRATCH = frozenset({"requested_turn_id", "resume_turn_id", "messages", 
 def _apply_passthrough_transforms(
     prepared: dict[str, Any], route: PostRoute, body: PreparedPostBody, adapter: Any
 ) -> dict[str, Any]:
-    backend_id = str(route.model.get("backend") or "")
-    out = _pem.apply_prepared_off_patch(prepared, body.request, route.request, adapter, backend_id)
-    if _pem.drops_thinking_route(adapter, backend_id):
-        out = _pem.drop_thinking_keep_effort(out)
-    return clamp_thinking_budget(out)
+    bid = str(route.model.get("backend") or "")
+    out = _pem.apply_prepared_off_patch(prepared, body.request, route.request, adapter, bid)
+    return clamp_thinking_budget(_pem.drop_thinking_keep_effort(out) if _pem.drops_thinking_route(adapter, bid) else out)
 
 
 def _passthrough(route: PostRoute, adapter: Any, body: PreparedPostBody | None) -> None:
@@ -128,10 +127,8 @@ def _native_tools(route: PostRoute, ctx: dict[str, Any]) -> list[dict[str, Any]]
     messages = request.get("messages")
     ctx["messages"] = messages if isinstance(messages, list) else []
     raw_tools = request.get("tools")
-    tools = (
-        [item for item in raw_tools if isinstance(item, dict)]
-        if isinstance(raw_tools, list) else []
-    )
+    tools = [item for item in raw_tools if isinstance(item, dict)] if isinstance(raw_tools, list) else []
+    ctx["native_payload"] = build_native_turn_payload(request)
     ctx["emulate_tools"] = bool(tools) and not host._tool_choice_none(request.get("tool_choice"))
     ctx["tool_schemas"] = host.build_tool_schemas(raw_tools)
     return tools
@@ -141,9 +138,7 @@ def _render_native(route: PostRoute, ctx: dict[str, Any], adapter: Any) -> bool:
     request, host, handler = route.request, route.host, route.handler
     tools = _native_tools(route, ctx)
     choice, images = request.get("tool_choice"), ctx["images"]
-    chat = host.resolve_chat_key(
-        request, namespace=host.RPC_NAMESPACE, sources=host.SOURCES_CACHE_KEY_ONLY, lenient=True,
-    )
+    chat = host.resolve_chat_key(request, namespace=host.RPC_NAMESPACE, sources=host.SOURCES_CACHE_KEY_ONLY, lenient=True)
     ctx["raw_key"] = chat.value if chat.keyed else request.get("prompt_cache_key")
     ctx["keyed"], ctx["route"] = chat.keyed, chat.route
     if images or host._is_title_request(ctx["messages"], tools, request):
@@ -241,6 +236,12 @@ def _serve_native(route: PostRoute, ctx: dict[str, Any]) -> None:
         handler._serve_resilient(route.model["backend"], serve)
 
 
+def _run_native_scoped(route: PostRoute, ctx: dict[str, Any], adapter: Any) -> None:
+    with native_payload_scope(ctx.pop("native_payload", None)):
+        if _attach_native(route, ctx, adapter):
+            _serve_native(route, ctx)
+
+
 def dispatch_route(route: PostRoute, body: PreparedPostBody | None = None) -> None:
     """Разделяет raw passthrough и CLI, не повторяя исполненный POST."""
     if not selected_route_allowed(route):
@@ -256,8 +257,7 @@ def dispatch_route(route: PostRoute, body: PreparedPostBody | None = None) -> No
     if adapter is None or not _render_native(route, ctx, adapter):
         return
     try:
-        if _attach_native(route, ctx, adapter):
-            _serve_native(route, ctx)
+        _run_native_scoped(route, ctx, adapter)
     finally:
         managed = ctx.get("managed_turn")
         if managed is not None and not ctx["attached_existing"] and managed.is_active:
