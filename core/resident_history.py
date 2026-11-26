@@ -57,9 +57,14 @@ def _canonical_arguments(raw: object) -> object:
     if isinstance(raw, str):
         try:
             parsed = cast(object, json.loads(raw.strip()))
-        except ValueError:
+        except (ValueError, RecursionError):
             return raw
-    return _sorted_json(parsed) if isinstance(parsed, dict) else raw
+    if not isinstance(parsed, dict):
+        return raw
+    try:
+        return _sorted_json(parsed)
+    except RecursionError:
+        return raw
 
 
 def _canonical_call(call: object) -> object:
@@ -81,8 +86,11 @@ def _canonical_payload(payload: object) -> str | None:
     arguments = cast(dict[str, object], payload).get("arguments") if isinstance(payload, dict) else None
     if not isinstance(arguments, dict):
         return None
-    cast(dict[str, object], payload)["arguments"] = cast(object, json.loads(_sorted_json(arguments)))
-    return json.dumps(payload, ensure_ascii=False)
+    try:
+        cast(dict[str, object], payload)["arguments"] = cast(object, json.loads(_sorted_json(arguments)))
+        return json.dumps(payload, ensure_ascii=False)
+    except RecursionError:
+        return None
 
 
 def _parse_tool_call_at(text: str, start: int) -> tuple[str, int] | None:
@@ -91,8 +99,10 @@ def _parse_tool_call_at(text: str, start: int) -> tuple[str, int] | None:
         start += 1
     try:
         payload, end = cast(tuple[object, int], _JSON_DECODER.raw_decode(text, start))
-    except ValueError:
+    except (ValueError, RecursionError):
         return None
+    while end < len(text) and text[end].isspace():
+        end += 1
     if not text.startswith(_TOOL_CALL_CLOSE, end):
         return None
     body = _canonical_payload(payload)

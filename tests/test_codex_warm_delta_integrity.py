@@ -10,6 +10,7 @@ from core.backend_routing_models import Transcript, TranscriptItem
 from core.resident_history import (
     HistoryPlan,
     ResidentHistoryTracker,
+    _canonical_item_digest,  # pyright: ignore[reportPrivateUsage]
     build_assistant_transcript_item,
     plan_history_transition,
     render_delta_prompt,
@@ -214,6 +215,29 @@ def test_tool_call_with_close_tag_in_arguments_stays_delta(monkeypatch: pytest.M
     reordered = _client_assistant('{"b": "x</tool_call>y", "a": 1}')
     plan = _transition(tracker, _envelope((user, reordered, _tool_result_item())))
     assert (plan.action, plan.reason) == ("delta", "history_extended")
+
+
+def test_multiline_tool_call_whitespace_stays_delta(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    _set_flag(monkeypatch, tmp_path, True)
+    user = _item("user", "U1")
+    committed = _item("assistant", '<tool_call>\n{"name": "f", "arguments": {"a": 1, "b": 2}}\n</tool_call>')
+    tracker = _committed((user,), committed)
+    client = _item("assistant", '<tool_call>\n{"name": "f", "arguments": {"b": 2, "a": 1}}\n</tool_call>')
+    plan = _transition(tracker, _envelope((user, client, _tool_result_item())))
+    assert (plan.action, plan.reason) == ("delta", "history_extended")
+
+
+def test_deeply_nested_tool_call_falls_back_without_recursion_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _set_flag(monkeypatch, tmp_path, True)
+    depth = 100_000
+    deep = "[" * depth + "]" * depth
+    item = _item("assistant", f'<tool_call>{{"name": "f", "arguments": {{"k": {deep}}}}}</tool_call>')
+    assert _canonical_item_digest(item) == item.digest
+    user = _item("user", "U1")
+    plan = _transition(_committed((user,), item), _envelope((user, item, _tool_result_item())))
+    assert plan.action == "delta"
 
 
 @pytest.mark.parametrize("first,second", [(True, False), (False, True)])
