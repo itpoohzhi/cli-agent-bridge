@@ -90,14 +90,14 @@ def test_sanitize_stderr_tail_matrix() -> None:
 
 
 @pytest.mark.parametrize("raw,bad", [
-    ("Authorization: Bearer sk-abc12345", "sk-abc12345"), ("Bearer tok123456", "tok123456"),
-    ("x sk-abc12345 y", "sk-abc12345"), ("BRIDGE_KEY=supersecret OPENAI_API_KEY=xyz", "supersecret"),
-    ("OPENAI_API_KEY=xyz", "xyz"), ("AWS_SECRET_ACCESS_KEY=foo", "foo"), ("\x1b[31merr\x1b[0m", "\x1b"),
-    ("a\r\nb\x00c", "\x00"), ("\x1b]0;title\x07ok", "title"),
+    ("Authorization: Bearer sk-abc12345", "sk-abc12345"), ("Bearer tok123456", "tok123456"), ("x sk-abc12345 y", "sk-abc12345"), ("OPENAI_API_KEY=xyz", "xyz"),
+    ("BRIDGE_KEY=supersecret OPENAI_API_KEY=xyz", "supersecret"), ("AWS_SECRET_ACCESS_KEY=foo", "foo"), ("\x1b[31merr sk-abc12345\x1b[0m", "\x1b"), ("a\r\nb\x00c sk-abc12345", "\x00"),
+    ("\x1b]0;title\x07ok sk-abc12345", "title"), ("sk-\x1b[31mABCDEF", "ABCDEF"), ("sk-\x00ABCDEF", "ABCDEF"), ("\x1b(BAuthorization: Bearer tok123456", "tok123456"),
+    ("eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.SigPartSecret999", "SigPartSecret999"), ('{"api_key": "jsonsecret999"}', "jsonsecret999"), ("Cookie: sid=cookiesecret999", "cookiesecret999"),
     ("Authorization: Bearer sk-abc12345\r\nBRIDGE_KEY=topsecret \x1b[31mERR\x1b[0m\x00", "topsecret")])
 def test_sanitize_stderr_tail_negative(raw: str, bad: str) -> None:
     out = P.sanitize_stderr_tail(raw)
-    assert bad not in out and "sk-abc12345" not in out and not any(c in out for c in "\r\n\x1b\x00")
+    assert bad not in out and "[REDACTED]" in out and "sk-abc12345" not in out and not any(c in out for c in "\r\n\x1b\x00")
 
 
 def test_summarize_snapshot_empty_clamp_mixed() -> None:
