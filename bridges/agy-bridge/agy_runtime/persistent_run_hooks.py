@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import re
 import subprocess
@@ -282,10 +283,13 @@ def close_run_resources(run: object, ctx: RunCloseContext) -> None:
 
 
 def resolve_run_chat_key(ctx: Mapping[str, object]) -> str:
-    """Извлечь стабильный ключ сессии хода (sess_key > explicit_state.session_key > chat_id)."""
+    """Извлечь нормализованный ключ сессии хода (sess_key > explicit_state.session_key > chat_id)."""
     sess_key = ctx.get("sess_key")
+    if isinstance(sess_key, (tuple, list)):
+        raw = "\x1f".join(str(p) for p in cast(tuple[object, ...] | list[object], sess_key))
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:32]
     if sess_key:
-        return str(sess_key)
+        return hashlib.sha256(str(sess_key).encode("utf-8")).hexdigest()[:32]
     exp_st = ctx.get("explicit_state")
     if exp_st is not None and bool(getattr(exp_st, "handled", False)):
         exp_key = str(cast(object, getattr(exp_st, "session_key", "")) or "")

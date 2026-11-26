@@ -564,10 +564,13 @@ class TestRunPersistentIntegration(unittest.TestCase):
             handled: bool = True
             session_key: str = "exp-key-42"
 
-        self.assertEqual(
-            resolve_run_chat_key({"sess_key": ("m", "c"), "explicit_state": _Exp(), "chat_id": "cid"}),
-            "('m', 'c')",
-        )
+        k1 = resolve_run_chat_key({"sess_key": ("m", "c"), "explicit_state": _Exp(), "chat_id": "cid"})
+        k2 = resolve_run_chat_key({"sess_key": ("m", "c"), "explicit_state": _Exp(), "chat_id": "cid"})
+        k3 = resolve_run_chat_key({"sess_key": ("m", "other"), "explicit_state": _Exp(), "chat_id": "cid"})
+        self.assertEqual(k1, k2)
+        self.assertNotEqual(k1, k3)
+        self.assertEqual(len(k1), 32)
+        self.assertTrue(all(ch in "0123456789abcdef" for ch in k1))
         self.assertEqual(
             resolve_run_chat_key({"sess_key": None, "explicit_state": _Exp(), "chat_id": ""}),
             "exp-key-42",
