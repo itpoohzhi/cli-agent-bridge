@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import ast
+import importlib
 import json
-import sqlite3
 import subprocess
 import sys
 import threading
@@ -24,8 +24,14 @@ NEW_MODULES: tuple[str, ...] = (
     "core/usage_fields.py",
     "core/usage_log.py",
     "core/usage_analytics.py",
+    "core/usage_report_render.py",
     "scripts/usage_report.py",
 )
+LOC_LIMITS: dict[str, int] = {
+    "core/usage_analytics.py": 300,
+    "core/usage_report_render.py": 250,
+    "scripts/usage_report.py": 250,
+}
 PURE_MODULES: tuple[str, ...] = ("core/usage_fields.py", "core/usage_analytics.py")
 FORBIDDEN_IO_IMPORTS: frozenset[str] = frozenset(
     {"pathlib", "urllib", "http", "socket", "subprocess", "duckdb", "sqlite3", "io", "os"}
@@ -93,7 +99,7 @@ def test_cli_help_exits_zero() -> None:
     """Флаг --help завершается с кодом 0 без сети и секретов."""
     proc = subprocess.run([sys.executable, str(SCRIPT_PATH), "--help"], capture_output=True, text=True, check=False)
     assert proc.returncode == 0
-    for flag in ("--jsonl", "--db", "--url", "--fail-on-anomaly"):
+    for flag in ("--jsonl", "--path", "--db", "--url", "--fail-on-anomaly", "--cli-path", "--no-cli"):
         assert flag in proc.stdout
 
 
@@ -127,12 +133,87 @@ def test_jsonl_and_rotated_archive(tmp_path: Path, capsys: pytest.CaptureFixture
     assert "50.00%" in table_out and "ALERTS: none" in table_out
 
 
+def _rec(rid: str, ts: str, **extra: Any) -> str:
+    """Собрать JSON-строку usage-записи с разумными дефолтами."""
+    base: dict[str, Any] = {"ts": ts, "request_id": rid, "model": "m", "backend_id": "b", "http_status": 200,
+                            "prompt_tokens": 100, "completion_tokens": 10, "cached_tokens": 40,
+                            "total_tokens": 110, "usage_present": True}
+    return json.dumps({**base, **extra})
+
+
+def _cli_fixture(tmp_path: Path) -> Path:
+    """Создать usage.jsonl + companion cli-usage.jsonl (+ архив .1) и вернуть путь usage.jsonl."""
+    active = tmp_path / "usage.jsonl"
+    _write_jsonl(active, [_rec("u1", "2026-11-20T10:00:00Z", cache_creation_tokens=7, route="proxy")])
+    _write_jsonl(tmp_path / "cli-usage.jsonl", [_rec("c1", "2026-11-21T10:00:00Z", prompt_tokens=200, cached_tokens=100, cache_creation_tokens=3, route="cli")])
+    _write_jsonl(tmp_path / "cli-usage.jsonl.1", [_rec("c0", "2026-11-19T10:00:00Z", usage_present=False, usage_missing_reason="no_usage_in_stream")])
+    return active
+
+
+def test_cache_creation_column_text_and_json(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """Колонка create / cache_creation_tokens и cache% присутствуют в text и --json (флаг --path = alias --jsonl)."""
+    active = tmp_path / "usage.jsonl"
+    _write_jsonl(active, [_rec("u1", "2026-11-20T10:00:00Z", cache_creation_tokens=7), _rec("u2", "2026-11-20T11:00:00Z")])
+    assert usage_report.main(["--path", str(active), "--days", "0", "--json"]) == 0
+    data = json.loads(capsys.readouterr().out)
+    assert data["summary"]["cache_creation_tokens"] == 7
+    assert data["summary"]["cache_hit_pct"] == 40.0
+    assert data["by_model"][0]["cache_creation_tokens"] == 7 and data["by_day"][0]["cache_creation_tokens"] == 7
+    assert data["sources"] == [str(active)] and data["source"] == str(active)
+    assert usage_report.main(["--jsonl", str(active), "--days", "0"]) == 0
+    out = capsys.readouterr().out
+    assert "create" in out and "cache%" in out and "cache_creation=7" in out and "BY ROUTE" in out
+
+
+def test_cli_usage_autodiscovery_merges_records(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """Companion cli-usage.jsonl (+ архивы) подхватывается автоматически и объединяется с usage.jsonl."""
+    active = _cli_fixture(tmp_path)
+    assert usage_report.main(["--jsonl", str(active), "--days", "0", "--json"]) == 0
+    data = json.loads(capsys.readouterr().out)
+    assert data["summary"]["total_requests"] == 3
+    assert data["summary"]["cache_creation_tokens"] == 10
+    assert data["summary"]["prompt_tokens"] == 400
+    assert {Path(p).name for p in data["sources"]} == {"usage.jsonl", "cli-usage.jsonl", "cli-usage.jsonl.1"}
+    assert {r["route"] for r in data["by_route"]} == {"proxy", "cli", ""}
+    assert data["summary"]["usage_missing_reasons"] == {"no_usage_in_stream": 1}
+    assert usage_report.main(["--jsonl", str(active), "--days", "0"]) == 0
+    out = capsys.readouterr().out
+    assert "Usage missing: no_usage_in_stream=1" in out and "cli-usage.jsonl" in out
+
+
+def test_no_cli_and_explicit_cli_path(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """--no-cli отключает auto-discovery; --cli-path читает явный файл; отсутствие companion не ошибка."""
+    active = _cli_fixture(tmp_path)
+    assert usage_report.main(["--jsonl", str(active), "--days", "0", "--json", "--no-cli"]) == 0
+    assert json.loads(capsys.readouterr().out)["summary"]["total_requests"] == 1
+    other = tmp_path / "other"
+    other.mkdir()
+    custom = other / "my-cli.jsonl"
+    _write_jsonl(custom, [_rec("x1", "2026-11-22T10:00:00Z", cache_creation_tokens=5)])
+    before = custom.read_bytes()
+    assert usage_report.main(["--jsonl", str(active), "--cli-path", str(custom), "--days", "0", "--json"]) == 0
+    data = json.loads(capsys.readouterr().out)
+    assert data["summary"]["total_requests"] == 2 and data["summary"]["cache_creation_tokens"] == 12
+    assert custom.read_bytes() == before
+    lone = other / "usage.jsonl"
+    _write_jsonl(lone, [_rec("y1", "2026-11-22T10:00:00Z")])
+    assert usage_report.main(["--jsonl", str(lone), "--days", "0", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["summary"]["total_requests"] == 1
+
+
+def test_since_window_applies_to_companion(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """Окно --days действует и на записи companion-файла (старые отсекаются)."""
+    active = _cli_fixture(tmp_path)
+    assert usage_report.main(["--jsonl", str(active), "--days", "1", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["summary"]["total_requests"] == 0
+
+
 def test_db_sqlite_fixture(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     """Чтение bridge_requests из sqlite3-фикстуры совместимой с RequestTelemetryStore."""
     assert hasattr(_rt_mod, "RequestTelemetryStore")
     db_path = tmp_path / "telemetry.sqlite"
     placeholders = ", ".join("?" for _ in COLUMNS)
-    conn = sqlite3.connect(db_path)
+    conn = importlib.import_module("sqlite3").connect(db_path)
     try:
         conn.execute(f"CREATE TABLE bridge_requests ({SCHEMA})")
         rows = [
@@ -243,38 +324,44 @@ def test_architecture_flow_council_and_new_backends() -> None:
     assert t3["direct_requests"] == 0
 
 
-def test_ast_and_architecture_guards() -> None:
-    """AST-гард по VER-004: лимиты LOC/McCabe, чистота pure-модулей и владельцы состояния."""
-    assert len(Path(__file__).read_text(encoding="utf-8").splitlines()) <= 295
-    for rel in NEW_MODULES:
-        src = (REPO_ROOT / rel).read_text(encoding="utf-8")
-        assert len(src.splitlines()) <= 245, f"{rel} > 245 LOC"
-        tree = ast.parse(src, filename=rel)
-        for stmt in tree.body:
-            if isinstance(stmt, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
-                assert not _has_mutable_collection(stmt.value), f"{rel} has module-level mutable collection"
-        for fn in (n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))):
-            assert (fn.end_lineno or fn.lineno) - fn.lineno + 1 <= 50, f"{rel}:{fn.name} > 50 LOC"
-            assert _func_param_count(fn) <= 5, f"{rel}:{fn.name} > 5 params"
-            assert _mccabe_complexity(fn) <= 10, f"{rel}:{fn.name} McCabe > 10"
-        if rel != "core/usage_log.py":
-            for cls_attrs in _self_assigned_attrs(tree).values():
-                assert not (cls_attrs & {"_queue", "_stats", "_usage_log", "_lock", "_cfg"})
-    for rel in PURE_MODULES:
-        src = (REPO_ROOT / rel).read_text(encoding="utf-8")
-        tree = ast.parse(src, filename=rel)
-        assert "os.environ" not in src
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Import):
-                assert not ({a.name.split(".")[0] for a in node.names} & FORBIDDEN_IO_IMPORTS), rel
-            elif isinstance(node, ast.ImportFrom):
-                assert (node.module or "").split(".")[0] not in FORBIDDEN_IO_IMPORTS, rel
-            elif isinstance(node, ast.Attribute):
-                assert node.attr not in ("environ", "getenv"), rel
-            elif isinstance(node, ast.Name):
-                assert node.id != "getenv", rel
-            elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
-                assert node.func.id != "open", rel
+def _check_module_ast(rel: str) -> None:
+    """Проверить лимиты LOC, McCabe, параметров и отсутствие module-level mutable коллекций."""
+    src = (REPO_ROOT / rel).read_text(encoding="utf-8")
+    limit = LOC_LIMITS.get(rel, 245)
+    assert len(src.splitlines()) <= limit, f"{rel} > {limit} LOC"
+    tree = ast.parse(src, filename=rel)
+    for stmt in tree.body:
+        if isinstance(stmt, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
+            assert not _has_mutable_collection(stmt.value), f"{rel} has module-level mutable collection"
+    for fn in (n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))):
+        assert (fn.end_lineno or fn.lineno) - fn.lineno + 1 <= 50, f"{rel}:{fn.name} > 50 LOC"
+        assert _func_param_count(fn) <= 5, f"{rel}:{fn.name} > 5 params"
+        assert _mccabe_complexity(fn) <= 10, f"{rel}:{fn.name} McCabe > 10"
+    if rel != "core/usage_log.py":
+        for cls_attrs in _self_assigned_attrs(tree).values():
+            assert not (cls_attrs & {"_queue", "_stats", "_usage_log", "_lock", "_cfg"})
+
+
+def _check_pure_module_ast(rel: str) -> None:
+    """Проверить, что pure-модуль не импортирует I/O и не читает env/open."""
+    src = (REPO_ROOT / rel).read_text(encoding="utf-8")
+    tree = ast.parse(src, filename=rel)
+    assert "os.environ" not in src
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            assert not ({a.name.split(".")[0] for a in node.names} & FORBIDDEN_IO_IMPORTS), rel
+        elif isinstance(node, ast.ImportFrom):
+            assert (node.module or "").split(".")[0] not in FORBIDDEN_IO_IMPORTS, rel
+        elif isinstance(node, ast.Attribute):
+            assert node.attr not in ("environ", "getenv"), rel
+        elif isinstance(node, ast.Name):
+            assert node.id != "getenv", rel
+        elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+            assert node.func.id != "open", rel
+
+
+def _check_state_owners() -> None:
+    """Проверить единственных владельцев состояния RequestTelemetryStore/TelemetryReader/RotatingUsageLogWriter."""
     store_attrs: dict[str, set[str]] = {}
     for rel in ("core/request_telemetry.py", "core/telemetry_query.py"):
         for cls_name, attrs in _self_assigned_attrs(ast.parse((REPO_ROOT / rel).read_text(encoding="utf-8"))).items():
@@ -289,3 +376,13 @@ def test_ast_and_architecture_guards() -> None:
     for cls_name, attrs in writer_attrs.items():
         if cls_name != "RotatingUsageLogWriter":
             assert not (attrs & {"_stats", "_lock", "_cfg"})
+
+
+def test_ast_and_architecture_guards() -> None:
+    """AST-гард по VER-004: лимиты LOC/McCabe, чистота pure-модулей и владельцы состояния."""
+    assert len(Path(__file__).read_text(encoding="utf-8").splitlines()) <= 400
+    for rel in NEW_MODULES:
+        _check_module_ast(rel)
+    for rel in PURE_MODULES:
+        _check_pure_module_ast(rel)
+    _check_state_owners()

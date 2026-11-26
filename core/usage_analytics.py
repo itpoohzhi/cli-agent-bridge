@@ -15,11 +15,11 @@ from core.usage_schema import (
 
 __all__: tuple[str, ...] = (
     "AnomalyThresholds", "aggregate_records", "compute_cache_hit_pct", "compute_cache_hit_pct_strict", "compute_uncached_prompt_tokens",
-    "detect_prompt_anomalies", "enrich_with_cache_hit", "normalize_usage_record_aliases",
+    "detect_prompt_anomalies", "enrich_with_cache_hit", "int_or_zero", "normalize_usage_record_aliases",
 )
 
 _TOKEN_FIELDS: tuple[str, ...] = (
-    "prompt_tokens", "completion_tokens", "cached_tokens", "reasoning_tokens", "total_tokens",
+    "prompt_tokens", "completion_tokens", "cached_tokens", "cache_creation_tokens", "reasoning_tokens", "total_tokens",
 )
 
 
@@ -45,6 +45,11 @@ def _opt_int(value: Any) -> int | None:
 def _as_int(value: Any) -> int:
     """Безопасное приведение скаляра к int (bool и некорректные значения -> 0)."""
     return _opt_int(value) or 0
+
+
+def int_or_zero(value: Any) -> int:
+    """Публичное безопасное приведение к int (None, bool и мусор -> 0)."""
+    return _as_int(value)
 
 
 def compute_cache_hit_pct(cached_tokens: int | None, prompt_tokens: int | None) -> float:
@@ -203,6 +208,32 @@ def detect_prompt_anomalies(
     return [*_detect_day_spikes(by_day, cfg), *_detect_turn_spikes(recent_turns, cfg)]
 
 
+def _missing_reasons(records: Sequence[Mapping[str, Any]]) -> dict[str, int]:
+    """Счётчик usage_missing_reason среди записей без usage (usage_present=False, причина непуста)."""
+    counts: dict[str, int] = {}
+    for rec in records:
+        reason = rec.get("usage_missing_reason")
+        if not rec.get("usage_present") and isinstance(reason, str) and reason.strip():
+            counts[reason.strip()] = counts.get(reason.strip(), 0) + 1
+    return dict(sorted(counts.items(), key=lambda item: (-item[1], item[0])))
+
+
+def _route_key(record: Mapping[str, Any]) -> tuple[str, str]:
+    """Ключ разреза by_route: (route|route_mode, backend_id)."""
+    route = record.get("route") or record.get("route_mode") or ""
+    return (str(route), str(record.get("backend_id") or ""))
+
+
+def _finalize_summary(summary: dict[str, Any], records: Sequence[Mapping[str, Any]]) -> None:
+    """Дополнить summary производными метриками кэша и причинами отсутствия usage."""
+    summary["cache_hit_pct"] = compute_cache_hit_pct(summary["cached_tokens"], summary["prompt_tokens"])
+    summary["uncached_prompt_tokens"] = compute_uncached_prompt_tokens(summary["prompt_tokens"], summary["cached_tokens"])
+    invalid, elig_cached, elig_prompt = eligible_cache_stats(records)
+    summary["invalid_usage_requests"] = invalid
+    summary["eligible_cache_hit_pct"] = compute_cache_hit_pct_strict(elig_cached, elig_prompt) if elig_prompt else None
+    summary["usage_missing_reasons"] = _missing_reasons(records)
+
+
 def aggregate_records(
     records: Sequence[Mapping[str, Any]],
     thresholds: AnomalyThresholds | None = None,
@@ -212,6 +243,7 @@ def aggregate_records(
     summary.pop("requests")
     by_model: dict[tuple[str, str], dict[str, Any]] = {}
     by_role: dict[tuple[str, str], dict[str, Any]] = {}
+    by_route: dict[tuple[str, str], dict[str, Any]] = {}
     by_day: dict[str, dict[str, Any]] = {}
     for rec in records:
         summary["total_requests"] += 1
@@ -222,15 +254,14 @@ def aggregate_records(
         r_key = (_normalize_role(rec), str(rec.get("subagent_id") or ""))
         r_bucket = by_role.setdefault(r_key, _new_bucket({"subagent_role": r_key[0], "subagent_id": r_key[1]}))
         _accumulate(r_bucket, rec)
+        t_key = _route_key(rec)
+        _accumulate(by_route.setdefault(t_key, _new_bucket({"route": t_key[0], "backend_id": t_key[1]})), rec)
         day = _extract_day(rec)
         _accumulate(by_day.setdefault(day, _new_bucket({"day": day}, with_status=True)), rec, with_status=True)
-    summary["cache_hit_pct"] = compute_cache_hit_pct(summary["cached_tokens"], summary["prompt_tokens"])
-    summary["uncached_prompt_tokens"] = compute_uncached_prompt_tokens(summary["prompt_tokens"], summary["cached_tokens"])
-    invalid, elig_cached, elig_prompt = eligible_cache_stats(records)
-    summary["invalid_usage_requests"] = invalid
-    summary["eligible_cache_hit_pct"] = compute_cache_hit_pct_strict(elig_cached, elig_prompt) if elig_prompt else None
+    _finalize_summary(summary, records)
     models = sorted(_with_uncached(list(by_model.values())), key=lambda x: (-x["requests"], -x["prompt_tokens"], x["model"], x["backend_id"]))
     roles = sorted(_with_uncached(list(by_role.values())), key=lambda x: (-x["prompt_tokens"], -x["requests"], x["subagent_role"], x["subagent_id"]))
+    routes = sorted(_with_uncached(list(by_route.values())), key=lambda x: (-x["requests"], -x["prompt_tokens"], x["route"], x["backend_id"]))
     days = sorted(_with_uncached(list(by_day.values())), key=lambda x: x["day"])
     anomalies = detect_prompt_anomalies(days, records, thresholds)
-    return {"summary": summary, "by_model": models, "by_role": roles, "by_day": days, "prompt_anomalies": anomalies}
+    return {"summary": summary, "by_model": models, "by_role": roles, "by_route": routes, "by_day": days, "prompt_anomalies": anomalies}

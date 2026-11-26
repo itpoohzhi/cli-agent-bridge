@@ -67,7 +67,7 @@ def test_disabled_by_default_performs_no_io(
 def test_enabled_creates_secure_permissions_and_redacts_secrets(
     tmp_path: Path,
 ) -> None:
-    """Проверяет права 0o700/0o600, 16 allowlist-полей и редакцию секретов."""
+    """Проверяет права 0o700/0o600, 18 allowlist-полей и редакцию секретов."""
     log_dir = tmp_path / "telemetry"
     log_path = log_dir / "usage.jsonl"
     writer = create_usage_log_writer(
@@ -89,7 +89,7 @@ def test_enabled_creates_secure_permissions_and_redacts_secrets(
     record = json.loads(raw_text.splitlines()[0])
 
     assert tuple(record.keys()) == USAGE_LOG_FIELDS
-    assert len(record) == 16
+    assert len(record) == 18
     assert record["route"] == "passthrough"
     assert record["http_status"] == 200
     assert record["elapsed_ms"] == 123.46
@@ -222,3 +222,20 @@ def test_fail_open_on_unwritable_path_and_snapshot_copy(tmp_path: Path) -> None:
     snap["usage_log_errors"] = 999
     assert writer.status_snapshot()["usage_log_errors"] == 1
     writer.close()
+
+
+def test_cache_creation_and_missing_reason_reach_usage_jsonl(tmp_path: Path) -> None:
+    """cache_creation_tokens и usage_missing_reason проходят от события телеметрии до usage.jsonl."""
+    log_path = tmp_path / "usage.jsonl"
+    writer = create_usage_log_writer({"usage_log_enabled": True, "usage_log_path": str(log_path)})
+    present = _sample_event(request_id="req-cc", cache_creation_tokens=200)
+    absent = _sample_event(
+        request_id="req-miss", usage_present=False, usage_missing_reason="usage_missing_in_stream",
+        prompt_tokens=None, completion_tokens=None, total_tokens=None,
+    )
+    assert writer.write_rows([make_row(present), make_row(absent)], col_names=NAMES) == 2
+    records = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
+    assert records[0]["cache_creation_tokens"] == 200
+    assert records[0]["usage_missing_reason"] is None
+    assert records[1]["cache_creation_tokens"] is None
+    assert records[1]["usage_missing_reason"] == "usage_missing_in_stream"

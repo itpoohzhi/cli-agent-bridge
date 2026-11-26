@@ -335,3 +335,48 @@ def test_ver003_lossless_turn_result_and_dispatch_format() -> None:
     out = _format_turn_output(replaced, "stdio_resident")
     assert out["turn_usage"] == tu
     assert out["usage"] == {"input_tokens": 700, "output_tokens": 50, "cache_read_tokens": 400, "cache_creation_tokens": 200, "reasoning_tokens": 15, "usage_present": True, "usage_source": "upstream_report", "usage_missing_reason": None}
+
+
+def test_req001_cache_creation_overflow_degrades_softly() -> None:
+    upd = UsageUpdate(1000, 50, cache_read_tokens=900, cache_creation_tokens=200, input_includes_cache=True)
+    res = normalize_usage_update(upd)
+    assert res.reason is None and res.usage is not None
+    assert (res.usage.prompt_tokens, res.usage.cache_read_tokens) == (1000, 900)
+    assert res.usage.cache_creation_tokens is None
+    assert res.usage.completion_tokens == 50
+    assert res.advisory == "cache_creation_dropped"
+
+
+def test_req001_cache_read_exceeding_prompt_still_hard_rejects() -> None:
+    upd = UsageUpdate(1000, 50, cache_read_tokens=1200, cache_creation_tokens=10, input_includes_cache=True)
+    res = normalize_usage_update(upd)
+    assert res.usage is None and res.reason == "cache_exceeds_prompt"
+
+
+class _FakeMuseHandle:
+    def __init__(self, lines: list[str]) -> None:
+        self._lines = list(lines)
+        self.written: list[bytes] = []
+
+    def write(self, payload: bytes) -> None:
+        self.written.append(payload)
+
+    def read_line(self, timeout_s: float = 0.0) -> str | None:
+        return self._lines.pop(0) if self._lines else None
+
+
+def test_req001_muse_late_token_usage_captured_before_leave_ack() -> None:
+    from adapters.stdio_drivers.muse_driver import MuseMspDriver
+
+    late = {
+        "jsonrpc": "2.0",
+        "method": "session/tokenUsage",
+        "params": {"inputTokens": 21752, "outputTokens": 10, "cachedTokens": 16000, "cacheWriteTokens": 120},
+    }
+    handle = _FakeMuseHandle([json.dumps(late), json.dumps({"jsonrpc": "2.0", "id": 7, "result": {}})])
+    drv = MuseMspDriver()
+    assert drv._send_and_wait_ack(handle, b"{}\n", lambda p: p.get("id") == 7, 1.0) is True
+    got = drv.last_late_usage
+    assert got is not None
+    assert (got.input_tokens, got.cache_read_tokens, got.cache_creation_tokens) == (21752, 16000, 120)
+    assert handle._lines == []

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 from typing import Final
 
@@ -127,6 +127,16 @@ def _compute_totals(update: UsageUpdate) -> tuple[int, int] | str:
     return prompt, completion
 
 
+def _soften_cache_creation(update: UsageUpdate) -> UsageUpdate | None:
+    """Drop only an over-reported cache_creation when cache_read itself is valid."""
+    if not update.input_includes_cache or update.cache_creation_tokens is None or update.input_tokens is None:
+        return None
+    read = update.cache_read_tokens or 0
+    if read > update.input_tokens or read + update.cache_creation_tokens <= update.input_tokens:
+        return None
+    return replace(update, cache_creation_tokens=None)
+
+
 def normalize_usage_update(update: UsageUpdate) -> NormalizeResult:
     """Validate and normalize a raw UsageUpdate into canonical TurnUsage."""
     if update.rejection_reason:
@@ -135,6 +145,8 @@ def normalize_usage_update(update: UsageUpdate) -> NormalizeResult:
         return NormalizeResult(None, "session_counter_not_exportable")
     if (err := _check_all_counters(update)) is not None:
         return NormalizeResult(None, err)
+    softened = _soften_cache_creation(update)
+    update = softened or update
     totals = _compute_totals(update)
     if isinstance(totals, str):
         return NormalizeResult(None, totals)
@@ -143,7 +155,7 @@ def normalize_usage_update(update: UsageUpdate) -> NormalizeResult:
     advisory = (
         "usage_total_mismatch"
         if type(reported) is int and reported != prompt + completion
-        else None
+        else ("cache_creation_dropped" if softened else None)
     )
     return NormalizeResult(
         TurnUsage(

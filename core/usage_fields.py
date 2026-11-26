@@ -19,6 +19,7 @@ from core.usage_event_fields import (  # noqa: F401
     _resolve_missing_reason,
     _resolve_usage_source,
     _total_tokens,
+    extract_cache_creation,
     finalize_event_usage,
 )
 
@@ -31,6 +32,10 @@ _PRESENCE_KEYS: tuple[str, ...] = (
     "cache_read_input_tokens",
     "cached_tokens",
     "reasoning_tokens",
+    "cache_creation_tokens",
+    "cache_creation_input_tokens",
+    "cacheCreationTokens",
+    "cacheWriteTokens",
     "total_tokens",
 )
 _TURN_USAGE_FIELDS: tuple[tuple[str, str], ...] = (
@@ -38,6 +43,7 @@ _TURN_USAGE_FIELDS: tuple[tuple[str, str], ...] = (
     ("output_tokens", "completion_tokens"),
     ("cache_read_tokens", "cache_read_tokens"),
     ("reasoning_tokens", "reasoning_tokens"),
+    ("cache_creation_tokens", "cache_creation_tokens"),
 )
 
 
@@ -47,7 +53,7 @@ def _nested(raw: Mapping[str, Any], key: str) -> Mapping[str, Any]:
     return value if isinstance(value, Mapping) else {}
 
 
-def _extract_raw_counters(raw: Mapping[str, Any]) -> tuple[Any, Any, Any, Any, Any]:
+def _extract_raw_counters(raw: Mapping[str, Any]) -> tuple[Any, Any, Any, Any, Any, Any]:
     prompt = first(raw.get("input_tokens"), raw.get("prompt_tokens"))
     completion = first(raw.get("output_tokens"), raw.get("completion_tokens"))
     cached = first(
@@ -57,7 +63,7 @@ def _extract_raw_counters(raw: Mapping[str, Any]) -> tuple[Any, Any, Any, Any, A
         _nested(raw, "prompt_tokens_details").get("cached_tokens"),
     )
     reasoning = extract_reasoning_tokens(raw)
-    return prompt, completion, cached, reasoning, raw.get("total_tokens")
+    return prompt, completion, cached, reasoning, raw.get("total_tokens"), extract_cache_creation(raw)
 
 
 def _usage_present(raw: Mapping[str, Any]) -> bool:
@@ -82,11 +88,11 @@ def normalize_usage_fields(raw: Mapping[str, Any] | None) -> dict[str, Any]:
     if raw is None:
         return {
             "input_tokens": None, "output_tokens": None, "cache_read_tokens": None,
-            "reasoning_tokens": None, "usage_present": None,
+            "reasoning_tokens": None, "cache_creation_tokens": None, "usage_present": None,
             "usage_source": None, "usage_missing_reason": None,
         }
     counters = _extract_raw_counters(raw)
-    prompt, completion, cached, reasoning, total = counters
+    prompt, completion, cached, reasoning, _total, cache_creation = counters
     has_positive = any(_is_positive(value) for value in counters)
     explicit_false = raw.get("usage_present") is False
     if explicit_false or not has_positive:
@@ -94,13 +100,13 @@ def normalize_usage_fields(raw: Mapping[str, Any] | None) -> dict[str, Any]:
         reason = _absent_reason(raw.get("usage_missing_reason"), has_zero_num, explicit_false)
         return {
             "input_tokens": None, "output_tokens": None, "cache_read_tokens": None,
-            "reasoning_tokens": None, "usage_present": False,
+            "reasoning_tokens": None, "cache_creation_tokens": None, "usage_present": False,
             "usage_source": None, "usage_missing_reason": reason,
         }
     source = _resolve_usage_source(raw.get("usage_source")) or _resolve_usage_source(raw.get("source")) or "upstream_report"
     return {
         "input_tokens": prompt, "output_tokens": completion, "cache_read_tokens": cached,
-        "reasoning_tokens": reasoning, "usage_present": True,
+        "reasoning_tokens": reasoning, "cache_creation_tokens": cache_creation, "usage_present": True,
         "usage_source": source, "usage_missing_reason": None,
     }
 
@@ -144,6 +150,7 @@ def telemetry_usage_updates(usage: Mapping[str, Any] | None) -> dict[str, Any]:
     updates = present({
         "prompt_tokens": fields["input_tokens"], "completion_tokens": fields["output_tokens"],
         "cached_tokens": fields["cache_read_tokens"], "reasoning_tokens": fields["reasoning_tokens"],
+        "cache_creation_tokens": fields["cache_creation_tokens"],
     })
     reported_total = usage.get("total_tokens")
     if fields["usage_present"] and _is_counter(reported_total) and reported_total > 0:

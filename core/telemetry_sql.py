@@ -20,7 +20,7 @@ SCHEMA = (
     "status_code INTEGER, error_type VARCHAR, queue_ms DOUBLE, ttfb_ms DOUBLE, total_ms DOUBLE, "
     "stream_chunks INTEGER, prompt_tokens INTEGER, completion_tokens INTEGER, cached_tokens INTEGER, "
     "total_tokens INTEGER, response_bytes BIGINT, reasoning_tokens INTEGER, usage_present BOOLEAN, "
-    "usage_source VARCHAR, usage_missing_reason VARCHAR"
+    "usage_source VARCHAR, usage_missing_reason VARCHAR, cache_creation_tokens INTEGER"
 )
 COLUMNS: tuple[tuple[str, str], ...] = tuple((n, t) for n, t in (part.split() for part in SCHEMA.split(", ")))
 NAMES = tuple(name for name, _ in COLUMNS)
@@ -29,6 +29,7 @@ MIGRATION_COLUMNS: tuple[tuple[str, str], ...] = (
     ("usage_present", "BOOLEAN"),
     ("usage_source", "TEXT"),
     ("usage_missing_reason", "TEXT"),
+    ("cache_creation_tokens", "INTEGER"),
 )
 _OK = "(status_code >= 200 AND status_code < 400)"
 _Q = "quantile_cont({}, {})"
@@ -50,19 +51,19 @@ _E = {  # SQL-выражения агрегатов; одни и те же дл�
     "outbound_target": "MAX(outbound_target)",
     "egress_proxy": "MAX(egress_proxy)",
     **{f"p{q}_{c}_ms": _Q.format(f"{c}_ms", q / 100) for q in (50, 95, 99) for c in ("ttfb", "total")},
-    **{t: f"COALESCE(SUM({t}), 0)" for t in ("prompt_tokens", "completion_tokens", "cached_tokens", "reasoning_tokens", "total_tokens")},
+    **{t: f"COALESCE(SUM({t}), 0)" for t in ("prompt_tokens", "completion_tokens", "cached_tokens", "reasoning_tokens", "cache_creation_tokens", "total_tokens")},
 }
 SUMMARY_COLS = (
     "total_requests ok_requests error_requests stream_requests subagent_requests interactive_requests "
     "avg_queue_ms avg_ttfb_ms p50_ttfb_ms p95_ttfb_ms p99_ttfb_ms avg_total_ms p50_total_ms p95_total_ms "
-    "p99_total_ms max_total_ms prompt_tokens completion_tokens cached_tokens reasoning_tokens total_tokens "
+    "p99_total_ms max_total_ms prompt_tokens completion_tokens cached_tokens reasoning_tokens cache_creation_tokens total_tokens "
     "total_response_bytes"
 ).split()
-MODEL_COLS = "outbound_target egress_proxy requests ok_requests error_requests avg_ttfb_ms p50_total_ms p95_total_ms avg_total_ms max_total_ms prompt_tokens completion_tokens cached_tokens reasoning_tokens total_tokens".split()
+MODEL_COLS = "outbound_target egress_proxy requests ok_requests error_requests avg_ttfb_ms p50_total_ms p95_total_ms avg_total_ms max_total_ms prompt_tokens completion_tokens cached_tokens reasoning_tokens cache_creation_tokens total_tokens".split()
 BACKEND_COLS = "requests ok_requests error_requests avg_ttfb_ms p50_total_ms p95_total_ms avg_total_ms max_total_ms total_tokens".split()
 CLIENT_COLS = "requests ok_requests error_requests avg_total_ms total_tokens reasoning_tokens last_seen_ts".split()
-HOUR_COLS = "requests ok_requests error_requests total_tokens avg_total_ms".split()
-ROLE_COLS = "requests ok_requests error_requests prompt_tokens completion_tokens cached_tokens reasoning_tokens total_tokens avg_total_ms".split()
+HOUR_COLS = "requests ok_requests error_requests total_tokens cache_creation_tokens avg_total_ms".split()
+ROLE_COLS = "requests ok_requests error_requests prompt_tokens completion_tokens cached_tokens reasoning_tokens cache_creation_tokens total_tokens avg_total_ms".split()
 DAY_COLS = ROLE_COLS
 
 
@@ -202,7 +203,7 @@ def make_row(event: Mapping[str, Any], max_len: int | None = None, scan_len: int
 
 
 def make_usage_log_record(row_dict: Mapping[str, Any]) -> dict[str, Any]:
-    """Санитизированная строка стора -> 16 канонических полей usage-лога из core.usage_schema (интерфейс W1-C)."""
+    """Санитизированная строка стора -> канонические поля usage-лога из core.usage_schema (интерфейс W1-C)."""
     return {name: resolve_usage_log_source_value(row_dict, name) for name in USAGE_LOG_FIELDS}
 
 

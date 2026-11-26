@@ -25,7 +25,8 @@ def test_b1b_nested_presence_and_reasoning() -> None:
 def test_b1b_normalize_usage_fields_cases() -> None:
     assert normalize_usage_fields(None) == {
         "input_tokens": None, "output_tokens": None, "cache_read_tokens": None,
-        "reasoning_tokens": None, "usage_present": None, "usage_source": None, "usage_missing_reason": None,
+        "reasoning_tokens": None, "cache_creation_tokens": None, "usage_present": None,
+        "usage_source": None, "usage_missing_reason": None,
     }
     zero = normalize_usage_fields({"prompt_tokens": 0, "completion_tokens": 0})
     explicit_false = normalize_usage_fields({"prompt_tokens": 10, "usage_present": False})

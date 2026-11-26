@@ -28,7 +28,7 @@ try:  # DuckDB опционален: миграцию проверяем и на
 except Exception:  # noqa: BLE001 - любой сбой импорта = миграция проверяется только на sqlite3
     duckdb = None
 
-LEGACY_COLUMNS = COLUMNS[:-4]
+LEGACY_COLUMNS = COLUMNS[:-5]
 LEGACY_SCHEMA = ", ".join(f"{name} {typ}" for name, typ in LEGACY_COLUMNS)
 _LEGACY_INSERT = f"INSERT INTO bridge_requests VALUES ({', '.join('?' * len(LEGACY_COLUMNS))})"
 
@@ -73,14 +73,15 @@ def _check_migrated(store: RequestTelemetryStore) -> None:
 
 def test_schema_contract() -> None:
     """Схема 33 колонки: новые строго в конце, прежние 29 не тронуты, разрезы дополнены аддитивно."""
-    assert len(NAMES) == 33
-    assert NAMES[-4:] == ("reasoning_tokens", "usage_present", "usage_source", "usage_missing_reason")
-    assert NAMES[:-4] == tuple(name for name, _ in LEGACY_COLUMNS)
+    assert len(NAMES) == 34
+    assert NAMES[-5:] == ("reasoning_tokens", "usage_present", "usage_source", "usage_missing_reason", "cache_creation_tokens")
+    assert NAMES[:-5] == tuple(name for name, _ in LEGACY_COLUMNS)
     assert MIGRATION_COLUMNS == (
         ("reasoning_tokens", "INTEGER"),
         ("usage_present", "BOOLEAN"),
         ("usage_source", "TEXT"),
         ("usage_missing_reason", "TEXT"),
+        ("cache_creation_tokens", "INTEGER"),
     )
     assert "reasoning_tokens" not in LEGACY_SCHEMA
     for cols in (SUMMARY_COLS, MODEL_COLS, CLIENT_COLS):
@@ -149,9 +150,9 @@ def test_make_row_usage_absent_and_false() -> None:
 
 
 def test_make_usage_log_record_fields() -> None:
-    """JSONL-запись usage-лога: ровно 16 полей из санитизированной строки, без повторной regex-редакции."""
+    """JSONL-запись usage-лога: ровно 18 полей из санитизированной строки, без повторной regex-редакции."""
     record = make_usage_log_record(dict(zip(NAMES, make_row(_new_event()))))
-    assert len(record) == 16
+    assert len(record) == 18
     assert record["request_id"] == "req_new"
     assert record["model"] == "gpt-4o-mini"
     assert record["reasoning_tokens"] == 77

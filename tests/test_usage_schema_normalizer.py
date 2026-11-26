@@ -35,8 +35,9 @@ def test_usage_log_fields_exact() -> None:
         "route", "backend_id", "stream", "http_status", "elapsed_ms",
         "prompt_tokens", "completion_tokens", "total_tokens",
         "cached_tokens", "reasoning_tokens", "usage_present",
+        "cache_creation_tokens", "usage_missing_reason",
     )
-    assert len(USAGE_LOG_FIELDS) == 16
+    assert len(USAGE_LOG_FIELDS) == 18
     assert USAGE_DB_SOURCE_MAP == {
         "ts": "ts_iso", "route": "route_mode",
         "http_status": "status_code", "elapsed_ms": "total_ms",
@@ -240,3 +241,15 @@ def test_reconciled_usage_frozen() -> None:
     result = reconcile_turn_usage(raw_input=1, raw_output=2, raw_total=3, raw_thinking=0)
     with pytest.raises(dataclasses.FrozenInstanceError):
         result.relation = "x"  # type: ignore[misc]
+
+
+def test_legacy_16_field_rows_read_with_none_defaults() -> None:
+    """Старые 16-польные JSONL-строки читаются без ошибок: новых полей нет -> None по умолчанию."""
+    legacy = {name: None for name in USAGE_LOG_FIELDS[:16]}
+    legacy.update(prompt_tokens=10, cached_tokens=4, usage_present=True, http_status=200)
+    normalized = normalize_usage_record_aliases(legacy)
+    assert normalized["uncached_prompt_tokens"] == 6
+    assert normalized["usage_validity"] == "valid"
+    assert normalized.get("cache_creation_tokens") is None
+    assert normalized.get("usage_missing_reason") is None
+    assert tuple(legacy) == USAGE_LOG_FIELDS[:16]

@@ -75,6 +75,7 @@ def test_normalize_usage_fields_openai_keys() -> None:
         "output_tokens": 5,
         "cache_read_tokens": None,
         "reasoning_tokens": None,
+        "cache_creation_tokens": None,
         "usage_present": True,
         "usage_source": "upstream_report",
         "usage_missing_reason": None,
@@ -99,6 +100,7 @@ def test_normalize_usage_fields_none_gives_all_none() -> None:
         "output_tokens": None,
         "cache_read_tokens": None,
         "reasoning_tokens": None,
+        "cache_creation_tokens": None,
         "usage_present": None,
         "usage_source": None,
         "usage_missing_reason": None,
@@ -131,7 +133,7 @@ def test_normalize_usage_fields_reasoning_from_details() -> None:
 
 def test_normalize_usage_returns_reasoning_without_presence_flag() -> None:
     fields = normalize_usage({"prompt_tokens": 1, "output_tokens_details": {"reasoning_tokens": 2}})
-    assert fields == {"input_tokens": 1, "output_tokens": None, "cache_read_tokens": None, "reasoning_tokens": 2,
+    assert fields == {"input_tokens": 1, "output_tokens": None, "cache_read_tokens": None, "reasoning_tokens": 2, "cache_creation_tokens": None,
                       "usage_source": "upstream_report", "usage_missing_reason": None}
 
 
@@ -237,6 +239,7 @@ def test_finalize_event_usage_full_block() -> None:
         "completion_tokens": 5,
         "cached_tokens": 2,
         "reasoning_tokens": 3,
+        "cache_creation_tokens": None,
         "total_tokens": 15,
         "usage_present": True,
         "usage_source": "upstream_report",
@@ -257,6 +260,7 @@ def test_finalize_event_usage_empty_meta() -> None:
         "completion_tokens": None,
         "cached_tokens": None,
         "reasoning_tokens": None,
+        "cache_creation_tokens": None,
         "total_tokens": None,
         "usage_present": False,
         "usage_source": None,
