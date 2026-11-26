@@ -170,7 +170,8 @@ def test_f002_cancel_turn_runs_callbacks_before_release_and_protects_slot_on_unr
     turn.pgid = None
     monkeypatch.setattr(mgr, "unregister_child_pgid", lambda _p: (_ for _ in ()).throw(RuntimeError("boom")))
     mgr.cancel_turn(turn.turn_id, reason="client_disconnected")
-    assert order == ["cb", "release"]
+    # Default flag=False releases slot BEFORE callbacks (RW-001/F-005), and try/finally protects slot
+    assert order == ["release", "cb"]
     reset_hub_p12_seam_for_tests()
 
 
