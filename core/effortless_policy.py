@@ -6,6 +6,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from typing import Final, cast
 
+from core.effort_errors import EffortValidationError as EffortValidationError
 from core.effort_policy import (
     EFFORT_LEVELS,
     EffortResolution,
@@ -24,10 +25,6 @@ _EFFORTLESS_CLAMP_SOURCE: Final[DynamicFlagSource] = DynamicFlagSource(
 )
 _MSG_NOT_STRING: Final[str] = "reasoning_effort must be a string"
 _MSG_NOT_ALLOWED: Final[str] = "reasoning_effort is not allowed for this model"
-
-
-class EffortValidationError(ValueError):
-    """Ошибка валидации `reasoning_effort` на passthrough-маршруте."""
 
 
 def effortless_clamp_enabled() -> bool:

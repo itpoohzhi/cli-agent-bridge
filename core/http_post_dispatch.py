@@ -6,24 +6,18 @@ from functools import partial
 from pathlib import Path
 from typing import Any
 
-from core import passthrough_effort_map as _pem
+from core import manifest_dialect_dispatch as _mdd
 from core.http_post_context import PostRequestContext
 from core.http_post_ingress import begin_post, read_post_request
 from core.http_post_routing import PostRoute, PreparedPostBody, log_route, native_autonomy, native_effort, prepare_post_body, prepare_route_request, resolve_post_route, selected_route_allowed
-from core.param_adapter import ThinkingBudgetConfigError, clamp_thinking_budget
+from core.param_adapter import ThinkingBudgetConfigError
 from core.resident_identity import turn_ids_and_resident_ctx
 
 _NATIVE_SCRATCH = frozenset({"requested_turn_id", "resume_turn_id", "messages", "raw_key", "keyed"})
 
 
-def _apply_passthrough_transforms(
-    prepared: dict[str, Any], route: PostRoute, body: PreparedPostBody, adapter: Any
-) -> dict[str, Any]:
-    backend_id = str(route.model.get("backend") or "")
-    out = _pem.apply_prepared_off_patch(prepared, body.request, route.request, adapter, backend_id)
-    if _pem.drops_thinking_route(adapter, backend_id):
-        out = _pem.drop_thinking_keep_effort(out)
-    return clamp_thinking_budget(out)
+def _apply_passthrough_transforms(prepared: dict[str, Any], route: PostRoute, body: PreparedPostBody, adapter: Any) -> dict[str, Any]:
+    return _mdd.apply_passthrough_transforms(prepared, route, body, adapter)
 
 
 def _passthrough(route: PostRoute, adapter: Any, body: PreparedPostBody | None) -> None:
@@ -51,6 +45,9 @@ def _passthrough(route: PostRoute, adapter: Any, body: PreparedPostBody | None) 
         return
     except ThinkingBudgetConfigError as exc:
         route.reject(400, "invalid_request", str(exc))
+        return
+    except _mdd.ParamDegradedError as exc:
+        _mdd.handle_param_degraded(route, exc)
         return
     raw = body.raw if prepared == body.request else host.json.dumps(prepared, ensure_ascii=False).encode("utf-8")
     log_route(route, "passthrough")

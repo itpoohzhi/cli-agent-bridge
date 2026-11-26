@@ -170,7 +170,7 @@ def test_compile_is_byte_deterministic() -> None:
     assert fc.canonical_json(first.sidecar) == fc.canonical_json(second.sidecar)
     standard = (json.dumps(first.fleet, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
     assert render_fleet_json(first.fleet) == standard
-    assert len(standard.splitlines()) <= 1600  # Включая NeuralWatt Standard/Flex (glm-5.3-flex, glm-5.3-flash, mimo-v2.6-pro-flex) и единый opencode-go.
+    assert len(standard.splitlines()) <= 1900  # Включая NeuralWatt Standard/Flex, единый opencode-go и `backends.<id>.params` (REQ-004).
     assert len(render_fleet_json(first.sidecar).splitlines()) <= 1100
 
 

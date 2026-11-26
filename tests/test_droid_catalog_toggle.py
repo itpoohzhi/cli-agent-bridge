@@ -248,12 +248,14 @@ class DroidCatalogRuntimeToggleTest(unittest.TestCase):
 
     def test_efforts_follow_flag(self) -> None:
         catalog, _registry = self.build(False)
-        for model in ("claude-haiku-5-5", "claude-opus-5-5", "claude-sonnet-5-5"):
-            self.assertEqual(efforts(catalog, model), (["high"], "high"))
+        models = ("claude-haiku-5-5", "claude-opus-5-5", "claude-sonnet-5-5")
+        # AD-005: droid_off не затирает efforts claude-моделей, kill-switch их не меняет.
+        on_state = {model: efforts(catalog, model) for model in models}
+        self.assertEqual(on_state["claude-haiku-5-5"], (["low", "medium", "high"], "low"))
         set_flag(True)
-        self.assertEqual(efforts(catalog, "claude-haiku-5-5"), (["low", "medium", "high"], "low"))
+        self.assertEqual({model: efforts(catalog, model) for model in models}, on_state)
         set_flag(False)
-        self.assertEqual(efforts(catalog, "claude-haiku-5-5"), (["high"], "high"))
+        self.assertEqual({model: efforts(catalog, model) for model in models}, on_state)
 
     def test_catalog_keeps_meta_and_writes_across_flips(self) -> None:
         catalog, _registry = self.build(False)

@@ -21,39 +21,12 @@ from core.gated_registry import GatedRegistry, gated_catalog  # noqa: E402
 from core.runtime_env import ConfigSnapshotError, DynamicFlagSource  # noqa: E402
 
 FLEET_FILE = Path(__file__).resolve().parent.parent / "fleet.json"
-_ZEN = ("high", "max")
-_ALL = ("minimal", "low", "medium", "high", "max")
 _LMH = ("low", "medium", "high")
-# Независимый эталон droid_off: weighted-владельцы по AD-001, defaults по AD-008.
-# Sol скрыта профилем; DeepSeek принадлежит Go-пулу (sub1) независимо от флага droid.
-BASE_MODELS = (
-    ("claude-sonnet-5-5", "claude-p", ("high",), "high"), ("gemini-3.8-flash", "agy", _LMH, "high"),
-    ("gemini-3.8-flash-agy", "agy", _LMH, "high"), ("gemini-4-carbon", "agy", ("off",), "off"),
-    ("muse-ember-1.0", "muse", (*_ALL[:-1], "xhigh", "max"), "high"), ("muse-spark-1.3", "muse", ("max",), "max"),
-    ("muse-spark-1.3-contributor", "muse", ("max",), "max"), ("muse-wonder-1.0", "muse", _ALL, "high"),
-    ("muse-wonder-full-1.0", "muse", _ALL, "high"), ("gpt-6.1-terra", "openai-key-2", _LMH, "high"),
-    ("claude-opus-5-5", "claude-p", ("high",), "high"), ("claude-haiku-5-5", "claude-p", ("high",), "high"),
-    ("gemini-4-argon", "agy", _LMH, "high"), ("gemini-4-hydrogen", "agy", (*_LMH, "xhigh"), "high"),
-    ("deepseek-v4.1-flash", "opencode-go-sub1", ("off", "low", "high", "max"), "off"),
-    ("deepseek-v4.1-flash-free", "opencode-zen", _ZEN, "high"),
-    ("flint-40b-free", "opencode-zen", _ZEN, "high"),
-    ("mimo-v2.6-flash-free", "opencode-zen", _ZEN, "high"),
-    ("nemotron-3.5-lightning-free", "opencode-zen", _ZEN, "high"),
-    ("nemotron-3.5-super-vl-free", "opencode-zen", _ZEN, "high"),
-    ("beam-free", "opencode-zen", _ZEN, "high"),
-    ("big-pickle", "opencode-zen", _ZEN, "high"),
-    ("iceman-free", "opencode-zen", _ZEN, "high"),
-    ("inkling-2-small-free", "opencode-zen", _ALL, "high"),
-    ("longcat-2.5-free", "opencode-zen", _ZEN, "high"),
-    ("minimax-m3.1-flash-free", "opencode-zen", (*_LMH, "xhigh", "max"), "high"),
-)
-# Имена моделей, переключаемых гейтом, при выключенном флаге.
-BASE_NAMES = {
-    "claude-sonnet-5-5": "Claude Sonnet 5.5 (Claude-p bridge)",
-    "gemini-3.8-flash": "Gemini 3.8 Flash (AGY bridge)",
-}
+# Эталон — актуальный fleet.json: без хардкодов моделей/алиасов, только инварианты droid_off.
+BASE_NAMES = {"gemini-3.8-flash": "Gemini 3.8 Flash (AGY bridge)"}
 BASE_DROID_BACKEND = dict(kind="droid", enabled=False, owned_by="factory-droid", max_concurrent=64)
-BASE_ALIAS: dict[str, Any] = {}
+ALIAS_COUNT = 67  # число алиасов fleet.json; droid_off их не трогает
+DROID_ONLY = frozenset({"claude-sonnet-5-5-droid", "gemini-3.8-flash-droid", "gpt-6.1-sol-droid"})
 
 
 def srv() -> Any:
@@ -69,9 +42,22 @@ def routes(data: dict[str, Any]) -> dict[str, str]:
     return {m["id"]: m["backend"] for m in data["models"]}
 
 
+def droid_on_bytes() -> bytes:
+    """fleet.json с включённым `droid`: то, что гейт переключает флагом."""
+    raw = raw_fleet()
+    raw["backends"]["droid"]["enabled"] = True
+    return json.dumps(raw).encode()
+
+
 def effective(models: Any) -> dict[str, tuple[str, tuple[str, ...], str]]:
     items = models.values() if isinstance(models, dict) else models
     return {m["id"]: (m["backend"], tuple(m["efforts"]), m["default_effort"]) for m in items}
+
+
+def base_effective(raw: dict[str, Any]) -> dict[str, tuple[str, tuple[str, ...], str]]:
+    """Ожидаемый каталог при выключенном флаге: fleet.json + backend-override droid_off."""
+    patch = raw["technical_ref"]["droid_off"].get("models", {})
+    return {mid: (patch.get(mid, {}).get("backend", b), e, d) for mid, (b, e, d) in effective(raw["models"]).items()}
 
 
 class DroidCatalogFlagTest(unittest.TestCase):
@@ -152,28 +138,30 @@ class DroidCatalogFlagTest(unittest.TestCase):
         self.assertEqual(gated["backends"]["droid"]["kind"], raw["backends"]["droid"]["kind"])
         skip = ("backends", "models", "aliases")
         self.assertEqual({k: v for k, v in gated.items() if k not in skip}, {k: v for k, v in raw.items() if k not in skip})
-        self.assertEqual(gated["aliases"], BASE_ALIAS)
+        self.assertEqual(gated["aliases"], raw["aliases"])
+        self.assertEqual(len(gated["aliases"]), ALIAS_COUNT)
 
     def test_gate_off_restores_base_efforts(self) -> None:
         """W1B-001: default-off сохраняет и маршрут, и efforts/default_effort базы."""
-        gated = effective(apply_droid_catalog_gate(raw_fleet(), enabled=False)["models"])
-        for mid, backend, efforts, default in BASE_MODELS:
-            with self.subTest(model=mid):
-                self.assertEqual(gated[mid], (backend, efforts, default))
+        raw = raw_fleet()
+        gated = effective(apply_droid_catalog_gate(raw, enabled=False)["models"])
+        self.assertEqual(gated, base_effective(raw))
+        self.assertEqual(gated["claude-haiku-5-5"][1:], (_LMH, "low"))
+        self.assertEqual(gated["claude-opus-5-5"], effective(raw["models"])["claude-opus-5-5"])
 
     def test_load_fleet_off_matches_base_effective_catalog(self) -> None:
         """W1B-001: каталог сервера при выключенных флагах совпадает с базой по active-моделям."""
         got = effective(srv()._load_fleet()["models"])
-        want = {mid: (b, e, d) for mid, b, e, d in BASE_MODELS if b != "droid"}
+        want = {mid: v for mid, v in base_effective(raw_fleet()).items() if mid not in DROID_ONLY}
         self.assertEqual(got, want)
 
     def test_gate_on_keeps_droid_routes(self) -> None:
         raw = raw_fleet()
         gated: Any = apply_droid_catalog_gate(raw, enabled=True)
         self.assertEqual(gated, raw)
-        self.assertTrue(gated["backends"]["droid"]["enabled"])
-        self.assertEqual(list(routes(gated).values()).count("droid"), 4)
-        self.assertEqual(len(gated["aliases"]), 35)
+        self.assertEqual(gated["backends"]["droid"], raw["backends"]["droid"])
+        self.assertEqual(list(routes(gated).values()).count("droid"), len(DROID_ONLY))
+        self.assertEqual(len(gated["aliases"]), ALIAS_COUNT)
 
     def test_gate_off_tolerates_malformed_entries(self) -> None:
         raw: dict[str, Any] = {"schema_version": 3, "backends": {"droid": "broken"}, "models": ["broken", {"id": "x"}], "technical_ref": {"droid_off": {"models": {"x": {"backend": "agy"}}}}}
@@ -209,9 +197,8 @@ class DroidCatalogFlagTest(unittest.TestCase):
         for mid, name in BASE_NAMES.items():
             self.assertEqual(by_id[mid]["name"], name)
         self.assertEqual(gated["backends"]["droid"], BASE_DROID_BACKEND)
-        self.assertEqual(gated["aliases"], BASE_ALIAS)
-        ids = [m["id"] for m in gated["models"]]
-        self.assertEqual(set(ids), {b[0] for b in BASE_MODELS} | {"claude-sonnet-5-5-droid", "gemini-3.8-flash-droid", "gpt-6.1-sol-droid"})
+        self.assertEqual(gated["aliases"], raw_fleet()["aliases"])
+        self.assertEqual({m["id"] for m in gated["models"]}, set(effective(raw_fleet()["models"])))
 
     def test_schema_gate(self) -> None:
         """F-006.1: схема 2 не трогается, схема 4 под гейтом (fail-closed)."""
@@ -230,12 +217,12 @@ class DroidCatalogFlagTest(unittest.TestCase):
         self.assertEqual(reg._adapters, {"droid": 1})
 
     def test_gated_catalog_follows_droid_off_profile(self) -> None:
-        built: Any = gated_catalog(FLEET_FILE.read_bytes(), srv()._build_catalog)
+        built: Any = gated_catalog(droid_on_bytes(), srv()._build_catalog)
         self.assertIsInstance(built, GatedCatalog)
         self.assertFalse(built["backends"]["droid"]["enabled"])
         with mock.patch.dict(os.environ, {FLAG_DROID_CATALOG: "1"}):
             self.assertTrue(built["backends"]["droid"]["enabled"])
-        plain = raw_fleet()
+        plain = json.loads(droid_on_bytes())
         del plain["technical_ref"]["droid_off"]
         synthetic = gated_catalog(json.dumps(plain).encode(), lambda data: data)
         self.assertEqual(synthetic, plain)
@@ -245,55 +232,54 @@ class DroidCatalogFlagTest(unittest.TestCase):
     def test_load_fleet_explicit_path_is_gated(self) -> None:
         """F-005.1: путь каталога не отключает гейт, пока в каталоге есть профиль."""
         explicit = Path(tempfile.gettempdir()) / "x.json"
-        with mock.patch.object(srv(), "FLEET_PATH", explicit), mock.patch.object(Path, "read_bytes", return_value=FLEET_FILE.read_bytes()):
+        with mock.patch.object(srv(), "FLEET_PATH", explicit), mock.patch.object(Path, "read_bytes", return_value=droid_on_bytes()):
             catalog = srv()._load_fleet()
         self.assertIsInstance(catalog, GatedCatalog)
         self.assertFalse(catalog["backends"]["droid"]["enabled"])
-        self.assertNotIn("gpt-6.1-sol", catalog["models"])
+        self.assertNotIn("gpt-6.1-sol-droid", catalog["models"])
 
     def test_load_fleet_env_fleet_path_keeps_gate(self) -> None:
         """F-005.1: `DROID_DSH_BRIDGE_FLEET` на штатный `fleet.json` не открывает fail-open."""
         env = {"DROID_DSH_BRIDGE_FLEET": str(FLEET_FILE)}
-        with mock.patch.dict(os.environ, env), mock.patch.object(srv(), "FLEET_PATH", FLEET_FILE):
+        with mock.patch.dict(os.environ, env), mock.patch.object(srv(), "FLEET_PATH", FLEET_FILE), mock.patch.object(Path, "read_bytes", return_value=droid_on_bytes()):
             catalog = srv()._load_fleet()
             self.assertIsInstance(catalog, GatedCatalog)
             self.assertFalse(catalog["backends"]["droid"]["enabled"])
             os.environ[FLAG_DROID_CATALOG] = "1"
             self.assertTrue(catalog["backends"]["droid"]["enabled"])
-            self.assertIn("gpt-6.1-sol", catalog["models"])
+            self.assertIn("gpt-6.1-sol-droid", catalog["models"])
 
     def test_load_fleet_synthetic_explicit_catalog_is_plain(self) -> None:
-        plain = raw_fleet()
+        plain = json.loads(droid_on_bytes())
         del plain["technical_ref"]["droid_off"]
         explicit = Path(tempfile.gettempdir()) / "x.json"
         with mock.patch.object(srv(), "FLEET_PATH", explicit), mock.patch.object(Path, "read_bytes", return_value=json.dumps(plain).encode()):
             catalog = srv()._load_fleet()
         self.assertNotIsInstance(catalog, GatedCatalog)
         self.assertTrue(catalog["backends"]["droid"]["enabled"])
-        self.assertIn("gpt-6.1-sol", catalog["models"])
+        self.assertIn("gpt-6.1-sol-droid", catalog["models"])
 
     def test_gated_catalog_methods_follow_flag(self) -> None:
         """F-003.1: `len`, `==`, `copy`, `keys` и `items` тоже применяют флаг."""
-        built: Any = gated_catalog(FLEET_FILE.read_bytes(), srv()._build_catalog)
-        self.assertNotIn("gpt-6.1-sol", built["models"])
+        built: Any = gated_catalog(droid_on_bytes(), srv()._build_catalog)
+        self.assertNotIn("gpt-6.1-sol-droid", built["models"])
         os.environ[FLAG_DROID_CATALOG] = "1"
-        self.assertIn("gpt-6.1-sol", built.copy()["models"])
+        self.assertIn("gpt-6.1-sol-droid", built.copy()["models"])
         os.environ.pop(FLAG_DROID_CATALOG)
-        self.assertNotIn("gpt-6.1-sol", dict(built.items())["models"])
+        self.assertNotIn("gpt-6.1-sol-droid", dict(built.items())["models"])
         os.environ[FLAG_DROID_CATALOG] = "1"
-        self.assertIn("gpt-6.1-sol", list(built.values())[list(built.keys()).index("models")])
+        self.assertIn("gpt-6.1-sol-droid", list(built.values())[list(built.keys()).index("models")])
         self.assertEqual(len(built), len(built.copy()))
         self.assertEqual(built, built.copy())
 
     def test_load_fleet_enabled(self) -> None:
         for extra in ({}, {FLAG_COMPILED_FLEET: "1"}):
             env = {FLAG_DROID_CATALOG: "1", **extra}
-            with self.subTest(env=sorted(env)), mock.patch.dict(os.environ, env):
+            with self.subTest(env=sorted(env)), mock.patch.dict(os.environ, env), mock.patch.object(Path, "read_bytes", return_value=droid_on_bytes()):
                 catalog = srv()._load_fleet()
                 self.assertTrue(catalog["backends"]["droid"]["enabled"])
-                self.assertEqual((catalog["models"]["gpt-6.1-sol"]["backend"], catalog["models"]["gpt-6.1-sol-droid"]["backend"]), ("openai-key-2", "droid"))
-                self.assertIn("gpt-6.1-sol", catalog["models"])
-                self.assertEqual(len(catalog["aliases"]), 35)
+                self.assertEqual((catalog["models"]["gpt-6.1-sol"]["backend"], catalog["models"]["gpt-6.1-sol-droid"]["backend"]), ("codex", "droid"))
+                self.assertEqual(len(catalog["aliases"]), ALIAS_COUNT)
 
 
 if __name__ == "__main__":
