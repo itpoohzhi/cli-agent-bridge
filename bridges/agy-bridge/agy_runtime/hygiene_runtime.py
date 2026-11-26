@@ -225,6 +225,7 @@ class HygieneRuntime:
             with self._admission_lock:
                 self._legacy_adm.release(key)
     def bind_reaper(self, pgid: int, reap_leader: Callable[[], int | None] | None) -> None:
+        if reap_leader is not None and _invalid_pgid(pgid): return
         with self._orphan_lock:
             self._reapers.pop(pgid, None) if reap_leader is None else self._reapers.__setitem__(pgid, reap_leader)
     def handle_disconnect(self, pgid: int, ttfc_received: bool, tools_count: int, kill_fn: Callable[[int, int], None] | None = None, waiter: Callable[[int, float], bool] | None = None) -> bool:
@@ -250,13 +251,13 @@ class HygieneRuntime:
                 self._detached[pgid] = (e[0], time.monotonic())
     def release_detached(self, pgid: int) -> bool:
         with self._orphan_lock:
+            self._reapers.pop(pgid, None)
             return self._detached.pop(pgid, None) is not None
     def _drain_pgids(self, pgids: list[int], kill_fn: Callable[[int, int], None] | None, waiter: Callable[[int, float], bool] | None) -> int:
-        for pgid in pgids:
-            _bounded_teardown(pgid, kill_fn, waiter)
+        with self._orphan_lock: reapers = {p: self._reapers.pop(p, None) for p in pgids}
+        for pgid in pgids: _bounded_teardown(pgid, kill_fn, waiter, reap_leader=reapers.get(pgid))
         with self._orphan_lock:
-            for pgid in pgids:
-                _ = (self._detached.pop(pgid, None), self._cancelling.discard(pgid))
+            for pgid in pgids: _ = (self._detached.pop(pgid, None), self._cancelling.discard(pgid))
         return len(pgids)
     def sweep_orphans(self, kill_fn: Callable[[int, int], None] | None = None, waiter: Callable[[int, float], bool] | None = None) -> int:
         now_s = time.monotonic()

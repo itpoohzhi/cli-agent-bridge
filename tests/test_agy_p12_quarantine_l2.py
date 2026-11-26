@@ -145,6 +145,22 @@ def test_f001_bounded_teardown_reaps_zombie_via_reap_leader_without_sigkill() ->
             proc.wait(timeout=1.0)
 
 
+def test_f014_hygiene_reaper_registry_ignores_invalid_pgid_and_unbinds_cleanly() -> None:
+    from agy_runtime.hygiene_runtime import HygieneRuntime
+
+    rt = HygieneRuntime()
+    rt.bind_reaper(0, lambda: 0)
+    rt.bind_reaper(-5, lambda: 0)
+    assert rt._reapers == {}
+    rt.bind_reaper(999991, lambda: 0)
+    assert 999991 in rt._reapers
+    rt.bind_reaper(999991, None)
+    assert 999991 not in rt._reapers
+    rt.bind_reaper(999992, lambda: 0)
+    rt.release_detached(999992)
+    assert 999992 not in rt._reapers
+
+
 def test_rw002_quarantine_holds_both_slot_and_admission_ticket_until_dead(tmp_path: Path) -> None:
     from core.pgid_cleanup_driver import ProcessIdentity
 

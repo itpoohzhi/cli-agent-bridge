@@ -7054,6 +7054,7 @@ class Handler(BaseHTTPRequestHandler):
                 finally:
                     run.close()
                     if job is not None:
+                        _hygiene_rt().bind_reaper(job.pgid, None)
                         _JOB_REGISTRY.bind_cancel(job, None)
                 if out["state"] == "done":
                     break
