@@ -17,14 +17,10 @@ from core.liveness_signals import (
     internal_stream_requested,
     parse_sse_json,
 )
+from core.nonstream_usage import extract_usage
 from core.runtime_env import flag_enabled
-from core.usage_wire import (
-    CACHE_CREATION_KEYS,
-    _first_count,
-    _is_count,
-    build_wire_usage,
-    extract_cache_read_tokens,
-)
+from core.usage_wire import CACHE_CREATION_KEYS, _first_count, _is_count
+from core.usage_wire import build_wire_usage, extract_cache_read_tokens
 
 _Obj = dict[str, Any]
 SignalHook = Callable[[str, frozenset[str]], None]
@@ -238,8 +234,9 @@ class NonstreamAggregator:
             _merge_first(self._meta, key, chunk.get(key), key)
         for key in _FIRST_WINS_META_KEYS:
             _keep_first(self._meta, key, chunk.get(key))
-        if isinstance(chunk.get("usage"), dict):
-            self._usage = chunk["usage"]
+        usage = extract_usage(chunk)
+        if usage is not None:
+            self._usage = usage
         choices = chunk.get("choices")
         for choice in choices if isinstance(choices, list) else ():
             if not isinstance(choice, dict):
