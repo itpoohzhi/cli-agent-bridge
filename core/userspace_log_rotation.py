@@ -85,7 +85,7 @@ def open_dir_chain_no_toctou(dir_path: str, dir_mode: int = 0o700) -> int:
             os.close(cur_fd)
             cur_fd = nxt_fd
         st = os.fstat(cur_fd)
-        if not stat.S_ISDIR(st.st_mode) or st.st_uid != os.getuid():
+        if not stat.S_ISDIR(st.st_mode) or st.st_uid != os.geteuid():
             raise OSError(errno.EPERM, "log directory not owned regular directory")
         if stat.S_IMODE(st.st_mode) != dir_mode:
             os.fchmod(cur_fd, dir_mode)
@@ -99,7 +99,7 @@ def _open_active_file(dir_fd: int, base_name: str, file_mode: int) -> Tuple[int,
     fd = os.open(base_name, _OPEN_FILE_FLAGS, file_mode, dir_fd=dir_fd)
     try:
         st = os.fstat(fd)
-        reason = validate_stat(stat.S_ISREG(st.st_mode), st.st_uid, st.st_nlink, os.getuid())
+        reason = validate_stat(stat.S_ISREG(st.st_mode), st.st_uid, st.st_nlink, os.geteuid())
         if reason is not None:
             raise OSError(errno.ELOOP, f"unsafe active log file: {reason}")
         needs_adopt = bool(st.st_mode & 0o077)
@@ -113,7 +113,7 @@ def _open_active_file(dir_fd: int, base_name: str, file_mode: int) -> Tuple[int,
 
 def _validate_and_harden_slots(dir_fd: int, base_name: str, backup_count: int, file_mode: int) -> None:
     """Phase 1 of two-phase rollover: validate & fchmod 0600 ALL .1..N slots before any rename."""
-    euid = os.getuid()
+    euid = os.geteuid()
     for idx in range(1, backup_count + 1):
         slot = f"{base_name}.{idx}"
         try:
@@ -157,6 +157,7 @@ class PrivateWatchedRotatingWriter:
         self._dir_fd = -1
         self._file_fd = -1
         self._open_id: Optional[Tuple[int, int]] = None
+        self._pending_adopt_id: Optional[Tuple[int, int]] = None
         self._bound_path = ""
         self._stats: Dict[str, object] = {
             "writes": 0, "rotations": 0, "reopens": 0, "dropped_lines": 0,
@@ -188,20 +189,21 @@ class PrivateWatchedRotatingWriter:
     def _enter_degraded_locked(self, reason: str, err_no: int) -> None:
         prev = self._state
         self._close_all_locked()
-        self._state = WriterState.DEGRADED_FAIL_OPEN
-        self._degraded_reason = reason
-        self._stats["dropped_lines"] = int(self._stats["dropped_lines"]) + 1
-        self._stats["last_errno"] = err_no
+        self._state, self._degraded_reason = WriterState.DEGRADED_FAIL_OPEN, reason
+        self._stats["dropped_lines"], self._stats["last_errno"] = int(self._stats["dropped_lines"]) + 1, err_no
         if prev != WriterState.DEGRADED_FAIL_OPEN:
             self._stats["degraded_count"] = int(self._stats["degraded_count"]) + 1
             self._emit_notice(prev, self._state, reason)
 
     def _open_path_locked(self, cfg: RotationConfig, base_name: str) -> bool:
         self._close_all_locked()
-        self._dir_fd = open_dir_chain_no_toctou(os.path.dirname(os.path.abspath(cfg.log_path)), cfg.dir_mode)
+        abs_log = os.path.abspath(os.path.expanduser(cfg.log_path))
+        self._dir_fd = open_dir_chain_no_toctou(os.path.dirname(abs_log), cfg.dir_mode)
         self._bound_path = cfg.log_path
         fd, st, needs_adopt = _open_active_file(self._dir_fd, base_name, cfg.file_mode)
         self._file_fd, self._open_id = fd, (st.st_dev, st.st_ino)
+        if needs_adopt:
+            self._pending_adopt_id = self._open_id
         self._stats["reopens"] = int(self._stats["reopens"]) + 1
         return needs_adopt
 
@@ -221,6 +223,7 @@ class PrivateWatchedRotatingWriter:
                     continue
         fd, st, _ = _open_active_file(self._dir_fd, base_name, cfg.file_mode)
         self._file_fd, self._open_id = fd, (st.st_dev, st.st_ino)
+        self._pending_adopt_id = None
         self._stats["rotations"] = int(self._stats["rotations"]) + 1
 
     def _ensure_current_locked(self, cfg: RotationConfig, base_name: str) -> bool:
@@ -237,26 +240,27 @@ class PrivateWatchedRotatingWriter:
         self._close_file_locked()
         fd, st, needs_adopt = _open_active_file(self._dir_fd, base_name, cfg.file_mode)
         self._file_fd, self._open_id = fd, (st.st_dev, st.st_ino)
+        if needs_adopt:
+            self._pending_adopt_id = self._open_id
         self._stats["reopens"] = int(self._stats["reopens"]) + 1
         return needs_adopt
 
-    def _commit_payload_locked(
-        self, cfg: RotationConfig, base_name: str, payload: bytes, was_degraded: bool
-    ) -> None:
+    def _commit_payload_locked(self, cfg: RotationConfig, base_name: str, payload: bytes, was_degraded: bool) -> None:
         if not supports_secure_dir_fd():
             raise OSError(errno.ENOTSUP, "dir_fd unsupported")
         needs_adopt = self._ensure_current_locked(cfg, base_name)
         if was_degraded and self._degraded_reason == "ARCHIVE_UNSAFE":
             self._close_file_locked()
             _validate_and_harden_slots(self._dir_fd, base_name, cfg.backup_count, cfg.file_mode)
-            needs_adopt = self._ensure_current_locked(cfg, base_name)
-        if needs_adopt or should_rollover(os.fstat(self._file_fd).st_size, len(payload), cfg.max_bytes):
+            needs_adopt = self._ensure_current_locked(cfg, base_name) or needs_adopt
+        pending = self._pending_adopt_id is not None and self._pending_adopt_id == self._open_id
+        if needs_adopt or pending or should_rollover(os.fstat(self._file_fd).st_size, len(payload), cfg.max_bytes):
             self._do_rollover_locked(cfg, base_name)
         _write_all(self._file_fd, payload)
 
     def write_bytes(self, cfg: RotationConfig, payload: bytes) -> bool:
         """Write UTF-8 bytes with inode-watch, two-phase rollover, and commit-before-recover."""
-        base_name = os.path.basename(cfg.log_path)
+        base_name = os.path.basename(os.path.abspath(os.path.expanduser(cfg.log_path)))
         with self._lock:
             was_degraded = self._state == WriterState.DEGRADED_FAIL_OPEN
             try:
@@ -269,9 +273,10 @@ class PrivateWatchedRotatingWriter:
             except _ArchiveUnsafeError as exc:
                 self._enter_degraded_locked("ARCHIVE_UNSAFE", exc.errno or errno.ELOOP)
                 return False
-            except OSError as exc:
-                reason = "UNSAFE_TARGET" if exc.errno in (errno.ELOOP, errno.ENXIO, errno.EPERM) else "IO_ERROR"
-                self._enter_degraded_locked(reason, exc.errno or errno.EIO)
+            except (OSError, ValueError) as exc:
+                err_no = getattr(exc, "errno", None) or errno.EINVAL
+                reason = "UNSAFE_TARGET" if err_no in (errno.ELOOP, errno.ENXIO, errno.EPERM, errno.EINVAL) else "IO_ERROR"
+                self._enter_degraded_locked(reason, err_no)
                 return False
 
     def note_external_degrade(self, reason: str) -> None:
@@ -282,11 +287,11 @@ class PrivateWatchedRotatingWriter:
     def close(self) -> None:
         with self._lock:
             self._close_all_locked()
-            self._state, self._degraded_reason = WriterState.CLOSED, ""
+            self._state, self._degraded_reason, self._pending_adopt_id = WriterState.CLOSED, "", None
 
     def reset_after_fork(self) -> None:
         """Discard inherited parent FDs in child process without flushing parent state."""
         self._lock = threading.Lock()
         self._file_fd = self._dir_fd = -1
-        self._open_id, self._bound_path = None, ""
-        self._state, self._degraded_reason = WriterState.CLOSED, ""
+        self._open_id = self._pending_adopt_id = None
+        self._bound_path, self._state, self._degraded_reason = "", WriterState.CLOSED, ""

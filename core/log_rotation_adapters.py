@@ -122,7 +122,7 @@ def _get_or_create_writer(service: str) -> PrivateWatchedRotatingWriter:
 
 def _close_writer_if_present(service: str) -> None:
     with _REG_LOCK:
-        writer = _WRITERS.get(service)
+        writer = _WRITERS.pop(service, None)
     if writer is not None:
         writer.close()
 

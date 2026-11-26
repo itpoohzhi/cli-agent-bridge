@@ -219,8 +219,9 @@ def resolve_rotation_config(
     max_bytes = parse_bounded_int(_pick_param(src_doc, env_map, pfx + "MAX_BYTES"), DEFAULT_MAX_BYTES, 1)
     backup_count = parse_bounded_int(_pick_param(src_doc, env_map, pfx + "BACKUP_COUNT"), DEFAULT_BACKUP_COUNT, 0)
     raw_path = _pick_param(src_doc, env_map, pfx + "PATH")
-    if isinstance(raw_path, str) and raw_path.strip():
-        log_path = raw_path.strip()
+    cand = raw_path.strip() if isinstance(raw_path, str) else ""
+    if cand and "\x00" not in cand and not cand.endswith("/"):
+        log_path = cand
     elif runtime_log_path and str(runtime_log_path).strip():
         log_path = str(runtime_log_path).strip()
     else:

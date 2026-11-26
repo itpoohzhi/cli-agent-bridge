@@ -45,3 +45,38 @@ def test_hub_off_compat_on_rotation_redaction_and_dynamic_toggle(
     hub_server._log("hub-nonbool-fail-closed")
     assert "hub-nonbool-fail-closed" in capsys.readouterr().err
     assert adapters.get_rotation_snapshot("hub")["state"] == "CLOSED"
+
+
+def test_f012_pending_adopt_survives_archive_unsafe_and_f001_nul_path_rejected(tmp_path: Path) -> None:
+    from core import userspace_log_rotation as ulr
+    from core.log_rotation_policy import SERVICE_SPECS, RotationConfig, resolve_rotation_config
+
+    # F-001: NUL or trailing-slash PATH falls back to default safely
+    cfg_nul = resolve_rotation_config(SERVICE_SPECS["hub"], ({"BRIDGE_LOG_ROTATION_PATH": "/tmp/bad\x00log"}, False), {}, str(tmp_path))
+    assert "\x00" not in cfg_nul.log_path and cfg_nul.log_path.endswith("logs/bridge.log")
+
+    # F-012: 0644 active + symlink .1 -> first write degrades after fchmod, removing .1 MUST still roll over onto fresh 0600 inode
+    d = tmp_path / "f012" / "logs"
+    d.mkdir(parents=True)
+    log_p = d / "bridge.log"
+    log_p.write_text("legacy\n", encoding="utf-8")
+    os.chmod(log_p, 0o644)
+    old_inode = os.stat(log_p).st_ino
+    old_reader = open(log_p, "r", encoding="utf-8")
+    try:
+        old_reader.read()
+        victim = tmp_path / "v.txt"
+        victim.write_text("SAFE", encoding="utf-8")
+        os.symlink(victim, d / "bridge.log.1")
+        w = ulr.PrivateWatchedRotatingWriter("hub")
+        cfg = RotationConfig(True, str(log_p), max_bytes=4096, backup_count=2)
+        assert w.write_bytes(cfg, b"blocked-by-symlink\n") is False
+        assert stat.S_IMODE(os.stat(log_p).st_mode) == 0o600
+        (d / "bridge.log.1").unlink()
+        assert w.write_bytes(cfg, b"after-recovery-new-inode\n") is True
+        assert os.stat(log_p).st_ino != old_inode
+        assert old_reader.read() == ""
+        assert (d / "bridge.log.1").exists() and stat.S_IMODE(os.stat(d / "bridge.log.1").st_mode) == 0o600
+        w.close()
+    finally:
+        old_reader.close()
