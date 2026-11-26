@@ -30,25 +30,31 @@ PHASE_IDLE_TIMEOUT_BOUNDS = (0.02, 3600.0)
 ACTIVE_SOCKET_TIMEOUT_BOUNDS = (1.0, 86400.0)
 CLAUDE_STDERR_MAX_BOUNDS = (32.0, 2048.0)
 
-# F-001/F-101: ANSI/C0/C1 → sentinel \x00 (не пробел), чтобы склейка со словом и вставка
-# внутри токена не обходила _SECRET_RE; \x00 снимается после Pass 1, [\r\n\t]→пробел после Pass 2.
-_STRIP_RE = re.compile(
-    r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)"
-    r"|\x1b[()][A-Z0-9]|\x1b[@-Z\\-_]|[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]"
+# Span-Union (Cycle 5): вместо деструктивного Pass1->Pass2 строим неизменяемое пространство
+# индексов видимых символов и три проекции (a/b/c). ANSI/C0/C1 удаляются, [\r\n\t]→пробел;
+# секреты ищутся на проекциях, маскируются индексы out и один раз сворачиваются в [REDACTED].
+# O(N), ZERO ReDoS: все квантификаторы над дизъюнктными классами, 0 деструктивных проходов.
+_TOK_RE = re.compile(
+    r"(\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)"
+    r"|\x1b[()][A-Z0-9]|\x1b[@-Z\\-_]|\x1b|[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f])"
+    r"|([\r\n\t])|([^\x00-\x1f\x7f-\x9f]+)"
 )
-_WS_CTRL_RE = re.compile(r"[\r\n\t]")
+_WORD_CHAR_RE = re.compile(r"[A-Za-z0-9_]")
+_PREFIX_RE = re.compile(
+    r"(?:sk|pk|rk)[-_][A-Za-z0-9_.-]{4,}"
+    r"|(?:ghp|github_pat)_[A-Za-z0-9_]{4,}"
+    r"|AIza[0-9A-Za-z_-]{8,}"
+    r"|eyJ[A-Za-z0-9_-]{6,}(?:\.[A-Za-z0-9_-]+)*"
+)
 _SECRET_RE = re.compile(
-    r"(?i)\b(?:authorization|cookie)[\"']?[ \t]*[:=][ \t]*[\"']?"
-    r"(?:(?:bearer|basic)[ \t\x00]+)?[^\s\x00;]+(?:;[ \t]*[^\s\x00;]+)*"
-    r"|\b(?:[A-Z0-9_]+_)?(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|AUTH|COOKIE)"
-    r"[\"']?[ \t]*[:=][ \t]*[\"']?[^\s\x00]+"
-    r"|\b(?:api[_-]?key|token|secret|password)[\"']?[ \t]*[:=][ \t]*[\"']?[^\s\x00]+"
-    r"|\b(?:bearer|basic)[ \t\x00]+[^\s\x00]+"
-    r"|\b(?:sk|pk|rk)[-_](?:[\x00\r\n\t]*[A-Za-z0-9_.-]){4,}"
-    r"|\b(?:ghp|github_pat)_(?:[\x00\r\n\t]*[A-Za-z0-9_]){4,}"
-    r"|\bAIza(?:[\x00\r\n\t]*[0-9A-Za-z_-]){8,}"
-    r"|\beyJ(?:[\x00\r\n\t]*[A-Za-z0-9_-]){6,}"
-    r"(?:[\x00\r\n\t]*\.(?:[\x00\r\n\t]*[A-Za-z0-9_-])+)*"
+    r"(?i:(?:authorization|cookie))[\"']?[ ]*[:=][ ]*[\"']?"
+    r"(?:(?i:bearer|basic)[ ]+)?[^ ;]+(?:;[ ]*[^ ;]+)*"
+    r"|(?-i:[A-Z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|AUTH|COOKIE))"
+    r"[\"']?[ ]*[:=][ ]*[\"']?[^ ]+"
+    r"|(?i:(?:api[_-]?key|secret[_-]?key|access[_-]?key|token|secret|password|passwd|auth[_-]?token))"
+    r"[\"']?[ ]*[:=][ ]*[\"']?[^ ]+"
+    r"|(?i:(?:bearer|basic))[ ]+[^ ]+"
+    r"|" + _PREFIX_RE.pattern
 )
 
 
@@ -87,11 +93,82 @@ def resolve_socket_timeout_for_phase(
     return idle if (cfg.phase_idle_timeout_enabled and phase == "idle") else active
 
 
+def _project_stderr_views(
+    raw: str,
+) -> tuple[list[str], bytearray, str, list[int], str, list[int], str, list[int]]:
+    """Проекции видимых символов: a ANSI→пробел(idx -1), b склейка ANSI, c склейка ANSI+[\\r\\n\\t]."""
+    out: list[str] = []
+    a: list[str] = []
+    c: list[str] = []
+    ma: list[int] = []
+    mc: list[int] = []
+    sep_flags = bytearray()
+    sep_next = False
+    for m in _TOK_RE.finditer(raw):
+        vis = m.group(3)
+        if vis:
+            vid = len(out)
+            out.extend(vis)
+            a.extend(vis)
+            c.extend(vis)
+            ma.extend(range(vid, vid + len(vis)))
+            mc.extend(range(vid, vid + len(vis)))
+            sep_flags.append(int(sep_next))
+            sep_flags.extend(bytes(len(vis) - 1))
+            sep_next = False
+        elif m.group(2):
+            out.append(" ")
+            a.append(" ")
+            ma.append(len(out) - 1)
+            sep_flags.append(1)
+            sep_next = True
+        else:
+            a.append(" ")
+            ma.append(-1)
+            sep_next = True
+    va = "".join(a)
+    vb = "".join(out)
+    vc = "".join(c)
+    mb = list(range(len(out)))
+    return out, sep_flags, va, ma, vb, mb, vc, mc
+
+
+def _mark_spans(
+    view: str,
+    mapping: list[int],
+    pat: re.Pattern[str],
+    masked: bytearray,
+    sep_flags: bytearray,
+) -> None:
+    """Помечает индексы out для совпадений с валидной левой границей слова (Span-Union)."""
+    padded = " " + view
+    for m in pat.finditer(view):
+        start = m.start()
+        if _WORD_CHAR_RE.match(padded[start]):
+            if not sep_flags[mapping[start]]:
+                continue
+        for idx in range(start, m.end()):
+            masked[mapping[idx]] = 1
+
+
 def sanitize_stderr_tail(raw: str, max_chars: int = 240) -> str:
-    """Однострочный хвост: ANSI/C0/C1→sentinel \\x00, 2-pass редакция секретов, [\\r\\n\\t]→пробел."""
-    marked = _STRIP_RE.sub("\x00", raw)
-    pass1 = _SECRET_RE.sub("[REDACTED]", marked).replace("\x00", "")
-    redacted = _WS_CTRL_RE.sub(" ", _SECRET_RE.sub("[REDACTED]", pass1))
+    """Однострочный хвост: Span-Union редакцией секретов по трём проекциям, [\\r\\n\\t]→пробел."""
+    out, sep_flags, va, ma, vb, mb, vc, mc = _project_stderr_views(raw)
+    masked = bytearray(len(out) + 1)
+    _mark_spans(va, ma, _SECRET_RE, masked, sep_flags)
+    _mark_spans(vb, mb, _SECRET_RE, masked, sep_flags)
+    _mark_spans(vc, mc, _PREFIX_RE, masked, sep_flags)
+    parts: list[str] = []
+    in_span = False
+    for ch, flag in zip(out, masked, strict=False):
+        if flag:
+            if not in_span:
+                parts.append("[REDACTED]")
+                in_span = True
+        else:
+            parts.append(ch)
+            in_span = False
+    redacted = "".join(parts)
     return (
         "..." + redacted[-max_chars:]
         if (max_chars > 0 and len(redacted) > max_chars)

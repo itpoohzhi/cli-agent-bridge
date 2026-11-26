@@ -84,13 +84,15 @@ def test_legacy_knob_warning_matrix() -> None:
 
 
 def test_sanitize_stderr_tail_matrix() -> None:
-    assert P.sanitize_stderr_tail("") == "" and P.sanitize_stderr_tail("line1\nline2") == "line1 line2" and P.sanitize_stderr_tail("monkey=banana") == "monkey=banana" and P.sanitize_stderr_tail("api_key=abc") == P.sanitize_stderr_tail("ghp_abcdef123456") == "[REDACTED]" and P.sanitize_stderr_tail("x" * 500, 40) == "..." + "x" * 40
+    assert P.sanitize_stderr_tail("") == "" and P.sanitize_stderr_tail("line1\nline2") == "line1 line2" and P.sanitize_stderr_tail("monkey=banana") == "monkey=banana" and P.sanitize_stderr_tail("disk-1234") == "disk-1234" and P.sanitize_stderr_tail("api_key=abc") == P.sanitize_stderr_tail("ghp_abcdef123456") == "[REDACTED]" and P.sanitize_stderr_tail("x" * 500, 40) == "..." + "x" * 40
 
 
 @pytest.mark.parametrize("raw,bad", [
     ("Authorization: Bearer sk-abc12345", "sk-abc12345"), ("Bearer tok123456", "tok123456"), ("x sk-abc12345 y", "sk-abc12345"), ("OPENAI_API_KEY=xyz", "xyz"), ("BRIDGE_KEY=supersecret OPENAI_API_KEY=xyz", "supersecret"), ("AWS_SECRET_ACCESS_KEY=foo", "foo"), ("\x1b[31merr sk-abc12345\x1b[0m", "\x1b"), ("a\r\nb\x00c sk-abc12345", "\x00"), ("\x1b]0;title\x07ok sk-abc12345", "title"),
     ("sk-\x1b[31mABCDEF", "ABCDEF"), ("sk-\x00ABCDEF", "ABCDEF"), ("\x1b(BAuthorization: Bearer tok123456", "tok123456"), ("eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.SigPartSecret999", "SigPartSecret999"), ('{"api_key": "jsonsecret999"}', "jsonsecret999"), ("Cookie: sid=cookiesecret999", "cookiesecret999"), ("Authorization: Bearer sk-abc12345\r\nBRIDGE_KEY=topsecret \x1b[31mERR\x1b[0m\x00", "topsecret"), ("err\x1b[31msk-abc12345\x1b[0m", "sk-abc12345"), ("err\x1b[31mBearer tok123456\x1b[0m", "tok123456"),
-    ("err\x00sk-abc12345", "sk-abc12345"), ("err\x1b[31msk-\x1b[0mABCDEF", "ABCDEF"), ("sk-\tabc123456", "abc123456"), ("sk-abc\n1234567890abcdef", "1234567890abcdef"), ("eyJhbGciOiJIUzI1NiJ9.\nSigPartSecret999", "SigPartSecret999"), ("sk-\x1b[38:2:255:0:0mABCDEF", "ABCDEF"), ("Cookie: a=1; sid=cookiesecret999", "cookiesecret999"), ('{"authorization": "rawsecret999"}', "rawsecret999")])
+    ("err\x00sk-abc12345", "sk-abc12345"), ("err\x1b[31msk-\x1b[0mABCDEF", "ABCDEF"), ("sk-\tabc123456", "abc123456"), ("sk-abc\n1234567890abcdef", "1234567890abcdef"), ("eyJhbGciOiJIUzI1NiJ9.\nSigPartSecret999", "SigPartSecret999"), ("sk-\x1b[38:2:255:0:0mABCDEF", "ABCDEF"), ("Cookie: a=1; sid=cookiesecret999", "cookiesecret999"), ('{"authorization": "rawsecret999"}', "rawsecret999"),
+    ("Cookie: a=1;\x1b[31msid=cookiesecret999", "cookiesecret999"), ("Authorization: Bearer tok\x1b[31m123456", "123456"), ("Authorization: Bearer sk-\x1b[31mABCDEF123456", "ABCDEF123456"), ("Authorization: Bearer sk-\tabc123456", "abc123456"), ("Bearer\ntok123456", "tok123456"), ("api_key=\nrawsecret999", "rawsecret999"), ("api_key=abc\x1b[31mDEF", "DEF"),
+    ("SECRETKEY=rawsecret999", "rawsecret999"), ("sk-abc12345\r\nBRIDGE_KEY=topsecret", "topsecret"), ("sk-abc12345\nCookie: sid=cookiesecret999", "cookiesecret999"), ("\x1b[31msk-abc12345\x1b[0mOPENAI_API_KEY=supersecret", "supersecret"), ('{"api_key": "\x1b[33mjsonsecret999\x1b[0m"}', "jsonsecret999"), ('OPENAI_API_KEY="\x1b[31msupersecret\x1b[0m"', "supersecret"), ("err\x1b[31mBearer tok\x1b[0m123456", "123456")])
 def test_sanitize_stderr_tail_negative(raw: str, bad: str) -> None:
     out = P.sanitize_stderr_tail(raw)
     assert bad not in out and "[REDACTED]" in out and "sk-abc12345" not in out and not any(c in out for c in "\r\n\x1b\x00")
