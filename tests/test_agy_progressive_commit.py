@@ -714,3 +714,20 @@ def test_c5_f003_drain_and_post_finalize_traces_ignore_expired_deadline() -> Non
     assert body.drain() is True
     assert trace_mock.call_count == 1
     assert body._pending_traces == []
+
+
+def test_c5_c2_f012_malformed_tool_calls_rejected_before_fsm_and_buffer() -> None:
+    """F-012/F-001: malformed tool_calls отклоняется на входе stage() до step_delivery() и без порчи s.buffer."""
+    body = _direct_runner()
+    body.progressive = body.buffering = True
+    body.delivery_fsm = initial_delivery_state(True)
+    body.s.buffer.stage_fragment(" ", "content")
+    before_fsm = body.delivery_fsm
+    assert body.stage("{not-json", "tool_calls") is False
+    assert body.stage('{"not":"a-list"}', "tool_calls") is False
+    assert body.delivery_fsm == before_fsm
+    assert body.s.buffer.commit_fragments() == (("content", " "),)
+    # Последующий валидный чанк нормально делает flush_and_emit и коммитит wire
+    body.s.buffer.stage_fragment(" ", "content")
+    assert body.stage("Ответ", "content") is True
+    assert body.delivery_fsm.wire_committed is True

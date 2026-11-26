@@ -55,19 +55,19 @@ class _SseBodyRunner:
         except (ValueError, TypeError):
             payload = None if channel == "tool_calls" else value.strip()
         self._note_progress(channel, payload if payload is not None else value.strip())
-        if self.cancelled():
-            return False
         bad_tc = channel == "tool_calls" and not isinstance(payload, list)
+        if self.cancelled() or bad_tc:
+            return False
         wire_val = payload if channel == "tool_calls" else value
         if getattr(self, "_direct_finalize", False):
-            return not bad_tc and self._deliver_direct(wire_val, channel)
+            return self._deliver_direct(wire_val, channel)
         if getattr(self, "progressive", False):
             kind = dict(tool_calls=DeliveryEventKind.TOOL_CALLS, reasoning_content=DeliveryEventKind.REASONING).get(channel, DeliveryEventKind.CONTENT)
-            deliverable = (not bad_tc and bool(payload)) if channel == "tool_calls" else bool(value.strip())
+            deliverable = bool(payload) if channel == "tool_calls" else bool(value.strip())
             self.delivery_fsm, actions = step_delivery(self.delivery_fsm, DeliveryEvent(epoch=self.delivery_fsm.epoch, seq=self._delivery_seq, kind=kind, channel=channel, payload=value, deliverable=deliverable))
             act = actions[0].kind if actions else "drop_stale"
             if act in ("flush_and_emit", "emit"):
-                ok = not bad_tc and (act != "flush_and_emit" or self._flush_precommit()) and self._deliver_direct(wire_val, channel)
+                ok = (act != "flush_and_emit" or self._flush_precommit()) and self._deliver_direct(wire_val, channel)
                 if ok:
                     self._mark_wire_sent()
                     ok = self._drain_traces()
