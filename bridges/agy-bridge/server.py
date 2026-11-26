@@ -204,6 +204,7 @@ from core.watchdog import (  # noqa: E402
 from core.runtime_build_info import UNKNOWN as BUILD_UNKNOWN, RuntimeBuildInfo  # noqa: E402
 from core import resumed_tools_policy as _RESUMED_TOOLS, timeout_ladder as _tl, turn_resilience_facade as _TURN_RESILIENCE  # noqa: E402
 from core.log_redaction import mask_credential_context, mask_long_tokens, redact_log_text, safe_log_tokens  # noqa: E402
+from core.log_rotation_adapters import emit_service_log as _emit_rotated_log  # noqa: E402
 from core.recovery_flags import (  # noqa: E402
     read_diagnostic_redact_margin_chars, read_diagnostic_window_chars, read_post_call_cutoff_enabled,
     read_tool_call_cap_cutoff_enabled, read_tool_json_repair_enabled,
@@ -1258,10 +1259,7 @@ IMAGE_LIMITS = cast("dict[str, object]", cast(object, FLEET["image_limits"]))
 
 
 def _log(msg: str) -> None:
-    sys.stderr.write(
-        "[agy-bridge] %s %s\n" % (time.strftime("%H:%M:%S"), _mask_secrets(msg))
-    )
-    sys.stderr.flush()
+    _emit_rotated_log("agy", "[agy-bridge] %s %s" % (time.strftime("%H:%M:%S"), _mask_secrets(msg)), ROOT)
 
 
 _CONTINUITY = ContinuityIndex(ContinuityConfig(
