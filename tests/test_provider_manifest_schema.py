@@ -87,7 +87,8 @@ def test_shipped_manifests_all_valid() -> None:
     assert dict(loaded.rejected_providers) == {}
     assert {m.provider_id for m in loaded.manifests} == set(
         (
-            "agy agy-passthrough claude-p codex deepseek-direct droid muse "
+            "agy agy-passthrough claude-p codex dashscope-intl dashscope-intl-k2 "
+            "dashscope-intl-k3 dashscope-intl-k4 deepseek-direct droid muse "
             "neuralwatt neuralwatt-flex openai-key-2 openai-key-3 opencode-go opencode-go-claude "
             "opencode-go-sub1 opencode-go-sub2 opencode-resident opencode-zen"
         ).split()
