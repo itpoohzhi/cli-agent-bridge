@@ -11,7 +11,6 @@ import shutil
 import tempfile
 import threading
 import tomllib
-import uuid
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Final
@@ -21,10 +20,9 @@ from core.zero_canon_fs import (
     ensure_private_dir,
     read_gigarc_bool,
     read_regular_file_nofollow,
+    replace_atomic_0600,
     resolve_hub_dynamic_config,
     sanitize_zero_canon_env,
-    write_atomic_0600,
-    write_atomic_text_0600,
 )
 
 CODEX_STD_CLEAN_HOME_FLAG: Final[str] = "BRIDGE_CODEX_STD_CLEAN_HOME_ENABLED"
@@ -168,19 +166,30 @@ def _owned_base_dir() -> Path:
     return base
 
 
-def _new_owned_dir() -> Path:
-    """Создаёт уникальный приватный `pid-<pid>-<uuid>` под базой и регистрирует его для уборки."""
+def _stable_owned_dir(suffix: str) -> Path:
+    """Стабильный process-scoped приватный `pid-<pid>-<suffix>` под базой (идемпотентен в рамках процесса).
+
+    Dead-PID GC запускается при первом создании; повторные вызовы возвращают тот же путь
+    (удалённый извне каталог безопасно пересоздаётся с `0o700`).
+    """
     base = _owned_base_dir()
-    cleanup_stale_pid_homes(base)
-    path = base / f"pid-{os.getpid()}-{uuid.uuid4().hex[:12]}"
-    ensure_private_dir(path, 0o700)
+    path = base / f"pid-{os.getpid()}-{suffix}"
+    if not path.exists():
+        cleanup_stale_pid_homes(base)
+    with _OWNED_LOCK:
+        ensure_private_dir(path, 0o700)
+        if path.is_symlink() or path.stat().st_uid != os.getuid():
+            raise RuntimeError(f"Refusing unsafe directory: {path}")
     _register_owned(path)
     return path
 
 
 def create_neutral_fallback_cwd() -> str:
-    """Создаёт уникальный пустой `0o700` каталог (без `AGENTS.md`) для fallback-CWD слота."""
-    return str(_new_owned_dir())
+    """Возвращает стабильный пустой `0o700` каталог (без `AGENTS.md`) fallback-CWD процесса.
+
+    Путь постоянен между вызовами, чтобы `SlotAffinityKey.cwd_norm` не менялся между ходами.
+    """
+    return str(_stable_owned_dir("neutral-cwd"))
 
 
 def _read_optional(path: Path) -> bytes | None:
@@ -197,25 +206,32 @@ def _source_codex_dir(base_env: Mapping[str, str]) -> Path | None:
     return Path(raw) if raw else None
 
 
+def _sync_codex_files(src_codex: Path | None, dst_codex: Path, raw_cfg_out: dict[str, Any]) -> None:
+    """Читает хостовые `config.toml`/`auth.json` (без симлинков) и атомарно обновляет копии слота."""
+    cfg_bytes = _read_optional(src_codex / "config.toml") if src_codex is not None else None
+    auth_bytes = _read_optional(src_codex / "auth.json") if src_codex is not None else None
+    if cfg_bytes is not None:
+        raw_cfg_out.update(tomllib.loads(cfg_bytes.decode("utf-8")))
+    cfg_text = dump_toml(filter_codex_standard_config(raw_cfg_out))
+    with _OWNED_LOCK:
+        if auth_bytes is not None:
+            replace_atomic_0600(dst_codex / "auth.json", auth_bytes)
+        else:
+            (dst_codex / "auth.json").unlink(missing_ok=True)
+        replace_atomic_0600(dst_codex / "config.toml", cfg_text.encode("utf-8"))
+
+
 def prepare_codex_std_home(base_env: Mapping[str, str], root: str | Path | None = None) -> dict[str, str]:
     """Готовит чистый `HOME`/`CODEX_HOME` (`0o700`): `auth.json` (`0o600`) и filtered `config.toml`.
 
-    Симлинк на `auth.json`/`config.toml` — fail-closed, без отката на хостовый `~/.codex`.
+    Без `root` используется стабильный process-scoped каталог (нет утечки каталогов на warm-ходах);
+    файлы обновляются при каждом вызове. Симлинк на `auth.json`/`config.toml` — fail-closed.
     """
-    home_root = Path(root) if root is not None else _new_owned_dir()
+    home_root = Path(root) if root is not None else _stable_owned_dir("std-home")
     dst_codex = home_root / ".codex"
     for directory in (home_root, dst_codex, home_root / "cwd"):
         ensure_private_dir(directory, 0o700)
-    src_codex = _source_codex_dir(base_env)
-    raw_cfg: dict[str, Any] = {}
-    if src_codex is not None:
-        cfg_bytes = _read_optional(src_codex / "config.toml")
-        if cfg_bytes is not None:
-            raw_cfg = tomllib.loads(cfg_bytes.decode("utf-8"))
-        auth_bytes = _read_optional(src_codex / "auth.json")
-        if auth_bytes is not None:
-            write_atomic_0600(dst_codex / "auth.json", auth_bytes)
-    write_atomic_text_0600(dst_codex / "config.toml", dump_toml(filter_codex_standard_config(raw_cfg)))
+    _sync_codex_files(_source_codex_dir(base_env), dst_codex, {})
     env = sanitize_zero_canon_env(base_env, home_root)
     env["CODEX_HOME"] = str(dst_codex)
     env["BRIDGE_CODEX_STD_CLEAN_HOME"] = "1"

@@ -156,7 +156,7 @@ def resolve_resident_identity(inputs: IdentityInputs) -> ResidentIdentity:
     if not chat_valid:
         return _no_chat_identity(inputs, principal)
     raw_cache = inputs.request.get("prompt_cache_key")
-    cache_key = raw_cache if isinstance(raw_cache, str) else ""
+    cache_key = derive_pck_digest(inputs.secret, raw_cache) if isinstance(raw_cache, str) and raw_cache else ""
     return ResidentIdentity(principal, conv, False, cache_key, inputs.turn_id, inputs.scope, inputs.subagent_id, _scoped_id(inputs, principal, conv))
 
 

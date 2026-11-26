@@ -174,6 +174,41 @@ def test_owned_home_and_neutral_cwd_are_private_and_registered(tmp_path: Path, m
     assert not home_root.exists() and not cwd.exists()
 
 
+def test_neutral_fallback_cwd_is_stable_private_and_recreated(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(codex_std_home.tempfile, "gettempdir", lambda: str(tmp_path))
+    first = Path(create_neutral_fallback_cwd())
+    try:
+        second = Path(create_neutral_fallback_cwd())
+        assert first == second
+        assert stat.S_IMODE(first.stat().st_mode) == 0o700
+        assert not list(first.iterdir()) and not (first / "AGENTS.md").exists()
+        assert len(list(first.parent.glob("pid-*"))) == 1
+        cleanup_std_home_dir(first)
+        assert not first.exists()
+        third = Path(create_neutral_fallback_cwd())
+        assert third == first and stat.S_IMODE(third.stat().st_mode) == 0o700
+    finally:
+        cleanup_std_home_dir(first)
+
+
+def test_prepare_std_home_without_root_reuses_process_scoped_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(codex_std_home.tempfile, "gettempdir", lambda: str(tmp_path))
+    env, src = _source_home(tmp_path)
+    first = prepare_codex_std_home(env)
+    home_root = Path(first["HOME"])
+    try:
+        (src / "auth.json").write_text('{"token":"fresh"}', encoding="utf-8")
+        second = prepare_codex_std_home(env)
+        assert second["HOME"] == first["HOME"]
+        assert len(list(home_root.parent.glob("pid-*"))) == 1
+        auth = home_root / ".codex" / "auth.json"
+        assert auth.read_text(encoding="utf-8") == '{"token":"fresh"}'
+        assert stat.S_IMODE(auth.stat().st_mode) == 0o600
+        assert stat.S_IMODE((home_root / ".codex" / "config.toml").stat().st_mode) == 0o600
+    finally:
+        cleanup_std_home_dir(home_root)
+
+
 def test_build_argv_keeps_repeated_config_flags() -> None:
     argv = CodexAppServerV2Driver().build_argv(["codex"], {"cli_args": ["-c", "model=a", "-c", "model=b"]})
     assert argv == ["codex", "app-server", "-c", "model=a", "-c", "model=b"]

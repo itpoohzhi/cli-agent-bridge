@@ -102,6 +102,13 @@ def test_pck_flag_off_is_ephemeral() -> None:
     assert result.cache_key == ""
 
 
+def test_valid_chat_id_cache_key_is_digest_never_raw() -> None:
+    result = _identity(request={"chat_id": "chat-1", "prompt_cache_key": _RAW_PCK})
+    assert not result.ephemeral
+    assert result.cache_key == derive_pck_digest(_SECRET, _RAW_PCK)
+    assert _RAW_PCK not in result.cache_key and _RAW_PCK not in repr(result)
+
+
 def test_pck_flag_on_gives_deterministic_affinity(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv(CODEX_PCK_V1_FLAG, "true")
     first, second = _identity(), _identity()

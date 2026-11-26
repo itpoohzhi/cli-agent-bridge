@@ -101,6 +101,15 @@ def test_flag_on_codex_standard_empty_cwd_is_neutral_dir(monkeypatch: pytest.Mon
     assert not (Path(env.cwd_norm) / "AGENTS.md").exists()
 
 
+def test_flag_on_keyed_chat_without_cwd_keeps_stable_cwd_norm(monkeypatch: pytest.MonkeyPatch) -> None:
+    _flag(monkeypatch, "true")
+    body = {"prompt": "x", "chat_id": "chat-1"}
+    first, _ = build_resident_envelope_from_chat("codex", body, _SECRET)
+    second, _ = build_resident_envelope_from_chat("codex", body, _SECRET)
+    assert first.cwd_norm == second.cwd_norm
+    assert first.cwd_norm != os.path.realpath(os.getcwd())
+
+
 def test_flag_on_explicit_cwd_preserved(monkeypatch: pytest.MonkeyPatch) -> None:
     _flag(monkeypatch, "true")
     assert _resolve_default_cwd("codex", "/tmp/proj-with-agents") == "/tmp/proj-with-agents"
