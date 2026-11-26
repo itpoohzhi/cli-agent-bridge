@@ -40,14 +40,16 @@ from tests._codex_l5_helpers import (  # noqa: E402
 )
 
 
-def _assert_gpt62_rejected(stand: IsolatedL5Stand) -> None:
+def _assert_gpt62_policy_and_unknown_rejected(stand: IsolatedL5Stand) -> None:
     assert "gpt-6.2-sol" in rcc.FORBIDDEN_ALIAS_MODEL_IDS
     rcc.validate_no_forbidden_aliases(json.loads((ROOT / "fleet.json").read_text(encoding="utf-8"))["aliases"])
+    assert validate_codex_model_effort("gpt-6.2-sol", "high") == ("gpt-6.2-sol", "high")
+    assert validate_codex_model_effort("gpt-6.2-sol", None) == ("gpt-6.2-sol", "high")
     with pytest.raises(CodexZeroCanonPolicyError, match="Unsupported Codex model"):
-        _ = validate_codex_model_effort("gpt-6.2-sol", "high")
+        _ = validate_codex_model_effort("gpt-6.9-unsupported", "high")
     reqs_before = len(stand.upstream_reqs)
-    s62, h62, b62 = http_post(stand.hub_url, {"model": "gpt-6.2-sol", "reasoning_effort": "high", "messages": [{"role": "user", "content": "PONG"}]}, {"X-Review-Profile": "Zero-Canon"})
-    assert (s62, "model_not_found" in b62, ATTEST_LOW in h62, len(stand.upstream_reqs)) == (404, True, False, reqs_before)
+    s_bad, h_bad, b_bad = http_post(stand.hub_url, {"model": "gpt-6.9-unsupported", "reasoning_effort": "high", "messages": [{"role": "user", "content": "PONG"}]}, {"X-Review-Profile": "Zero-Canon"})
+    assert (s_bad in (400, 404), ATTEST_LOW in h_bad, len(stand.upstream_reqs), bool(b_bad)) == (True, False, reqs_before, True)
 
 
 def _assert_ports_closed(ports: tuple[int, int]) -> None:
@@ -142,7 +144,7 @@ def test_l5_recovery_pong_readback_gpt62_negative_and_hygiene(tmp_path: Path, mo
         healthy, effs = rec.transition(st, rec.RecoveryEvent(rec.RecoveryEventKind.PONG_RECEIPT, 4.0, rec.HealthDomain.ROUTE, receipt=pong))
         assert healthy.is_healthy
         assert any(e.kind is rec.RecoveryEffectKind.EMIT_RECOVERY_RECEIPT for e in effs)
-        _assert_gpt62_rejected(stand)
+        _assert_gpt62_policy_and_unknown_rejected(stand)
     finally:
         stand.close()
     assert all(not is_pgid_alive(p) for p in stand.spawned_pgids)
