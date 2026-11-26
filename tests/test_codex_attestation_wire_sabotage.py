@@ -218,3 +218,38 @@ def test_server_serve_json_body_nonstream_barrier_wiring() -> None:
     assert rec2["statuses"] == [200] and int(rec2["headers"]["Content-Length"]) == len(body2)
     parsed = json.loads(body2)
     assert parsed["object"] == "chat.completion" and parsed["choices"][0]["message"]["content"] == "ok"
+
+
+def test_mutation_killers_wire_and_driver(tmp_path: Path) -> None:
+    """Wire requires zero_canon+CLEAN state, kills proofs on tool events; driver helpers fail closed."""
+    from core.stdio_resident.codex_driver import _verify_zc_clean_home
+    from core.stdio_resident.codex_protocol_fsm import ProtocolPhase, ProtocolState
+    from core.zc_admission import TurnProofRecorder
+
+    assert _verify_zc_clean_home({"zero_canon_root": ""}) is False
+    assert _verify_zc_clean_home({"zero_canon_root": str(tmp_path / "plain")}) is False
+    assert TurnProofRecorder().inherited_state is False
+    active = ProtocolState(phase=ProtocolPhase.TURN_ACTIVE, epoch=2, thread_id="thr-srv-1", turn_id="trn-1", zero_canon=True)
+    assert build_v2_admission_proof(type("_D", (), {"protocol_state": active, "turn_proof": None})(), model=MODEL, effort=EFFORT) is None
+    done = ProtocolState(phase=ProtocolPhase.COMPLETED, epoch=2, thread_id="thr-srv-1", turn_id="trn-1", zero_canon=True)
+    rec_tool = TurnProofRecorder(handshake_acked=True, clean_home_verified=True, issued_thread_id="thr-srv-1", issued_turn_id="trn-1", turn_epoch=2, tool_events_seen=1)
+    assert build_v2_completion_proof(type("_D", (), {"protocol_state": done, "last_turn_state": None, "turn_proof": rec_tool})(), model=MODEL, effort=EFFORT) is None
+    rec_ok = TurnProofRecorder(handshake_acked=True, clean_home_verified=True, issued_thread_id="thr-srv-1", issued_turn_id="trn-1", turn_epoch=2)
+    drv_attr = type("_D2", (), {"protocol_state": None, "last_turn_state": done, "last_turn_proof": rec_ok})()
+    assert build_v2_completion_proof(drv_attr, model=MODEL, effort=EFFORT) is not None and drv_attr.last_turn_proof is None
+    drv, handle, ctx = _clean(tmp_path, "zc-err")
+    _activate(drv, handle, ctx)
+    _ = drv.decode_line(json.dumps({"jsonrpc": "2.0", "method": "error", "params": {"threadId": "thr-srv-1", "error": {"message": "boom"}}}))
+    assert drv.turn_proof is not None and drv.turn_proof.tool_events_seen == 0
+    idle_drv = codex_driver_mod.CodexAppServerV2Driver()
+    term_line = json.dumps({"jsonrpc": "2.0", "method": "turn/completed", "params": {"threadId": "t1", "turn": {"id": "u1", "status": "completed"}}})
+    assert idle_drv.is_terminal(term_line, None) is True
+    assert idle_drv.is_tool_stop(term_line, None) is False
+
+
+def test_barrier_emits_managed_turn_header() -> None:
+    """Non-stream barrier surfaces X-Turn-Id for the active managed turn."""
+    h, rec = _make_handler("standard")
+    h._active_managed_turn = type("_T", (), {"turn_id": "mt-42"})()
+    assert emit_nonstream_headers(h, 2, (), ("X-Context-Pruned", None), {}) is True
+    assert rec["headers"].get("X-Turn-Id") == "mt-42"
