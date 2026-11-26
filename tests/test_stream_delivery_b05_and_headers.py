@@ -16,6 +16,7 @@ _AGY_DIR = str(_ROOT / "bridges" / "agy-bridge")
 if _AGY_DIR not in sys.path:
     sys.path.append(_AGY_DIR)
 
+from agy_runtime.sse_body_runner import _SseBodyRunner  # noqa: E402
 from agy_runtime.sse_stream_helpers import SseStreamSession  # noqa: E402
 from core.stream_resilience_runtime import StreamResilienceConfig  # noqa: E402
 from resilience_wiring_support import load_server  # noqa: E402
@@ -155,15 +156,18 @@ def test_b05_partial_timeout_with_held_partial_tool_call_flushes_without_loss_or
         emulate_tools=True, tool_turn_cls=srv._ToolTurn
     )
     prefix = "Префикс. "
+    thought = "Думаю. "
     part_call = '<tool_call>{"name":"read",'
     rest_call = '"arguments":{"path":"a.py"}}</tool_call>'
-    assert session.stream_text(prefix) is True
-    assert session.stream_text(part_call) is True
+    assert session.stream_reasoning(thought) is True
+    assert session.stream_text(prefix + part_call) is True
+    assert session.emitted_reasoning_text == thought
+    assert session.emitted_stream_text == ""
     out: dict[str, Any] = {
         "state": "idle_timeout",
         "timeout_limit_s": 20,
         "conversation_id": "12345678-abcd",
-        "retained_events": [("text", prefix + part_call + rest_call)],
+        "retained_events": [("reasoning", thought), ("text", rest_call)],
     }
     session.finalize_timeout(out)
     assert out.get("graceful_done") is True
@@ -173,11 +177,12 @@ def test_b05_partial_timeout_with_held_partial_tool_call_flushes_without_loss_or
     tool_calls = [tc for d in deltas for tc in (d.get("tool_calls") or [])]
     assert "<tool_call>" not in content
     assert "</tool_call>" not in content
+    assert (content + reasoning).count("Думаю.") == 1
     assert (content + reasoning).count("Префикс.") == 1
     assert len(tool_calls) == 1
     assert tool_calls[0]["function"]["name"] == "read"
     assert json.loads(tool_calls[0]["function"]["arguments"]) == {"path": "a.py"}
-    assert session.b05_skipped_chars == len(prefix + part_call)
+    assert session.b05_skipped_chars == len(thought)
     assert session.b05_flushed_tail_chars == len(rest_call)
 
 
@@ -191,6 +196,7 @@ def test_reset_precommit_emitted_reinstantiates_clean_tool_turn_and_keeps_invari
     old_turn = session.tool_turn
     assert old_turn is not None
     assert ctx["stream_committed"] is False
+    assert session.on_text("pre") is True
     assert session.stream_text('Префикс <tool_call>{"name":"read",') is True
     assert session.stream_reasoning("думаю") is True
     assert session.on_tool_trace({"step_index": 1, "tool_name": "read_file"}) is True
@@ -209,6 +215,7 @@ def test_reset_precommit_emitted_reinstantiates_clean_tool_turn_and_keeps_invari
     assert session.tool_turn._normalizer.has_open_tool_call() is False
     assert ctx["tool_stop"] == session.tool_turn.turn_complete
     assert session.stream_text("Чистый текст") is True
+    session.tool_turn.finish()
     assert session.emitted_stream_text == "Чистый текст"
 
 
@@ -280,3 +287,60 @@ def test_start_emits_tool_sanitized_header_iff_tool_turn_is_not_none() -> None:
     assert s_none.tool_turn is None
     s_none.start(200, [("Content-Type", "text/event-stream")])
     assert all(k.lower() != "x-bridge-tool-sanitized" for k, _ in h_none.headers_sent)
+
+
+def test_rw001_legacy_buffered_text_is_not_wire_emitted_until_timeout_flush() -> None:
+    session, handler, _ctx = _make_session()
+    body_runner = _SseBodyRunner(session)
+    body_runner.buffering = True
+    body_runner.prepare_buffer()
+    session.buffer.stage_fragment("already-buffered")
+    retained = "Полностью сохранённый текст"
+
+    assert session.stream_text(retained) is True
+    assert session.buffer.commit_fragments() == (
+        ("content", "already-buffered"),
+        ("content", retained),
+    )
+    assert session.emitted_stream_text == ""
+    assert "already-buffered" not in "".join(handler.emitted)
+    assert retained not in "".join(handler.emitted)
+
+    session.buffer.stage_fragment(retained)
+    out: dict[str, Any] = {
+        "state": "idle_timeout",
+        "timeout_limit_s": 10,
+        "retained_events": [("text", retained)],
+    }
+    session.finalize_timeout(out)
+    assert out["graceful_done"] is True
+    assert session.b05_skipped_chars == 0
+    assert session.b05_flushed_tail_chars == len(retained)
+    assert (
+        "".join(d.get("content", "") for d in _parse_deltas(handler.emitted)).count(
+            retained
+        )
+        == 1
+    )
+
+
+def test_rw006_emulate_tools_tracks_only_sanitized_wire_content() -> None:
+    srv = load_server()
+    session, _handler, _ctx = _make_session(
+        emulate_tools=True, tool_turn_cls=srv._ToolTurn
+    )
+    body_runner = _SseBodyRunner(session)
+    body_runner.buffering = True
+    body_runner.prepare_buffer()
+    raw = 'Префикс <tool_call>{"name":"read","arguments":{"path":"a.py"}}</tool_call> Суффикс'
+
+    assert session.stream_text(raw) is True
+    assert session.emitted_stream_text == ""
+    assert body_runner.drain() is True
+    assert "<tool_call>" not in session.emitted_stream_text
+    assert "<tool_call>" not in session.emitted_reasoning_text
+    assert "</tool_call>" not in session.emitted_stream_text
+    assert "</tool_call>" not in session.emitted_reasoning_text
+    wire_text = session.emitted_stream_text + session.emitted_reasoning_text
+    assert "Префикс" in wire_text
+    assert "<" not in wire_text and ">" not in wire_text

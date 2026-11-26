@@ -20,7 +20,11 @@ if _AGY_DIR not in sys.path:
 
 import core.runtime_env as runtime_env  # noqa: E402
 from agy_runtime import sse_body_runner as runner  # noqa: E402
-from agy_runtime.stream_delivery_fsm import DeliveryPhase  # noqa: E402
+from agy_runtime.stream_delivery_fsm import (  # noqa: E402
+    DeliveryPhase,
+    can_retry_after_failure,
+    initial_delivery_state,
+)
 from core.stream_resilience_policy import UncommittedTurnBuffer  # noqa: E402
 
 _FLAG = "BRIDGE_AGY_PROGRESSIVE_COMMIT_ENABLED"
@@ -174,7 +178,7 @@ def test_progressive_commit_streams_first_delta_before_done_with_global_flags_on
     assert "tool — done" not in joined[:first_text], "tool_trace не обгоняет текст"
     assert "tool — done" in joined[first_text:]
     summary = _summaries(logs)[0]
-    assert summary["midstream_replay_blocked"] is True
+    assert summary["midstream_replay_blocked"] is False
     assert summary["post_live_replay_attempted"] is False
 
 
@@ -210,7 +214,7 @@ def test_progressive_commit_keepalive_in_precommit_does_not_trigger_live_and_pre
     assert retry_phases == [DeliveryPhase.PRECOMMIT]
     assert ": keepalive\n\n" in joined
     assert joined.count("second-attempt-response") == 1
-    assert _summaries(logs)[0]["phase_end"] == "live"
+    assert _summaries(logs)[0]["phase_end"] == "closed"
 
 
 def test_progressive_commit_per_turn_latch_ignores_mid_turn_flag_flip_and_hot_reloads_between_turns(
@@ -311,7 +315,7 @@ def test_progressive_commit_emits_redact_safe_turn_summary_with_all_t1_t2_t3_fie
     summary = summaries[0]
     assert _REQUIRED_SUMMARY_FIELDS <= summary.keys()
     assert summary["mode"] == "progressive"
-    assert summary["phase_end"] == "live"
+    assert summary["phase_end"] == "closed"
     assert summary["emitted_events"] == 1
     assert summary["upstream_rc"] == 0
     assert summary["total_ms"] >= 0
@@ -344,3 +348,105 @@ def test_progressive_commit_no_duplicate_on_idle_timeout_with_graceful_partial(
     summary = _summaries(logs)[0]
     assert summary["b05_skipped_chars"] == sum(map(len, chunks))
     assert summary["b05_flushed_tail_chars"] == 0
+
+
+def _direct_runner() -> runner._SseBodyRunner:
+    wire: list[str] = []
+    logs: list[str] = []
+    ctx: dict[str, Any] = {"model": "m", "conversation_id": "bbdb91e5"}
+    hooks = (
+        lambda key, default=False: key == "emit_tool_trace" or default,
+        logs.append,
+        lambda: "stop",
+        Mock(),
+    )
+    session = runner.SseStreamSession(_handler(wire, Mock()), ctx, hooks)
+    return runner._SseBodyRunner(session)
+
+
+def test_rw002_partial_precommit_flush_commits_wire_and_blocks_retry() -> None:
+    body = _direct_runner()
+    body.progressive = True
+    body.delivery_fsm = initial_delivery_state(True)
+    body.s.buffer.stage_fragment("мысль", "reasoning_content")
+    body.s.buffer.stage_fragment("ответ")
+    delivered: list[str] = []
+
+    def deliver(value: str, _channel: str) -> bool:
+        delivered.append(value)
+        return len(delivered) == 1
+
+    body._deliver_direct = deliver
+    assert body._flush_precommit() is False
+    assert delivered == ["мысль", "ответ"]
+    assert body.delivery_fsm.wire_committed is True
+    assert can_retry_after_failure(body.delivery_fsm) is False
+
+
+def test_rw003_progressive_precommit_retry_rolls_back_staged_whitespace(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    body = _direct_runner()
+    body.progressive = body.buffering = True
+    body.delivery_fsm = initial_delivery_state(True)
+    body.s.buffer.stage_fragment(" ")
+    body.s.buffer.stage_fragment("\n")
+    body._invoke = lambda: {"state": "done", "rc": 0}
+    monkeypatch.setattr(body.s, "config", NS(flag_enabled=lambda _name: False))
+
+    body.attempt(1, 10.0)
+
+    assert body.s.buffer.commit_fragments() == ()
+    assert body.delivery_fsm.epoch == 1
+    assert body.s.emitted_stream_text == ""
+
+
+def test_rw004_live_whitespace_is_direct_and_disconnect_gates_stage() -> None:
+    body = _direct_runner()
+    body.progressive = True
+    body.delivery_fsm = initial_delivery_state(True)
+    direct: list[str] = []
+    body._deliver_direct = lambda value, _channel: direct.append(value) or True
+
+    assert body.stage("first") is True
+    assert body.delivery_fsm.wire_committed is True
+    assert body.stage(" ") is True
+    assert body.stage("\n") is True
+    assert direct == ["first", " ", "\n"]
+    assert body.s.buffer.commit_fragments() == ()
+
+    body.s.disconnected = True
+    assert body.stage("not-delivered") is False
+    assert direct == ["first", " ", "\n"]
+
+
+def test_rw005_progressive_trace_respects_ledger_forwarding() -> None:
+    body = _direct_runner()
+    body.progressive = True
+    body.delivery_fsm = initial_delivery_state(True)
+    event = {"step_index": 4, "tool_name": "read"}
+    monkey_forward = Mock(return_value=False)
+    body.s.ledger.should_forward_step = monkey_forward
+    traces = Mock(return_value=True)
+    body.s.on_tool_trace = traces
+
+    assert body.trace(event) is True
+    assert traces.call_count == 0
+    assert body._pending_traces == []
+    monkey_forward.assert_called_once_with(4)
+
+
+def test_rw007_normal_progressive_summary_is_closed_without_replay_block(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _config(monkeypatch, tmp_path, True)
+
+    def once(_ctx: dict[str, Any], text: Any, *_callbacks: Any) -> dict[str, Any]:
+        assert text("normal-response")
+        return {"state": "done", "rc": 0}
+
+    _wire, logs, _ctx = _serve(once)
+    summary = _summaries(logs)[0]
+    assert summary["phase_end"] == "closed"
+    assert summary["midstream_replay_blocked"] is False
+    assert summary["post_live_replay_attempted"] is False

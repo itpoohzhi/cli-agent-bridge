@@ -20,7 +20,7 @@ from core.turn_usage_fsm import should_emit_wire_usage
 from core.stream_resilience_policy import can_safely_replay_turn, is_present, is_uncommitted_step
 from core.stream_resilience_runtime import MidstreamReplayOrchestrator
 from core.runtime_env import flag_enabled
-from agy_runtime.stream_delivery_fsm import TurnSummaryMetrics, format_turn_summary, initial_delivery_state, mark_sent, next_retry_epoch
+from agy_runtime.stream_delivery_fsm import DeliveryEvent, DeliveryEventKind, TurnSummaryMetrics, can_retry_after_failure, format_turn_summary, initial_delivery_state, mark_sent, next_retry_epoch, step_delivery
 _attempt_scope = threading.local()
 def current_attempt_index() -> int:
     return getattr(_attempt_scope, "index", -1)
@@ -33,25 +33,17 @@ def invoke_at_attempt[T](index: int, invoke: Callable[[], T]) -> T:
 @final
 class _SseBodyRunner:
     def __init__(self, session: SseStreamSession) -> None:
-        self.s = session
-        self.time = _owner_time(session.handler)
+        self.s, self.time = session, _owner_time(session.handler)
         self.replay = MidstreamReplayOrchestrator(session.config, clock=self.time.monotonic, sleeper=self.time.sleep)
-        self.replay.buffer = session.buffer
-        self.collector = AgyToolTraceCollector(session.ledger)
-        self.buffering = False
-        self.progressive = False
-        self.delivery_fsm = initial_delivery_state(False)
-        self._pending_traces: list[dict[str, Any]] = []
-        self._delivery_seq = 0
-        self._post_live_replay_attempted = False
-        self._turn_started_at, self._ttft_ms = self.time.monotonic(), None
-        self.deadline = float("inf")
+        self.replay.buffer, self.collector = session.buffer, AgyToolTraceCollector(session.ledger)
+        self.buffering = self.progressive = self._post_live_replay_attempted = False
+        self.delivery_fsm, self._pending_traces, self._delivery_seq = initial_delivery_state(False), [], 0
+        self._turn_started_at, self._ttft_ms, self.deadline = self.time.monotonic(), None, float("inf")
         self.cid = str(next(filter(None, (session.ctx.get("conversation_id"),)), ""))
         self._last_out: dict[str, Any] = {}
         self._activity_window: SlidingActivityWindow | None = None
         self._activity_runtime: activity_runtime.ActivityRuntime | None = None
-        self._attempt_started_at = self._attempt_budget = 0.0
-        self.stop: Any = None
+        self._attempt_started_at, self._attempt_budget, self.stop = 0.0, 0.0, None
     def _note_progress(self, kind: str, payload: object) -> None:
         runtime = getattr(self, "_activity_runtime", None)
         if is_present(runtime):
@@ -63,38 +55,47 @@ class _SseBodyRunner:
         except (ValueError, TypeError):
             payload = value.strip()
         self._note_progress(channel, payload)
-        ok = False
-        if getattr(self, "progressive", False) and any((channel == "tool_calls", bool(value.strip()))):
-            self._flush_precommit()
-            ok = self._deliver_direct(json.loads(value) if channel == "tool_calls" else value, channel)
-            if ok:
-                self.delivery_fsm = mark_sent(self.delivery_fsm, self._delivery_seq)
-                self._delivery_seq += 1
-                self._ttft_ms = self._ttft_ms if self._ttft_ms is not None else (self.time.monotonic() - self._turn_started_at) * 1000
-                self.s.ledger.client_delivery_reconciled = False
-                self._drain_traces()
-        elif not self.cancelled():
-            self.s.buffer.stage_fragment(value, channel)
-            ok = self.s.commit()
-        return ok
-    def _flush_precommit(self) -> None:
+        if self.cancelled():
+            return False
+        if getattr(self, "progressive", False):
+            kind = dict(tool_calls=DeliveryEventKind.TOOL_CALLS, reasoning_content=DeliveryEventKind.REASONING).get(channel, DeliveryEventKind.CONTENT)
+            self.delivery_fsm, actions = step_delivery(self.delivery_fsm, DeliveryEvent(epoch=self.delivery_fsm.epoch, seq=self._delivery_seq, kind=kind, channel=channel, payload=value, deliverable=any((channel == "tool_calls", bool(value.strip())))))
+            act = actions[0].kind if actions else "drop_stale"
+            if act == "stage":
+                self.s.buffer.stage_fragment(value, channel)
+                return self.s.commit()
+            if act in ("flush_and_emit", "emit"):
+                if act == "flush_and_emit" and not self._flush_precommit():
+                    return False
+                ok = self._deliver_direct(json.loads(value) if channel == "tool_calls" else value, channel)
+                if ok:
+                    self._mark_wire_sent()
+                    self._drain_traces()
+                return ok
+            return False
+        self.s.buffer.stage_fragment(value, channel)
+        return self.s.commit()
+    def _mark_wire_sent(self) -> None:
+        self.delivery_fsm, self._delivery_seq = mark_sent(self.delivery_fsm, self._delivery_seq), self._delivery_seq + 1
+        self._ttft_ms = (self.time.monotonic() - self._turn_started_at) * 1000 if self._ttft_ms is None else self._ttft_ms
+        self.s.ledger.client_delivery_reconciled = False
+    def _flush_precommit(self) -> bool:
         for channel, value in normalize_staged_fragments(self.s.buffer.commit_fragments()):
-            _ = self._deliver_direct(json.loads(value) if channel == "tool_calls" else value, channel)
+            if self.cancelled() or not self._deliver_direct(json.loads(value) if channel == "tool_calls" else value, channel):
+                return False
+            self._mark_wire_sent()
+        return True
     def _deliver_direct(self, value: Any, channel: str) -> bool:
         return dict(content=self.s.on_text, reasoning_content=self.s.on_reasoning, tool_calls=self.s.on_calls)[channel](value)
     def _drain_traces(self) -> None:
-        pending = self._pending_traces if self.delivery_fsm.wire_committed else []
-        self._pending_traces = []
+        pending, self._pending_traces = (self._pending_traces if self.delivery_fsm.wire_committed else []), []
         for event in pending:
-            _ = self.s.on_tool_trace(event)
-    def stage_reasoning(self, value: str) -> bool:
-        return self.stage(value, "reasoning_content")
-    def stage_calls(self, value: list[dict[str, Any]]) -> bool:
-        return self.stage(json.dumps(value, ensure_ascii=False), "tool_calls")
-    def cancelled(self) -> bool:
-        return self.s.disconnected
-    def keepalive(self) -> bool:
-        return self._deliver(self.s.keepalive)
+            if self.delivery_fsm.wire_committed and not self.cancelled() and not self.expired() and self.s.ledger.should_forward_step(event.get("step_index")):
+                _ = self.s.on_tool_trace(event)
+    def stage_reasoning(self, value: str) -> bool: return self.stage(value, "reasoning_content")
+    def stage_calls(self, value: list[dict[str, Any]]) -> bool: return self.stage(json.dumps(value, ensure_ascii=False), "tool_calls")
+    def cancelled(self) -> bool: return self.s.disconnected
+    def keepalive(self) -> bool: return self._deliver(self.s.keepalive)
     def text(self, value: str) -> bool:
         self._note_progress("content", value)
         return self._deliver(self.s.stream_text, value)
@@ -102,39 +103,35 @@ class _SseBodyRunner:
         self._note_progress("reasoning", value)
         return self._deliver(self.s.stream_reasoning, value)
     def _deliver(self, callback: Any, *args: Any) -> bool:
-        ok = False
-        if not self.expired():
-            ok = callback(*args)
-        return ok
-    def expired(self) -> bool:
-        return self.time.monotonic() >= self.deadline
+        return callback(*args) if not self.expired() else False
+    def expired(self) -> bool: return self.time.monotonic() >= self.deadline
     def trace(self, event: dict[str, Any]) -> bool:
         self._note_progress("tool_calls", event)
-        if getattr(self, "progressive", False):
-            if self.delivery_fsm.wire_committed:
-                return self.s.on_tool_trace(event)
-            self._pending_traces.append(event)
-            return True
         forward = self.s.ledger.should_forward_step(event.get("step_index"))
+        if getattr(self, "progressive", False):
+            if not forward:
+                return True
+            self.delivery_fsm, actions = step_delivery(self.delivery_fsm, DeliveryEvent(epoch=self.delivery_fsm.epoch, seq=self._delivery_seq, kind=DeliveryEventKind.TOOL_TRACE, channel="tool_trace", payload=""))
+            act = actions[0].kind if actions else "drop_stale"
+            if act == "emit":
+                return not self.expired() and not self.cancelled() and self.s.on_tool_trace(event)
+            if act == "stage":
+                self._pending_traces.append(event)
+                return True
+            return False
         ok = True
         if all((self.buffering, forward)):
-            record = dict(event, tool_name=event.get("tool_name", event.get("name")), type=event.get("type", "tool_result"))
-            self.collector.on_record(record)
+            self.collector.on_record(dict(event, tool_name=event.get("tool_name", event.get("name")), type=event.get("type", "tool_result")))
         if any((not self.buffering, forward)):
-            ok = False
-            if not self.expired():
-                ok = self.s.on_tool_trace(event)
+            ok = self.s.on_tool_trace(event) if not self.expired() else False
         return ok
     def prepare_buffer(self) -> None:
         s = self.s
-        s.stream_text, s.stream_reasoning = lambda text: s._feed_stream_text(self.stage, text), self.stage_reasoning
+        s.stream_text, s.stream_reasoning = self.stage, self.stage_reasoning
         if is_present(s.tool_turn):
             s.tool_turn = s.hooks[3](next(filter(None, (s.ctx.get("tools"),)), list[dict[str, Any]]()), self.stage, self.stage_reasoning, self.stage_calls)
-            s.stream_text = s.tool_turn.feed
-            s.stream_reasoning = s.tool_turn.feed_reasoning
-            s.ctx["tool_stop"] = s.tool_turn.turn_complete
-            s.ctx["tool_calls_emitted"] = lambda: bool(s.tool_turn.calls)
-            s.ctx["emitted_call_ids"] = lambda: [str(c.get("id", "")) for c in s.tool_turn.calls]
+            s.stream_text, s.stream_reasoning = s.tool_turn.feed, s.tool_turn.feed_reasoning
+            s.ctx.update(tool_stop=s.tool_turn.turn_complete, tool_calls_emitted=lambda: bool(s.tool_turn.calls), emitted_call_ids=lambda: [str(c.get("id", "")) for c in s.tool_turn.calls])
     def tool_stop(self) -> bool:
         return self.expired() or bool(self.stop and self.stop())
     def settle_decision(self, *, proc_exited: bool = False, result_received: bool = False) -> SettleDecision:
@@ -155,14 +152,17 @@ class _SseBodyRunner:
         ctx["attempt_index"] = index
         self._activity_window = self._activity_runtime = None
         self._attempt_started_at, self._attempt_budget = self.time.monotonic(), budget
-        if all((index > 0, self.progressive, not self.delivery_fsm.wire_committed)):
-            self.delivery_fsm = next_retry_epoch(self.delivery_fsm)
-            s.reset_precommit_emitted()
-            self._pending_traces.clear()
-        self._post_live_replay_attempted |= bool(index > 0 and self.delivery_fsm.wire_committed)
+        if index > 0:
+            if can_retry_after_failure(self.delivery_fsm):
+                if self.buffering:
+                    s.buffer.rollback_uncommitted()
+                if self.progressive:
+                    self.delivery_fsm = next_retry_epoch(self.delivery_fsm, self.time.monotonic() * 1000)
+                    s.reset_precommit_emitted()
+                    self._pending_traces.clear()
+            else:
+                self._post_live_replay_attempted = True
         if self.buffering:
-            if not self.progressive:
-                s.buffer.rollback_uncommitted()
             self.prepare_buffer()
             ctx.update(conversation_id=self.cid, attempt_budget_s=budget, attempt_index=index)
             self.deadline = self._attempt_started_at + budget if s.config.flag_enabled("midstream_retry_enabled") else float("inf")
@@ -296,15 +296,13 @@ class _SseBodyRunner:
                     self.finish(out)
         self._log_turn_summary(out)
     def _log_turn_summary(self, out: dict[str, Any]) -> None:
-        s = self.s
-        rc = out.get("rc")
-        metrics = TurnSummaryMetrics(b05_skipped_chars=s.b05_skipped_chars, b05_flushed_tail_chars=s.b05_flushed_tail_chars, midstream_replay_blocked=self.progressive and self.delivery_fsm.wire_committed, post_live_replay_attempted=self._post_live_replay_attempted, client_gone=self.cancelled() or out.get("state") == "client_gone", tool_turn_active=is_present(s.tool_turn), tool_parse_error=bool(s.tool_turn.error) if is_present(s.tool_turn) else False, upstream_rc=rc if type(rc) is int else None, ttft_ms=self._ttft_ms, total_ms=(self.time.monotonic() - self._turn_started_at) * 1000)
+        s, rc = self.s, out.get("rc")
+        self.delivery_fsm, _ = step_delivery(self.delivery_fsm, DeliveryEvent(epoch=self.delivery_fsm.epoch, seq=self._delivery_seq, kind=DeliveryEventKind.DONE if out.get("state") == "done" else DeliveryEventKind.ERROR, channel="", payload=""))
+        metrics = TurnSummaryMetrics(b05_skipped_chars=s.b05_skipped_chars, b05_flushed_tail_chars=s.b05_flushed_tail_chars, midstream_replay_blocked=bool(self._post_live_replay_attempted and self.delivery_fsm.wire_committed), post_live_replay_attempted=self._post_live_replay_attempted, client_gone=self.cancelled() or out.get("state") == "client_gone", tool_turn_active=is_present(s.tool_turn), tool_parse_error=bool(s.tool_turn.error) if is_present(s.tool_turn) else False, upstream_rc=rc if type(rc) is int else None, ttft_ms=self._ttft_ms, total_ms=(self.time.monotonic() - self._turn_started_at) * 1000)
         if len(s.hooks) > 1 and callable(s.hooks[1]):
             s.hooks[1](format_turn_summary(self.delivery_fsm, metrics))
     def finish(self, out: dict[str, Any]) -> None:
-        s = self.s
-        err = s.handler._error_body(out, s.resilience)
-        reason, proceed = "stop", True
+        s, err, reason, proceed = self.s, self.s.handler._error_body(out, self.s.resilience), "stop", True
         if all(((not is_present(err)), (is_present(s.tool_turn)))):
             s.tool_turn.finish()
             proceed = not self.cancelled() and (s.tool_turn.ok or bool(s.tool_turn.error))
@@ -319,8 +317,7 @@ class _SseBodyRunner:
         if proceed:
             self._finish_response(out, err, reason)
     def _finish_response(self, out: dict[str, Any], err: Any, reason: str) -> None:
-        s = self.s
-        presend = all(((is_present(err)), not s.ctx["stream_committed"], any((s.resilience, s.ctx.get("step_job_id")))))
+        s, presend = self.s, all(((is_present(err)), not self.s.ctx["stream_committed"], any((self.s.resilience, self.s.ctx.get("step_job_id")))))
         if presend:
             clean = {k: redact_diagnostic_text(v) if isinstance(v, str) else v for k, v in err.items()}
             code = 503 if err.get("type") == "overloaded" else (int(err.get("code") or 502) if any((s.ctx.get("step_job_id"), err.get("type") == CAPACITY_REASON)) else 502)

@@ -82,15 +82,9 @@ class SseStreamSession:
                 self.on_text, self.on_reasoning, self.on_calls, )
             self.ctx.update(tool_stop=self.tool_turn.turn_complete, tool_calls_emitted=lambda: bool(self.tool_turn.calls),
                 emitted_call_ids=lambda: [str(c.get("id", "")) for c in self.tool_turn.calls])
-        target = self.tool_turn.feed if self.tool_turn else self.on_text
-        self.stream_text = lambda text: self._feed_stream_text(target, text)
+        self.stream_text = self.tool_turn.feed if self.tool_turn else self.on_text
         self.stream_reasoning = (
             self.tool_turn.feed_reasoning if self.tool_turn else self.on_reasoning )
-    def _feed_stream_text(self, target: Any, text: str) -> bool:
-        ok = target(text)
-        if ok:
-            self.emitted_stream_text += text
-        return ok
     def reset_precommit_emitted(self) -> None:
         self.emitted_stream_text = ""
         self.emitted_reasoning_text = ""
@@ -155,6 +149,10 @@ class SseStreamSession:
             ok = self.emit(self.chunk({channel: value}))
             if ok:
                 self._track(value, channel)
+                if channel == "content" and isinstance(value, str):
+                    self.emitted_stream_text += value
+                if channel == "reasoning_content" and isinstance(value, str):
+                    self.emitted_reasoning_text += value
             useful = bool(value.strip()) if isinstance(value, str) else True
             if all((ok, useful)):
                 self._count_delta(value, channel)
@@ -170,8 +168,6 @@ class SseStreamSession:
         else:
             self.emitted_reasoning_or_tool += 1
             self.emitted_tool_calls += int(dict(tool_calls=True).get(channel, False))
-        if channel == "reasoning_content" and isinstance(value, str):
-            self.emitted_reasoning_text += value
     def on_text(self, value: str) -> bool:
         return self._delta(value, "content")
     def on_reasoning(self, value: str) -> bool:
@@ -272,8 +268,8 @@ class SseStreamSession:
         self.b05_flushed_tail_chars += sum( len(str(p)) for k, p in retained
             if k in ("text", "reasoning") )
         ok = True
-        callbacks = dict( text=self.stream_text, reasoning=self.on_reasoning,
-            tool_trace=self.on_tool_trace, )
+        callbacks = dict( text=self.tool_turn.feed if self.tool_turn else self.on_text,
+            reasoning=self.on_reasoning, tool_trace=self.on_tool_trace, )
         for kind, payload in retained:
             callback = callbacks.get(kind)
             if callback:
