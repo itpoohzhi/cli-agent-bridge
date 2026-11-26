@@ -187,3 +187,32 @@ def test_passthrough_dispatch_answers_422_on_quorum_degrade_and_serves_otherwise
     route, served = _passthrough_route(request, {"X-Subagent-Id": "worker-1"}, _adapter(CLAUDE))
     dispatch._passthrough(route, _adapter(CLAUDE), body)
     assert route.sent == [] and "thinking" not in served[0][2]
+
+
+def test_f012_quorum_thinking_none_is_not_degradation() -> None:
+    out = _run({"reasoning_effort": "low", "thinking": None}, _adapter(CLAUDE), QUORUM)
+    assert out == {"reasoning_effort": "low"}
+
+
+def test_f012_quorum_disabled_in_request_but_absent_in_prepared_translates_off() -> None:
+    request = {"thinking": {"type": "disabled"}, "max_tokens": 8}
+    route = _route(request, QUORUM, "neuralwatt")
+    out = mdd.apply_passthrough_transforms({"max_tokens": 8}, route, SimpleNamespace(request=request), _adapter(NW, "neuralwatt"))
+    assert out == {"reasoning_effort": "none", "max_tokens": 8}
+
+
+def test_f011_manifest_strip_always_degrades_on_quorum_without_hardcode(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _boom(*a: Any, **k: Any) -> Any:
+        raise AssertionError("hardcoded drops_thinking_route must not run in manifest branch")
+
+    monkeypatch.setattr(pem, "drops_thinking_route", _boom)
+    monkeypatch.setattr(pem, "drop_thinking_keep_effort", _boom)
+    request = {"reasoning_effort": "low", "thinking": {"type": "enabled", "budget_tokens": 512}}
+    adapter = _adapter(NW, "neuralwatt")
+    route = _route(request, QUORUM, "neuralwatt")
+    with pytest.raises(mdd.ParamDegradedError) as caught:
+        mdd.apply_passthrough_transforms(dict(request), route, SimpleNamespace(request=request), adapter)
+    mdd.handle_param_degraded(route, caught.value)
+    code, payload, headers = route.sent[0]
+    assert code == 422 and payload["error"]["param"] == "thinking" and headers == {"X-Bridge-Degraded": "thinking"}
+    assert _run(request, adapter, {"X-Subagent-Id": "worker-1"}, "neuralwatt") == {"reasoning_effort": "low"}

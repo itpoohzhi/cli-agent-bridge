@@ -438,7 +438,9 @@
           "temperature",
           "top_p"
         ],
-        "strip_always": []
+        "strip_always": [
+          "thinking"
+        ]
       }
     },
     "agy": {
@@ -704,7 +706,9 @@
           "temperature",
           "top_p"
         ],
-        "strip_always": []
+        "strip_always": [
+          "thinking"
+        ]
       }
     },
     "opencode-go-claude": {
@@ -778,7 +782,9 @@
           "temperature",
           "top_p"
         ],
-        "strip_always": []
+        "strip_always": [
+          "thinking"
+        ]
       }
     },
     "openai-key-3": {
@@ -797,7 +803,9 @@
           "temperature",
           "top_p"
         ],
-        "strip_always": []
+        "strip_always": [
+          "thinking"
+        ]
       }
     },
     "droid": {

@@ -39,3 +39,4 @@ models_overrides:
 params:
   effort_field: reasoning_effort
   adaptive_whitelist: [reasoning_effort, thinking, temperature, top_p]
+  strip_always: [thinking]

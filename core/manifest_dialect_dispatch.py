@@ -62,18 +62,16 @@ def _is_quorum(route: Any) -> bool:
     return param_adapter.is_quorum_call(headers.get("X-Subagent-Id"), headers.get("X-Review-Profile"))
 
 
-def _translate_off(out: dict[str, Any], effort_map: Mapping[str, Any]) -> bool:
-    """Логический `off` -> эффорт `off` для `effort_map`; True — `thinking` поглощён переводом."""
-    consumed = is_thinking_disabled(out)
-    for key in (*EFFORT_KEYS, *(("thinking",) if consumed else ())):
+def _translate_off(out: dict[str, Any]) -> None:
+    """Логический `off` -> эффорт `off` для `effort_map`; `thinking: disabled` поглощается переводом."""
+    for key in (*EFFORT_KEYS, *(("thinking",) if is_thinking_disabled(out) else ())):
         out.pop(key, None)
     out["reasoning_effort"] = LOGICAL_OFF
-    return consumed
 
 
 def _check_degrade(explicit: Mapping[str, Any], strip: tuple[str, ...], consumed: set[str], route: Any) -> None:
     """Кворум: явный «думающий» параметр, снимаемый `strip_always` без перевода, — деградация."""
-    lost = [k for k in strip if k in param_adapter.DEGRADE_PARAMS and k in explicit and k not in consumed]
+    lost = [k for k in strip if k in param_adapter.DEGRADE_PARAMS and explicit.get(k) is not None and k not in consumed]
     if lost and _is_quorum(route):
         raise ParamDegradedError(lost[0], route.model_id)
 
@@ -98,13 +96,12 @@ def _apply_manifest_dialect(
     explicit = {**(body.request or {}), **(route.request or {})}
     logical = canonicalize_logical_effort(out, route.request, body.request, alias_effort=route.alias_effort)
     consumed: set[str] = set()
-    if logical == LOGICAL_OFF and LOGICAL_OFF in effort_map and _translate_off(out, effort_map):
-        consumed.add("thinking")
+    if logical == LOGICAL_OFF and LOGICAL_OFF in effort_map:
+        if is_thinking_disabled(out) or is_thinking_disabled(explicit):
+            consumed.add("thinking")
+        _translate_off(out)
     _check_degrade(explicit, tuple(params.get("strip_always") or ()), consumed, route)
     out = _normalize(out, params)
-    backend_id = str(route.model.get("backend") or "")
-    if _pem.drops_thinking_route(adapter, backend_id):
-        out = _pem.drop_thinking_keep_effort(out)
     thinking = out.get("thinking")
     if isinstance(thinking, dict) and thinking.get("type") == "enabled":
         out = param_adapter.clamp_thinking_budget(out)

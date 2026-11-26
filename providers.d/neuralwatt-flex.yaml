@@ -63,3 +63,4 @@ params:
     'off':
       reasoning_effort: none
   adaptive_whitelist: [reasoning_effort, temperature, top_p]
+  strip_always: [thinking]
