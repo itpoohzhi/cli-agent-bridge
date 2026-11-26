@@ -82,7 +82,7 @@ class ResidentBridgeRuntime:
             argv, cwd, spawn_env = prepare_runtime_spec(self._driver, current, options.argv_builder(), iso)
             sandbox = tempfile.mkdtemp(prefix="turn-")
             os.chmod(sandbox, 0o700)
-            turn_ctx = {**dict(options.extra_turn_context if options.extra_turn_context else {}), "turn_sandbox": sandbox, "cwd": cwd, "review_profile": current.review_profile}
+            turn_ctx = {**dict(options.extra_turn_context if options.extra_turn_context else {}), "turn_sandbox": sandbox, "cwd": cwd, "review_profile": current.review_profile, "zero_canon_root": iso.root}
             opts = replace(options, extra_turn_context=turn_ctx)
             try:
                 slot, plan = self._acquire_checked_slot(current, committed, affinity_key, (any((eph, bool(iso.active))), argv, cwd, spawn_env))
