@@ -19,14 +19,16 @@ from typing import Any, cast
 import pytest
 
 _ROOT = Path(__file__).resolve().parents[1]
-# Путь agy-моста добавляется ПОСЛЕ импорта корневого хаба: имя ``server`` не подменяется.
-_AGY_PATH = str(_ROOT / "bridges" / "agy-bridge")
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
+_AGY_DIR = str(_ROOT / "bridges" / "agy-bridge")
+if _AGY_DIR not in sys.path:
+    sys.path.append(_AGY_DIR)
 
 import core.runtime_env as runtime_env  # noqa: E402
 import server  # noqa: E402
 from adapters.passthrough_adapter import PassthroughAdapter, ResponseSink  # noqa: E402
 
-sys.path.insert(0, _AGY_PATH)
 from agy_runtime.stream_delivery_fsm import sanitizer_headers  # noqa: E402
 
 FLAG = "BRIDGE_TRUSTED_TOOL_STREAMING_ENABLED"

@@ -12,7 +12,11 @@ from unittest.mock import Mock
 import pytest
 
 _ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(_ROOT / "bridges" / "agy-bridge"))
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
+_AGY_DIR = str(_ROOT / "bridges" / "agy-bridge")
+if _AGY_DIR not in sys.path:
+    sys.path.append(_AGY_DIR)
 
 import core.runtime_env as runtime_env  # noqa: E402
 from agy_runtime import sse_body_runner as runner  # noqa: E402

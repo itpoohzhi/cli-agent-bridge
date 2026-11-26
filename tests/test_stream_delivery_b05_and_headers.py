@@ -9,9 +9,12 @@ from types import SimpleNamespace
 from typing import Any
 
 _ROOT = Path(__file__).resolve().parents[1]
-for _p in (str(_ROOT), str(_ROOT / "tests"), str(_ROOT / "bridges" / "agy-bridge")):
+for _p in (str(_ROOT), str(_ROOT / "tests")):
     if _p not in sys.path:
         sys.path.insert(0, _p)
+_AGY_DIR = str(_ROOT / "bridges" / "agy-bridge")
+if _AGY_DIR not in sys.path:
+    sys.path.append(_AGY_DIR)
 
 from agy_runtime.sse_stream_helpers import SseStreamSession  # noqa: E402
 from core.stream_resilience_runtime import StreamResilienceConfig  # noqa: E402

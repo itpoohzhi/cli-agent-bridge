@@ -16,7 +16,12 @@ from typing import Any
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "bridges" / "agy-bridge"))
+_ROOT = Path(__file__).resolve().parents[1]
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
+_AGY_DIR = str(_ROOT / "bridges" / "agy-bridge")
+if _AGY_DIR not in sys.path:
+    sys.path.append(_AGY_DIR)
 
 from agy_runtime.stream_delivery_fsm import (  # noqa: E402
     DeliveryAction,
