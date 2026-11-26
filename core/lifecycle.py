@@ -28,6 +28,7 @@ import threading
 import time
 from typing import Any
 
+from core.admission_idle_policy import resolve_drain_actor
 from core.drain_policy import (
     DEFAULT_DRAIN_TIMEOUT_S,
     DEFAULT_RETRY_AFTER_S,
@@ -588,10 +589,8 @@ class HubLifecycleManager:
                 self._effective_drain_budget() if self.is_drain_enabled() else (0.0, False, None)
             )
             active_before = self._safe_active_count()
-            self._log(format_drain_event(
-                "drain_started", signal=self.last_signal or 0,
-                active_turns=active_before, timeout_s=eff_timeout, clamped=clamped or None,
-            ))
+            actor = resolve_drain_actor(os.environ, os.getpid(), os.getppid(), os.getpgrp())
+            self._log(format_drain_event("drain_started", {**actor, "signal": self.last_signal or 0, "active_turns": active_before, "timeout_s": eff_timeout, "clamped": clamped or None}))  # fmt: skip
             if clamped:
                 self._log(format_drain_event(
                     "drain_timeout_clamped", configured_timeout_s=self.drain_timeout_s,

@@ -11,6 +11,9 @@ import time
 from collections.abc import Callable
 from typing import Any, NamedTuple
 
+from core.admission_idle_policy import TTL_SWEEP_FLAG
+from core.recovery_flags import read_recovery_switch
+
 
 class _IdleConnection(NamedTuple):
     connection: http.client.HTTPConnection
@@ -45,6 +48,55 @@ class PassthroughConnectionPool:
         self._idle_count: int = 0
         self._lock: threading.Lock = threading.Lock()
         self._closed: bool = False
+        self._active_ttl_sweep: bool | None = None
+        self._evicted_expired: int = 0
+
+    def set_active_ttl_sweep(self, enabled: bool | None) -> None:
+        """Явное переопределение kill-switch; None — свежее чтение env/config."""
+        self._active_ttl_sweep = enabled
+
+    def _sweep_enabled(self) -> bool:
+        """Явный bool либо свежий kill-switch (default False, instant без рестарта)."""
+        if self._active_ttl_sweep is not None:
+            return self._active_ttl_sweep
+        return read_recovery_switch(TTL_SWEEP_FLAG)
+
+    def sweep_expired(self) -> int:
+        """Вытесняет просроченные idle-соединения всех хостов; close вне lock."""
+        now = self._monotonic()
+        expired: list[_IdleConnection] = []
+        with self._lock:
+            for key in list(self._idle):
+                kept: list[_IdleConnection] = []
+                for entry in self._idle[key]:
+                    if now - entry.released_s > self._keepalive_expiry_s:
+                        expired.append(entry)
+                    else:
+                        kept.append(entry)
+                if kept:
+                    self._idle[key] = kept
+                else:
+                    del self._idle[key]
+            self._idle_count -= len(expired)
+            self._evicted_expired += len(expired)
+        for entry in expired:
+            entry.connection.close()
+        return len(expired)
+
+    @property
+    def idle_count(self) -> int:
+        """Текущее число свободных соединений в пуле."""
+        with self._lock:
+            return self._idle_count
+
+    def stats(self) -> dict[str, int]:
+        """Снимок пула: idle, max_keepalive, evicted_expired."""
+        with self._lock:
+            return {
+                "idle": self._idle_count,
+                "max_keepalive": self._max_keepalive,
+                "evicted_expired": self._evicted_expired,
+            }
 
     def _pop(self, key: tuple[str, int]) -> _IdleConnection | None:
         with self._lock:
@@ -88,6 +140,8 @@ class PassthroughConnectionPool:
         fresh: bool = False,
     ) -> tuple[http.client.HTTPConnection, bool]:
         """Передаёт вызывающему подключённое соединение; ошибок send здесь нет."""
+        if self._sweep_enabled():
+            self.sweep_expired()
         while not fresh:
             entry = self._pop((host, port))
             if entry is None:
@@ -115,6 +169,8 @@ class PassthroughConnectionPool:
         can_reuse: bool = True,
     ) -> None:
         """Принимает владение ровно один раз: сохраняет либо закрывает сокет."""
+        if self._sweep_enabled():
+            self.sweep_expired()
         if can_reuse and conn.sock is not None:
             with self._lock:
                 if not self._closed and self._idle_count < self._max_keepalive:

@@ -33,6 +33,8 @@ for _p in (_REPO_ROOT, Path(__file__).resolve().parents[1]):
         sys.path.insert(0, str(_p))
 
 from core.chat_key import resolve_chat_key  # noqa: E402
+from core.admission_idle_policy import format_claude_done_fields  # noqa: E402
+from core.http_accept import load_admission_idle_config  # noqa: E402
 from core.claude_zero_canon import (  # noqa: E402
     CLAUDE_PRESERVED_CA_FILES, build_claude_zero_canon_env, build_claude_zero_canon_flags,
     filter_claude_settings, filter_claude_state, serialize_claude_json,
@@ -195,9 +197,7 @@ CLAUDE_P_BRIDGE_IO_WAIT_CAP_S = _get_positive_float(
 CLAUDE_P_BRIDGE_SAFETY_CAP_S = _get_positive_float(
     "CLAUDE_P_BRIDGE_SAFETY_CAP_S", "BRIDGE_SAFETY_CAP_S", 3600.0
 )
-CLAUDE_P_BRIDGE_WATCHDOG_INTERVAL_S = _get_positive_float(
-    "CLAUDE_P_BRIDGE_WATCHDOG_INTERVAL_S", "BRIDGE_WATCHDOG_INTERVAL_S", 5.0
-)
+CLAUDE_P_BRIDGE_WATCHDOG_INTERVAL_S = _get_positive_float("CLAUDE_P_BRIDGE_WATCHDOG_INTERVAL_S", "BRIDGE_WATCHDOG_INTERVAL_S", 5.0)  # fmt: skip
 
 
 ROOT = Path(__file__).resolve().parent
@@ -217,7 +217,6 @@ CLAUDE_BIN = os.environ.get(
 )
 MCP_CONFIG = ROOT / "empty-mcp.json"
 WORKSPACE = ROOT / "workspace"
-
 
 _CLAUDE_HOME_LOCK = threading.Lock()
 _CLAUDE_HOME_INITIALIZED = False
@@ -243,17 +242,22 @@ def _read_json_dict(path: Path) -> dict | None:
 
 def _sync_ca_files(real_claude: Path, claude_dir: Path) -> None:
     claude_dir.mkdir(parents=True, exist_ok=True)
-    try: os.chmod(claude_dir, 0o700)
-    except OSError: pass
+    try:
+        os.chmod(claude_dir, 0o700)
+    except OSError:
+        pass
     for name in _CLAUDE_CA_FILES:
         try:
             src = real_claude / name
-            if src.is_file(): _write_atomic(claude_dir / name, src.read_bytes())
-        except OSError: pass
+            if src.is_file():
+                _write_atomic(claude_dir / name, src.read_bytes())
+        except OSError:
+            pass
     for src in (real_claude / ".claude.json", real_claude.parent / ".claude.json"):
         if src.is_file():
             st = _read_json_dict(src)
-            if st is not None: _write_atomic(claude_dir / ".claude.json", serialize_claude_json(filter_claude_state(st)).encode("utf-8"))
+            if st is not None:
+                _write_atomic(claude_dir / ".claude.json", serialize_claude_json(filter_claude_state(st)).encode("utf-8"))
             break
 
 def spawn_registered(cmd: list, **kwargs: Any) -> subprocess.Popen:
@@ -262,7 +266,8 @@ def spawn_registered(cmd: list, **kwargs: Any) -> subprocess.Popen:
     h = env.get("HOME", "") if raw is not None else ""
     kwargs["env"] = build_claude_zero_canon_env(env, h if h and Path(h).resolve() != Path.home().resolve() else iso)
     return _spawn_registered(cmd, **kwargs)
-for _a in ("unregister", "set_blocked"): setattr(spawn_registered, _a, getattr(_spawn_registered, _a))
+for _a in ("unregister", "set_blocked"):
+    setattr(spawn_registered, _a, getattr(_spawn_registered, _a))
 
 def _prepare_claude_home(claude_home: Path | None = None, real_home: Path | None = None) -> Path:
     global _CLAUDE_HOME_INITIALIZED
@@ -278,7 +283,8 @@ def _prepare_claude_home(claude_home: Path | None = None, real_home: Path | None
         raw = _read_json_dict(src) if src.is_file() else {}
         if raw is not None:
             _write_atomic(claude_dir / "settings.json", serialize_claude_json(filter_claude_settings(raw)).encode("utf-8"))
-            if use_cache: _CLAUDE_HOME_INITIALIZED = True
+            if use_cache:
+                _CLAUDE_HOME_INITIALIZED = True
         return home
 MAX_CONCURRENT = int(os.environ.get("CLAUDE_P_BRIDGE_MAX_CONCURRENT", "32"))
 QUEUE_TIMEOUT_S = int(os.environ.get("CLAUDE_P_BRIDGE_QUEUE_TIMEOUT", "900"))
@@ -294,12 +300,8 @@ HTTP_TIMEOUT_S = float(os.environ.get("CLAUDE_P_BRIDGE_HTTP_TIMEOUT_S", "1800"))
 HTTP_BACKLOG = _env_positive_int("CLAUDE_P_BRIDGE_HTTP_BACKLOG", 64)
 # Лимиты изображений — env с безопасными значениями по умолчанию из core.
 MAX_IMAGES = _env_positive_int("CLAUDE_P_BRIDGE_MAX_IMAGES", DEFAULT_MAX_IMAGES)
-MAX_IMAGE_BYTES = _env_positive_int(
-    "CLAUDE_P_BRIDGE_MAX_IMAGE_BYTES", DEFAULT_MAX_IMAGE_BYTES
-)
-MAX_TOTAL_IMAGE_BYTES = _env_positive_int(
-    "CLAUDE_P_BRIDGE_MAX_TOTAL_IMAGE_BYTES", DEFAULT_MAX_TOTAL_IMAGE_BYTES
-)
+MAX_IMAGE_BYTES = _env_positive_int("CLAUDE_P_BRIDGE_MAX_IMAGE_BYTES", DEFAULT_MAX_IMAGE_BYTES)  # fmt: skip
+MAX_TOTAL_IMAGE_BYTES = _env_positive_int("CLAUDE_P_BRIDGE_MAX_TOTAL_IMAGE_BYTES", DEFAULT_MAX_TOTAL_IMAGE_BYTES)  # fmt: skip
 IMAGE_TMP_ROOT = Path(os.environ.get("CLAUDE_P_BRIDGE_TMPDIR", "/tmp"))
 MODEL_CONTEXT = {
     "claude-sonnet-5-5": 1_000_000,
@@ -316,13 +318,10 @@ _active_img_dirs: set = set()
 _active_lock = threading.Lock()
 _started = time.time()
 
-
 def _log(msg: str) -> None:
     """Диагностика в stderr (файлы вне каталога моста не создаём)."""
     try:
-        sys.stderr.write(
-            f"{time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())} {msg}\n"
-        )
+        sys.stderr.write(f"{time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())} {msg}\n")  # fmt: skip
         sys.stderr.flush()
     except OSError:
         pass
@@ -831,12 +830,8 @@ class Handler(BaseHTTPRequestHandler):
 
     @staticmethod
     def _log_turn_done(turn: _Turn, out: dict, t0: float) -> None:
-        out_calls = out.get("tool_calls")
-        out_text = out.get("text")
-        _log(f"done model={turn.model} effort={turn.effort} rc={out['rc']} state={out['state']} "
-             f"tools={len(out_calls) if isinstance(out_calls, list) else 0} "
-             f"out_bytes={len(out_text.encode()) if isinstance(out_text, str) else 0} "
-             f"wall_s={time.monotonic() - t0:.1f} {turn.tag}")
+        cfg = load_admission_idle_config()
+        _log(format_claude_done_fields((turn.model, turn.effort, turn.tag), out, time.monotonic() - t0, cfg))  # fmt: skip
 
     @staticmethod
     def _error_body(out: dict) -> Any:

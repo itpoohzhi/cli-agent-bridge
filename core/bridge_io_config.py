@@ -146,3 +146,13 @@ class AdmissionBudget:
             if flags is not None:
                 self._ui_count -= int(flags[0])
                 self._header_count -= int(flags[1])
+
+    @property
+    def limit(self) -> int:
+        """Эффективный лимит admission (read-only)."""
+        return self._config.admission_limit
+
+    @property
+    def config(self) -> BridgeIOConfig:
+        """Снимок конфигурации бюджетов (read-only)."""
+        return self._config
