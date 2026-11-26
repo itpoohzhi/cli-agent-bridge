@@ -190,7 +190,7 @@ def _check_leader_reaped(
             if reap_leader() is not None:
                 return True, False, False
         except OSError:
-            return True, True, False
+            return False, True, False
     ident = probe.probe_live(key.leader_pid)
     if ident is not None:
         if key.leader_start_time_us > 0 and ident.start_time_us != key.leader_start_time_us:

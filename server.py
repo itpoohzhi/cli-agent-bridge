@@ -5350,7 +5350,8 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
 
     def handle_one_request(self) -> None:
         self._turn_mode = None
-        try: super().handle_one_request()
+        try:
+            super().handle_one_request()
         finally:
             tracking = getattr(self.server, "set_connection_active", None)
             if tracking is not None and not tracking(self.connection, False):
@@ -5725,7 +5726,7 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
         ]  # mid последнего content-куска в pieces (разделитель "\n\n" между сообщениями)
         pushback = None  # элемент очереди, подсмотренный при коалесации, но не обработанный сейчас
         from core.p12_hub_cancel_seam import get_hub_p12_seam
-        from core.turn_mode_cancel_policy import TurnMode
+        from core.turn_mode_cancel_policy import CancelDecision, TurnMode
         managed_turn = getattr(self, "_active_managed_turn", None)
         turn_mode = self._turn_mode if isinstance(self._turn_mode, TurnMode) else TurnMode.UNKNOWN
         watchdog_enabled = os.environ.get("BRIDGE_ADAPTIVE_WATCHDOG_ENABLED", "true").strip().lower() in ("1", "true", "yes", "on")
@@ -5779,8 +5780,7 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
                     self._delivery_reserved += piece_bytes
                     if not sse_writer("content", piece):
                         self._client_write_dead = True
-                        if managed_turn is not None: get_hub_p12_seam().on_client_disconnect(managed_turn, TURN_MANAGER, turn_mode)
-                        if not (managed_turn is not None and turn_mode is TurnMode.DETACHED):
+                        if (get_hub_p12_seam().on_client_disconnect(managed_turn, TURN_MANAGER, turn_mode) if managed_turn is not None else None) is not CancelDecision.MARK_DETACHED:
                             break
             elif managed_turn is not None and not managed_turn.buffer.sealed:
                 for piece in _text_slices(text):
@@ -5802,8 +5802,7 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
                     self._delivery_reserved += piece_bytes
                     if not sse_writer("reasoning", piece):
                         self._client_write_dead = True
-                        if managed_turn is not None: get_hub_p12_seam().on_client_disconnect(managed_turn, TURN_MANAGER, turn_mode)
-                        if not (managed_turn is not None and turn_mode is TurnMode.DETACHED):
+                        if (get_hub_p12_seam().on_client_disconnect(managed_turn, TURN_MANAGER, turn_mode) if managed_turn is not None else None) is not CancelDecision.MARK_DETACHED:
                             break
             elif managed_turn is not None and not managed_turn.buffer.sealed:
                 for piece in _text_slices(text):
@@ -5885,10 +5884,8 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
                         f"{cli_label('no_progress')} within {effective_idle:.1f}s",
                     )
             if not self._client_write_dead and _client_gone(self.connection):
-                if detach_on_disconnect:
+                if managed_turn is not None and get_hub_p12_seam().on_client_disconnect(managed_turn, TURN_MANAGER, turn_mode) is CancelDecision.MARK_DETACHED:
                     self._client_write_dead = True
-                    if managed_turn is not None:
-                        TURN_MANAGER.mark_detached(managed_turn.turn_id)
                 else:
                     return state("client_gone", 1)
             try:
@@ -5923,10 +5920,8 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
                 ):
                     last_ka = time.monotonic()
                     if not keepalive():
-                        if detach_on_disconnect:
+                        if managed_turn is not None and get_hub_p12_seam().on_client_disconnect(managed_turn, TURN_MANAGER, turn_mode) is CancelDecision.MARK_DETACHED:
                             self._client_write_dead = True
-                            if managed_turn is not None:
-                                TURN_MANAGER.mark_detached(managed_turn.turn_id)
                         else:
                             return state("client_gone", 1)
                 continue
@@ -7272,6 +7267,8 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
             _log(f"done route=cli status={self._response_status} {self._trace_log_fields()} elapsed_ms={int((time.monotonic() - started) * 1000)}")
 
     def _serve_json_body(self, ctx: dict[str, Any]) -> None:
+        from core.p12_hub_cancel_seam import get_hub_p12_seam
+        self._turn_mode = get_hub_p12_seam().resolve_mode_for_ctx(ctx)
         lease = self._current_lease()
         try:
             out = self._dispatch(ctx, None)
@@ -7398,7 +7395,7 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
         created = int(time.time())
         shown_model = ctx["model"]
         from core.p12_hub_cancel_seam import get_hub_p12_seam
-        from core.turn_mode_cancel_policy import TurnMode
+        from core.turn_mode_cancel_policy import CancelDecision
         managed_turn: ManagedTurn | None = ctx.get("managed_turn") or getattr(self, "_active_managed_turn", None)
         p12_seam = get_hub_p12_seam()
         self._turn_mode = p12_seam.resolve_mode_for_ctx(ctx)
@@ -7406,7 +7403,8 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
             _log("client gone before headers")
             self._telemetry_gone()
             lease.record_discard("client_disconnected")
-            if managed_turn is not None: p12_seam.on_client_disconnect(managed_turn, TURN_MANAGER, self._turn_mode)
+            if managed_turn is not None:
+                p12_seam.on_client_disconnect(managed_turn, TURN_MANAGER, self._turn_mode)
 
         def chunk(delta: dict, finish=None) -> str:
             payload = {"id": completion_id, "object": "chat.completion.chunk", "created": created, "model": shown_model, "choices": [{"index": 0, "delta": delta, "finish_reason": finish}]}
@@ -7519,11 +7517,9 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
                 return
             # Пустой стартовый кадр успехом не считается; обрыв клиента нейтрален.
             lease.record_discard("client_disconnected")
-            if self._turn_mode is TurnMode.DETACHED and managed_turn is not None:
+            if managed_turn is not None and p12_seam.on_client_disconnect(managed_turn, TURN_MANAGER, self._turn_mode) is CancelDecision.MARK_DETACHED:
                 self._client_write_dead = True
-                TURN_MANAGER.mark_detached(managed_turn.turn_id)
             else:
-                if managed_turn is not None: p12_seam.on_client_disconnect(managed_turn, TURN_MANAGER, self._turn_mode)
                 return
         try:
             try:
@@ -7548,7 +7544,8 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
             return
         if self._client_write_dead:
             _log("client_write_dead: terminal frames suppressed")
-            if managed_turn is not None: p12_seam.on_client_disconnect(managed_turn, TURN_MANAGER, self._turn_mode)
+            if managed_turn is not None:
+                p12_seam.on_client_disconnect(managed_turn, TURN_MANAGER, self._turn_mode)
             lease.record_discard("client_disconnected")
             return
         if out.get("state") == "client_gone":

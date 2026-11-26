@@ -210,3 +210,58 @@ def test_f006_cancel_turn_flag_on_live_pgid_reaps_without_reap_leader(
         except OSError:
             pass
 
+
+def test_f015_cancel_turn_flag_off_keeps_pgid_registered_until_terminate_pgid(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from core.turn_session_manager import TurnSessionManager
+
+    reset_hub_p12_seam_for_tests()
+    mgr = TurnSessionManager(state_root=tmp_path, persist_children_file=False)
+    events: list[str] = []
+    turn, _ = mgr.create_or_attach_turn(
+        model="m1", backend="b1", cwd=str(tmp_path), messages=[{"role": "user", "content": "hi"}],
+        owner_token_hash="h1", rid="r-f015", slot_release_fn=lambda: events.append("slot"),
+    )
+    turn.pgid = 55555
+    turn.add_cancel_callback(lambda: events.append("cb"))
+    monkeypatch.setattr(mgr, "unregister_child_pgid", lambda p: events.append(f"unreg:{p}"))
+    monkeypatch.setattr(mgr, "_terminate_pgid", lambda p, g: (events.append(f"term:{p}"), mgr.unregister_child_pgid(p)))
+    mgr.cancel_turn(turn.turn_id, reason="client_disconnected")
+    assert events == ["slot", "cb", "term:55555", "unreg:55555"]
+    reset_hub_p12_seam_for_tests()
+
+
+def test_f014_check_leader_reaped_returns_false_on_reap_leader_oserror() -> None:
+    from core.pgid_cleanup_driver import _check_leader_reaped
+    from core.pgid_cleanup_policy import CleanupKey
+
+    key = CleanupKey(turn_id="t", attempt_epoch=1, pgid=99999, leader_pid=99999, leader_start_time_us=0)
+    def _boom() -> int | None:
+        raise OSError("transient")
+    reaped, gone, reused = _check_leader_reaped(key, _boom, PosixProcProbe())
+    assert (reaped, gone, reused) == (False, True, False)
+
+
+def test_f013_nonstream_detached_turn_sets_turn_mode_before_reply_json() -> None:
+    import server as hub_server
+
+    src = Path(hub_server.__file__).read_text(encoding="utf-8")
+    assert "self._turn_mode = get_hub_p12_seam().resolve_mode_for_ctx(ctx)" in src
+    assert "if detach_on_disconnect:" not in src
+    h = object.__new__(hub_server.Handler)
+    h._trace = None
+    h._response_status = 0
+    h._turn_mode = TurnMode.DETACHED
+    h._telemetry_error_response = lambda *a: None
+    h.send_response = lambda _c: None
+    h.send_header = lambda _k, _v: None
+    h.end_headers = lambda: None
+    h.wfile = SimpleNamespace(write=lambda _b: (_ for _ in ()).throw(BrokenPipeError("gone")))
+    h._send(200, {"ok": True})  # DETACHED swallows BrokenPipeError
+    h._turn_mode = TurnMode.NON_DETACHED
+    with pytest.raises(BrokenPipeError):
+        h._send(200, {"ok": True})
+
+
+

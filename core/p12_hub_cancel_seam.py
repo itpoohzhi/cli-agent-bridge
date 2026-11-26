@@ -22,7 +22,6 @@ from core.pgid_cleanup_driver import (
     CachedDynamicFlagReader,
     PosixProcProbe,
     ProcProbePort,
-    darwin_probe_live_pid,
 )
 from core.pgid_cleanup_policy import CleanupKey, GroupProbeStatus
 from core.pgid_reaper import AlertCallback, BoundedPgidReaper, ReleaseCallback
@@ -222,6 +221,7 @@ class HubP12CancelSeam:
         pgid: int | None,
         release_fn: ReleaseCallback,
         reap_leader: Callable[[], int | None] | None = None,
+        deferred_release_fn: ReleaseCallback | None = None,
     ) -> SlotReleaseDecision:
         """Gate slot release on confirmed-dead PGID ONLY when flag #4 on AND pgid registered."""
         pgid_ok = isinstance(pgid, int) and pgid > 1
@@ -231,7 +231,7 @@ class HubP12CancelSeam:
             release_fn()
             return decision
         assert pgid is not None
-        ident = darwin_probe_live_pid(pgid)
+        ident = self._probe.probe_live(pgid)
         key = CleanupKey(
             turn_id=turn_id or f"hub-{pgid}",
             attempt_epoch=next(self._epoch_seq),
@@ -239,7 +239,8 @@ class HubP12CancelSeam:
             leader_pid=pgid,
             leader_start_time_us=ident.start_time_us if ident is not None else 0,
         )
-        self._get_reaper().register_and_cancel(key, release_fn, reap_leader=reap_leader)
+        cb = deferred_release_fn if deferred_release_fn is not None else release_fn
+        self._get_reaper().register_and_cancel(key, cb, reap_leader=reap_leader)
         return decision
 
     def shutdown(self, timeout_s: float = 1.0) -> None:

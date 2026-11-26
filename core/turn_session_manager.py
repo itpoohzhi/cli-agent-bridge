@@ -1295,8 +1295,6 @@ class TurnSessionManager:
         """Гарантирует освобождение ресурсов хода при выходе потока-исполнителя до финализации."""
         if turn is None:
             return
-        from core.p12_hub_cancel_seam import get_hub_p12_seam
-        get_hub_p12_seam().gate_slot_release(turn.turn_id, turn.pgid, turn.release_slot_once)
         with self._lock:
             if turn.is_terminal:
                 return
@@ -1310,6 +1308,8 @@ class TurnSessionManager:
                 turn.timeout_controller.close()
             turn.done_event.set()
             self._cond.notify_all()
+        from core.p12_hub_cancel_seam import get_hub_p12_seam
+        get_hub_p12_seam().gate_slot_release(turn.turn_id, turn.pgid, turn.release_slot_once)
 
     def mark_detached(self, turn_id: str) -> None:
         """Переводит активный ход в `RUNNING_DETACHED` при разрыве HTTP-соединения."""
@@ -1365,27 +1365,26 @@ class TurnSessionManager:
             pgid = turn.pgid
             callbacks = list(turn._cancel_callbacks)
 
-        def _release_turn() -> None:
-            try: (self.unregister_child_pgid(pgid) if pgid is not None else None)
-            finally: turn.release_slot_once()
+        def _release_deferred() -> None:
+            try:
+                if pgid is not None:
+                    self.unregister_child_pgid(pgid)
+            finally:
+                turn.release_slot_once()
         from core.p12_hub_cancel_seam import get_hub_p12_seam
         from core.turn_mode_cancel_policy import SlotReleaseDecision
-        rel_dec = get_hub_p12_seam().gate_slot_release(turn.turn_id, pgid, _release_turn)
+        rel_dec = get_hub_p12_seam().gate_slot_release(turn.turn_id, pgid, turn.release_slot_once, deferred_release_fn=_release_deferred)
         for cb in callbacks:
-            try: cb()
-            except Exception: pass
-        if pgid is not None and rel_dec is SlotReleaseDecision.RELEASE_IMMEDIATE: self._terminate_pgid(pgid, self.cancel_grace_s)
+            try:
+                cb()
+            except Exception:
+                pass
+        if pgid is not None and rel_dec is SlotReleaseDecision.RELEASE_IMMEDIATE:
+            self._terminate_pgid(pgid, self.cancel_grace_s)
 
         with self._lock:
             if not turn.buffer.sealed:
-                turn.buffer.append(
-                    "error",
-                    {
-                        "message": f"Turn cancelled ({reason})",
-                        "type": "cancelled",
-                        "code": "turn_cancelled",
-                    },
-                )
+                turn.buffer.append("error", {"message": f"Turn cancelled ({reason})", "type": "cancelled", "code": "turn_cancelled"})
                 turn.buffer.seal()
             if turn.timeout_controller is not None:
                 turn.timeout_controller.close()
