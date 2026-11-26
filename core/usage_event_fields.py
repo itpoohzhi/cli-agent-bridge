@@ -39,12 +39,27 @@ def _is_positive(value: Any) -> bool:
     return _is_number(value) and value > 0
 
 
+def _cache_creation_sources(raw: Mapping[str, Any]) -> tuple[Mapping[str, Any], ...]:
+    """Собрать допустимые контейнеры поиска cache_creation: корень, вложенный usage и prompt_tokens_details."""
+    sources: list[Mapping[str, Any]] = [raw]
+    for parent in (raw, raw.get("usage")):
+        if not isinstance(parent, Mapping):
+            continue
+        if parent is not raw:
+            sources.append(parent)
+        details = parent.get("prompt_tokens_details")
+        if isinstance(details, Mapping):
+            sources.append(details)
+    return tuple(sources)
+
+
 def extract_cache_creation(raw: Mapping[str, Any]) -> int | None:
-    """cache_creation_tokens из usage по известным ключам (без импорта usage_wire); нет валидного счётчика — None."""
-    for key in CACHE_CREATION_RAW_KEYS:
-        value = raw.get(key)
-        if _is_counter(value):
-            return value
+    """cache_creation_tokens из usage (корень, вложенный usage или prompt_tokens_details); нет счётчика — None."""
+    for source in _cache_creation_sources(raw):
+        for key in CACHE_CREATION_RAW_KEYS:
+            value = source.get(key)
+            if _is_counter(value):
+                return value
     return None
 
 

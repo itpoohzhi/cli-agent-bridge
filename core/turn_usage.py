@@ -129,9 +129,8 @@ def _compute_totals(update: UsageUpdate) -> tuple[int, int] | str:
 
 def _soften_cache_creation(update: UsageUpdate) -> UsageUpdate | None:
     """Drop only an over-reported cache_creation when cache_read itself is valid."""
-    if not update.input_includes_cache or update.cache_creation_tokens is None:
+    if not update.input_includes_cache or update.cache_creation_tokens is None or update.input_tokens is None:
         return None
-    assert update.input_tokens is not None
     read = update.cache_read_tokens or 0
     if read > update.input_tokens or read + update.cache_creation_tokens <= update.input_tokens:
         return None

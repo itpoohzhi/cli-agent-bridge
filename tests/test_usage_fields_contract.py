@@ -96,3 +96,16 @@ def test_finalize_zero_counters_usage_block() -> None:
     assert event["usage_source"] is None
     assert event["usage_missing_reason"] in {"empty_zero_usage", "omitted"}
     assert event["total_tokens"] is None
+
+
+def test_extract_cache_creation_nested_usage_and_details() -> None:
+    """F-001 regression: cache_creation извлекается из корня, вложенного usage и prompt_tokens_details."""
+    from core.usage_event_fields import extract_cache_creation
+
+    assert extract_cache_creation({"usage": {"cache_creation_input_tokens": 100}}) == 100
+    assert extract_cache_creation({"usage": {"prompt_tokens_details": {"cache_creation_tokens": 55}}}) == 55
+    assert extract_cache_creation({"prompt_tokens_details": {"cacheCreationTokens": 33}}) == 33
+    assert extract_cache_creation({"usage": {"cache_creation_input_tokens": True}}) is None
+    upd = telemetry_usage_updates({"prompt_tokens": 600, "usage": {"cache_creation_input_tokens": 200}})
+    assert upd["usage_present"] is True
+    assert upd["cache_creation_tokens"] == 200

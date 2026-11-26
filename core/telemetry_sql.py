@@ -56,13 +56,13 @@ _E = {  # SQL-выражения агрегатов; одни и те же дл�
 SUMMARY_COLS = (
     "total_requests ok_requests error_requests stream_requests subagent_requests interactive_requests "
     "avg_queue_ms avg_ttfb_ms p50_ttfb_ms p95_ttfb_ms p99_ttfb_ms avg_total_ms p50_total_ms p95_total_ms "
-    "p99_total_ms max_total_ms prompt_tokens completion_tokens cached_tokens reasoning_tokens total_tokens "
+    "p99_total_ms max_total_ms prompt_tokens completion_tokens cached_tokens reasoning_tokens cache_creation_tokens total_tokens "
     "total_response_bytes"
 ).split()
 MODEL_COLS = "outbound_target egress_proxy requests ok_requests error_requests avg_ttfb_ms p50_total_ms p95_total_ms avg_total_ms max_total_ms prompt_tokens completion_tokens cached_tokens reasoning_tokens cache_creation_tokens total_tokens".split()
 BACKEND_COLS = "requests ok_requests error_requests avg_ttfb_ms p50_total_ms p95_total_ms avg_total_ms max_total_ms total_tokens".split()
 CLIENT_COLS = "requests ok_requests error_requests avg_total_ms total_tokens reasoning_tokens last_seen_ts".split()
-HOUR_COLS = "requests ok_requests error_requests total_tokens avg_total_ms".split()
+HOUR_COLS = "requests ok_requests error_requests total_tokens cache_creation_tokens avg_total_ms".split()
 ROLE_COLS = "requests ok_requests error_requests prompt_tokens completion_tokens cached_tokens reasoning_tokens cache_creation_tokens total_tokens avg_total_ms".split()
 DAY_COLS = ROLE_COLS
 
