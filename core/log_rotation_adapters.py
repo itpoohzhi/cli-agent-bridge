@@ -48,7 +48,7 @@ class DynamicJsonBoolCache:
         cached = self._entries.get(config_path)
         if cached is not None and cached[0] == sig:
             return cached[1]
-        if stat.S_ISDIR(st.st_mode):
+        if not stat.S_ISREG(st.st_mode):
             res: Tuple[Optional[Dict[str, object]], bool] = (None, True)
             self._entries[config_path] = (sig, res)
             return res

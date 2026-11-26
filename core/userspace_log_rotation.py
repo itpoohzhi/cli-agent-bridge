@@ -29,7 +29,7 @@ class _ArchiveUnsafeError(OSError):
 
 def supports_secure_dir_fd() -> bool:
     """Verify platform supports the exact dir_fd callables used at runtime (Py 3.9.6+ safe)."""
-    required_fns = (os.open, os.stat, os.rename, os.unlink)
+    required_fns = (os.open, os.stat, os.rename, os.unlink, os.mkdir)
     required_flags = ("O_NOFOLLOW", "O_DIRECTORY", "O_NONBLOCK", "O_CLOEXEC")
     return all(fn in os.supports_dir_fd for fn in required_fns) and all(hasattr(os, fl) for fl in required_flags)
 
