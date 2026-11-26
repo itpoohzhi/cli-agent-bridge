@@ -34,6 +34,7 @@ CLAUDE_STDERR_MAX_BOUNDS = (32.0, 2048.0)
 # индексов видимых символов и три проекции (a/b/c). ANSI/C0/C1 удаляются, [\r\n\t]→пробел;
 # секреты ищутся на проекциях, маскируются индексы out и один раз сворачиваются в [REDACTED].
 # O(N), ZERO ReDoS: все квантификаторы над дизъюнктными классами, 0 деструктивных проходов.
+_ANSI_SENTINEL = -1  # map_a ANSI-пробелов проекции a.
 _TOK_RE = re.compile(
     r"(\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)"
     r"|\x1b[()][A-Z0-9]|\x1b[@-Z\\-_]|\x1b|[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f])"
@@ -46,16 +47,34 @@ _PREFIX_RE = re.compile(
     r"|AIza[0-9A-Za-z_-]{8,}"
     r"|eyJ[A-Za-z0-9_-]{6,}(?:\.[A-Za-z0-9_-]+)*"
 )
+_Q = r'(?:"(?:\\.|[^"\\])*(?:"|$)|\'(?:\\.|[^\'\\])*(?:\'|$))'  # RW-001: O(N), незакрытая кавычка — до конца строки.
+_VAL = rf"(?:{_Q}|[^ ]+)"
+_AUTH_VAL = (
+    rf"(?:{_Q}|(?:(?i:bearer|basic)[ ]+)?"
+    rf"(?:{_Q}|[^ ;\"'])+(?:;[ ]*(?:{_Q}|[^ ;\"'])+)*)"
+)
+_KEY_SUFFIXES = ("token", "secret", "password", "passwd", "auth", "cookie")
+_KEY_COMPOUNDS = tuple(
+    "api secret access private signing client auth master encrypt encryption bridge".split()
+)
+_IDENT_KEY = (
+    r"(?<![A-Za-z0-9_-])(?:"
+    r"[A-Za-z0-9_-]*(?:"
+    r"(?i:" + "|".join(_KEY_SUFFIXES) + r")"
+    r"|(?-i:KEY|Key)"
+    r"|(?i:(?:" + "|".join(_KEY_COMPOUNDS) + r")[_-]?key)"
+    r"|[_-](?i:key)"
+    r")|(?i:key))"
+)
 _SECRET_RE = re.compile(
-    r"(?i:(?:authorization|cookie))[\"']?[ ]*[:=][ ]*[\"']?"
-    r"(?:(?i:bearer|basic)[ ]+)?"
-    r"(?:\"[^\"]+\"|'[^']+'|[^ ;]+(?:;[ ]*[^ ;]+)*)"
-    r"|(?<![A-Z0-9_])(?-i:[A-Z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|AUTH|COOKIE))"
-    r"[\"']?[ ]*[:=][ ]*(?:\"[^\"]+\"|'[^']+'|[^ ]+)"
-    r"|(?i:(?:api[_-]?key|secret[_-]?key|access[_-]?key|token|secret|password|passwd|auth[_-]?token))"
-    r"[\"']?[ ]*[:=][ ]*(?:\"[^\"]+\"|'[^']+'|[^ ]+)"
-    r"|(?i:(?:bearer|basic))[ ]+[^ ]+"
-    r"|" + _PREFIX_RE.pattern
+    "|".join(
+        (
+            r"(?i:(?:authorization|cookie))[\"']?[ ]*[:=][ ]*" + _AUTH_VAL,
+            _IDENT_KEY + r"[\"']?[ ]*[:=][ ]*" + _VAL,
+            r"(?i:(?:bearer|basic))[ ]+" + _VAL,
+            _PREFIX_RE.pattern,
+        )
+    )
 )
 
 
@@ -97,7 +116,7 @@ def resolve_socket_timeout_for_phase(
 def _project_stderr_views(
     raw: str,
 ) -> tuple[list[str], bytearray, str, list[int], str, list[int], str, list[int]]:
-    """Проекции видимых символов: a ANSI→пробел(idx -1), b склейка ANSI, c склейка ANSI+[\\r\\n\\t]."""
+    """Проекции видимых символов: a ANSI→пробел (idx=_ANSI_SENTINEL), b склейка ANSI, c склейка ANSI+[\\r\\n\\t]."""
     out: list[str] = []
     a: list[str] = []
     c: list[str] = []
@@ -125,7 +144,7 @@ def _project_stderr_views(
             sep_next = True
         else:
             a.append(" ")
-            ma.append(-1)
+            ma.append(_ANSI_SENTINEL)
             sep_next = True
     va = "".join(a)
     vb = "".join(out)
@@ -141,19 +160,26 @@ def _mark_spans(
     masked: bytearray,
     sep_flags: bytearray,
 ) -> None:
-    """Помечает индексы out для совпадений с валидной левой границей слова (Span-Union)."""
+    """Помечает индексы out (Span-Union); отказ по границе слова не «съедает» вложенный секрет (F-002)."""
     padded = " " + view
-    for m in pat.finditer(view):
+    pos = 0
+    while m := pat.search(view, pos):
         start = m.start()
         if _WORD_CHAR_RE.match(padded[start]):
             if not sep_flags[mapping[start]]:
+                pos = start + 1
                 continue
         for idx in range(start, m.end()):
             masked[mapping[idx]] = 1
+        pos = m.end()
 
 
 def sanitize_stderr_tail(raw: str, max_chars: int = 240) -> str:
-    """Однострочный хвост: Span-Union редакцией секретов по трём проекциям, [\\r\\n\\t]→пробел."""
+    """Однострочный хвост: Span-Union редакцией секретов по трём проекциям, [\\r\\n\\t]→пробел.
+
+    Best-effort: key[:=]val (единый словарь ключей, включая *_key/camelCase/слитные имена), Authorization/Cookie, Bearer/Basic, префиксные токены.
+    Пробельные формы (--token abc, password hunter2 без [:=]) и ложные basic <word> — известные ограничения best-effort; незакрытая кавычка редактируется до конца строки.
+    """
     out, sep_flags, va, ma, vb, mb, vc, mc = _project_stderr_views(raw)
     masked = bytearray(len(out) + 1)
     _mark_spans(va, ma, _SECRET_RE, masked, sep_flags)
@@ -161,7 +187,7 @@ def sanitize_stderr_tail(raw: str, max_chars: int = 240) -> str:
     _mark_spans(vc, mc, _PREFIX_RE, masked, sep_flags)
     parts: list[str] = []
     in_span = False
-    # masked[-1] — мусорный слот для map_a=-1 (ANSI-пробелы проекции a); срез явно исключает его.
+    # masked[_ANSI_SENTINEL] — мусорный слот для map_a (ANSI-пробелы проекции a); срез явно исключает его.
     for ch, flag in zip(out, masked[: len(out)], strict=True):
         if flag:
             if not in_span:

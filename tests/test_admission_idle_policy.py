@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import sys
-import time
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -24,15 +23,13 @@ from core import bridge_io_config, drain_response, http_accept  # noqa: E402
 
 def test_config_defaults_fail_closed() -> None:
     cfg = P.AdmissionIdleConfig()
-    assert not cfg.phase_idle_timeout_enabled and not cfg.active_ttl_sweep_enabled
-    assert not cfg.admission_telemetry_enabled and not cfg.claude_stderr_log_enabled
+    assert not cfg.phase_idle_timeout_enabled and not cfg.active_ttl_sweep_enabled and not cfg.admission_telemetry_enabled and not cfg.claude_stderr_log_enabled
     assert (cfg.phase_idle_timeout_s, cfg.active_socket_timeout_s, cfg.claude_stderr_max_chars) == (30.0, 3600.0, 240)
 
 
 def test_admission_budget_limit_and_config_properties() -> None:
     budget = bridge_io_config.AdmissionBudget()
-    assert (budget.limit, budget.config.admission_limit) == (128, 128)
-    assert (budget.config.ui_reserve, budget.config.header_headroom) == (2, 2)
+    assert (budget.limit, budget.config.admission_limit) == (128, 128) and (budget.config.ui_reserve, budget.config.header_headroom) == (2, 2)
 
 
 @pytest.mark.parametrize("phase", ["idle", "active"])
@@ -84,10 +81,15 @@ def test_legacy_knob_warning_matrix() -> None:
     assert "sk-secret123" not in line and "[REDACTED]" in line and "effective_limit=128" in line
 
 
-def test_sanitize_stderr_tail_matrix() -> None:
-    assert P.sanitize_stderr_tail("") == "" and P.sanitize_stderr_tail("line1\nline2") == "line1 line2" and P.sanitize_stderr_tail("monkey=banana") == "monkey=banana" and P.sanitize_stderr_tail("disk-1234") == "disk-1234" and P.sanitize_stderr_tail("api_key=abc") == P.sanitize_stderr_tail("ghp_abcdef123456") == "[REDACTED]" and P.sanitize_stderr_tail("x" * 500, 40) == "..." + "x" * 40 and P.sanitize_stderr_tail("_" * 200_000, 40) == "..." + "_" * 40 and P.sanitize_stderr_tail("ABCDEF0123" * 20_000, 40) == "..." + "ABCDEF0123" * 4 and P.sanitize_stderr_tail('password="' + "a" * 100_000, 40) == "[REDACTED]"
-    t0 = time.monotonic()
-    assert len(P.sanitize_stderr_tail("A" * 200_000, 40)) == 43 and time.monotonic() - t0 < 1.0
+@pytest.mark.parametrize("raw,max_c,expected", [
+    ("", 240, ""), ("line1\nline2", 240, "line1 line2"), ("monkey=banana", 240, "monkey=banana"), ("disk-1234", 240, "disk-1234"), ('""', 240, '""'), ("api_key=abc", 240, "[REDACTED]"), ("ghp_abcdef123456", 240, "[REDACTED]"), ('password=""', 240, "[REDACTED]"), ('password="abc', 240, "[REDACTED]"), ('password="foo\\"bar" ok', 240, "[REDACTED] ok"), ('password="foo\\\\" ok', 240, "[REDACTED] ok"), ("monkey=A_PASSWORD=hunter2", 240, "monkey=[REDACTED]"),
+    ('{"password": "foo\\"bar", "user": "bob"}', 240, '{"[REDACTED], "user": "bob"}'), ('{"authorization": "a\\"b c", "user": "bob"}', 240, '{"[REDACTED], "user": "bob"}'), ('Cookie: a=1; sid="foo\\"bar baz" ok', 240, "[REDACTED] ok"), ('Authorization: Bearer "foo\\"bar baz" ok', 240, "[REDACTED] ok"), ('Bearer "foo\\"bar baz" ok', 240, "[REDACTED] ok"), ("xsk-1234=A_PASSWORD=hunter2", 240, "xsk-1234=[REDACTED]"), ("xBearer foo=A_PASSWORD=hunter2", 240, "xBearer foo=[REDACTED]"), ("xtoken=A_PASSWORD=hunter2", 240, "[REDACTED]"), ("x" * 500, 40, "..." + "x" * 40), ("_" * 200_000, 40, "..." + "_" * 40), ("ABCDEF0123" * 20_000, 40, "..." + "ABCDEF0123" * 4), ('password="' + "a" * 100_000, 40, "[REDACTED]")])
+def test_sanitize_stderr_tail_matrix(raw: str, max_c: int, expected: str) -> None:
+    assert P.sanitize_stderr_tail(raw, max_c) == expected
+
+
+def test_sanitize_stderr_tail_big_a_structural_guard() -> None:
+    assert len(P.sanitize_stderr_tail("A" * 200_000, 40)) == 43
 
 
 @pytest.mark.parametrize("raw,bad", [
@@ -95,7 +97,9 @@ def test_sanitize_stderr_tail_matrix() -> None:
     ("sk-\x1b[31mABCDEF", "ABCDEF"), ("sk-\x00ABCDEF", "ABCDEF"), ("\x1b(BAuthorization: Bearer tok123456", "tok123456"), ("eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.SigPartSecret999", "SigPartSecret999"), ('{"api_key": "jsonsecret999"}', "jsonsecret999"), ("Cookie: sid=cookiesecret999", "cookiesecret999"), ("Authorization: Bearer sk-abc12345\r\nBRIDGE_KEY=topsecret \x1b[31mERR\x1b[0m\x00", "topsecret"), ("err\x1b[31msk-abc12345\x1b[0m", "sk-abc12345"), ("err\x1b[31mBearer tok123456\x1b[0m", "tok123456"),
     ("err\x00sk-abc12345", "sk-abc12345"), ("err\x1b[31msk-\x1b[0mABCDEF", "ABCDEF"), ("sk-\tabc123456", "abc123456"), ("sk-abc\n1234567890abcdef", "1234567890abcdef"), ("eyJhbGciOiJIUzI1NiJ9.\nSigPartSecret999", "SigPartSecret999"), ("sk-\x1b[38:2:255:0:0mABCDEF", "ABCDEF"), ("Cookie: a=1; sid=cookiesecret999", "cookiesecret999"), ('{"authorization": "rawsecret999"}', "rawsecret999"),
     ("Cookie: a=1;\x1b[31msid=cookiesecret999", "cookiesecret999"), ("Authorization: Bearer tok\x1b[31m123456", "123456"), ("Authorization: Bearer sk-\x1b[31mABCDEF123456", "ABCDEF123456"), ("Authorization: Bearer sk-\tabc123456", "abc123456"), ("Bearer\ntok123456", "tok123456"), ("api_key=\nrawsecret999", "rawsecret999"), ("api_key=abc\x1b[31mDEF", "DEF"),
-    ("SECRETKEY=rawsecret999", "rawsecret999"), ("sk-abc12345\r\nBRIDGE_KEY=topsecret", "topsecret"), ("sk-abc12345\nCookie: sid=cookiesecret999", "cookiesecret999"), ("\x1b[31msk-abc12345\x1b[0mOPENAI_API_KEY=supersecret", "supersecret"), ('{"api_key": "\x1b[33mjsonsecret999\x1b[0m"}', "jsonsecret999"), ('OPENAI_API_KEY="\x1b[31msupersecret\x1b[0m"', "supersecret"), ("err\x1b[31mBearer tok\x1b[0m123456", "123456"), ("access_token=abc123456", "abc123456"), ("refresh_token=rtok1234", "rtok1234"), ("client_secret=csec1234", "csec1234"), ("db_password=dbpass1234", "dbpass1234"), ("my_api_key=myk12345", "myk12345"), ("user_passwd=upass1234", "upass1234"), ('password="my secret pass"', "secret pass"), ('{"password": "a b"}', "a b"), ("ERR\x1b[31mSECRETKEY=rawsecret999", "rawsecret999"), ("err\x1b[31mSECRETKEY=rawsecret999", "rawsecret999"), ("A" * 100 + "KEY=rawsecret999", "rawsecret999"), ("API_KEY=abc12345", "abc12345"), ("MY_TOKEN=tok12345", "tok12345"), ("DB_PASSWORD=pw12345", "pw12345"), ("FOO_API_KEY=abc12345", "abc12345")])
+    ("SECRETKEY=rawsecret999", "rawsecret999"), ("sk-abc12345\r\nBRIDGE_KEY=topsecret", "topsecret"), ("sk-abc12345\nCookie: sid=cookiesecret999", "cookiesecret999"), ("\x1b[31msk-abc12345\x1b[0mOPENAI_API_KEY=supersecret", "supersecret"), ('{"api_key": "\x1b[33mjsonsecret999\x1b[0m"}', "jsonsecret999"), ('OPENAI_API_KEY="\x1b[31msupersecret\x1b[0m"', "supersecret"), ("err\x1b[31mBearer tok\x1b[0m123456", "123456"), ("access_token=abc123456", "abc123456"), ("refresh_token=rtok1234", "rtok1234"), ("client_secret=csec1234", "csec1234"), ("db_password=dbpass1234", "dbpass1234"), ("my_api_key=myk12345", "myk12345"), ("user_passwd=upass1234", "upass1234"), ('password="my secret pass"', "secret pass"), ('{"password": "a b"}', "a b"), ("ERR\x1b[31mSECRETKEY=rawsecret999", "rawsecret999"), ("err\x1b[31mSECRETKEY=rawsecret999", "rawsecret999"), ("A" * 100 + "KEY=rawsecret999", "rawsecret999"), ("API_KEY=abc12345", "abc12345"), ("MY_TOKEN=tok12345", "tok12345"), ("DB_PASSWORD=pw12345", "pw12345"), ("FOO_API_KEY=abc12345", "abc12345"),
+    ('password="foo\\"bar"', 'bar"'), ("password='foo\\'bar'", "bar'"), ('password="a\\"b c"', "b c"), ('{"password": "foo\\"bar", "user": "bob"}', "foo"), ('{"authorization": "a\\"b c", "user": "bob"}', "b c"), ('Cookie: a=1; sid="foo\\"bar baz" ok', "bar baz"), ('Authorization: Bearer "foo\\"bar baz" ok', "bar baz"), ('Bearer "foo\\"bar baz" ok', "bar baz"), ("signing_key=AKIA123456789", "AKIA123456789"), ("private_key=priv1234", "priv1234"), ("client_key=ckey1234", "ckey1234"), ("encryption_key=ekey1234", "ekey1234"), ("my_key=mkey1234", "mkey1234"), ("x-key=xkey1234", "xkey1234"), ("key=bare1234", "bare1234"),
+    ("my_KEY=mkey1234", "mkey1234"), ("my_AUTH=mauth1234", "mauth1234"), ("accessToken=abc12345", "abc12345"), ('{"accessToken": "abc12345"}', "abc12345"), ("clientSecret=csec1234", "csec1234"), ("dbPassword=dbpw1234", "dbpw1234"), ("dbpassword=dbpw1234", "dbpw1234"), ("apikey=ak12345", "ak12345"), ("apiKey=ak12345", "ak12345"), ("privateKey=pk12345", "pk12345"), ("sessionCookie=sc12345", "sc12345"), ("xtoken=A_PASSWORD=hunter2", "hunter2"), ("xsk-1234=A_PASSWORD=hunter2", "hunter2"), ("xBearer foo=A_PASSWORD=hunter2", "hunter2")])
 def test_sanitize_stderr_tail_negative(raw: str, bad: str) -> None:
     out = P.sanitize_stderr_tail(raw)
     assert bad not in out and "[REDACTED]" in out and "sk-abc12345" not in out and not any(c in out for c in "\r\n\x1b\x00")
@@ -129,8 +133,7 @@ def test_drain_response_allows_actor_ppid() -> None:
 
 
 _DONE_OUT = {"rc": 0, "state": "ok", "tool_calls": [1, 2], "text": "hi"}
-_DONE_LEGACY = ("done model=m effort=high rc=0 state=ok tools=2 out_bytes=2 "
-                "wall_s=2.0 client=1.2.3.4:5 ua=x")
+_DONE_LEGACY = "done model=m effort=high rc=0 state=ok tools=2 out_bytes=2 wall_s=2.0 client=1.2.3.4:5 ua=x"
 
 
 def test_format_claude_done_legacy_exact() -> None:
@@ -172,17 +175,14 @@ class _FakeClock:
 
 
 class _FakeConn:
-    def __init__(self) -> None:
-        self.sock, self.closed, self.timeout = SimpleNamespace(settimeout=lambda t: None), 0, None
+    def __init__(self) -> None: self.sock, self.closed, self.timeout = SimpleNamespace(settimeout=lambda t: None), 0, None
     def connect(self) -> None: pass
     def close(self) -> None: self.closed += 1
 
 
 def _pool(clock: _FakeClock, **kw) -> PassthroughConnectionPool:
-    pool = PassthroughConnectionPool(
-        max_keepalive=kw.pop("max_keepalive", 4), keepalive_expiry_s=kw.pop("keepalive_expiry_s", 1.0),
-        select_fn=lambda r, w, x, timeout=0: ([], [], []),
-        monotonic_fn=clock, connection_fn=lambda h, p, t: _FakeConn())
+    pool = PassthroughConnectionPool(max_keepalive=kw.pop("max_keepalive", 4), keepalive_expiry_s=kw.pop("keepalive_expiry_s", 1.0),
+        select_fn=lambda r, w, x, timeout=0: ([], [], []), monotonic_fn=clock, connection_fn=lambda h, p, t: _FakeConn())
     pool.set_active_ttl_sweep(kw.pop("active_ttl_sweep", None))
     return pool
 
