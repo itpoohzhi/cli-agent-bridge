@@ -9,11 +9,12 @@ from time import gmtime, strftime
 from typing import Any
 
 from core.usage_schema import (
-    compute_uncached_prompt_tokens, normalize_status_code, normalize_usage_record_aliases, parse_ts_epoch,
+    compute_cache_hit_pct_strict, compute_uncached_prompt_tokens, eligible_cache_stats, normalize_status_code,
+    normalize_usage_record_aliases, parse_ts_epoch,
 )
 
 __all__: tuple[str, ...] = (
-    "AnomalyThresholds", "aggregate_records", "compute_cache_hit_pct", "compute_uncached_prompt_tokens",
+    "AnomalyThresholds", "aggregate_records", "compute_cache_hit_pct", "compute_cache_hit_pct_strict", "compute_uncached_prompt_tokens",
     "detect_prompt_anomalies", "enrich_with_cache_hit", "normalize_usage_record_aliases",
 )
 
@@ -225,6 +226,9 @@ def aggregate_records(
         _accumulate(by_day.setdefault(day, _new_bucket({"day": day}, with_status=True)), rec, with_status=True)
     summary["cache_hit_pct"] = compute_cache_hit_pct(summary["cached_tokens"], summary["prompt_tokens"])
     summary["uncached_prompt_tokens"] = compute_uncached_prompt_tokens(summary["prompt_tokens"], summary["cached_tokens"])
+    invalid, elig_cached, elig_prompt = eligible_cache_stats(records)
+    summary["invalid_usage_requests"] = invalid
+    summary["eligible_cache_hit_pct"] = compute_cache_hit_pct_strict(elig_cached, elig_prompt) if elig_prompt else None
     models = sorted(_with_uncached(list(by_model.values())), key=lambda x: (-x["requests"], -x["prompt_tokens"], x["model"], x["backend_id"]))
     roles = sorted(_with_uncached(list(by_role.values())), key=lambda x: (-x["prompt_tokens"], -x["requests"], x["subagent_role"], x["subagent_id"]))
     days = sorted(_with_uncached(list(by_day.values())), key=lambda x: x["day"])
