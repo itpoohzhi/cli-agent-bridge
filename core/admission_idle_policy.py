@@ -39,7 +39,7 @@ _TOK_RE = re.compile(
     r"|\x1b[()][A-Z0-9]|\x1b[@-Z\\-_]|\x1b|[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f])"
     r"|([\r\n\t])|([^\x00-\x1f\x7f-\x9f]+)"
 )
-_WORD_CHAR_RE = re.compile(r"[A-Za-z0-9_]")
+_WORD_CHAR_RE = re.compile(r"[A-Za-z0-9]")
 _PREFIX_RE = re.compile(
     r"(?:sk|pk|rk)[-_][A-Za-z0-9_.-]{4,}"
     r"|(?:ghp|github_pat)_[A-Za-z0-9_]{4,}"
@@ -48,11 +48,12 @@ _PREFIX_RE = re.compile(
 )
 _SECRET_RE = re.compile(
     r"(?i:(?:authorization|cookie))[\"']?[ ]*[:=][ ]*[\"']?"
-    r"(?:(?i:bearer|basic)[ ]+)?[^ ;]+(?:;[ ]*[^ ;]+)*"
-    r"|(?-i:[A-Z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|AUTH|COOKIE))"
-    r"[\"']?[ ]*[:=][ ]*[\"']?[^ ]+"
+    r"(?:(?i:bearer|basic)[ ]+)?"
+    r"(?:\"[^\"]+\"|'[^']+'|[^ ;]+(?:;[ ]*[^ ;]+)*)"
+    r"|(?<![A-Z0-9_])(?-i:[A-Z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|AUTH|COOKIE))"
+    r"[\"']?[ ]*[:=][ ]*(?:\"[^\"]+\"|'[^']+'|[^ ]+)"
     r"|(?i:(?:api[_-]?key|secret[_-]?key|access[_-]?key|token|secret|password|passwd|auth[_-]?token))"
-    r"[\"']?[ ]*[:=][ ]*[\"']?[^ ]+"
+    r"[\"']?[ ]*[:=][ ]*(?:\"[^\"]+\"|'[^']+'|[^ ]+)"
     r"|(?i:(?:bearer|basic))[ ]+[^ ]+"
     r"|" + _PREFIX_RE.pattern
 )
@@ -160,7 +161,8 @@ def sanitize_stderr_tail(raw: str, max_chars: int = 240) -> str:
     _mark_spans(vc, mc, _PREFIX_RE, masked, sep_flags)
     parts: list[str] = []
     in_span = False
-    for ch, flag in zip(out, masked, strict=False):
+    # masked[-1] — мусорный слот для map_a=-1 (ANSI-пробелы проекции a); срез явно исключает его.
+    for ch, flag in zip(out, masked[: len(out)], strict=True):
         if flag:
             if not in_span:
                 parts.append("[REDACTED]")

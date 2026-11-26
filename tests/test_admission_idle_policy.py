@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -84,7 +85,9 @@ def test_legacy_knob_warning_matrix() -> None:
 
 
 def test_sanitize_stderr_tail_matrix() -> None:
-    assert P.sanitize_stderr_tail("") == "" and P.sanitize_stderr_tail("line1\nline2") == "line1 line2" and P.sanitize_stderr_tail("monkey=banana") == "monkey=banana" and P.sanitize_stderr_tail("disk-1234") == "disk-1234" and P.sanitize_stderr_tail("api_key=abc") == P.sanitize_stderr_tail("ghp_abcdef123456") == "[REDACTED]" and P.sanitize_stderr_tail("x" * 500, 40) == "..." + "x" * 40
+    assert P.sanitize_stderr_tail("") == "" and P.sanitize_stderr_tail("line1\nline2") == "line1 line2" and P.sanitize_stderr_tail("monkey=banana") == "monkey=banana" and P.sanitize_stderr_tail("disk-1234") == "disk-1234" and P.sanitize_stderr_tail("api_key=abc") == P.sanitize_stderr_tail("ghp_abcdef123456") == "[REDACTED]" and P.sanitize_stderr_tail("x" * 500, 40) == "..." + "x" * 40 and P.sanitize_stderr_tail("_" * 200_000, 40) == "..." + "_" * 40 and P.sanitize_stderr_tail("ABCDEF0123" * 20_000, 40) == "..." + "ABCDEF0123" * 4 and P.sanitize_stderr_tail('password="' + "a" * 100_000, 40) == "[REDACTED]"
+    t0 = time.monotonic()
+    assert len(P.sanitize_stderr_tail("A" * 200_000, 40)) == 43 and time.monotonic() - t0 < 1.0
 
 
 @pytest.mark.parametrize("raw,bad", [
@@ -92,7 +95,7 @@ def test_sanitize_stderr_tail_matrix() -> None:
     ("sk-\x1b[31mABCDEF", "ABCDEF"), ("sk-\x00ABCDEF", "ABCDEF"), ("\x1b(BAuthorization: Bearer tok123456", "tok123456"), ("eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.SigPartSecret999", "SigPartSecret999"), ('{"api_key": "jsonsecret999"}', "jsonsecret999"), ("Cookie: sid=cookiesecret999", "cookiesecret999"), ("Authorization: Bearer sk-abc12345\r\nBRIDGE_KEY=topsecret \x1b[31mERR\x1b[0m\x00", "topsecret"), ("err\x1b[31msk-abc12345\x1b[0m", "sk-abc12345"), ("err\x1b[31mBearer tok123456\x1b[0m", "tok123456"),
     ("err\x00sk-abc12345", "sk-abc12345"), ("err\x1b[31msk-\x1b[0mABCDEF", "ABCDEF"), ("sk-\tabc123456", "abc123456"), ("sk-abc\n1234567890abcdef", "1234567890abcdef"), ("eyJhbGciOiJIUzI1NiJ9.\nSigPartSecret999", "SigPartSecret999"), ("sk-\x1b[38:2:255:0:0mABCDEF", "ABCDEF"), ("Cookie: a=1; sid=cookiesecret999", "cookiesecret999"), ('{"authorization": "rawsecret999"}', "rawsecret999"),
     ("Cookie: a=1;\x1b[31msid=cookiesecret999", "cookiesecret999"), ("Authorization: Bearer tok\x1b[31m123456", "123456"), ("Authorization: Bearer sk-\x1b[31mABCDEF123456", "ABCDEF123456"), ("Authorization: Bearer sk-\tabc123456", "abc123456"), ("Bearer\ntok123456", "tok123456"), ("api_key=\nrawsecret999", "rawsecret999"), ("api_key=abc\x1b[31mDEF", "DEF"),
-    ("SECRETKEY=rawsecret999", "rawsecret999"), ("sk-abc12345\r\nBRIDGE_KEY=topsecret", "topsecret"), ("sk-abc12345\nCookie: sid=cookiesecret999", "cookiesecret999"), ("\x1b[31msk-abc12345\x1b[0mOPENAI_API_KEY=supersecret", "supersecret"), ('{"api_key": "\x1b[33mjsonsecret999\x1b[0m"}', "jsonsecret999"), ('OPENAI_API_KEY="\x1b[31msupersecret\x1b[0m"', "supersecret"), ("err\x1b[31mBearer tok\x1b[0m123456", "123456")])
+    ("SECRETKEY=rawsecret999", "rawsecret999"), ("sk-abc12345\r\nBRIDGE_KEY=topsecret", "topsecret"), ("sk-abc12345\nCookie: sid=cookiesecret999", "cookiesecret999"), ("\x1b[31msk-abc12345\x1b[0mOPENAI_API_KEY=supersecret", "supersecret"), ('{"api_key": "\x1b[33mjsonsecret999\x1b[0m"}', "jsonsecret999"), ('OPENAI_API_KEY="\x1b[31msupersecret\x1b[0m"', "supersecret"), ("err\x1b[31mBearer tok\x1b[0m123456", "123456"), ("access_token=abc123456", "abc123456"), ("refresh_token=rtok1234", "rtok1234"), ("client_secret=csec1234", "csec1234"), ("db_password=dbpass1234", "dbpass1234"), ("my_api_key=myk12345", "myk12345"), ("user_passwd=upass1234", "upass1234"), ('password="my secret pass"', "secret pass"), ('{"password": "a b"}', "a b"), ("ERR\x1b[31mSECRETKEY=rawsecret999", "rawsecret999"), ("err\x1b[31mSECRETKEY=rawsecret999", "rawsecret999"), ("A" * 100 + "KEY=rawsecret999", "rawsecret999"), ("API_KEY=abc12345", "abc12345"), ("MY_TOKEN=tok12345", "tok12345"), ("DB_PASSWORD=pw12345", "pw12345"), ("FOO_API_KEY=abc12345", "abc12345")])
 def test_sanitize_stderr_tail_negative(raw: str, bad: str) -> None:
     out = P.sanitize_stderr_tail(raw)
     assert bad not in out and "[REDACTED]" in out and "sk-abc12345" not in out and not any(c in out for c in "\r\n\x1b\x00")
