@@ -227,11 +227,11 @@ def _stream_with_mcp(
                 break
             raise ResidentStreamError("resident process ended before the terminal marker", code="upstream_incomplete_stream")
         chunk, done, emit = _decode_tagged_line(driver, handle, tagged, turn_ctx)
-        if isinstance(idle_or_dl, _TurnDeadlines):
-            if _is_useful_chunk(chunk, done):
+        if _is_useful_chunk(chunk, done):
+            if isinstance(idle_or_dl, _TurnDeadlines):
                 idle_or_dl.record_useful(now_fn(), ActivityKind.CONTENT)
-        else:
-            last_activity = now_fn()
+            else:
+                last_activity = now_fn()
         if emit and not (done and srv.captured_event.is_set()):
             yield cast(DecodedChunk, chunk)
     if srv.captured_event.is_set():
