@@ -576,6 +576,22 @@ class TestRunPersistentIntegration(unittest.TestCase):
             "exp-key-42",
         )
         self.assertEqual(
+            resolve_run_chat_key({"sess_key": (), "explicit_state": _Exp(), "chat_id": "cid"}),
+            "exp-key-42",
+        )
+        self.assertEqual(
+            resolve_run_chat_key({"sess_key": [], "explicit_state": _Exp(), "chat_id": "cid"}),
+            "exp-key-42",
+        )
+        self.assertEqual(
+            resolve_run_chat_key({"sess_key": (), "explicit_state": None, "chat_id": "chat-99"}),
+            "chat-99",
+        )
+        self.assertEqual(
+            resolve_run_chat_key({"sess_key": [], "explicit_state": None, "chat_id": "chat-99"}),
+            "chat-99",
+        )
+        self.assertEqual(
             resolve_run_chat_key({"sess_key": None, "explicit_state": None, "chat_id": "chat-99"}),
             "chat-99",
         )

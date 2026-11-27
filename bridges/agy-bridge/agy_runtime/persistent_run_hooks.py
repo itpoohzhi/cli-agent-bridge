@@ -285,7 +285,7 @@ def close_run_resources(run: object, ctx: RunCloseContext) -> None:
 def resolve_run_chat_key(ctx: Mapping[str, object]) -> str:
     """Извлечь нормализованный ключ сессии хода (sess_key > explicit_state.session_key > chat_id)."""
     sess_key = ctx.get("sess_key")
-    if isinstance(sess_key, (tuple, list)):
+    if isinstance(sess_key, (tuple, list)) and sess_key:
         raw = "\x1f".join(str(p) for p in cast(tuple[object, ...] | list[object], sess_key))
         return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:32]
     if sess_key:
