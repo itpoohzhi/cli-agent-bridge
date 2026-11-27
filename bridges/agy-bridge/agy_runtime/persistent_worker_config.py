@@ -69,6 +69,7 @@ class PersistentWorkerSettings:
     standby_ttl_s: float = 300.0
     fast_drain_enabled: bool = False
     fast_drain_min_s: float = 0.015
+    fresh_rotate_enabled: bool = False
 
 
 @dataclass(frozen=True)
@@ -95,6 +96,7 @@ class PersistentReleaseParams:
     cid: str = ""
     still_enabled: bool = True
     max_slots: int = 8
+    rotate: bool = False
 
 
 @dataclass
@@ -249,6 +251,12 @@ def persistent_worker_settings(
     idle_s, ttl_s, max_rss_mb, max_turns = _read_lifecycle_bounds(config_path)
     pump_tick_s, persistent_drain_s, drain_s = _read_drain_windows(config_path)
     st_en, st_max, st_init, st_ttl, fd_en, fd_min = _read_standby_and_fast_drain(config_path)
+    fresh_rotate_enabled = read_bool_setting(
+        "BRIDGE_AGY_PERSISTENT_FRESH_ROTATE_ENABLED",
+        "AGY_BRIDGE_PERSISTENT_FRESH_ROTATE_ENABLED",
+        False,
+        config_path=config_path,
+    )
     return PersistentWorkerSettings(
         enabled=enabled, max_slots=max_slots, lease_wait_s=lease_wait_s,
         idle_timeout_s=idle_s, ttl_s=ttl_s, max_rss_mb=max_rss_mb,
@@ -257,4 +265,5 @@ def persistent_worker_settings(
         standby_enabled=st_en, standby_max_slots=st_max,
         standby_init_timeout_s=st_init, standby_ttl_s=st_ttl,
         fast_drain_enabled=fd_en, fast_drain_min_s=fd_min,
+        fresh_rotate_enabled=fresh_rotate_enabled,
     )

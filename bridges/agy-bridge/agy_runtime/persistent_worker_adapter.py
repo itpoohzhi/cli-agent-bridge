@@ -43,7 +43,7 @@ class AgyPersistentWorkerPool:
         self._cid_to_chat_key: collections.OrderedDict[str, str] = collections.OrderedDict()
         self._standby: AgyStandbyManager = AgyStandbyManager()
         self._hits = self._misses = self._fallbacks = 0
-        self._teardowns_error = self._teardowns_cancel = self._desync_evictions = 0
+        self._teardowns_error = self._teardowns_cancel = self._desync_evictions = self._fresh_rotations = 0
 
     @staticmethod
     def _pool_sig_of(cfg: PersistentWorkerSettings) -> tuple[int, float, float, int, float]:
@@ -211,7 +211,7 @@ class AgyPersistentWorkerPool:
         lease.released = True
         turns_after = lease.turns_before + 1
         keep = bool(
-            params.success and not params.cancel and params.still_enabled
+            params.success and not params.rotate and not params.cancel and params.still_enabled
             and lease.pool is self._pool and lease.handle.is_alive()
             and turns_after < lease.max_turns
         )
@@ -223,8 +223,9 @@ class AgyPersistentWorkerPool:
         self._standby.drop_alias(lease.chat_key)
         if params.cid and (params.cancel or not params.success):
             _ = self._cid_to_chat_key.pop(params.cid, None)
-        self._teardowns_cancel += int(params.cancel)
-        self._teardowns_error += int(not params.cancel and not params.success)
+        self._fresh_rotations += int(params.rotate)
+        self._teardowns_cancel += int(not params.rotate and params.cancel)
+        self._teardowns_error += int(not params.rotate and not params.cancel and not params.success)
         return False
 
     def release(self, lease: PersistentLease, params: PersistentReleaseParams) -> None:
@@ -262,7 +263,7 @@ class AgyPersistentWorkerPool:
             pool = self._pool
             counters = (
                 self._hits, self._misses, self._fallbacks,
-                self._teardowns_error, self._teardowns_cancel, self._desync_evictions,
+                self._teardowns_error, self._teardowns_cancel, self._desync_evictions, self._fresh_rotations,
             )
         self._safe_shutdown_pool(to_shutdown)
         slots = busy = idle = 0
@@ -278,7 +279,7 @@ class AgyPersistentWorkerPool:
             "enabled": enabled, "slots": slots, "busy": busy, "idle": idle,
             "hits": counters[0], "misses": counters[1], "fallbacks": counters[2],
             "teardowns_error": counters[3], "teardowns_cancel": counters[4],
-            "desync_evictions": counters[5],
+            "desync_evictions": counters[5], "fresh_rotations": counters[6],
         }
 
     def shutdown(self, timeout_s: float | None = None) -> None:

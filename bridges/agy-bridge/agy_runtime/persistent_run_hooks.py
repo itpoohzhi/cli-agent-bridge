@@ -13,10 +13,9 @@ from collections.abc import Callable, Iterator, Mapping
 from pathlib import Path
 from typing import IO, cast
 
-from core.stdio_resident.process_io import EOF as _STDIO_EOF
-from core.stdio_resident.process_io import LINE as _STDIO_LINE
-from core.stdio_resident.process_io import TIMEOUT as _STDIO_TIMEOUT
+from core.stdio_resident.process_io import EOF as _STDIO_EOF, LINE as _STDIO_LINE, TIMEOUT as _STDIO_TIMEOUT
 
+from .persistent_fresh_rotate import acquire_with_fresh_guard
 from .persistent_worker_adapter import AgyPersistentWorkerPool, StdioWriteError
 from .persistent_worker_config import (
     PersistentAcquireRequest, PersistentLease, PersistentReleaseParams, RunCloseContext,
@@ -69,7 +68,7 @@ def start_run_process(run: object, ctx: RunSpawnContext) -> float:
                 review_profile="zero-canon" if ctx.zero_canon else "standard",
                 argv_builder=lambda: list(ctx.cmd), env=ctx.launch_env,
             )
-            lease = pool.acquire(req, pw_cfg)
+            lease = acquire_with_fresh_guard(pool, req, pw_cfg)
         if lease is not None:
             setattr(run, "_persistent_lease", lease)
             setattr(run, "_persistent_mode", True)
