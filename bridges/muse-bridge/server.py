@@ -68,6 +68,7 @@ from muse_runtime.process_supervisor import (  # noqa: E402 # pyright: ignore[re
 from muse_runtime.account_pool import AccountPool, AccountPoolConfig  # noqa: E402 # pyright: ignore[reportImplicitRelativeImport]
 from muse_runtime.stream_relay import StreamRelay  # noqa: E402 # pyright: ignore[reportImplicitRelativeImport]
 from muse_runtime.zero_canon_runtime import prepare_muse_launch, zero_canon_scope  # noqa: E402 # pyright: ignore[reportImplicitRelativeImport]
+from muse_runtime.lossless_policy import allow_reactive_prune_retry, evaluate_muse_prompt_policy  # noqa: E402 # pyright: ignore[reportImplicitRelativeImport]
 __all__ = [
     "ProcessSupervisor",
     "ProcessSupervisorConfig",
@@ -2936,50 +2937,22 @@ class Handler(BaseHTTPRequestHandler):
         limit = _context_limit(model)
         target = _context_target(limit)
         retry_target = _context_retry_target(limit)
-        prune_res = _prune_messages(
-            raw_messages,
-            limit=limit,
-            target=target,
-            tools=tools,
-            tool_choice=tool_choice,
-            raw_tools=raw_tools,
+        decision = evaluate_muse_prompt_policy(
+            raw_messages, limit=limit, target=target, tools=tools, tool_choice=tool_choice,
+            raw_tools=raw_tools, prune_fn=_prune_messages, assemble_fn=_assemble_prompt,
+            estimate_fn=_estimate_tokens, redact_fn=_redact_secrets,
         )
-        if prune_res.status == "refused":
-            _log_context_prune(
-                rid, model, "refused_mandatory", 1, limit, target, prune_res
-            )
-            detail = (
-                f"mandatory context exceeds budget "
-                f"(est_tokens={prune_res.mandatory_est}, limit={limit})"
-            )
-            err_msg = f"muse turn failed (rc=1, state=terminal_failed): {detail}"
-            _log(
-                _format_err_log(
-                    model,
-                    "refused",
-                    {"rc": 1, "state": "terminal_failed", "err": detail},
-                    req.get("stream") is True,
-                )
-            )
-            self._send(
-                502,
-                {
-                    "error": {
-                        "message": _redact_secrets(err_msg),
-                        "detail": _redact_secrets(detail)[:500],
-                        "type": "proxy_error",
-                        "code": 502,
-                    }
-                },
-            )
+        prune_res = decision.prune_result
+        if not decision.ok and decision.error_body is not None:
+            _log_context_prune(rid, model, decision.log_reason or "refused_mandatory", 1, limit, target, prune_res)
+            _log(_format_err_log(model, "refused", {"rc": 1, "state": "terminal_failed", "err": decision.log_reason}, req.get("stream") is True))
+            self._send(decision.http_status, decision.error_body)
             return
-        if prune_res.status == "pruned":
-            _log_context_prune(
-                rid, model, "proactive_prune", 1, limit, target, prune_res
-            )
+        if decision.log_reason == "proactive_prune":
+            _log_context_prune(rid, model, "proactive_prune", 1, limit, target, prune_res)
 
-        prompt = prune_res.prompt
-        current_est = prune_res.est_after
+        prompt = decision.prompt
+        current_est = decision.est_after
         reflected_prompts: list[str] = [prompt]
 
         effort = _map_effort(req)
@@ -3301,6 +3274,9 @@ class Handler(BaseHTTPRequestHandler):
                         _log(
                             "context retry skipped: first attempt process group not confirmed dead"
                         )
+                        break
+                    if not allow_reactive_prune_retry():
+                        _log("context retry skipped: MUSE_BRIDGE_LOSSLESS_ENABLED=true")
                         break
                     ok_ctx, ctx_reason = _can_start(False, context=True)
                     if not ok_ctx:
