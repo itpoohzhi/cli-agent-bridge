@@ -103,7 +103,7 @@ import sys
 import threading
 import time
 import uuid
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, replace
 from functools import partial
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -149,6 +149,12 @@ from agy_runtime.explicit_turn_commit import abort_explicit_turn_safe, finalize_
 from agy_runtime.hygiene_runtime import HygieneRuntime, ManagedSqliteRoPool  # noqa: E402
 from agy_runtime.orphan_coordinator import CoordinatorDecision  # noqa: E402
 from agy_runtime.p12_cleanup_seam import AgyP12CleanupSeam, DisconnectInput, capture_run_identity  # noqa: E402
+from agy_runtime.persistent_run_hooks import (  # noqa: E402
+    RunCloseContext, RunPumpDrainContext, RunSpawnContext, cancel_run_persistent, close_run_resources,
+    drain_run_stderr, feed_run_stdin, finish_run_pump_drain, iter_run_stdout_lines, join_run_source,
+    release_run_persistent, resolve_run_chat_key, start_run_process,
+)
+from agy_runtime.persistent_worker_adapter import AgyPersistentWorkerPool  # noqa: E402
 from agy_runtime.legacy_session_helpers import (  # noqa: E402
     LegacyLoadSpec, atomic_write_sessions_json, load_sessions_json_entries, normalize_request_cwd,
     session_entry_from_json, session_key_from_json, session_key_to_json, session_key_valid, validate_clean_cid,
@@ -163,6 +169,7 @@ from core.prompt_rendering import render_tools_section  # noqa: E402
 _HYGIENE_RT: HygieneRuntime | None = None
 _P12_SEAM: AgyP12CleanupSeam | None = None
 _HYGIENE_LOCK = threading.Lock()
+_PERSISTENT_POOL = AgyPersistentWorkerPool()
 
 def _hygiene_rt() -> HygieneRuntime:
     global _HYGIENE_RT
@@ -3176,6 +3183,7 @@ def _lifecycle_cleanup() -> None:
             [p for p in _active.copy().values() if p.returncode is None]
         )
     finally:
+        _PERSISTENT_POOL.shutdown()
         with _HYGIENE_LOCK:
             rt, p12 = _HYGIENE_RT, _P12_SEAM
         if rt is not None:
@@ -5438,6 +5446,7 @@ class Run:
         zero_canon: bool = False,
         req_id: str = "",
         extra_env: Mapping[str, str] | None = None,
+        chat_key: str = "",
     ):
         launcher = _launcher()
         WORKSPACE.mkdir(parents=True, exist_ok=True)
@@ -5449,6 +5458,7 @@ class Run:
             prompt = _ensure_prompt_fits_ndjson(prompt)
         self.stdin_line = _ndjson_user_line(prompt)
         cli_mode = slot_and_session.resolve_cli_mode(mode)
+        settings_arg = zero_canon_settings_cli_arg() if zero_canon else ""
         cmd = [
             launcher,
             "--input-format",
@@ -5465,7 +5475,7 @@ class Run:
             *_build_turn_cli_flags(cli_mode, zero_canon=zero_canon),
         ]
         if zero_canon:
-            cmd += ["--settings", zero_canon_settings_cli_arg()]
+            cmd += ["--settings", settings_arg]
         # Изображения хода: каталог файлов отдельным аргументом, cwd не подменяется.
         if add_dir is not None:
             cmd += ["--add-dir", str(add_dir)]
@@ -5484,23 +5494,20 @@ class Run:
         if self.run_cid and not _cid_acquire(self.run_cid, self.turn_id):
             plan.anchored = False
             plan.reason = "cid_busy"
-        spawn_started = time.monotonic()
-        try:
-            self.proc = spawn_registered(
-                cmd,
-                cwd=work_dir,
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                start_new_session=True,
-                env=_launch_env(zero_canon=zero_canon, req_id=req_id, extra_env=extra_env),
-            )
-        except BaseException:
-            _cid_release(self.run_cid, self.turn_id)
-            raise
+        launch_env = _launch_env(zero_canon=zero_canon, req_id=req_id, extra_env=extra_env)
+        spawn_started = start_run_process(self, RunSpawnContext(
+            pool=_PERSISTENT_POOL, config_path=DYNAMIC_CONFIG_PATH, cmd=cmd, work_dir=work_dir,
+            launch_env=launch_env, model=model, effort=effort, cli_mode=cli_mode,
+            zero_canon=zero_canon, settings_arg=settings_arg, add_dir=add_dir, chat_key=chat_key,
+            spawn_cold=lambda: spawn_registered(
+                cmd, cwd=work_dir, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE, start_new_session=True, env=launch_env,
+            ),
+            on_cold_fail=lambda: _cid_release(self.run_cid, self.turn_id),
+        ))
         self.started = time.monotonic()
         self.req_id = req_id
-        self.spawn_ms = int((self.started - spawn_started) * 1000)
+        self.spawn_ms = 0 if self._persistent_reused else int((self.started - spawn_started) * 1000)
         self.first_event_at: float | None = None
         self.first_reasoning_at: float | None = None
         self.first_content_at: float | None = None
@@ -5526,8 +5533,9 @@ class Run:
         self.stderr_head: list = []
         # Первая capacity-503 строка CLI: не пусто — ход прерван fast-fail.
         self.capacity_exhausted: str = ""
-        with _active_lock:
-            _active[self.proc.pid] = self.proc
+        if self._persistent_lease is None:
+            with _active_lock:
+                _active[self.proc.pid] = self.proc
         self.q = queue.Queue()
         self.err_box = []
         # Протокол antigravity-cli передаёт инкрементальные чанки (text_delta).
@@ -5584,10 +5592,13 @@ class Run:
             self._tail.deadline_s = policy.effective_max_timeout_s + 60.0
         if self.run_cid:
             self._tail.bind(self.run_cid)
-        threading.Thread(target=self._feed_stdin, daemon=True).start()
-        threading.Thread(target=self._drain_stderr, daemon=True).start()
-        threading.Thread(target=self._pump, daemon=True).start()
+        # Сначала запускаем поток чтения транскрипта: в persistent-режиме _pump может
+        # завершить ход за доли миллисекунды и вызвать _join_source до возврата из __init__.
         self._tail.start()
+        threading.Thread(target=self._feed_stdin, daemon=True).start()
+        if self._persistent_lease is None:
+            threading.Thread(target=self._drain_stderr, daemon=True).start()
+        threading.Thread(target=self._pump, daemon=True).start()
 
     def _emit_reasoning(
         self, idx: int, delta: str, on_delivered: Callable[[], None] | None = None
@@ -5812,36 +5823,10 @@ class Run:
         return snap
 
     def _feed_stdin(self) -> None:
-        """Отдать промпт на stdin и закрыть поток: agy читает stdin до EOF."""
-        try:
-            self.proc.stdin.write(self.stdin_line.encode("utf-8"))
-            self.proc.stdin.flush()
-        except (BrokenPipeError, OSError, ValueError):
-            pass
-        finally:
-            try:
-                self.proc.stdin.close()
-            except (BrokenPipeError, OSError, ValueError):
-                pass
-            self.proc.stdin = None
+        feed_run_stdin(self)
 
     def _drain_stderr(self) -> None:
-        """Читать stderr построчно, держать только хвост: он идёт в error-ответ."""
-        head: list = []
-        try:
-            for raw in iter(self.proc.stderr.readline, b""):
-                line = raw.decode("utf-8", "replace").rstrip()
-                if not line:
-                    continue
-                self._note_capacity_line(line)
-                if _NOISE.search(line):
-                    continue
-                head.append(line)
-                if len(head) > 40:
-                    del head[0]
-        except Exception:  # noqa: BLE001 — вторичный поток, ошибку терять нельзя молча
-            pass
-        self.err_box.append("\n".join(head).strip())
+        drain_run_stderr(self, _NOISE)
 
     def _note_capacity_line(self, line: str) -> None:
         """Fast-fail: первая capacity-503 строка CLI гасит процесс."""
@@ -5859,7 +5844,10 @@ class Run:
         _log(
             f"capacity-exhausted fast-fail pid={self.proc.pid} reason={CAPACITY_REASON}"
         )
-        _kill_group(self.proc)
+        if getattr(self, "_persistent_lease", None) is not None:
+            self.cancel_persistent()
+        else:
+            _kill_group(self.proc)
 
     def claim_preamble(self, step_idx: int | None, source: str = "transcript") -> bool:
         """Атомарно заявить право на отправку преамбулы шага.
@@ -5899,6 +5887,9 @@ class Run:
                 _add_preamble_bounded(preambles, key_idx)
                 return True
 
+    def _iter_stdout_lines(self) -> Iterator[str]:
+        return iter_run_stdout_lines(self)
+
     def _pump(self) -> None:
         """Разбор NDJSON agy 1.3.1.
 
@@ -5906,19 +5897,18 @@ class Run:
         Run конкатенирует их в `accum = prev + delta`. `step_update.tool` — трассировка
         нативного инструмента (в stderr моста). `result` — финальный текст, usage, ошибка.
 
-        После EOF: ждём выход процесса не дольше PROC_EXIT_WAIT_S, затем даём
-        источнику мышления дренировать окно DRAIN_WINDOW_S (join с бюджетом) и
-        только потом ставим ("done", …). Терминальное событие кладётся ровно один
-        раз в `finally`, поэтому очередь закрывается при любом исходе.
+        В cold-spawn после EOF ждём выход процесса и дренируем окно `drain_window_s`;
+        в persistent-режиме выходим из цикла чтения сразу по `result`, не закрывая процесс,
+        и выполняем короткий bounded SQLite-drain (`persistent_drain_window_s`).
         """
         final_text = ""
         result_ev = {}
         tool_state = midstream_resilience.PumpToolState(_as_int)
         term_kind = "pump_error"
         term_payload: object = "pump terminated"
+        lease = getattr(self, "_persistent_lease", None)
         try:
-            for raw in iter(self.proc.stdout.readline, b""):
-                line = raw.decode("utf-8", "replace").strip()
+            for line in self._iter_stdout_lines():
                 if not line.startswith("{"):
                     self._note_capacity_line(line)
                     continue
@@ -5939,17 +5929,24 @@ class Run:
                         if isinstance(tools_raw, list)
                         else []
                     )
+                    init_cid = str(
+                        ev.get("conversation_id")
+                        or (init.get("conversation_id") if lease is not None else "")
+                        or ""
+                    )
+                    if lease is not None and init_cid:
+                        self._persistent_resolved_cid = init_cid
                     self.q.put(
                         (
                             "init",
                             {
-                                "conversation_id": ev.get("conversation_id") or "",
+                                "conversation_id": init_cid,
                                 "tools": len(tools),
                                 "permission_mode": init.get("permission_mode") or "",
                             },
                         )
                     )
-                    self._tail.bind(str(ev.get("conversation_id") or ""))
+                    self._tail.bind(init_cid)
                 elif etype == "step_update":
                     step = (
                         ev.get("step_update")
@@ -6044,30 +6041,34 @@ class Run:
                     )
                     result_ev = result
                     final_text = str(result.get("response") or "")
+                    res_cid = str(result.get("conversation_id") or ev.get("conversation_id") or "")
+                    if lease is not None and res_cid:
+                        self._persistent_resolved_cid = res_cid
+                        self._tail.bind(res_cid)
                     if str(result.get("status") or "").upper() == "ERROR":
                         self._note_capacity_line(str(result.get("error") or ""))
                     up_status, up_headers = extract_upstream_error_meta(result)
                     self.q.put(("result", {
-                        "conversation_id": result.get("conversation_id") or "", "status": str(result.get("status") or ""),
+                        "conversation_id": res_cid, "status": str(result.get("status") or ""),
                         "error": str(result.get("error") or ""), "duration_s": result.get("duration_seconds"),
                         "num_turns": result.get("num_turns"), "usage": result.get("usage") or {},
                         "upstream_status_code": up_status, "upstream_headers": up_headers,
                         "upstream_not_started": result.get("upstream_not_started") is True,
                         "fail_stage": result.get("fail_stage") if isinstance(result.get("fail_stage"), str) else "",
                     }))
-            rc: int | None
-            try:
-                rc = self.proc.wait(timeout=PROC_EXIT_WAIT_S)
-            except subprocess.TimeoutExpired:
-                rc = None  # процесс ещё жив после EOF: добьёт Run.close
-            time.sleep(0.05)  # дать стоку stderr дозавершиться
-            t_exit = time.monotonic()
-            self._drain_t0 = t_exit
-            self._tail.drain_deadline = t_exit + DRAIN_WINDOW_S
-            self._proc_done.set()
-            self._join_source(t_exit)
-            if rc is None:
-                rc = 0 if result_ev else 1
+                    if lease is not None:
+                        self._persistent_turn_ok = (
+                            str(result.get("status") or "").upper() != "ERROR"
+                            and not self.capacity_exhausted
+                            and not self._stop_watch.is_set()
+                            and not self._persistent_cancelled
+                            and lease.handle.is_alive()
+                        )
+                        break
+            rc = finish_run_pump_drain(self, RunPumpDrainContext(
+                config_path=DYNAMIC_CONFIG_PATH, proc_exit_wait_s=PROC_EXIT_WAIT_S,
+                drain_max_s=DRAIN_MAX_S, result_ev=result_ev,
+            ))
             if (
                 rc == 0
                 and not final_text
@@ -6097,37 +6098,26 @@ class Run:
             self._proc_done.set()
             self._close_and_put_done(term_kind, term_payload)
 
-    def _join_source(self, t_exit: float) -> None:
-        """Дождаться потока источника мышления в бюджете окна drain, затем прервать SELECT."""
-        thread = self._tail.thread
-        thread.join(timeout=max(0.0, t_exit + DRAIN_WINDOW_S - time.monotonic()))
-        if not thread.is_alive():
-            return
-        self._tail.interrupt_active_query()
-        thread.join(timeout=JOIN_TIMEOUT_S)
-        if thread.is_alive():
-            _count_drain_deadline()
-            _log(f"drain-timeout cid={self._tail.cid[:8] or '-'}")
+    def _join_source(self, t_exit: float, *, drain_window_s: float | None = None) -> None:
+        window = DRAIN_WINDOW_S if drain_window_s is None else drain_window_s
+        join_run_source(self, t_exit, window, JOIN_TIMEOUT_S,
+                        lambda cid8: (_count_drain_deadline(), _log(f"drain-timeout cid={cid8}")))
+
+    def _release_persistent(self, *, success: bool, cancel: bool) -> None:
+        release_run_persistent(self, _PERSISTENT_POOL, DYNAMIC_CONFIG_PATH, success=success, cancel=cancel)
+
+    def cancel_persistent(self) -> None:
+        cancel_run_persistent(self)
 
     def close(self) -> None:
-        self._stop_watch.set()
-        self._proc_done.set()
-        self._tail.interrupt_active_query()
-        self.controller.close()
-        # Группа зачищается всегда: лидер мог выйти, оставив потомков (фоновые задачи agy).
-        _kill_group(self.proc, send_sigint=True)
-        with _active_lock:
-            _active.pop(self.proc.pid, None)
-        spawn_registered.unregister(self.proc)
-        for stream in (self.proc.stdin, self.proc.stdout, self.proc.stderr):
-            try:
-                if stream is not None:
-                    stream.close()
-            except OSError:
-                pass
-        thread = self._tail.thread
-        if thread.is_alive() and thread is not threading.current_thread():
-            thread.join(timeout=JOIN_TIMEOUT_S)
+        def _unreg(proc: subprocess.Popen[bytes]) -> None:
+            with _active_lock:
+                _active.pop(proc.pid, None)
+            spawn_registered.unregister(proc)
+        close_run_resources(self, RunCloseContext(
+            kill_group=lambda proc: _kill_group(proc, send_sigint=True),
+            unregister_proc=_unreg, join_timeout_s=JOIN_TIMEOUT_S,
+        ))
 
 
 def _reasoning_suffix(seen: dict, rid: str, text: str) -> str:
@@ -7016,9 +7006,12 @@ class Handler(BaseHTTPRequestHandler):
                         **({"zero_canon": True} if ctx.get("zero_canon") else {}),
                         req_id=str(ctx.get("req_id") or ""),
                         extra_env=ctx.get("extra_env"),
+                        chat_key=resolve_run_chat_key(ctx),
                     )
                     self._metric_run = run
-                    capture_run_identity(run)
+                    is_persistent = bool(getattr(run, "_persistent_mode", False))
+                    if not is_persistent:
+                        capture_run_identity(run)
                 except LauncherUnavailable:
                     self._reject(503, "launcher_unavailable", "canonical launcher is missing or not executable", model=model, model_len=ctx["model_len"])
                     out = _terminal_state("launcher_unavailable")
@@ -7028,9 +7021,12 @@ class Handler(BaseHTTPRequestHandler):
                     break
                 job = getattr(self, "_registry_job", None)
                 if job is not None:
-                    job.pgid = int(getattr(run.proc, "pid", 0) or 0)
-                    _hygiene_rt().bind_reaper(job.pgid, run.proc.poll)
-                    _JOB_REGISTRY.bind_cancel(job, lambda: _kill_group(run.proc))
+                    if is_persistent:
+                        _JOB_REGISTRY.bind_cancel(job, run.cancel_persistent)
+                    else:
+                        job.pgid = int(getattr(run.proc, "pid", 0) or 0)
+                        _hygiene_rt().bind_reaper(job.pgid, run.proc.poll)
+                        _JOB_REGISTRY.bind_cancel(job, lambda: _kill_group(run.proc))
                 stop_hook = ctx.get("tool_stop")
                 try:
                     out = self._execute(run, on_text, on_tool_trace, on_reasoning, keepalive, **({"turn_complete": stop_hook} if stop_hook is not None else {}))
@@ -7052,7 +7048,8 @@ class Handler(BaseHTTPRequestHandler):
                 finally:
                     run.close()
                     if job is not None:
-                        _hygiene_rt().bind_reaper(job.pgid, None)
+                        if not is_persistent:
+                            _hygiene_rt().bind_reaper(job.pgid, None)
                         _JOB_REGISTRY.bind_cancel(job, None)
                 if out["state"] == "done":
                     break
@@ -7186,7 +7183,8 @@ class Handler(BaseHTTPRequestHandler):
             def _release_resources(_out=cast("dict[str, object]", out), _run=self._metric_run) -> None:
                 try: _slots.release()
                 finally: slot_and_session.release_admission_for_state(_hygiene_rt().release, adm_dec.ticket_id, _out, run=_run)
-            _p12_seam().release_slot_after_run(_release_resources, self._metric_run, str(ctx.get("turn_id") or tag))
+            p12_run = None if getattr(self._metric_run, "_persistent_mode", False) else self._metric_run
+            _p12_seam().release_slot_after_run(_release_resources, p12_run, str(ctx.get("turn_id") or tag))
         self._log_done(cast(str, ctx["model"]), cast("dict[str, object]", out), t0, cast(str, ctx["tag"]))
         return out
 
