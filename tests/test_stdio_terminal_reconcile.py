@@ -1,7 +1,8 @@
 """W0-B: unit-тесты реконсиляции terminal-текста (AD-004, M-MOD-I1..I5).
 
 Покрывают точный дубль, многофрагментное накопление, суффиксный хвост,
-расходящийся terminal, сохранность полей кадра, fail-open при переполнении
+расходящийся terminal, легитимные повторы (F-007: дедупликация только на
+terminal-кадре), сохранность полей кадра, fail-open при переполнении
 бюджета, выключенный режим, allowlist протоколов и AST-чистоту модуля
 (M-MOD-I3: ноль запрещённых I/O-импортов).
 """
@@ -114,6 +115,40 @@ def test_divergent_terminal_untouched() -> None:
     terminal = _terminal("xyz")
     assert reconciler.apply(terminal) is terminal
     assert terminal.text == "xyz"
+
+
+@pytest.mark.parametrize(
+    ("parts", "terminal_text", "tail", "total"),
+    [
+        pytest.param(["ha", "haha"], "hahaha", "", "hahaha", id="legit_repeat_exact"),
+        pytest.param(
+            ["ha", "haha"], "hahaha!", "!", "hahaha!", id="legit_repeat_suffix"
+        ),
+        pytest.param(["foo", "foo"], "foofoo", "", "foofoo", id="double_prefix"),
+        pytest.param(["ha", "haha"], "other", "other", "hahahaother", id="divergent"),
+    ],
+)
+def test_legitimate_repeats_dedupe_only_on_terminal(
+    parts: list[str], terminal_text: str, tail: str, total: str
+) -> None:
+    """F-007: легитимные повторы ('ha'+'haha', дважды повторённый префикс).
+    Промежуточные дельты проходят БЕЗ искажения и дедупликации; реконсиляция
+    только на is_terminal=True; итоговый поток без удвоения и без потери."""
+    reconciler = TerminalTextReconciler()
+    accum = ""
+    for text in parts:
+        chunk = _progressive(text)
+        result = reconciler.apply(chunk)
+        assert result is chunk
+        assert result.text == text
+        accum += result.text
+    terminal = _terminal(terminal_text)
+    result = reconciler.apply(terminal)
+    assert result.text == tail
+    assert result.is_terminal is True
+    assert accum + result.text == total
+    if tail == terminal_text:
+        assert result is terminal  # fail-open: расходящийся кадр не обрезается
 
 
 def test_shorter_terminal_prefix_of_accum_untouched() -> None:

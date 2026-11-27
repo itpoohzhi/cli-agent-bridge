@@ -9,13 +9,17 @@
 Реальные имена полей сверены с ``server.py``: у ``_TranscriptTail`` публичные
 ``failed``/``stop_event``, ``_pending_steps`` — метод, а ``proc`` и
 ``_persistent_mode``/``_persistent_turn_ok`` живут на ``Run`` (``tail.run_ref``);
-поэтому каждый факт читается с tail и с его run_ref (при наличии).
+поэтому каждый факт читается с tail и с его run_ref (при наличии). Полей
+``_has_tool_trace``/``_progressive_chunks_emitted`` в реальных объектах НЕТ:
+tool trace определяется по ``_tool_step_indices``, progressive-выдача — по
+``emitted``; отсутствие обоих источников факта fail-closed запрещает выход.
 """
 
 # pyright: reportAny=false, reportExplicitAny=false
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Any, Final
 
@@ -34,6 +38,7 @@ DRAIN_FAST_PATH_FLAG: Final[str] = "BRIDGE_AGY_DRAIN_FAST_PATH_ENABLED"
 DRAIN_FAST_PATH_ENV: Final[str] = "AGY_BRIDGE_DRAIN_FAST_PATH_ENABLED"
 
 _MISSING: Final[object] = object()
+_LOGGER: Final[logging.Logger] = logging.getLogger(__name__)
 
 
 def is_drain_fast_path_enabled(config_path: Path | str | None = None) -> bool:
@@ -43,7 +48,8 @@ def is_drain_fast_path_enabled(config_path: Path | str | None = None) -> bool:
         return read_bool_setting(
             DRAIN_FAST_PATH_FLAG, DRAIN_FAST_PATH_ENV, False, config_path=path
         )
-    except Exception:
+    except Exception as exc:
+        _LOGGER.debug("drain_fast_path config read failed: %s", exc)
         return False
 
 
@@ -105,8 +111,25 @@ def _buffered_events(sources: tuple[Any, ...]) -> int:
 
 
 def _has_tool_trace(sources: tuple[Any, ...]) -> bool:
-    trace = _bool_of(_first_attr(sources, ("_has_tool_trace",)), True)
-    return trace or _count_of(_first_attr(sources, ("_tool_step_indices",))) > 0
+    """Явный ``_has_tool_trace`` или реальные ``_tool_step_indices``; нет обоих -> True."""
+    trace = _first_attr(sources, ("_has_tool_trace",))
+    indices = _first_attr(sources, ("_tool_step_indices",))
+    if trace is not _MISSING:
+        return bool(trace) or _count_of(indices) > 0
+    if indices is not _MISSING:
+        return _count_of(indices) > 0
+    return True
+
+
+def _has_progressive_chunks(sources: tuple[Any, ...]) -> bool:
+    """Явный ``_progressive_chunks_emitted`` или реальный ``emitted``; нет обоих -> True."""
+    explicit = _first_attr(sources, ("_progressive_chunks_emitted",))
+    if explicit is not _MISSING:
+        return bool(explicit)
+    emitted = _first_attr(sources, ("emitted",))
+    if isinstance(emitted, int) and not isinstance(emitted, bool):
+        return emitted > 0
+    return True
 
 
 def _stopped(sources: tuple[Any, ...]) -> bool:
@@ -130,9 +153,7 @@ def _collect(
         pending_steps=_pending_steps(sources),
         buffered_events=_buffered_events(sources),
         has_tool_trace=_has_tool_trace(sources),
-        has_progressive_chunks=_bool_of(
-            _first_attr(sources, ("_progressive_chunks_emitted",)), True
-        ),
+        has_progressive_chunks=_has_progressive_chunks(sources),
         failed=_bool_of(_first_attr(sources, ("_failed", "failed")), True),
         interrupted=_bool_of(_first_attr(sources, ("_interrupted",)), True),
         stopped=_stopped(sources),
@@ -149,7 +170,8 @@ def collect_drain_facts(
             flag_enabled=flag_enabled,
             authoritative_read_done=authoritative_read_done,
         )
-    except Exception:
+    except Exception as exc:
+        _LOGGER.debug("drain_fast_path fact collection failed: %s", exc)
         return DrainFacts(
             flag_enabled=flag_enabled,
             authoritative_read_done=authoritative_read_done,
@@ -160,9 +182,13 @@ def should_drain_fast_exit(
     tail: Any,
     config_path: Path | str | None = None,
     *,
-    authoritative_read_done: bool = True,
+    authoritative_read_done: bool = False,
 ) -> bool:
-    """Фасад AD-002: при выключенном флаге tail не читается (нулевой оверхед)."""
+    """Фасад AD-002: при выключенном флаге tail не читается (нулевой оверхед).
+
+    ``authoritative_read_done`` fail-closed по умолчанию ``False``: вызывающий
+    обязан явно подтвердить, что авторитетное чтение источников завершено.
+    """
     if not is_drain_fast_path_enabled(config_path):
         return False
     facts = collect_drain_facts(

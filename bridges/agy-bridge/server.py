@@ -4973,7 +4973,7 @@ class _TranscriptTail(InterruptionTailState):
             if self.sqlite_active:
                 _ = self._poll_sqlite()
             now = time.monotonic()
-            if should_drain_fast_exit(self, DYNAMIC_CONFIG_PATH):
+            if should_drain_fast_exit(self, DYNAMIC_CONFIG_PATH, authoritative_read_done=bool(self.final_planner or self.end_marker)):
                 exit_kind = "fast_clean"
                 break
             if now >= earliest and self.end_marker:

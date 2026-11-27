@@ -1,10 +1,10 @@
 """W3-B: интеграционные тесты fast_clean-выхода из дрена в монолите agy-bridge.
 
-Реальный ``_TranscriptTail._drain_post_eof()`` с делегирующим фасадом AD-002
-(``should_drain_fast_exit``): флаг false (дефолт) не меняет поведение и длительность,
-флаг true даёт мгновенный ``exit=fast_clean`` на чистом ходе (с end_marker и без),
-нечистые ветки сохраняют полный drain и доставку событий, откат true -> false
-возвращает штатный drain. PR #135 ``fast_complete_drain`` при false не ломается.
+Реальный ``_TranscriptTail._drain_post_eof()`` с фасадом AD-002: флаг false
+(дефолт) не меняет поведение и длительность, флаг true даёт мгновенный
+``exit=fast_clean`` на чистом ходе, нечистые ветки сохраняют полный drain,
+откат true -> false возвращает штатный drain; PR #135 не ломается.
+RW-001/F-013: пустой tail ждёт финальный чанк; RW-003: реальный конструктор.
 """
 
 from __future__ import annotations
@@ -63,7 +63,7 @@ def _write_flag(tmp_path: Path, enabled: bool | None) -> Path:
 def _make_tail(
     srv: Any, overrides: dict[str, Any] | None = None, window_s: float = 0.20
 ) -> Any:
-    """Реальный класс tail без I/O: чистый ход, все поля AD-002 явно выставлены."""
+    """Реальный класс tail без I/O: чистый ход, реальные поля server.py."""
     tail = object.__new__(srv._TranscriptTail)
     tail.stop_event = threading.Event()
     tail.sqlite_active = False
@@ -77,8 +77,6 @@ def _make_tail(
     tail.run_ref = SimpleNamespace(proc=SimpleNamespace(returncode=0))
     tail._buf = b""
     tail._tool_step_indices = set()
-    tail._has_tool_trace = False
-    tail._progressive_chunks_emitted = False
     tail.failed = False
     tail._interrupted = False
     tail._read_transcript = lambda: None
@@ -180,18 +178,13 @@ _NONCLEAN_CASES = [
     ({"run_ref": SimpleNamespace(proc=SimpleNamespace(returncode=1))}, "window"),
     ({"_pending_steps": lambda: 1}, "window"),
     ({"_buf": b"event"}, "window"),
-    ({"_has_tool_trace": True}, "window"),
-    ({"_progressive_chunks_emitted": True}, "window"),
+    ({"_tool_step_indices": {3}}, "window"),
+    ({"emitted": 1}, "window"),
     ({"stop_event": _stopped_event()}, "stop"),
 ]
-_NONCLEAN_IDS = [
-    "rc_nonzero",
-    "pending_steps",
-    "buffered_event",
-    "tool_trace",
-    "progressive_chunks",
-    "stop_event",
-]
+_NONCLEAN_IDS = (
+    "rc_nonzero pending_steps buffered_event tool_trace progressive_chunks stop_event"
+).split()
 
 
 @pytest.mark.parametrize(("overrides", "expected"), _NONCLEAN_CASES, ids=_NONCLEAN_IDS)
@@ -206,7 +199,6 @@ def test_flag_on_nonclean_keeps_full_drain(
     tail = _make_tail(srv, overrides, window_s=0.12)
     exit_kind, elapsed = _run_drain(srv, tail, monkeypatch)
     assert exit_kind == expected
-    assert exit_kind != "fast_clean"
     if expected == "window":
         assert elapsed >= 0.10
 
@@ -246,3 +238,62 @@ def test_rollback_true_to_false_restores_stock_drain(
     _write_flag(tmp_path, True)
     kind_back, _ = _run_drain(srv, _make_tail(srv, window_s=0.15), monkeypatch)
     assert kind_back == "fast_clean"
+
+
+@pytest.mark.parametrize(
+    ("marker", "emits", "expected"),
+    [
+        pytest.param("final_planner", True, "window", id="late_final_planner"),
+        pytest.param("end_marker", False, "fast_clean", id="late_end_marker"),
+    ],
+)
+def test_flag_on_empty_tail_waits_for_final_chunk(
+    monkeypatch, tmp_path, marker, emits, expected
+) -> None:
+    """F-013: флаг включён, rc=0, исходно пустой tail (final_planner=False,
+    end_marker=False): fast_clean НЕ срабатывает до финального чанка на втором
+    чтении; финальный чанк не теряется."""
+    srv = _load_server()
+    _enable(monkeypatch, srv, tmp_path, True)
+    tail = _make_tail(srv, {"final_planner": False}, window_s=0.25)
+    reads = {"n": 0}
+
+    def _read() -> None:
+        reads["n"] += 1
+        if reads["n"] == 2:
+            setattr(tail, marker, True)
+            if emits:
+                tail.emitted += 1
+
+    tail._read_transcript = _read
+    exit_kind, elapsed = _run_drain(srv, tail, monkeypatch)
+    assert reads["n"] >= 2
+    assert exit_kind == expected
+    assert tail.drain_outcome == "complete"
+    if emits:
+        assert tail.emitted == 1
+        assert elapsed >= 0.23
+    else:
+        assert elapsed < 0.20
+
+
+def test_real_constructor_tail_fast_clean(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """RW-003: настоящий __init__ _TranscriptTail, реальные поля -> fast_clean."""
+    srv = _load_server()
+    _enable(monkeypatch, srv, tmp_path, True)
+    tail = srv._TranscriptTail(
+        emit=lambda _idx, _text, _flush: True,
+        stop_event=threading.Event(),
+        done_event=threading.Event(),
+        resumed=False,
+        run_ref=SimpleNamespace(proc=SimpleNamespace(returncode=0)),
+    )
+    tail.final_planner = True
+    tail.drain_deadline = time.monotonic() + 0.35
+    tail._read_transcript = lambda: None
+    exit_kind, elapsed = _run_drain(srv, tail, monkeypatch)
+    assert exit_kind == "fast_clean"
+    assert elapsed < 0.10
+    assert tail.drain_outcome == "complete"
