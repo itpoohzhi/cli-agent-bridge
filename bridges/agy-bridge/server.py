@@ -4970,7 +4970,7 @@ class _TranscriptTail(InterruptionTailState):
         """
         run_post_eof_drain(
             self, drain_window_s=DRAIN_WINDOW_S, drain_max_s=DRAIN_MAX_S, drain_min_s=DRAIN_MIN_S,
-            poll_step_s=DRAIN_POLL_STEP_S, on_deadline_pending=_count_drain_deadline, log_fn=_log,
+            poll_step_s=DRAIN_POLL_STEP_S, on_deadline_pending=_count_drain_deadline, log_fn=_log, dynamic_config_path=DYNAMIC_CONFIG_PATH,
             fast_drain_enabled=_lsc.read_bool_setting("BRIDGE_AGY_DRAIN_EARLY_EXIT_ENABLED", "BRIDGE_AGY_DRAIN_EARLY_EXIT_ENABLED", False),
         )
 

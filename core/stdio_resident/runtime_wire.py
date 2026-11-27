@@ -20,6 +20,7 @@ from core.stdio_resident.process_io import TIMEOUT
 from core.stdio_resident.protocol_driver import DecodedChunk
 from core.stdio_resident.runtime_types import PreDispatchResidentError, ResidentStreamError
 from core.stdio_resident.session_manager import _build_cancel_payload, _track_fsm_ids
+from core.stdio_resident.terminal_reconcile import TerminalTextReconciler, should_reconcile_protocol
 from core.tool_mode import ToolMode, resolve_tool_mode
 
 logger = logging.getLogger(__name__)
@@ -210,10 +211,31 @@ def _stream_with_mcp(
         yield _finish_mcp_capture(driver, handle, turn_ctx, srv, cancel=not done)
 
 
+def _stream_plain(driver: Any, handle: Any, turn_ctx: dict[str, Any], idle_s: float) -> Iterator[DecodedChunk]:
+    done = False
+    while not done:
+        chunk, done, emit = _read_decoded_step(driver, handle, idle_s, turn_ctx)
+        if emit:
+            yield cast(DecodedChunk, chunk)
+
+
+def _driver_protocol(driver: Any) -> str | None:
+    proto = getattr(driver, "protocol", None)
+    if not isinstance(proto, str):
+        proto = getattr(getattr(driver, "capabilities", None), "protocol_name", None)
+    return proto if isinstance(proto, str) else None
+
+
+def _reconciled_chunks(reconciler: TerminalTextReconciler, chunks: Iterator[DecodedChunk]) -> Iterator[DecodedChunk]:
+    for chunk in chunks:
+        yield reconciler.apply(chunk)
+
+
 def stream_driver_turn(
     driver: Any, handle: Any, envelope: Any, ctx: dict[str, Any], on_dispatched: Callable[[], None]
 ) -> Iterator[DecodedChunk]:
     srv, _sess, wire_spec = _build_turn_mcp_context(envelope, ctx)
+    reconciler = TerminalTextReconciler(enabled=should_reconcile_protocol(_driver_protocol(driver)))
     with ExitStack() as stack:
         if srv is not None:
             _ = stack.enter_context(srv)
@@ -222,7 +244,7 @@ def stream_driver_turn(
             _ = stack.enter_context(TurnWireSessionScope.bind(eff_spec))
         custom = _call_driver_stream(driver, handle, envelope, ctx)
         if custom:
-            yield from custom
+            yield from _reconciled_chunks(reconciler, custom)
             return
         raw_ctx = ctx.get("extra_turn_context")
         turn_ctx = cast(dict[str, Any], raw_ctx) if isinstance(raw_ctx, dict) else (dict(cast(Mapping[str, Any], raw_ctx)) if raw_ctx else {})
@@ -230,13 +252,9 @@ def stream_driver_turn(
         _send_turn_input(driver, handle, str(ctx["prompt"]), turn_ctx, timeouts[0])
         on_dispatched()
         if srv is not None:
-            yield from _stream_with_mcp(driver, handle, turn_ctx, timeouts[1], srv)
-            return
-        done = False
-        while not done:
-            chunk, done, emit = _read_decoded_step(driver, handle, timeouts[1], turn_ctx)
-            if emit:
-                yield cast(DecodedChunk, chunk)
+            yield from _reconciled_chunks(reconciler, _stream_with_mcp(driver, handle, turn_ctx, timeouts[1], srv))
+        else:
+            yield from _reconciled_chunks(reconciler, _stream_plain(driver, handle, turn_ctx, timeouts[1]))
 
 
 def cancel_driver_turn(driver: Any, handle: Any, turn_context: Mapping[str, object] | None) -> None:

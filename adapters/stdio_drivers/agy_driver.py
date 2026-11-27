@@ -6,8 +6,9 @@ import hashlib
 import math
 from collections.abc import Mapping
 from dataclasses import asdict, replace
-from typing import Any, ClassVar, cast, override
+from typing import ClassVar, SupportsFloat, cast, override
 
+from core.cli_turn_flags import format_print_timeout
 from core.resident_identity import ResidentRequestError
 
 from adapters.stdio_drivers.agy_config import (
@@ -71,7 +72,7 @@ class AgyStreamJsonDriver(StreamJsonDriver):
     @staticmethod
     def _parse_timeout_val(value: object) -> float:
         try:
-            fv = float(cast(Any, value))
+            fv = float(cast("SupportsFloat | str | bytes", value))
             bad = any((isinstance(value, bool), not math.isfinite(fv), fv > 86400))
             if bad:
                 raise ValueError("invalid timeout")
@@ -93,7 +94,7 @@ class AgyStreamJsonDriver(StreamJsonDriver):
         argv = list(base_argv)
         self._ensure_pair(argv, "--input-format", "stream-json")
         self._ensure_pair(argv, "--output-format", "stream-json")
-        self._set_pair(argv, "--print-timeout", str(self.validate_timeout(options)))
+        self._set_pair(argv, "--print-timeout", format_print_timeout(self.validate_timeout(options)))
         if model := self._option_str(options, "model"):
             self._ensure_pair(argv, "--model", model)
         if effort := self._option_str(options, "effort"):

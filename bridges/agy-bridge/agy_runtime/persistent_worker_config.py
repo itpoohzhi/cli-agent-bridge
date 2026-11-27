@@ -12,6 +12,7 @@ from core.stdio_resident.process_io import ResidentProcessHandle
 from core.stdio_resident.process_pool import ResidentProcessPool
 
 from .long_session_config import (
+    classify_cloud_mode,
     read_bool_setting,
     read_float_setting,
     read_int_setting,
@@ -31,10 +32,20 @@ __all__ = [
 
 
 def compute_env_digest(
-    cli_mode: str, zero_canon: bool, clean_home: str, settings_arg: str = ""
+    cli_mode: str,
+    zero_canon: bool,
+    clean_home: str,
+    settings_arg: str = "",
+    launch_env: Mapping[str, str] | None = None,
 ) -> str:
-    """Стабильный отпечаток среды запуска слота (исключает смешение профилей)."""
+    """Стабильный отпечаток среды запуска слота (исключает смешение профилей).
+
+    При ``launch_env is None`` digest побитово совместим с прежней 3/4-аргументной
+    формулой; иначе добавляется сегмент сетевого режима (direct vs georouter).
+    """
     raw = f"mode={cli_mode}|zc={int(zero_canon)}|home={clean_home}|cfg={settings_arg}"
+    if launch_env is not None:
+        raw = f"{raw}|net={classify_cloud_mode(launch_env)}"
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:24]
 
 

@@ -5,7 +5,10 @@ from __future__ import annotations
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Final
+
+from .drain_fast_path_adapter import should_drain_fast_exit
 
 FAST_SILENCE_FLOOR_MS: Final[float] = 15.0
 FAST_MAX_WAIT_MS: Final[float] = 25.0
@@ -57,6 +60,7 @@ def run_post_eof_drain(
     tail: Any, *, drain_window_s: float, drain_max_s: float, drain_min_s: float,
     poll_step_s: float, fast_drain_enabled: bool,
     on_deadline_pending: Callable[[], None], log_fn: Callable[[str], None],
+    dynamic_config_path: Path | str | None = None,
 ) -> None:
     """Процесс вышел: дочитать источники в окне drain_window_s (<= drain_max_s).
 
@@ -79,6 +83,11 @@ def run_post_eof_drain(
         if t.sqlite_active:
             _ = t._poll_sqlite()
         now = time.monotonic()
+        if should_drain_fast_exit(
+            t, dynamic_config_path, authoritative_read_done=bool(t.final_planner or t.end_marker)
+        ):
+            exit_kind = "fast_clean"
+            break
         if now >= earliest and t.end_marker:
             exit_kind = "end_turn"
             break
