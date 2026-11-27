@@ -168,7 +168,8 @@ def test_handle_json_resident_error_precommit_raises_refusal() -> None:
     assert exc_info.value.status_code == 502
     assert lease.failures == [exc]
     assert handler.sent == []
-    assert logs == []
+    assert len(logs) == 1
+    assert "resident_precommit_refusal status=502 code=resident_dispatch_failed" in logs[0]
 
 
 @pytest.mark.parametrize(

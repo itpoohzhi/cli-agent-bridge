@@ -50,6 +50,8 @@ ERROR_TAXONOMY: Final[Mapping[str, tuple[int, str, bool, bool, bool, bool]]] = M
     "first_progress_timeout": (504, "turn", False, True, True, False),
     "idle_timeout": (504, "turn", False, True, True, False),
     "safety_cap_timeout": (504, "turn", False, True, True, False),
+    "turn_timeout": (504, "turn", False, True, True, False),
+    "bridge_draining": (503, "route", True, True, False, False),
     ERR_TOOL_EVENT_FORBIDDEN: (502, "policy", False, False, True, True),
 })
 _QUOTA_KEYS: Final[tuple[str, ...]] = ("insufficient_quota", "quota", "usage limit", "limit reached", "billing")

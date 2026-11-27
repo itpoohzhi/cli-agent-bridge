@@ -43,6 +43,26 @@ class ResidentStreamError(RuntimeError):
         super().__init__(message)
 
 
+class TurnTimeoutError(ResidentStreamError, TimeoutError):
+    """Resident turn timed out before completion (defaults to 504 turn_timeout)."""
+
+    http_status = 504
+    code = "turn_timeout"
+
+    def __init__(self, message: str = "resident_turn_timeout", code: str = "turn_timeout") -> None:
+        super().__init__(message, code=code)
+
+
+class BridgeDrainingError(ResidentStreamError):
+    """Resident route rejected pre-commit because bridge is draining (503)."""
+
+    http_status = 503
+    code = "bridge_draining"
+
+    def __init__(self, message: str = "bridge_draining", code: str = "bridge_draining") -> None:
+        super().__init__(message, code=code)
+
+
 @dataclass(frozen=True, slots=True)
 class ResidentTurnOptions:
     """Execution callbacks and caps for one resident runtime turn."""
