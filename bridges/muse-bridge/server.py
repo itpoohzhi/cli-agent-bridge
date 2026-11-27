@@ -152,6 +152,7 @@ from core.chat_key import (  # noqa: E402
     SOURCES_CACHE_KEY_ONLY,
     resolve_chat_key,
 )
+from core.http_server_error import handle_accept_error  # noqa: E402
 from core.usage_wire import (  # noqa: E402
     extract_cache_read_tokens,
     normalize_prompt_cache_details,
@@ -1996,10 +1997,6 @@ class Handler(BaseHTTPRequestHandler):
 
     def log_message(self, format: str, *args: Any) -> None:
         _log("http " + (format % args))
-
-    def handle_error(self, request: Any, client_address: Any) -> None:
-        _log(f"http accept error from {client_address}")
-
     # Обрыв клиента и текущий ход: значения инициализируются в setup() каждого соединения.
     _client_gone: bool = False
     _current_run: Run | ServeRun | None = None
@@ -3670,6 +3667,8 @@ class Server(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
     request_queue_size = 64
+    def handle_error(self, request: Any, client_address: Any) -> None:
+        handle_accept_error(client_address, _log, lambda: ThreadingHTTPServer.handle_error(self, request, client_address), ROOT / "dynamic_config.json")
 
 
 def main() -> int:

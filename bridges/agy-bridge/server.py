@@ -212,6 +212,7 @@ from core.runtime_build_info import UNKNOWN as BUILD_UNKNOWN, RuntimeBuildInfo  
 from core import resumed_tools_policy as _RESUMED_TOOLS, timeout_ladder as _tl, turn_resilience_facade as _TURN_RESILIENCE  # noqa: E402
 from core.log_redaction import mask_credential_context, mask_long_tokens, redact_log_text, safe_log_tokens  # noqa: E402
 from core.log_rotation_adapters import emit_service_log as _emit_rotated_log  # noqa: E402
+from core.http_server_error import handle_accept_error  # noqa: E402
 from core.recovery_flags import (  # noqa: E402
     read_diagnostic_redact_margin_chars, read_diagnostic_window_chars, read_post_call_cutoff_enabled,
     read_tool_call_cap_cutoff_enabled, read_tool_json_repair_enabled,
@@ -6255,9 +6256,6 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, format: str, *args: Any) -> None:  # noqa: A003
         del format, args
 
-    def handle_error(self, request: Any, client_address: Any) -> None:
-        return
-
     def _client_tag(self) -> str:
         try:
             return "%s:%s" % (self.client_address[0], self.client_address[1])
@@ -8027,6 +8025,8 @@ class Server(ThreadingHTTPServer):
     request_queue_size = _env_int("AGY_HTTP_REQUEST_QUEUE_SIZE", 64, 16, 4096)
     allow_reuse_address = True
 
+    def handle_error(self, request: Any, client_address: Any) -> None:
+        handle_accept_error(client_address, _log, lambda: ThreadingHTTPServer.handle_error(self, request, client_address), DYNAMIC_CONFIG_PATH)
     def __init__(self, *args: Any, **kwargs: Any):
         super().__init__(*args, **kwargs)
         self._conn_sem = threading.BoundedSemaphore(
