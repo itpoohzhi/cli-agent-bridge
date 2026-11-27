@@ -14,6 +14,11 @@ from typing import Any, Final
 
 from core import passthrough_effort_map as _pem
 from core import param_adapter
+from core.anthropic_cache_control import (
+    STRATEGY_ANTHROPIC_EPHEMERAL,
+    inject_anthropic_cache_control,
+    is_anthropic_cache_control_enabled,
+)
 from core.backend_params import validate_backend_params
 from core.logical_effort import EFFORT_KEYS, LOGICAL_OFF, canonicalize_logical_effort, is_thinking_disabled
 from core.runtime_env import DynamicFlagSource
@@ -76,16 +81,38 @@ def _check_degrade(explicit: Mapping[str, Any], strip: tuple[str, ...], consumed
         raise ParamDegradedError(lost[0], route.model_id)
 
 
+def _first_effort(out: dict[str, Any]) -> tuple[dict[str, Any], Any]:
+    kept = {k: out[k] for k in EFFORT_KEYS if k in out}
+    return kept, next((v for v in kept.values() if v is not None), None)
+
+
 def _normalize(out: dict[str, Any], params: Mapping[str, Any]) -> dict[str, Any]:
     """`normalize_params` без потери effort при `effort_field == "none"` и отсутствии записи в `effort_map`."""
     field = params.get("effort_field", "reasoning_effort")
     effort_map = params.get("effort_map") or {}
-    kept = {k: out[k] for k in EFFORT_KEYS if k in out}
-    value = next((v for v in kept.values() if v is not None), None)
+    kept, value = _first_effort(out)
     result = param_adapter.normalize_params(out, effort_field=field, effort_map=effort_map)
-    if field == "none" and value is not None and not (isinstance(value, str) and isinstance(effort_map.get(value), Mapping)):
+    unmapped = not (isinstance(value, str) and isinstance(effort_map.get(value), Mapping))
+    if field == "none" and value is not None and unmapped:
         result.update(copy.deepcopy(kept))
     return param_adapter.strip_always(result, params.get("strip_always") or ())
+
+
+def _maybe_translate_off(
+    out: dict[str, Any], logical: Any, effort_map: Mapping[str, Any], explicit: Mapping[str, Any]
+) -> set[str]:
+    consumed: set[str] = set()
+    if logical == LOGICAL_OFF and LOGICAL_OFF in effort_map:
+        if is_thinking_disabled(explicit):
+            consumed.add("thinking")
+        _translate_off(out)
+    return consumed
+
+
+def _apply_cache_control(out: dict[str, Any], params: Mapping[str, Any]) -> dict[str, Any]:
+    if params.get("cache_control_strategy") != STRATEGY_ANTHROPIC_EPHEMERAL:
+        return out
+    return inject_anthropic_cache_control(out) if is_anthropic_cache_control_enabled() else out
 
 
 def _apply_manifest_dialect(
@@ -95,17 +122,13 @@ def _apply_manifest_dialect(
     effort_map = params.get("effort_map") or {}
     explicit = {**(body.request or {}), **(route.request or {})}
     logical = canonicalize_logical_effort(out, route.request, body.request, alias_effort=route.alias_effort)
-    consumed: set[str] = set()
-    if logical == LOGICAL_OFF and LOGICAL_OFF in effort_map:
-        if is_thinking_disabled(explicit):
-            consumed.add("thinking")
-        _translate_off(out)
+    consumed = _maybe_translate_off(out, logical, effort_map, explicit)
     _check_degrade(explicit, tuple(params.get("strip_always") or ()), consumed, route)
     out = _normalize(out, params)
     thinking = out.get("thinking")
     if isinstance(thinking, dict) and thinking.get("type") == "enabled":
         out = param_adapter.clamp_thinking_budget(out)
-    return out
+    return _apply_cache_control(out, params)
 
 
 def apply_passthrough_transforms(prepared: dict[str, Any], route: Any, body: Any, adapter: Any) -> dict[str, Any]:

@@ -237,6 +237,7 @@ class ParamsConfig:
     adaptive_whitelist: Tuple[str, ...] = tuple(GLOBAL_WHITELIST)
     strip_always: Tuple[str, ...] = ()
     tool_emulation: bool = True
+    cache_control_strategy: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -760,9 +761,7 @@ def _parse_overrides(raw: Any, err: _Errors) -> Tuple[ModelRule, ...]:
     return tuple(rules)
 
 
-def _parse_params(
-    raw: Any, defaults: Defaults, env: Mapping[str, str], err: _Errors
-) -> ParamsConfig:
+def _parse_params(raw: Any, defaults: Defaults, env: Mapping[str, str], err: _Errors) -> ParamsConfig:
     base = ParamsConfig(tool_emulation=defaults.tool_emulation)
     if raw is None:
         return base
@@ -779,13 +778,14 @@ def _parse_params(
         or not isinstance(effort_map, dict)
         or strip is None
         or not isinstance(tools, bool)
+        or (strategy := raw.get("cache_control_strategy")) not in (None, "anthropic_ephemeral")
     ):
         err.add("provider_manifest_invalid")
         return base
     if whitelist is None or any(item not in GLOBAL_WHITELIST for item in whitelist):
         err.add("provider_params_whitelist_invalid")
         return base
-    return ParamsConfig(field_name, dict(effort_map), whitelist, strip, tools)
+    return ParamsConfig(field_name, dict(effort_map), whitelist, strip, tools, strategy)
 
 
 def _parse_probe(raw: Any, defaults: Defaults, err: _Errors) -> ProbeConfig:
