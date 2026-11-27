@@ -113,6 +113,7 @@ from core.backend_adapter import (  # noqa: E402
 from core import context_resilience as ctxres  # noqa: E402
 from core import passthrough_facade as _transport_facade  # noqa: E402
 from core.route_attempts import AttemptPhase  # noqa: E402
+from core.route_failure_telemetry import finalize_cli_serve  # noqa: E402
 from core.resilience import (  # noqa: E402
     ResilienceError,
     ResilienceLease,
@@ -1882,7 +1883,7 @@ def _passthrough_discard_reason(status: int, error_type: str) -> str:
 class _HandlerSink(ResponseSink):
     """Запись ответа passthrough-шва в сокет клиента; сбой записи — ClientGone."""
 
-    _DROP = frozenset({"server", "date"})
+    _DROP = frozenset({"server", "date", "x-bridge-draining"})
 
     def __init__(
         self,
@@ -7253,8 +7254,7 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
         try:
             self._serve_json_body(ctx)
         finally:
-            self._record_telemetry()
-            _log(f"done route=cli status={self._response_status} {self._trace_log_fields()} elapsed_ms={int((time.monotonic() - started) * 1000)}")
+            finalize_cli_serve(self, started, _log)
 
     def _serve_json_body(self, ctx: dict[str, Any]) -> None:
         from core.p12_hub_cancel_seam import get_hub_p12_seam
@@ -7370,8 +7370,7 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
         try:
             self._serve_sse_body(ctx)
         finally:
-            self._record_telemetry(client_gone=self._client_write_dead)
-            _log(f"done route=cli status={self._response_status} {self._trace_log_fields()} elapsed_ms={int((time.monotonic() - started) * 1000)}")
+            finalize_cli_serve(self, started, _log, client_gone=self._client_write_dead)
 
     def _serve_sse_body(self, ctx: dict[str, Any]) -> None:
         lease = self._current_lease()

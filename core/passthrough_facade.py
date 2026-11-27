@@ -20,7 +20,8 @@ from core.quota_classifier import QuotaRules
 from core.retry_control import MAX_RETRY_RATIO, MAX_TOTAL_ATTEMPTS_LIMIT, CircuitPolicy, RetryReservation, RetrySizing, RetryTokenBucket, RouteCandidate, validate_retry_sizing
 from core.route_cb import RouteCB, RouteCBConfig, RouteCircuitBreaker, resolve_provider
 from core.route_cb_guard import acquire_cb_guard, get_route_cb
-from core.route_attempts import BRIDGE_OWNER, STATELESS_REPLAY_ENDPOINTS, AttemptPhase, AttemptState, RouteAttempt, RouteFailover, RouteRefusal, build_georouter_headers, build_pool_exhausted_error, evaluate_replay, failover_from_mapping, normalize_replay_endpoint
+from core.route_attempts import BRIDGE_OWNER, STATELESS_REPLAY_ENDPOINTS, AttemptPhase, AttemptState, RouteAttempt, RouteFailover, RouteRefusal, build_georouter_headers, evaluate_replay, failover_from_mapping, normalize_replay_endpoint
+from core.route_failure_telemetry import emit_route_failure, finalize_passthrough_serve, finalize_routes_exit
 from core.route_eligibility import EligibilityFacts, request_snapshot, route_eligible
 from core.route_health_policy import RetryBudgetConfig, compute_attempt_decision
 from core.routing_contract import ROUTING_ALGORITHM, PreSendTransientError, parse_routes
@@ -99,8 +100,7 @@ def serve_passthrough(handler: Any, host: Any, call: PassthroughCall) -> None:
         raise
     finally:
         host.get_registry().finish(live_id)
-        handler._telemetry_passthrough_done(sink.status)
-        host._log(f"done route=passthrough status={sink.status} {handler._trace_log_fields()} elapsed_ms={int((time.monotonic() - started) * 1000)}")
+        finalize_passthrough_serve(handler, host, sink, started)
 
 def _plain_params(value: Any) -> Any:
     if isinstance(value, Mapping):
@@ -249,39 +249,7 @@ def _credential_scope(route: Any, spec: Any) -> str:
     return f"backend:{spec.backend}"
 
 
-def _exhausted_pool(
-    refusals: list[tuple[str, RouteRefusal, RouteFailover]],
-) -> tuple[str, list[tuple[str, RouteRefusal]]] | None:
-    """Группа отказов одного объявленного пула (>=2 слотов) для сводного 429."""
-    groups: dict[str, tuple[str, list[tuple[str, RouteRefusal]]]] = {}
-    for slot, error, failover in refusals:
-        if not failover.pool_key:
-            continue
-        groups.setdefault(failover.pool_key, (failover.label, []))[1].append((slot, error))
-    for label, group in groups.values():
-        if len({slot for slot, _ in group}) >= 2:
-            return label, group
-    return None
-
-
-def _emit_route_failure(route: Any, last_error: Any, refusals: list[tuple[str, RouteRefusal, RouteFailover]], quota_skipped: list[tuple[str, RouteRefusal, RouteFailover]], cb_retry_after: int | None) -> None:
-    if isinstance(last_error, RouteRefusal) or quota_skipped:
-        sink = route.host._HandlerSink(route.handler, extra_headers=route.host._trace_headers(route.handler._trace))
-        pool = _exhausted_pool(refusals + quota_skipped)
-        if pool is not None:
-            status, headers, payload = build_pool_exhausted_error(pool[1], pool_label=pool[0])
-            sink.start(status, list(headers))
-            sink.write(payload)
-        else:
-            err = last_error if isinstance(last_error, RouteRefusal) else quota_skipped[0][1]
-            sink.start(err.status_code, list(err.response_headers))
-            sink.write(err.response_body)
-    elif cb_retry_after is not None:
-        sink = route.host._HandlerSink(route.handler, extra_headers=route.host._trace_headers(route.handler._trace))
-        sink.start(503, [("Content-Type", "application/json"), ("Retry-After", str(cb_retry_after))])
-        sink.write(b'{"error":{"type":"all_routes_open","code":"all_routes_open","message":"all routes are open or busy"}}')
-    else:
-        route.reject(503, "route_unavailable", "no eligible transport is available")
+_emit_route_failure = emit_route_failure
 
 
 def _run_routes(route: Any, routes: Any, seed: str, policy: Any) -> None:
@@ -339,9 +307,9 @@ def _run_routes(route: Any, routes: Any, seed: str, policy: Any) -> None:
             finally:
                 guard.release()
         retry_after = breakers[0].retry_after_s(cb_blocked, time.monotonic()) if breakers[0] is not None and cb_blocked and count == 0 else None
-        _emit_route_failure(route, last_error, refusals, quota_skipped, retry_after)
+        emit_route_failure(route, last_error, refusals, quota_skipped, retry_after)
     finally:
-        _ = reservation.release_unused()
+        finalize_routes_exit(route, reservation)
 
 def _request_policy(route: Any) -> Any:
     """Объединяет все источники ролей: header не может скрыть роль в body."""
