@@ -677,6 +677,9 @@ class TestPersistenceAndShutdown(RpcCase):
             self.assertTrue(wait_until(lambda: own.poll() is not None))
             self.assertIsNone(foreign.poll())
             self.assertIsNone(reused.poll())
+            # На Linux SIGKILL оставляет процесс в Z-состоянии до waitpid() в own.poll();
+            # повторный reconcile после reap подтверждает полную очистку реестра.
+            self.assertEqual(server.reconcile_children(), 0)
             self.assertEqual(json.loads(server._children_path().read_text()), [])
         finally:
             for proc in (own, foreign, reused):
