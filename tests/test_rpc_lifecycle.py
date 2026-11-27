@@ -299,7 +299,7 @@ class TestCapAndQueue(RpcCase):
         """TM-009: таймаут очереди -> 503 overloaded; отмена клиента возвращает билет; счётчики как раньше."""
         server.MAX_CONCURRENT = 1
         self.hub.script(
-            [{"steps": [{"op": "sleep", "s": 2.0}, {"op": "text", "text": "slow"}]}]
+            [{"steps": [{"op": "sleep", "s": 4.0}, {"op": "text", "text": "slow"}]}]
         )
         busy = self.conv("chat-busy2")
         first = threading.Thread(target=lambda: busy.ask("long"))
@@ -677,6 +677,9 @@ class TestPersistenceAndShutdown(RpcCase):
             self.assertTrue(wait_until(lambda: own.poll() is not None))
             self.assertIsNone(foreign.poll())
             self.assertIsNone(reused.poll())
+            # На Linux SIGKILL оставляет процесс в Z-состоянии до waitpid() в own.poll();
+            # повторный reconcile после reap подтверждает полную очистку реестра.
+            self.assertEqual(server.reconcile_children(), 0)
             self.assertEqual(json.loads(server._children_path().read_text()), [])
         finally:
             for proc in (own, foreign, reused):

@@ -138,6 +138,8 @@ def _start_thread(s: ProtocolState, p: JsonMap) -> TransitionResult:
         params["model"] = model
     if cwd is not None:
         params["cwd"] = cwd
+    if zc and (base_inst := _str(p.get("base_instructions"))) is not None:
+        params["baseInstructions"] = base_inst
     if zc or st:
         params["sandbox"], params["approvalPolicy"] = "read-only", "never"
     nxt = ProtocolState(

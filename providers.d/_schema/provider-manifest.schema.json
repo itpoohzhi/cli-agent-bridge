@@ -234,7 +234,8 @@
         "effort_map": {"type": "object"},
         "adaptive_whitelist": {"type": "array", "items": {"type": "string"}},
         "strip_always": {"type": "array", "items": {"type": "string"}},
-        "tool_emulation": {"type": "boolean", "default": true}
+        "tool_emulation": {"type": "boolean", "default": true},
+        "cache_control_strategy": {"type": ["string", "null"], "enum": ["anthropic_ephemeral", null]}
       }
     },
     "probe": {

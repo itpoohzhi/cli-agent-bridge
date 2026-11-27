@@ -915,7 +915,8 @@
         ],
         "strip_always": [
           "thinking"
-        ]
+        ],
+        "cache_control_strategy": "anthropic_ephemeral"
       }
     },
     "deepseek-direct": {

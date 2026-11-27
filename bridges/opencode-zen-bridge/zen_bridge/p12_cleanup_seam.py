@@ -178,3 +178,57 @@ class ZenP12CleanupSeam:
     def shutdown(self, timeout_s: float = 1.0) -> None:
         if self._reaper is not None:
             self._reaper.shutdown(timeout_s=timeout_s)
+
+    def finish_proc_after_turn(
+        self,
+        proc: Any | None,
+        feed: Any | None,
+        active_lock: threading.Lock,
+        active_map: dict[str, Any],
+        run_id: str,
+        attempts: Any,
+        release_fn: ReleaseCallback,
+    ) -> None:
+        """Finalize subprocess streams/table and quarantine slot release until dead_confirmed."""
+        p12_q = self.pgid_quarantine_enabled()
+        if proc is not None:
+            if feed is not None:
+                feed.close()
+            try:
+                if proc.stderr is not None:
+                    proc.stderr.close()
+            except OSError:
+                pass
+            if proc.poll() is None and not p12_q:
+                try:
+                    proc.kill()
+                except OSError:
+                    pass
+        with active_lock:
+            active_map.pop(run_id, None)
+        attempts.commit()
+        if p12_q:
+            self.release_slot_after_proc(release_fn, proc, run_id)
+        else:
+            release_fn()
+
+
+_ZEN_P12_LOCK = threading.Lock()
+_ZEN_P12_SEAM: ZenP12CleanupSeam | None = None
+
+
+def get_zen_p12_seam() -> ZenP12CleanupSeam:
+    """Thread-safe singleton accessor for ZenP12CleanupSeam."""
+    global _ZEN_P12_SEAM
+    if (s := _ZEN_P12_SEAM) is not None:
+        return s
+    with _ZEN_P12_LOCK:
+        if _ZEN_P12_SEAM is None:
+            _ZEN_P12_SEAM = ZenP12CleanupSeam()
+        return _ZEN_P12_SEAM
+
+
+def shutdown_zen_p12_seam(timeout_s: float = 1.0) -> None:
+    """Shutdown singleton reaper if initialized."""
+    if _ZEN_P12_SEAM is not None:
+        _ZEN_P12_SEAM.shutdown(timeout_s=timeout_s)

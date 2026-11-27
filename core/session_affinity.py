@@ -18,6 +18,7 @@ from typing import Any, Iterator
 import fcntl
 
 from core.runtime_env import flag_enabled
+from core.session_affinity_anchor import messages_dialog_anchor
 from core.session_plane.identity import CHAT_ID_RE
 from core.session_plane.zc_env_guard import is_passthrough_canonical_affinity_enabled
 from core.subbridge_zero_canon import normalize_review_profile
@@ -485,21 +486,9 @@ def _identity(
     input_identity = _input_identity(data)
     messages = data.get("messages")
     if isinstance(messages, (list, tuple)) and messages:
-        dialog_anchor = list(top_level)
-        if input_identity is not None:
-            dialog_anchor.extend(input_identity)
-        dialog_anchor.extend(
-            _message_identity(message)
-            for message in messages
-            if _field(message, "role") in ("system", "developer")
+        dialog_anchor = messages_dialog_anchor(
+            messages, top_level, input_identity, _field, _message_identity, _content_text
         )
-        user_msg = next(
-            (message for message in messages if _field(message, "role") == "user"), None
-        )
-        if user_msg is not None:
-            dialog_anchor.append(_message_identity(user_msg))
-        if not dialog_anchor:
-            dialog_anchor.append(_message_identity(messages[0]))
         return {"first": dialog_anchor, "tools": _json_value(data.get("tools"))}
 
     dialog_anchor = list(top_level)

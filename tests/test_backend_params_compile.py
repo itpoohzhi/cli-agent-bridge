@@ -39,14 +39,17 @@ def _manifests() -> dict[str, Any]:
 
 def test_params_is_known_backend_key() -> None:
     assert "params" in BACKEND_KEYS
-    assert BACKEND_PARAMS_KEYS == {"effort_field", "effort_map", "adaptive_whitelist", "strip_always"}
+    assert BACKEND_PARAMS_KEYS == {
+        "effort_field", "effort_map", "adaptive_whitelist", "strip_always", "cache_control_strategy"}
 
 
 @pytest.mark.parametrize("backend_id", DIALECT_BACKENDS)
 def test_fleet_json_carries_params_and_passes_strict_validation(backend_id: str) -> None:
     fleet = _fleet()
     params = fleet["backends"][backend_id]["params"]
-    assert set(params) == BACKEND_PARAMS_KEYS
+    assert {"effort_field", "effort_map", "adaptive_whitelist", "strip_always"} <= set(params) <= BACKEND_PARAMS_KEYS
+    if backend_id == "opencode-go-claude":
+        assert params.get("cache_control_strategy") == "anthropic_ephemeral"
     assert validate_backend_params(params) == ""
     build_catalog(fleet, ADAPTER_KINDS, mode="strict")  # без FleetViolation
 
@@ -125,3 +128,4 @@ def test_adapter_config_exposes_params_for_runtime_dispatch() -> None:
 
     config = server.BACKENDS.get("opencode-go-claude").config
     assert config["params"]["strip_always"] == ["thinking"]
+    assert config["params"]["cache_control_strategy"] == "anthropic_ephemeral"

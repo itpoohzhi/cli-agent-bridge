@@ -7156,11 +7156,9 @@ class Handler(BaseHTTPRequestHandler):
                     and callable(emitted)
                     and bool(emitted()),
                 )
-            def _release_resources(_out=cast("dict[str, object]", out), _run=self._metric_run) -> None:
-                try: _slots.release()
-                finally: slot_and_session.release_admission_for_state(_hygiene_rt().release, adm_dec.ticket_id, _out, run=_run)
-            p12_run = None if getattr(self._metric_run, "_persistent_mode", False) else self._metric_run
-            _p12_seam().release_slot_after_run(_release_resources, p12_run, str(ctx.get("turn_id") or tag))
+            _p12_seam().release_slots_and_admission(
+                _slots, _hygiene_rt().release, adm_dec.ticket_id, out, self._metric_run, str(ctx.get("turn_id") or tag),
+            )
         self._log_done(cast(str, ctx["model"]), cast("dict[str, object]", out), t0, cast(str, ctx["tag"]))
         return out
 

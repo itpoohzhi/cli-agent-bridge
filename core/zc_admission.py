@@ -170,6 +170,9 @@ def build_thread_params(ctx: Mapping[str, Any], zc: bool) -> dict[str, object]:
         params["model"] = model
     if isinstance(cwd, str) and cwd:
         params["cwd"] = cwd
+    base = ctx.get("base_instructions")
+    if zc and isinstance(base, str) and base.strip():
+        params["base_instructions"] = base.strip()
     return params
 
 
