@@ -179,12 +179,17 @@ def _classify_message_text(lower: str) -> tuple[int, str, str]:
     return 502, "upstream_error", "resident_turn_failed"
 
 
+_TURN_TIMEOUT_CODES: Final[frozenset[str]] = frozenset(
+    {"turn_timeout", "first_progress_timeout", "idle_timeout", "safety_cap_timeout"}
+)
+
+
 def _apply_timeout_status_policy(
     status: int, error_type: str, code: str, environ: Mapping[str, str] | None = None
 ) -> tuple[int, str, str]:
     if code == "bridge_draining" or status == 503:
         return status, error_type, code
-    if status == 504 and env_bool(os.environ if environ is None else environ, (TURN_TIMEOUT_502_ENV,), False):
+    if status == 504 and code in _TURN_TIMEOUT_CODES and env_bool(os.environ if environ is None else environ, (TURN_TIMEOUT_502_ENV,), False):
         return 502, error_type, code
     return status, error_type, code
 

@@ -47,3 +47,15 @@ def test_turn_timeout_post_commit_returns_200_sse(monkeypatch: pytest.MonkeyPatc
     assert resp.status == 200
     assert resp.code == "turn_timeout"
     assert "data: [DONE]\n\n" in resp.sse
+
+
+def test_non_turn_504_not_mapped_to_502_when_flag_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(TURN_TIMEOUT_502_ENV, "true")
+
+    class _Other504(RuntimeError):
+        http_status = 504
+        code = "upstream_gateway_timeout"
+
+    resp = build_turn_error(_Other504("gw timeout"), live_sent=0)
+    assert resp.status == 504
+    assert resp.code == "upstream_gateway_timeout"
