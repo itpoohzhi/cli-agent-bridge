@@ -81,7 +81,11 @@ from core.passthrough_adapter_runtime import (
     fail_context,
     handle_request,
 )
-from core.passthrough_exchange import OpenRequestOptions, open_request
+from core.passthrough_exchange import (
+    OpenRequestOptions,
+    _scoped_review_profile,  # pyright: ignore[reportPrivateUsage]
+    open_request,
+)
 from core.passthrough_sliding_window import (
     FLAG_PASSTHROUGH_SLIDING_WINDOW,
     SlidingDeadline,
@@ -105,10 +109,23 @@ from core.stream_framing import (
     is_graceful_error_framing_enabled,
 )
 from core.session_affinity import (
+    principal_fingerprint,
     register_response_affinity,
     request_scope,
     session_affinity,
 )
+from core.session_plane import (
+    DIRECTIVE_HEADER,
+    SessionIdentityError,
+    SessionIdentityInput,
+    decide_session_plan,
+    effective_capabilities,
+    encode_directive,
+    is_agy_signed_directive_enabled,
+    load_or_create_directive_key,
+    resolve_canonical_identity,
+)
+from core.subbridge_zero_canon import should_forward_review_profile
 from core.telemetry_hooks import telemetry_usage
 from core.usage_wire import positive_wire_usage
 
@@ -177,6 +194,27 @@ def _positive_float(environ: Mapping[str, str], name: str, default: float) -> fl
     except ValueError:
         return default
     return value if math.isfinite(value) and value > 0 else default
+
+
+def _without_directive(headers: Mapping[str, str]) -> Mapping[str, str]:
+    """Клиентский X-DSH-Session-Directive никогда не пересылается upstream."""
+    wanted = DIRECTIVE_HEADER.lower()
+    if not any(str(name).lower() == wanted for name in headers):
+        return headers
+    return {k: v for k, v in headers.items() if str(k).lower() != wanted}
+
+
+def _json_dict(raw_body: bytes) -> dict[str, Any]:
+    try:
+        data = json.loads(raw_body)
+    except (ValueError, UnicodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _effort_of(data: Mapping[str, Any]) -> str:
+    effort = data.get("reasoning_effort")
+    return effort.strip().lower() if isinstance(effort, str) else ""
 
 
 def _strip_body_controls(data: dict[str, Any]) -> bool:
@@ -1288,7 +1326,51 @@ class PassthroughAdapter(BackendAdapter):
             if affinity_out is not None:
                 affinity_out["affinity_uuid"] = computed_affinity
                 affinity_out["affinity_scope"] = scope_val
+        extra.update(self._session_directive_headers(raw_body, headers))
         return extra
+
+    def _trusts_session_directive(self) -> bool:
+        """Только локальные sub-bridges (сегментный allowlist), не `/sg-*`, `/go`, `/neuralwatt`."""
+        return should_forward_review_profile(
+            getattr(self, "_base_path", ""), str(self.config.get("trust_profile") or "")
+        )
+
+    def _session_directive_headers(
+        self, raw_body: bytes, headers: Mapping[str, str]
+    ) -> dict[str, str]:
+        """Подписанный X-DSH-Session-Directive для доверенного sub-bridge (default OFF)."""
+        if not is_agy_signed_directive_enabled() or not self._trusts_session_directive():
+            return {}
+        data = _json_dict(raw_body)
+        lower = {str(k).lower(): v for k, v in headers.items()}
+        base = {
+            "principal_id": principal_fingerprint(lower),
+            "backend_id": str(self.id),
+            "model_id": str(data.get("model") or ""),
+            "effort_level": _effort_of(data),
+            "review_profile": _scoped_review_profile(headers),
+            "subagent_id": str(lower.get("x-subagent-id") or ""),
+        }
+        result: dict[str, str] = {}
+        try:
+            identity = resolve_canonical_identity(
+                SessionIdentityInput(**base, headers=lower, request_body=data)
+            )
+        except SessionIdentityError:
+            # Fail-closed: подделанный/конфликтующий ключ не пробрасываем, процесс не греем.
+            identity = resolve_canonical_identity(SessionIdentityInput(**base))
+            if lower.get("x-dsh-chat-id"):
+                result["X-DSH-Chat-Id"] = f"eph-{uuid.uuid4().hex}"
+        caps = effective_capabilities("agy-bridge")
+        plan = decide_session_plan(
+            identity, caps, "cold", tools_requested=bool(data.get("tools"))
+        )
+        try:
+            result[DIRECTIVE_HEADER] = encode_directive(plan, load_or_create_directive_key())
+        except (OSError, ValueError):
+            self._log("passthrough session directive unavailable")
+            return {}
+        return result
 
     def _with_body_defaults(self, raw_body: bytes) -> bytes:
         """Удаляет управляющие поля моста и подставляет отсутствующие дефолты."""
@@ -1340,7 +1422,7 @@ class PassthroughAdapter(BackendAdapter):
         headers: Mapping[str, str],
         **kwargs: Unpack[OpenRequestOptions],
     ) -> http.client.HTTPConnection:
-        return open_request(self, path, raw_body, headers, **kwargs)
+        return open_request(self, path, raw_body, _without_directive(headers), **kwargs)
 
     def _fail(
         self,
