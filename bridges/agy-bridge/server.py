@@ -158,6 +158,12 @@ from agy_runtime.persistent_run_hooks import (  # noqa: E402
 from agy_runtime.persistent_worker_adapter import AgyPersistentWorkerPool  # noqa: E402
 from agy_runtime.input_guard_policy import ClientCompactionRequired  # noqa: E402
 from agy_runtime.loss_receipt_context import begin_request_scope, record_lossless, send_client_compaction_required, usage_payload  # noqa: E402
+from agy_runtime.lossless_prompt_facade import (  # noqa: E402
+    LosslessRejectionError, PromptRenderDeps, ensure_prompt_fits_or_pass, feed_run_stdin_or_lossless,
+    iter_run_stdout_or_lossless, prepare_run_lossless_state, release_run_lossless_resources,
+    render_messages_prompt, run_with_lossless_cleanup, send_rejection_response,
+)
+from agy_runtime.process_admission_guard import AdmissionOverloadError  # noqa: E402
 from core.resumed_tools_policy import CompactToolsQuery  # noqa: E402
 from agy_runtime.legacy_session_helpers import (  # noqa: E402
     LegacyLoadSpec, atomic_write_sessions_json, load_sessions_json_entries, normalize_request_cwd,
@@ -2482,33 +2488,15 @@ def _messages_to_prompt(
     *,
     sort_keys: bool = False,
 ) -> str:
-    """Собрать единый текстовый промпт хода.
-
-    Секцию протокола инструментов добавляет `_with_tools_protocol` (только при
-    эмуляции tools). Image-части получают сквозные маркеры `[image N]` (нумерация с `img_start + 1`),
-    а `images` описываются блоком `[attachments]` с абсолютными путями файлов.
-    Сверх `PROMPT_MAX_NDJSON_BYTES` минус `reserve_bytes` — head-pruning (ADR-0008).
-    """
-    counter = [0]
-    img_counter = [img_start]
-    blocks: list[tuple[int, str, str]] = []
-    for index, msg in enumerate(messages):
-        rendered = _render_message(msg, counter, img_counter, sort_keys=sort_keys)
-        if rendered:
-            role = str(msg.get("role") or "user") if isinstance(msg, dict) else ""
-            blocks.append((index, role, rendered))
-    tail_block = _attachments_block(images) if images else ""
-    text = _join_prompt_parts([b[2] for b in blocks], tail_block)
-    if not text:
-        return "Reply with exactly: PONG"
-    limit = _prompt_budget(reserve_bytes)
-    if not AGY_BRIDGE_ENABLE_HEAD_PRUNING or _ndjson_bytes(text) <= limit:
-        return record_lossless() or text
-    pruned = _prune_or_compact(blocks, tail_block, limit)
-    if not _new_flag("truncation_notice_enabled"):
-        return pruned
-    rp = partial(_prune_or_compact, blocks, tail_block)
-    return with_truncation_notice(pruned, blocks, rp, _NOTICE_POLICY, limit)
+    """Собрать промпт хода (legacy head-pruning/компакция либо lossless без обрезки по флагу)."""
+    deps = PromptRenderDeps(
+        _render_message, _attachments_block, _join_prompt_parts, _prompt_budget, _ndjson_bytes,
+        _prune_or_compact, with_truncation_notice, record_lossless, lambda: AGY_BRIDGE_ENABLE_HEAD_PRUNING,
+        lambda: _new_flag("truncation_notice_enabled"), _NOTICE_POLICY, DYNAMIC_CONFIG_PATH,
+    )
+    return render_messages_prompt(
+        messages, deps, images=images, img_start=img_start, reserve_bytes=reserve_bytes, sort_keys=sort_keys
+    )
 
 
 def _join_prompt_parts(parts: list[str], tail_block: str = "") -> str:
@@ -2890,18 +2878,12 @@ def _cap_prompt_block(block: str, cap: int) -> str:
 
 
 def _ensure_prompt_fits_ndjson(prompt: str, max_bytes: int | None = None) -> str:
-    """Защитный рубеж: строка NDJSON промпта не длиннее `max_bytes` байт UTF-8.
-
-    agy молча режет хвост длинного входа, поэтому при превышении вырезается
-    середина промпта (голова и хвост с последним вводом сохраняются).
-    """
+    """Защитный рубеж NDJSON (legacy middle-prune; в lossless-режиме пропускается для чанкинга)."""
     limit = PROMPT_MAX_NDJSON_BYTES if max_bytes is None else max_bytes
-    size = _ndjson_bytes(prompt)
-    if size <= limit:
-        return prompt
-    pruned = _middle_prune_text(prompt, limit - _ndjson_bytes(""))
-    _log(f"prompt middle-pruned: ndjson bytes {size} -> {_ndjson_bytes(pruned)}")
-    return pruned
+    return ensure_prompt_fits_or_pass(
+        prompt, limit=limit, ndjson_bytes_fn=_ndjson_bytes, middle_prune_fn=_middle_prune_text,
+        log_fn=_log, config_path=DYNAMIC_CONFIG_PATH,
+    )
 
 
 def _get_resumed_turn_prompt(
@@ -5432,9 +5414,6 @@ class Run:
         self.work_dir = work_dir
         self.mode = mode
         self.tag = tag
-        if AGY_BRIDGE_ENABLE_HEAD_PRUNING:
-            prompt = _ensure_prompt_fits_ndjson(prompt)
-        self.stdin_line = _ndjson_user_line(prompt)
         cli_mode = slot_and_session.resolve_cli_mode(mode)
         settings_arg = zero_canon_settings_cli_arg() if zero_canon else ""
         cmd = [
@@ -5473,7 +5452,13 @@ class Run:
             plan.anchored = False
             plan.reason = "cid_busy"
         launch_env = _launch_env(zero_canon=zero_canon, req_id=req_id, extra_env=extra_env)
-        spawn_started = start_run_process(self, RunSpawnContext(
+        self.stdin_line = prepare_run_lossless_state(
+            self, prompt, head_pruning_enabled=AGY_BRIDGE_ENABLE_HEAD_PRUNING,
+            ensure_fit_fn=_ensure_prompt_fits_ndjson, ndjson_user_line_fn=_ndjson_user_line,
+            config_path=DYNAMIC_CONFIG_PATH,
+        )
+        spawn_box: list[float] = []
+        run_with_lossless_cleanup(self, lambda: spawn_box.append(start_run_process(self, RunSpawnContext(
             pool=_PERSISTENT_POOL, config_path=DYNAMIC_CONFIG_PATH, cmd=cmd, work_dir=work_dir,
             launch_env=launch_env, model=model, effort=effort, cli_mode=cli_mode,
             zero_canon=zero_canon, settings_arg=settings_arg, add_dir=add_dir, chat_key=chat_key,
@@ -5483,7 +5468,8 @@ class Run:
                 stderr=subprocess.PIPE, start_new_session=True, env=launch_env,
             ),
             on_cold_fail=lambda: _cid_release(self.run_cid, self.turn_id),
-        ))
+        ))))
+        spawn_started = spawn_box[0]
         self.started = time.monotonic()
         self.req_id = req_id
         self.spawn_ms = 0 if self._persistent_reused else int((self.started - spawn_started) * 1000)
@@ -5802,7 +5788,7 @@ class Run:
         return snap
 
     def _feed_stdin(self) -> None:
-        feed_run_stdin(self)
+        feed_run_stdin_or_lossless(self, feed_run_stdin)
 
     def _drain_stderr(self) -> None:
         drain_run_stderr(self, _NOISE)
@@ -5867,7 +5853,7 @@ class Run:
                 return True
 
     def _iter_stdout_lines(self) -> Iterator[str]:
-        return iter_run_stdout_lines(self)
+        return iter_run_stdout_or_lossless(self, iter_run_stdout_lines)
 
     def _pump(self) -> None:
         """Разбор NDJSON agy 1.3.1.
@@ -6097,6 +6083,7 @@ class Run:
             kill_group=lambda proc: _kill_group(proc, send_sigint=True),
             unregister_proc=_unreg, join_timeout_s=JOIN_TIMEOUT_S,
         ))
+        release_run_lossless_resources(self)
 
 
 def _reasoning_suffix(seen: dict, rid: str, text: str) -> str:
@@ -7743,8 +7730,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._serve_sse(ctx)
             else:
                 self._serve_json(ctx)
-        except ClientCompactionRequired as exc:
-            send_client_compaction_required(self, exc)
+        except (ClientCompactionRequired, LosslessRejectionError, AdmissionOverloadError) as exc:
+            send_rejection_response(self, exc)
         finally:
             if not ctx.get("job_owns_cid"):
                 if use_cid:
