@@ -921,7 +921,7 @@
     },
     "deepseek-direct": {
       "kind": "passthrough",
-      "enabled": true,
+      "enabled": false,
       "owned_by": "deepseek",
       "max_concurrent": 1,
       "base_url": "http://127.0.0.1:10830/sg-deepseek",
