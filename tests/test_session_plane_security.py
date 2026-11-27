@@ -41,6 +41,21 @@ def test_slot_root_rejects_system_tmp(tmp_path: Path) -> None:
         allocate_zc_slot_home("slot-1", base_root=Path("/private/tmp"))
 
 
+def test_slot_root_rejects_subdirs_of_system_tmp() -> None:
+    for bad in (Path("/tmp/sub/dir"), Path("/private/tmp/sub")):
+        with pytest.raises(ValueError):
+            allocate_zc_slot_home("slot-1", base_root=bad)
+
+
+@pytest.mark.parametrize("mode", [0o777, 0o720])
+def test_directive_key_rejects_unsafe_parent_dir(tmp_path: Path, mode: int) -> None:
+    parent = tmp_path / "shared"
+    parent.mkdir()
+    os.chmod(parent, mode)
+    with pytest.raises(ValueError):
+        load_or_create_directive_key(parent / "directive.key")
+
+
 def test_symlink_and_forbidden_files_fail_closed(tmp_path: Path) -> None:
     root = tmp_path / "slots"
     home = allocate_zc_slot_home("slot-2", base_root=root)

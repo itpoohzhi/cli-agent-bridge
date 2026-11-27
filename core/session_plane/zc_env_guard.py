@@ -34,8 +34,8 @@ def _checked_root(root: Path) -> Path:
     if root.is_symlink():
         raise ValueError("base_root must not be a symlink")
     resolved = root.resolve(strict=False)
-    if resolved in _FORBIDDEN_ROOTS:
-        raise ValueError("base_root must not be /tmp")
+    if resolved in _FORBIDDEN_ROOTS or any(p in _FORBIDDEN_ROOTS for p in resolved.parents):
+        raise ValueError("base_root must not be under /tmp")
     root.mkdir(mode=0o700, parents=True, exist_ok=True)
     if root.is_symlink() or stat.S_IMODE(root.stat().st_mode) != 0o700:
         os.chmod(root, 0o700)
@@ -48,6 +48,9 @@ def load_or_create_directive_key(path: Path | None = None) -> bytes:
     target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     if target.parent.is_symlink() or target.is_symlink():
         raise ValueError("directive key path must not contain a symlink")
+    parent_st = target.parent.stat()
+    if parent_st.st_uid != os.getuid() or (stat.S_IMODE(parent_st.st_mode) & 0o022) != 0:
+        raise ValueError("directive key parent directory has unsafe owner or permissions")
     try:
         data = read_regular_file_nofollow(target)
     except FileNotFoundError:

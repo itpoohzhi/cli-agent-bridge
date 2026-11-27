@@ -107,7 +107,8 @@ def _directive_binding_reject(payload: SignedDirectivePayload, profile_tag: str,
         return "directive_epoch_invalid"
     if payload.review_profile != profile_tag:
         return "directive_profile_mismatch"
-    if explicit_chat_id and not hmac.compare_digest(payload.chat_id_hash, hashlib.sha256(explicit_chat_id.encode("utf-8")).hexdigest()[:16]):
+    expected_hash = hashlib.sha256(explicit_chat_id.encode("utf-8")).hexdigest()[:16] if explicit_chat_id else ""
+    if not hmac.compare_digest(payload.chat_id_hash, expected_hash):
         return "directive_chat_mismatch"
     if payload.process_directive != "WARM_SLOT_REUSE" or payload.context_directive not in _WARM_CONTEXTS:
         return "directive_ephemeral"

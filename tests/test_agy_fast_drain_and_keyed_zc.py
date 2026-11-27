@@ -24,7 +24,7 @@ from core.hot_session_policy import (  # noqa: E402
     DecisionAction as A, DecisionReason as R, HistoryFingerprints, PolicyConfig,
     SlotSnapshot, SlotState, TurnPolicyInput, decide_turn,
 )
-from core.session_plane.directive_codec import DIRECTIVE_HEADER, encode_directive  # noqa: E402
+from core.session_plane.directive_codec import DIRECTIVE_HEADER, encode_directive, verify_directive  # noqa: E402
 from core.session_plane.lifecycle_policy import SessionExecutionPlan  # noqa: E402
 
 _DP = importlib.import_module("agy_runtime.drain_policy")
@@ -273,6 +273,18 @@ def test_directive_replay_other_chat_is_rejected(env: Callable[..., Path], tmp_p
     chat_a = _enc(_plan("WARM_SLOT_REUSE", chat="chat-A"))
     _assert_fail_closed(_directive_state(env, tmp_path, chat_a, chat="chat-B"), "directive_chat_mismatch")
     _assert_fail_closed(_directive_state(env, tmp_path, _enc(_plan("WARM_SLOT_REUSE", chat=None)), chat="chat-B"), "directive_chat_mismatch")
+
+
+def test_directive_keyed_for_chat_a_rejected_on_unkeyed_request() -> None:
+    # unkeyed запрос (explicit_chat_id == "") не должен принимать директиву, подписанную для chat-A (и наоборот).
+    payload, reason = verify_directive(_enc(_plan("WARM_SLOT_REUSE", chat="chat-A")), _SECRET, now_s=2000.0, min_config_revision=0)
+    assert reason == "ok" and payload is not None
+    assert _SRA._directive_binding_reject(payload, "standard", "") == "directive_chat_mismatch"
+    assert _SRA._directive_binding_reject(payload, "standard", "chat-A") == ""
+    unkeyed, reason = verify_directive(_enc(_plan("WARM_SLOT_REUSE", chat=None)), _SECRET, now_s=2000.0, min_config_revision=0)
+    assert reason == "ok" and unkeyed is not None
+    assert _SRA._directive_binding_reject(unkeyed, "standard", "chat-A") == "directive_chat_mismatch"
+    assert _SRA._directive_binding_reject(unkeyed, "standard", "") == ""
 
 
 def test_directive_replay_other_profile_is_rejected(env: Callable[..., Path], tmp_path: Path) -> None:
