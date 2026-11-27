@@ -38,6 +38,7 @@ class SessionIdentityInput:
     cwd_norm: str = ""
     subagent_id: str = ""
     require_auth: bool = False
+    allow_prompt_cache_key: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,6 +80,8 @@ def extract_canonical_chat_id(
     headers: Mapping[str, object] | None,
     body: Mapping[str, object] | None,
     extra: Mapping[str, object] | None,
+    *,
+    allow_prompt_cache_key: bool = False,
 ) -> str | None:
     """Извлекает chat id из всех поддержанных полей и отклоняет расхождения."""
     candidates: list[str] = []
@@ -96,7 +99,11 @@ def extract_canonical_chat_id(
     unique = set(candidates)
     if len(unique) > 1:
         raise SessionIdentityError(409, "SESSION_ID_CONFLICT", "Conflicting session identifiers")
-    return candidates[0] if candidates else None
+    if candidates:
+        return candidates[0]
+    if allow_prompt_cache_key:
+        return _explicit_value(_mapping_value(body, "prompt_cache_key"), "prompt_cache_key")
+    return None
 
 
 def _effective_cwd_hash(profile: str, cwd_norm: str) -> str:
@@ -112,7 +119,9 @@ def resolve_canonical_identity(inp: SessionIdentityInput) -> CanonicalSessionIde
     if inp.require_auth and not principal:
         raise SessionIdentityError(401, "AUTH_REQUIRED", "principal_id is required")
     profile = normalize_review_profile(inp.review_profile)
-    chat_id = extract_canonical_chat_id(inp.headers, inp.request_body, inp.extra)
+    chat_id = extract_canonical_chat_id(
+        inp.headers, inp.request_body, inp.extra, allow_prompt_cache_key=inp.allow_prompt_cache_key
+    )
     keyed = chat_id is not None
     if profile == "zero-canon":
         isolation = f"zc:{hashlib.sha256(chat_id.encode()).hexdigest()[:16]}" if keyed else f"zc:eph:{uuid.uuid4()}"

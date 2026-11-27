@@ -31,6 +31,7 @@ from .zc_env_guard import (
     is_agy_signed_directive_enabled,
     is_passthrough_canonical_affinity_enabled,
     is_session_plane_enabled,
+    is_session_plane_prompt_cache_key_enabled,
     is_zero_canon_keyed_resident_enabled,
     load_or_create_directive_key,
     verify_zc_slot_home,
@@ -46,6 +47,7 @@ __all__ = (
     "check_epoch_frame", "decide_session_plan", "allocate_zc_slot_home",
     "cleanup_zc_slot_home", "is_agy_drain_early_exit_enabled",
     "is_agy_signed_directive_enabled", "is_passthrough_canonical_affinity_enabled",
-    "is_session_plane_enabled", "is_zero_canon_keyed_resident_enabled",
+    "is_session_plane_enabled", "is_session_plane_prompt_cache_key_enabled",
+    "is_zero_canon_keyed_resident_enabled",
     "load_or_create_directive_key", "verify_zc_slot_home",
 )
