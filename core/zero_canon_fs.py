@@ -179,10 +179,9 @@ def replace_atomic_0600(dst: Path, data: bytes) -> None:
 def replace_atomic_text_0600(dst: Path, text: str) -> None:
     """Атомарно создаёт или обновляет UTF-8 файл `dst` (`0o600`) через `replace_atomic_0600`."""
     replace_atomic_0600(dst, text.encode("utf-8"))
-
-
 def prepare_codex_zero_canon_home(base_env: Mapping[str, str], root: str | Path) -> dict[str, str]:
     """Готовит приватный per-turn Codex Zero-Canon HOME (`0o700`), filtered config и nofollow auth (`0o600`)."""
+    from core.codex_zero_canon_slim import apply_codex_zero_canon_slim
     from core.subbridge_zero_canon import dump_toml, filter_codex_config
     from core.zc_static_cwd_and_source import is_source_header_enabled, resolve_codex_source_tag
     zc_root = Path(root)
@@ -201,7 +200,8 @@ def prepare_codex_zero_canon_home(base_env: Mapping[str, str], root: str | Path)
         if auth_bytes is not None:
             write_atomic_0600(dst_codex / "auth.json", auth_bytes)
     src_tag = resolve_codex_source_tag(is_zero_canon=True) if is_source_header_enabled(base_env) else None
-    write_atomic_text_0600(dst_codex / "config.toml", dump_toml(filter_codex_config(raw_cfg, source_tag=src_tag)))
+    filtered_cfg = apply_codex_zero_canon_slim(filter_codex_config(raw_cfg, source_tag=src_tag), base_env)
+    write_atomic_text_0600(dst_codex / "config.toml", dump_toml(filtered_cfg))
     cleaned = sanitize_zero_canon_env(base_env, zc_root)
     cleaned["CODEX_HOME"] = str(dst_codex)
     cleaned["BRIDGE_ZERO_CANON"] = "1"
