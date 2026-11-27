@@ -7,14 +7,7 @@ import logging
 import threading
 from typing import final
 
-from core.stdio_resident.config import StdioPoolConfig
-from core.stdio_resident.process_io import (
-    EOF,
-    LINE,
-    ResidentProcessHandle,
-    StdioIoError,
-    StdioWriteError,
-)
+from core.stdio_resident.process_io import StdioIoError, StdioWriteError
 from core.stdio_resident.process_pool import (
     PoolClosedError,
     ResidentProcessPool,
@@ -22,6 +15,7 @@ from core.stdio_resident.process_pool import (
 )
 from core.stdio_resident.types import SlotAffinityKey, SlotState
 
+from .persistent_pool_support import PoolSig, build_pool, has_stale_stdout_or_eof, pool_sig_of
 from .persistent_worker_config import (
     PersistentAcquireRequest,
     PersistentLease,
@@ -29,6 +23,7 @@ from .persistent_worker_config import (
     PersistentWorkerSettings,
     compute_env_digest,
 )
+from .worker_rotation_policy import ReuseProbe, SlotBinding, SlotReuseVerdict, decide_slot_reuse
 
 __all__ = [
     "AgyPersistentWorkerPool",
@@ -53,26 +48,14 @@ class AgyPersistentWorkerPool:
     def __init__(self) -> None:
         self._lock: threading.Lock = threading.Lock()
         self._pool: ResidentProcessPool | None = None
-        self._pool_sig: tuple[int, float, float, int, float] | None = None
+        self._pool_sig: PoolSig | None = None
         self._detached_pools: dict[int, ResidentProcessPool] = {}
         self._pool_active: dict[int, int] = {}
-        self._slot_turns: dict[str, int] = {}
+        self._slot_bindings: dict[str, SlotBinding] = {}
         self._cid_to_chat_key: collections.OrderedDict[str, str] = collections.OrderedDict()
         self._hits = self._misses = self._fallbacks = 0
         self._teardowns_error = self._teardowns_cancel = self._desync_evictions = 0
-
-    @staticmethod
-    def _pool_sig_of(cfg: PersistentWorkerSettings) -> tuple[int, float, float, int, float]:
-        return (cfg.max_slots, cfg.idle_timeout_s, cfg.ttl_s, cfg.max_rss_mb, cfg.lease_wait_s)
-
-    @staticmethod
-    def _build_pool(cfg: PersistentWorkerSettings) -> ResidentProcessPool:
-        return ResidentProcessPool(StdioPoolConfig(
-            max_slots=cfg.max_slots, max_slots_per_principal=cfg.max_slots,
-            max_ephemeral_slots=cfg.max_slots, idle_timeout_s=cfg.idle_timeout_s,
-            ttl_s=cfg.ttl_s, max_rss_bytes=cfg.max_rss_mb * 1024 * 1024,
-            lease_wait_s=cfg.lease_wait_s, enabled=True, turn_idle_timeout_s=cfg.idle_timeout_s,
-        ))
+        self._cold_rotations = 0
 
     def _detach_current_locked(self) -> ResidentProcessPool | None:
         old = self._pool
@@ -103,10 +86,10 @@ class AgyPersistentWorkerPool:
                 to_shutdown = self._detach_current_locked()
                 pool = None
             else:
-                sig = self._pool_sig_of(cfg)
+                sig = pool_sig_of(cfg)
                 if self._pool is None or self._pool_sig != sig:
                     to_shutdown = self._detach_current_locked()
-                    self._pool = self._build_pool(cfg)
+                    self._pool = build_pool(cfg)
                     self._pool_sig = sig
                 pool = self._pool
         self._safe_shutdown_pool(to_shutdown)
@@ -135,30 +118,32 @@ class AgyPersistentWorkerPool:
         while len(self._cid_to_chat_key) > cap:
             _ = self._cid_to_chat_key.popitem(last=False)
 
-    @staticmethod
-    def _has_stale_stdout_or_eof(handle: ResidentProcessHandle) -> bool:
-        if not handle.is_alive():
-            return True
-        try:
-            kind, _tagged = handle.read_stdout_line_outcome(timeout_s=0.0)
-        except (OSError, StdioIoError, RuntimeError) as exc:
-            _LOGGER.warning("persistent stdout precheck failed: %s", exc)
-            return True
-        return kind in (LINE, EOF)
-
     def _evict_desynced(
-        self, pool: ResidentProcessPool, slot_id: str, lease_id: str, cid: str
+        self, pool: ResidentProcessPool, slot_id: str, lease_id: str, cid: str, *, cold: bool = False
     ) -> None:
+        """Единый eviction-путь: release(cancel=True) + сброс привязки; cold => cold_rotations."""
         try:
             _ = pool.release(slot_id, success=False, cancel=True, lease_id=lease_id)
         except _SHUTDOWN_ERRORS as exc:
             _LOGGER.warning("persistent desync eviction release error: %s", exc)
         with self._lock:
-            _ = self._slot_turns.pop(slot_id, None)
+            _ = self._slot_bindings.pop(slot_id, None)
             if cid:
                 _ = self._cid_to_chat_key.pop(cid, None)
-            self._desync_evictions += 1
+            self._cold_rotations += int(cold)
+            self._desync_evictions += int(not cold)
             self._fallbacks += 1
+
+    def _verdict_locked(
+        self, slot_id: str, generation: int, req: PersistentAcquireRequest, strict: bool
+    ) -> tuple[SlotReuseVerdict, int]:
+        binding = self._slot_bindings.get(slot_id)
+        turns_before = binding.turns if binding is not None else 0
+        probe = ReuseProbe(
+            strict=strict, reused=turns_before > 0 or generation > 0,
+            run_cid=req.cid, resume_base_idx=req.resume_base_idx,
+        )
+        return decide_slot_reuse(probe, binding), turns_before
 
     def acquire(
         self, req: PersistentAcquireRequest, cfg: PersistentWorkerSettings
@@ -186,11 +171,16 @@ class AgyPersistentWorkerPool:
             return None
         lease_id = entry.lease_id or ""
         with self._lock:
-            turns_before = self._slot_turns.get(entry.slot_id, 0)
-            reused = turns_before > 0 or entry.handle.generation > 0
-        if reused and self._has_stale_stdout_or_eof(entry.handle):
+            verdict, turns_before = self._verdict_locked(
+                entry.slot_id, entry.handle.generation, req, cfg.strict_cold_rotation
+            )
+        if verdict is not SlotReuseVerdict.FRESH and has_stale_stdout_or_eof(entry.handle):
             self._evict_desynced(pool, entry.slot_id, lease_id, req.cid)
             return None
+        if verdict.evicts_slot:
+            self._evict_desynced(pool, entry.slot_id, lease_id, req.cid, cold=True)
+            return None
+        reused = verdict is SlotReuseVerdict.REUSE
         with self._lock:
             pid_key = id(pool)
             self._pool_active[pid_key] = self._pool_active.get(pid_key, 0) + 1
@@ -216,10 +206,10 @@ class AgyPersistentWorkerPool:
             and turns_after < lease.max_turns
         )
         if keep:
-            self._slot_turns[lease.slot_id] = turns_after
+            self._slot_bindings[lease.slot_id] = SlotBinding(turns=lease.turns_before).after_turn(params.cid)
             self._record_cid_locked(params.cid, lease.chat_key, params.max_slots)
             return True
-        _ = self._slot_turns.pop(lease.slot_id, None)
+        _ = self._slot_bindings.pop(lease.slot_id, None)
         if params.cid and (params.cancel or not params.success):
             _ = self._cid_to_chat_key.pop(params.cid, None)
         self._teardowns_cancel += int(params.cancel)
@@ -262,6 +252,7 @@ class AgyPersistentWorkerPool:
             counters = (
                 self._hits, self._misses, self._fallbacks,
                 self._teardowns_error, self._teardowns_cancel, self._desync_evictions,
+                self._cold_rotations,
             )
         self._safe_shutdown_pool(to_shutdown)
         slots = busy = idle = 0
@@ -277,7 +268,7 @@ class AgyPersistentWorkerPool:
             "enabled": enabled, "slots": slots, "busy": busy, "idle": idle,
             "hits": counters[0], "misses": counters[1], "fallbacks": counters[2],
             "teardowns_error": counters[3], "teardowns_cancel": counters[4],
-            "desync_evictions": counters[5],
+            "desync_evictions": counters[5], "cold_rotations": counters[6],
         }
 
     def shutdown(self, timeout_s: float | None = None) -> None:
@@ -291,7 +282,7 @@ class AgyPersistentWorkerPool:
             pools.extend(self._detached_pools.values())
             self._detached_pools.clear()
             self._pool_active.clear()
-            self._slot_turns.clear()
+            self._slot_bindings.clear()
             self._cid_to_chat_key.clear()
         for pool in pools:
             self._safe_shutdown_pool(pool, timeout_s=timeout_s)

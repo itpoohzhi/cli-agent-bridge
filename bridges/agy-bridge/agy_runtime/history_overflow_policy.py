@@ -94,6 +94,38 @@ def _evict_role(
     return joined if spec.size_fn(joined) <= spec.limit_bytes else None
 
 
+def _shrink_tool_groups(
+    parts: Sequence[tuple[str, str]], spec: OverflowSpec
+) -> str | None:
+    """Делегирует overflow атомарному домену при наличии assistant+tool группы."""
+    if not any(
+        role == "assistant" and "[tool call " in text for role, text in parts
+    ):
+        return None
+    # Локальный импорт разрывает цикл инициализации: atomic_group_overflow
+    # использует OverflowSpec и порядок ролей из этого модуля.
+    from .atomic_group_overflow import OverflowItem, shrink_atomic
+
+    grouped: list[OverflowItem] = []
+    group = ""
+    last_tool_pos = -1
+    for pos, (role, text) in enumerate(parts):
+        if role == "assistant" and "[tool call " in text:
+            group = f"tool-{pos}"
+            last_tool_pos = pos
+        elif role != "tool" or not group:
+            group = f"item-{pos}"
+        grouped.append(OverflowItem(group=group, role=role, text=text))
+    has_later_user = any(role == "user" for role, _ in parts[last_tool_pos + 1 :])
+    active_group = grouped[last_tool_pos].group if not has_later_user else ""
+    if active_group:
+        grouped = [
+            OverflowItem(item.group, item.role, item.text, item.group == active_group)
+            for item in grouped
+        ]
+    return shrink_atomic(grouped, spec).prompt
+
+
 def shrink_overflow_parts(
     items: Sequence[tuple[str, str]], spec: OverflowSpec
 ) -> str:
@@ -101,6 +133,8 @@ def shrink_overflow_parts(
     joined = _join(parts, spec)
     if spec.size_fn(joined) <= spec.limit_bytes:
         return joined
+    if (fitted := _shrink_tool_groups(parts, spec)) is not None:
+        return fitted
     if (fitted := _shrink_role(parts, "synthetic", spec)) is not None:
         return fitted
     if (fitted := _evict_role(parts, "synthetic", spec)) is not None:

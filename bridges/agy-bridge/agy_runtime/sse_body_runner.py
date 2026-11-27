@@ -16,7 +16,7 @@ from core.usage_wire import positive_wire_usage
 from core.tool_channel_fsm import normalize_staged_fragments
 from core.tool_turn_settle_policy import SettleDecision, resolve_tool_turn_stop
 from core.stream_activity_policy import SlidingActivityWindow, build_final_outcome
-from core.turn_usage_fsm import should_emit_wire_usage
+from agy_runtime.loss_receipt_context import usage_chunk_due
 from core.stream_resilience_policy import can_safely_replay_turn, is_present, is_uncommitted_step
 from core.stream_resilience_runtime import MidstreamReplayOrchestrator
 from core.runtime_env import flag_enabled
@@ -343,7 +343,7 @@ class _SseBodyRunner:
         ok = s.emit(s.chunk({}, reason, conversation_id=cid))
         if any((ok, not s.resilience)):
             ok, usage = True, s.handler._usage_payload(next(filter(None, (out.get("usage"),)), dict[str, Any]()), out.get("usage_resolved"))
-            if all((should_emit_wire_usage(out.get("usage_resolved")), any((usage.get("prompt_tokens"), usage.get("completion_tokens"))))):
+            if usage_chunk_due(usage, out.get("usage_resolved")):
                 ok = s.emit(s.chunk({}, reason, usage=usage, conversation_id=cid))
         return ok
 def serve_sse_body(handler: Any, ctx: dict[str, Any], hooks: tuple[Any, Any, Any, Any]) -> None:

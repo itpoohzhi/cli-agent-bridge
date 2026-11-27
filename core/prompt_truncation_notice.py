@@ -1,10 +1,16 @@
-"""Чистый домен: уведомление модели об усечении активных tool-результатов.
+"""Чистый домен: честные маркеры усечения и уведомление модели (AD-008).
 
-Если при сжатии промпта под лимит активные (после последнего ``assistant``)
-tool-результаты были усечены, к хвосту промпта добавляется короткое
-фиксированное уведомление, чтобы модель не перечитывала файл целиком и
-не уходила в цикл повторов. Модуль stateless, без I/O и без обращения к
-окружению; в шаблон подставляются только целые числа.
+Единый SSoT текстов усечения для agy-bridge: маркеры опущенной ранней
+истории (``HISTORY_PRUNED_MARKER``) и вырезанной середины сообщения
+(``MIDDLE_PRUNED_MARKER``), а также уведомление об усечении активных
+tool-результатов. Все тексты называют настроенный лимит промпта моста
+(configured prompt cap / input_guard) и явно отрицают, что это окно
+контекста модели. Маркеры — константы без чисел (стабильный хеш префикса
+промпта); числа подставляются только в уведомление. Если при сжатии
+промпта активные (после последнего ``assistant``) tool-результаты были
+усечены, к хвосту промпта добавляется короткое фиксированное уведомление,
+чтобы модель не перечитывала файл целиком и не уходила в цикл повторов.
+Модуль stateless, без I/O и без обращения к окружению.
 """
 
 from __future__ import annotations
@@ -14,10 +20,23 @@ from dataclasses import dataclass
 
 TRUNCATION_NOTICE_MARKER = "[truncation-notice]"
 
+HISTORY_PRUNED_MARKER = (
+    "[ранняя история диалога опущена мостом agy-bridge для соблюдения"
+    " настроенного лимита промпта (configured prompt cap / input_guard),"
+    " а не окна контекста модели (not the model context window)]"
+)
+
+# Компактная форма (<= 150 байт UTF-8): влезает в тесные бюджеты промпта.
+MIDDLE_PRUNED_MARKER = (
+    "\n[... опущено agy-bridge: configured prompt cap/input_guard,"
+    " а не окна контекста модели/not the model context window...]\n"
+)
+
 DEFAULT_TRUNCATION_NOTICE_TEMPLATE = (
     "\n\n[truncation-notice] {count} active tool result(s) were truncated "
-    "to fit the {limit}-byte prompt limit. Do NOT re-read the same full "
-    "file; use offset/limit chunks or targeted grep/rg instead."
+    "to fit the {limit}-byte configured prompt cap (input_guard) of agy-bridge, "
+    "not the model context window. Do NOT re-read the same full file; "
+    "use offset/limit chunks or targeted grep/rg instead."
 )
 
 _SEPARATOR = "\n\n"

@@ -142,7 +142,7 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from agy_runtime import (  # noqa: E402
-    long_session_config as _lsc, midstream_resilience, slot_and_session, sqlite_ro_pool as _ro_pool,
+    long_session_config as _lsc, loss_contract_config as _lcc, midstream_resilience, slot_and_session, sqlite_ro_pool as _ro_pool,
     sqlite_tail_lifecycle, sse_body_runner, sse_stream_helpers, tool_turn_helpers, turn_usage_finalize as _u_fin, zc_static_cwd, zero_canon_profile,
 )
 from agy_runtime.explicit_turn_commit import abort_explicit_turn_safe, finalize_deferred_explicit_turn  # noqa: E402
@@ -155,6 +155,9 @@ from agy_runtime.persistent_run_hooks import (  # noqa: E402
     release_run_persistent, resolve_run_chat_key, start_run_process,
 )
 from agy_runtime.persistent_worker_adapter import AgyPersistentWorkerPool  # noqa: E402
+from agy_runtime.input_guard_policy import ClientCompactionRequired  # noqa: E402
+from agy_runtime.loss_receipt_context import begin_request_scope, record_lossless, send_client_compaction_required, usage_payload  # noqa: E402
+from core.resumed_tools_policy import CompactToolsQuery  # noqa: E402
 from agy_runtime.legacy_session_helpers import (  # noqa: E402
     LegacyLoadSpec, atomic_write_sessions_json, load_sessions_json_entries, normalize_request_cwd,
     session_entry_from_json, session_key_from_json, session_key_to_json, session_key_valid, validate_clean_cid,
@@ -202,7 +205,6 @@ from core.tool_turn_settle_policy import (  # noqa: E402
     SettleDecision, decide_session_commit,
     evaluate_tool_turn_settle, resolve_tool_turn_stop, suppress_post_call_content,
 )
-from core.turn_usage_fsm import should_emit_wire_usage  # noqa: E402
 from core.watchdog import (  # noqa: E402
     IDLE_TIMEOUT_S as _CORE_IDLE_TIMEOUT_S,
     WATCHDOG_INTERVAL_S as _CORE_WATCHDOG_INTERVAL_S,
@@ -225,7 +227,7 @@ from core.agy_capacity_guard import (  # noqa: E402
 )
 from core.chat_key import SOURCES_SESSION_ID, resolve_chat_key  # noqa: E402
 from core.session_continuity import ContinuityConfig, ContinuityIndex  # noqa: E402
-from core.prompt_truncation_notice import NoticePolicy, with_truncation_notice  # noqa: E402
+from core.prompt_truncation_notice import HISTORY_PRUNED_MARKER, MIDDLE_PRUNED_MARKER, NoticePolicy, with_truncation_notice  # noqa: E402
 from core.cli_rejection import is_deterministic_cli_rejection  # noqa: E402
 from core.effortless_policy import effort_cli_args, resolve_request_effort  # noqa: E402
 from core.proc_groups import spawn_registered  # noqa: E402
@@ -774,13 +776,6 @@ ANCHOR_USER_NO_ASSISTANT_MAX = _env_int(
     "AGY_BRIDGE_ANCHOR_USER_NO_ASSISTANT_MAX", 5, 1, 100000
 )
 ANCHOR_USER_TAIL_COUNT = _env_int("AGY_BRIDGE_ANCHOR_USER_TAIL_COUNT", 3, 1, 100000)
-HISTORY_PRUNED_MARKER = (
-    "[ранняя история диалога опущена мостом для соблюдения лимита контекста]"
-)
-MIDDLE_PRUNED_MARKER = (
-    "\n[... часть содержимого сообщения опущена мостом для соблюдения лимита"
-    " контекста agy ...]\n"
-)
 
 
 # Мышление шагов agy: CLI кладёт его в транскрипт разговора пошагово, в середине
@@ -1271,7 +1266,7 @@ def _log(msg: str) -> None:
 
 _CONTINUITY = ContinuityIndex(ContinuityConfig(
     _env_int("AGY_BRIDGE_CONTINUITY_MAX_LINKS", 4096, 16, 1_000_000),
-    SESSION_IDLE_TTL_S,
+    _lcc.continuity_ttl_s(SESSION_IDLE_TTL_S, config_path=DYNAMIC_CONFIG_PATH),
     _log,
     post_turn_anchor_enabled=lambda: _lsc.post_turn_anchor_enabled(config_path=DYNAMIC_CONFIG_PATH),
 ))
@@ -2505,7 +2500,7 @@ def _messages_to_prompt(
         return "Reply with exactly: PONG"
     limit = _prompt_budget(reserve_bytes)
     if not AGY_BRIDGE_ENABLE_HEAD_PRUNING or _ndjson_bytes(text) <= limit:
-        return text
+        return record_lossless() or text
     pruned = _prune_or_compact(blocks, tail_block, limit)
     if not _new_flag("truncation_notice_enabled"):
         return pruned
@@ -3035,12 +3030,17 @@ def _session_tools_fp(sess_key: tuple[str, ...]) -> str:
         return str((_session_store.get(sess_key) or {}).get("tools_fp") or "")
 
 
+def _session_cid(sess_key: tuple[str, ...]) -> str:
+    with _session_store_lock:
+        return str((_session_store.get(sess_key) or {}).get("cid") or "")
+
+
 def _session_max_turns() -> int:
-    return _lsc.read_int_setting("session_max_turns", "AGY_BRIDGE_SESSION_MAX_TURNS", 30, (1, 1000), config_path=DYNAMIC_CONFIG_PATH)
+    return _lcc.session_max_turns(config_path=DYNAMIC_CONFIG_PATH)
 
 
 def _session_expired(entry: dict[str, Any], now: float) -> bool:
-    return any((now - entry["last_used"] > SESSION_IDLE_TTL_S, now - entry["created"] > SESSION_MAX_TTL_S, entry["turns"] >= _session_max_turns()))
+    return _lcc.session_expired(entry, now, (SESSION_IDLE_TTL_S, SESSION_MAX_TTL_S), config_path=DYNAMIC_CONFIG_PATH)
 
 
 def _session_invalidate(sess_key: tuple, cid: str) -> None:
@@ -5499,6 +5499,7 @@ class Run:
             pool=_PERSISTENT_POOL, config_path=DYNAMIC_CONFIG_PATH, cmd=cmd, work_dir=work_dir,
             launch_env=launch_env, model=model, effort=effort, cli_mode=cli_mode,
             zero_canon=zero_canon, settings_arg=settings_arg, add_dir=add_dir, chat_key=chat_key,
+            resume_base_idx=plan.base_idx if plan.anchored else 0,
             spawn_cold=lambda: spawn_registered(
                 cmd, cwd=work_dir, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE, start_new_session=True, env=launch_env,
@@ -7186,25 +7187,7 @@ class Handler(BaseHTTPRequestHandler):
         self._log_done(cast(str, ctx["model"]), cast("dict[str, object]", out), t0, cast(str, ctx["tag"]))
         return out
 
-    @staticmethod
-    def _usage_payload(usage: dict, resolved: object = None) -> dict:
-        """usage agy -> OpenAI-поля. thinking_tokens прибавляем к completion.
-
-        `resolved` — итог `_resolve_step_usage` (флаг включён): одна и та же форма
-        для JSON и SSE; без него — прежнее отображение сырого usage.
-        """
-        if not should_emit_wire_usage(resolved):
-            return {}
-        if isinstance(resolved, dict):
-            wire = cast("dict[str, object]", resolved).get("wire")
-            if isinstance(wire, dict):
-                return dict(cast("dict[str, object]", wire))
-        return {
-            "prompt_tokens": usage.get("input_tokens", 0),
-            "completion_tokens": usage.get("output_tokens", 0)
-            + usage.get("thinking_tokens", 0),
-            "total_tokens": usage.get("total_tokens", 0),
-        }
+    _usage_payload = staticmethod(usage_payload)
 
     @staticmethod
     def _error_body(out: dict, resilience: bool | None = None) -> Any:
@@ -7392,6 +7375,7 @@ class Handler(BaseHTTPRequestHandler):
             },
         )
 
+    @begin_request_scope()
     def do_POST(self) -> None:  # noqa: N802
         t_req_start = time.monotonic()  # старт бюджета запроса: до admission
         self._request_id = _request_id(self.headers)
@@ -7729,7 +7713,7 @@ class Handler(BaseHTTPRequestHandler):
                 stored_fp = "" if explicit_state.handled else _session_tools_fp(cast(tuple, sess_key))
                 prompt, resumed_attached = _resumed_turn_prompt(render_messages, images, reserve, sort_keys=sort_keys)
                 tools_fp = "" if explicit_state.handled else (_RESUMED_TOOLS.compute_tools_fingerprint(tools, tool_choice, has_attachments=resumed_attached, attachment_tool=_attachment_tool() if resumed_attached else None) if emulate_tools else "")
-                compact_tools = (emulate_tools and _new_flag("resumed_compact_tools_enabled", True)) if explicit_state.handled else _RESUMED_TOOLS.should_use_compact_tools(is_resumed, stored_fp, tools_fp, _new_flag("resumed_compact_tools_enabled", True))
+                compact_tools = _lcc.compact_tools_decision(CompactToolsQuery(is_resumed=is_resumed, explicit_path=explicit_state.handled, emulate_tools=emulate_tools, compact_enabled=_new_flag("resumed_compact_tools_enabled", True), stored_fp=stored_fp, stored_cid=_session_cid(cast(tuple, sess_key)), run_cid=conversation_id, tools=tools, tool_choice=tool_choice, has_attachments=resumed_attached, attachment_tool=_attachment_tool() if resumed_attached else None), config_path=DYNAMIC_CONFIG_PATH)
                 names = sorted(build_tool_schemas(tools)) if sort_keys else list(build_tool_schemas(tools))
                 prompt = _RESUMED_TOOLS.wrap_resumed_tools_prompt(prompt, names, tool_choice) if compact_tools else _wrap_proto(prompt, resumed_attached)
             lazy_on = _lsc.lazy_prompt_enabled(config_path=DYNAMIC_CONFIG_PATH)
@@ -7785,6 +7769,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._serve_sse(ctx)
             else:
                 self._serve_json(ctx)
+        except ClientCompactionRequired as exc:
+            send_client_compaction_required(self, exc)
         finally:
             if not ctx.get("job_owns_cid"):
                 if use_cid:

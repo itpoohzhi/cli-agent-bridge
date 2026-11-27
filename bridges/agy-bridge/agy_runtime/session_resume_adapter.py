@@ -11,6 +11,7 @@ import threading
 import time
 from typing import cast, final
 from agy_runtime.long_session_config import read_bool_setting, read_float_setting, read_int_setting
+from agy_runtime.loss_contract_config import hot_overrides
 from agy_runtime.session_store import CommitPayload, ExplicitSessionStore, load_or_create_hmac_key
 from agy_runtime.slot_and_session import resolve_subagent_id
 from core import chat_key as _chat_key
@@ -90,7 +91,7 @@ def read_runtime_flags(config_path: Path | None = None) -> RuntimeFlags:
         kw[k] = read_int_setting(f"bridge_hot_{k}", env, d, b, config_path=config_path)
     for k, env, d, b in _FLT_BOUNDS:
         kw[k] = read_float_setting(f"bridge_hot_{k}", env, d, b, config_path=config_path)
-    return RuntimeFlags(ep, zp, za, cn, epoch, PolicyConfig(**cast("dict[str, object]", kw)))  # type: ignore[arg-type]
+    return RuntimeFlags(ep, zp, za, cn, epoch, hot_overrides(PolicyConfig(**cast("dict[str, object]", kw)), config_path=config_path))  # type: ignore[arg-type]
 def _header_str(headers: Mapping[str, object] | None, name: str) -> str:
     if headers is None:
         return ""

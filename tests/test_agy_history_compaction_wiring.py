@@ -194,6 +194,7 @@ def test_telemetry_no_leak_across_modes(
     _render(_blocks(32, _SECRET), False, logs, _isolate)
     _render(_blocks(32, _SECRET), True, logs, _isolate)
     monkeypatch.setenv("AGY_HISTORY_COMPACTION_INPUT_GUARD_BYTES", "999999999")
+    monkeypatch.setenv("AGY_BRIDGE_INPUT_GUARD_MODE", "legacy")
     _render(_blocks(32, _SECRET), True, logs, _isolate, guard=1024)
     for mode in ("legacy", "compact", "fallback"):
         _assert_fields(logs, mode)
@@ -203,6 +204,7 @@ def test_fallback_on_input_guard_exceeded_via_request(
     _isolate: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("AGY_HISTORY_COMPACTION_INPUT_GUARD_BYTES", "999999999")
+    monkeypatch.setenv("AGY_BRIDGE_INPUT_GUARD_MODE", "legacy")
     logs: list[str] = []
     prompt = _render(_blocks(32, _SECRET), True, logs, _isolate, guard=1024)
     assert prompt == _legacy(_blocks(32, _SECRET))
