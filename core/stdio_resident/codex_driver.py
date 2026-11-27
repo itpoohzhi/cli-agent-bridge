@@ -19,12 +19,11 @@ from core.stdio_resident.codex_std_home import is_codex_std_clean_home_enabled, 
 from core.stdio_resident.codex_usage import codex_v2_effects_to_chunk, extract_codex_legacy_usage
 from core.stdio_resident.protocol_driver import DecodedChunk, DriverCapabilities, StreamJsonDriver
 from core.subbridge_zero_canon import is_zero_canon_profile
+from core.codex_zero_canon_slim import enrich_zero_canon_thread_params
 from core.zc_admission import TurnProofRecorder, build_thread_params as _build_thread_params, build_turn_params as _build_turn_params
 from core.zero_canon_fs import prepare_codex_zero_canon_home
 
 _TERMINAL_STATUSES = frozenset({"completed", "failed", "interrupted"})
-
-
 def _mapping(value: object) -> dict[str, Any] | None:
     return cast(dict[str, Any], value) if isinstance(value, dict) else None
 
@@ -410,7 +409,8 @@ class CodexAppServerV2Driver(StreamJsonDriver):
         if not zc and not self._state.zero_canon and self._state.thread_id is not None and not ctx.get("new_thread"):
             return True
         try:
-            effects = self._apply(ProtocolEvent(EventKind.START_THREAD, _build_thread_params(ctx, zc)))
+            tp = enrich_zero_canon_thread_params(_build_thread_params(ctx, zc), zc)
+            effects = self._apply(ProtocolEvent(EventKind.START_THREAD, tp))
             if self._state.phase is ProtocolPhase.FAILED:
                 return False
             self._send_effects(handle, effects)
