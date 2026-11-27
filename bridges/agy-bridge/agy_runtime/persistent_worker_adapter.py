@@ -12,7 +12,7 @@ from core.stdio_resident.process_io import EOF, LINE, ResidentProcessHandle, Std
 from core.stdio_resident.process_pool import PoolClosedError, ResidentProcessPool, SlotLeaseTimeoutError
 from core.stdio_resident.types import SlotAffinityKey, SlotState
 
-from .persistent_standby_pool import AgyStandbyManager, StandbyProfileKey
+from .persistent_standby_pool import AgyStandbyManager, StandbyProfileKey, standby_argv_digest
 from .persistent_worker_config import (
     PersistentAcquireRequest, PersistentLease, PersistentReleaseParams,
     PersistentWorkerSettings, compute_env_digest,
@@ -147,9 +147,7 @@ class AgyPersistentWorkerPool:
             self._desync_evictions += 1
             self._fallbacks += 1
 
-    def acquire(
-        self, req: PersistentAcquireRequest, cfg: PersistentWorkerSettings
-    ) -> PersistentLease | None:
+    def acquire(self, req: PersistentAcquireRequest, cfg: PersistentWorkerSettings) -> PersistentLease | None:
         """Арендовать живой слот (включая standby на turn 0) или вернуть None для cold-spawn."""
         pool = self._ensure_pool(cfg)
         if pool is None:
@@ -160,12 +158,11 @@ class AgyPersistentWorkerPool:
             eff_chat_key = self._resolve_chat_key_locked(req.chat_key, req.cid)
         if not eff_chat_key:
             return None
-        profile_key = StandbyProfileKey(req.model, req.effort, req.cwd, req.env_digest, req.review_profile)
-        standby = (
-            self._standby.claim_ready(profile_key, pool, cfg)
-            if (not req.cid and not self._standby.has_alias(eff_chat_key))
-            else None
-        )
+        profile_key: StandbyProfileKey | None = None
+        if cfg.standby_enabled and not req.cid and req.review_profile != "zero-canon":
+            if (ad := standby_argv_digest(req.argv_builder())) is not None:
+                profile_key = StandbyProfileKey(req.model, req.effort, req.cwd, req.env_digest, req.review_profile, ad)
+        standby = self._standby.claim_ready(profile_key, pool, cfg) if (profile_key and not self._standby.has_alias(eff_chat_key)) else None
         if standby is not None:
             self._standby.bind_alias(eff_chat_key, standby.standby_chat_key, cfg.max_slots)
         affinity = SlotAffinityKey(
@@ -178,14 +175,15 @@ class AgyPersistentWorkerPool:
         except (SlotLeaseTimeoutError, PoolClosedError, OSError, StdioIoError):
             if standby is not None:
                 self._standby.drop_alias(eff_chat_key)
+                self._standby.close_slot(pool, standby)
             with self._lock:
                 self._fallbacks += 1
             return None
         lease_id = entry.lease_id or ""
-        standby_matched = standby is not None and entry.slot_id == standby.slot_id
-        prefetched_init = standby.init_line if standby_matched and standby is not None else ""
+        standby_matched = standby is not None and entry.slot_id == standby.slot_id and entry.handle.generation == standby.generation
+        prefetched_init = standby.init_line if (standby_matched and standby is not None) else ""
         if standby is not None and not standby_matched:
-            self._standby.drop_alias(eff_chat_key)
+            self._standby.close_slot(pool, standby)
         with self._lock:
             turns_before = self._slot_turns.get(entry.slot_id, 0)
             reused = turns_before > 0 or entry.handle.generation > 0
@@ -196,19 +194,18 @@ class AgyPersistentWorkerPool:
             self._pool_active[id(pool)] = self._pool_active.get(id(pool), 0) + 1
             self._hits += int(reused)
             self._misses += int(not reused)
-        self._standby.schedule_prewarm(profile_key, pool, req.argv_builder, req.cwd, req.env, cfg)
+        if profile_key is not None:
+            self._standby.schedule_prewarm(profile_key, pool, req.argv_builder, req.cwd, req.env, cfg)
         return PersistentLease(
             pool=pool, slot_id=entry.slot_id, lease_id=lease_id, handle=entry.handle,
             chat_key=eff_chat_key, reused=reused, turns_before=turns_before,
             max_turns=cfg.max_turns, pump_tick_s=cfg.pump_tick_s,
-            drain_window_s=cfg.persistent_drain_window_s,
-            prefetched_init_line=prefetched_init, fast_drain_enabled=cfg.fast_drain_enabled,
-            fast_drain_min_s=cfg.fast_drain_min_s, standby_claimed=standby_matched,
+            drain_window_s=cfg.persistent_drain_window_s, prefetched_init_line=prefetched_init,
+            fast_drain_enabled=cfg.fast_drain_enabled, fast_drain_min_s=cfg.fast_drain_min_s,
+            standby_claimed=standby_matched,
         )
 
-    def _decide_release_locked(
-        self, lease: PersistentLease, params: PersistentReleaseParams
-    ) -> bool | None:
+    def _decide_release_locked(self, lease: PersistentLease, params: PersistentReleaseParams) -> bool | None:
         if lease.released:
             return None
         lease.released = True
