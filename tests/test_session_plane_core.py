@@ -101,8 +101,22 @@ def test_directive_round_trip_and_fail_closed() -> None:
     assert verify_directive(encoded, secret, now_s=101.0, min_config_revision=4)[1] == "stale_revision"
 
     head, encoded_payload, signature = encoded.split(".")
-    raw = base64.urlsafe_b64decode(encoded_payload + "=")
+    raw = base64.urlsafe_b64decode(encoded_payload + "=" * (-len(encoded_payload) % 4))
     body = json.loads(raw)
     body["process_directive"] = "BAD"
     tampered = base64.urlsafe_b64encode(json.dumps(body, separators=(",", ":")).encode()).decode().rstrip("=")
     assert verify_directive(f"{head}.{tampered}.{signature}", secret)[0] is None
+
+
+def test_directive_binds_chat_id_hash_and_rejects_oversized_before_decode() -> None:
+    import hashlib
+
+    secret = b"s" * 32
+    plan = decide_session_plan(_identity(headers={"X-DSH-Chat-Id": "chat-0001"}), DEFAULT_CAPABILITIES["codex-app-server-v2"], "cold")
+    payload, reason = verify_directive(encode_directive(plan, secret, now_s=100.0), secret, now_s=101.0)
+    assert reason == "ok" and payload is not None
+    assert payload.chat_id_hash == hashlib.sha256(b"chat-0001").hexdigest()[:16]
+    unkeyed = decide_session_plan(_identity(headers=None), DEFAULT_CAPABILITIES["codex-app-server-v2"], "cold")
+    payload2, _ = verify_directive(encode_directive(unkeyed, secret, now_s=100.0), secret, now_s=101.0)
+    assert payload2 is not None and payload2.chat_id_hash == ""
+    assert verify_directive("v1." + "A" * 700 + ".sig", secret) == (None, "oversized")

@@ -1,4 +1,11 @@
-"""Приватные HOME-песочницы Zero-Canon и флаги GigaRC."""
+"""Приватные HOME-песочницы Zero-Canon и флаги GigaRC.
+
+Это OS/filesystem boundary adapter — ЕДИНСТВЕННЫЙ модуль пакета `core.session_plane`, которому
+разрешён I/O (os, pathlib, atomic-запись 0600, чтение флагов). Четыре policy-модуля пакета
+(`identity.py`, `capabilities.py`, `lifecycle_policy.py`, `directive_codec.py`) — строго Zero-I/O
+и не должны импортировать os/pathlib/shutil/subprocess/socket/urllib/io/tempfile/fcntl
+(контролируется AST-тестом в `tests/test_session_plane_security.py`).
+"""
 
 from __future__ import annotations
 

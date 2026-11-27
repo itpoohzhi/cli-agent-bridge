@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import json
 import os
 import stat
@@ -63,3 +64,24 @@ def test_flags_default_false_and_dynamic_config(tmp_path: Path, monkeypatch: pyt
     assert is_zero_canon_keyed_resident_enabled(environ=env, config_path=cfg) is False
     monkeypatch.setenv("BRIDGE_AGY_DRAIN_EARLY_EXIT_ENABLED", "true")
     assert is_agy_drain_early_exit_enabled(environ=os.environ, config_path=tmp_path / "missing.json") is True
+
+
+_ZERO_IO_MODULES = ("identity.py", "capabilities.py", "lifecycle_policy.py", "directive_codec.py")
+_FORBIDDEN_IO_IMPORTS = frozenset({"os", "pathlib", "shutil", "subprocess", "socket", "urllib", "io", "tempfile", "fcntl"})
+
+
+def _imported_roots(tree: ast.AST) -> set[str]:
+    roots: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            roots.update(alias.name.split(".")[0] for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+            roots.add(node.module.split(".")[0])
+    return roots
+
+
+@pytest.mark.parametrize("name", _ZERO_IO_MODULES)
+def test_zero_io_policy_modules_have_no_os_fs_imports(name: str) -> None:
+    path = Path(__file__).resolve().parents[1] / "core" / "session_plane" / name
+    found = _imported_roots(ast.parse(path.read_text(encoding="utf-8"))) & _FORBIDDEN_IO_IMPORTS
+    assert not found, f"{name} must be Zero-I/O, found imports: {sorted(found)}"

@@ -117,8 +117,8 @@ def _ready_slot() -> SlotSnapshot:
     return SlotSnapshot(SlotState.READY, "cid-1", "sd", 2, 1, 7, 1, 100.0, 100.0, 1, 0.0, 0.0)
 
 
-def _decide(cfg: PolicyConfig, supersedes: int = 0) -> Any:
-    req = TurnPolicyInput(True, "oh", "chat", "", _hist(0), 200.0, 1, supersedes)
+def _decide(cfg: PolicyConfig, supersedes: int = 0, profile: str = "zero-canon") -> Any:
+    req = TurnPolicyInput(True, "oh", "chat", "", _hist(0), 200.0, 1, supersedes, profile)
     return decide_turn(_ready_slot(), req, cfg)
 
 
@@ -130,12 +130,30 @@ def test_keyed_single_turn_flag_off_is_legacy_reject() -> None:
 
 
 def test_keyed_single_turn_flag_on_supersedes() -> None:
-    cfg = PolicyConfig(enabled=True, allow_keyed_single_turn=True)
+    cfg = PolicyConfig(enabled=True, allow_keyed_single_turn=True, keyed_single_turn_profile="zero-canon")
     d = _decide(cfg)
     assert (d.action, d.reason, d.allow_commit, d.supersede) == (A.COLD_SEED, R.HISTORY_DIVERGED_SUPERSEDE, True, True)
     assert (d.expected_gen, d.expected_stored_digest) == (7, "sd")
     limited = _decide(cfg, supersedes=cfg.supersede_max_per_min)
     assert (limited.action, limited.reason) == (A.COLD_REJECT, R.HISTORY_DIVERGED_RATE_LIMITED)
+
+
+@pytest.mark.parametrize("profile,action,reason", [
+    ("zero-canon", A.COLD_SEED, R.HISTORY_DIVERGED_SUPERSEDE),
+    ("standard", A.COLD_REJECT, R.NO_ASSISTANT_HISTORY),
+])
+def test_keyed_single_turn_is_zero_canon_only(profile: str, action: Any, reason: Any) -> None:
+    d = _decide(PolicyConfig(enabled=True, allow_keyed_single_turn=True, keyed_single_turn_profile="zero-canon"), profile=profile)
+    assert (d.action, d.reason) == (action, reason)
+
+
+def test_keyed_single_turn_without_profile_is_default_deny() -> None:
+    d = _decide(PolicyConfig(enabled=True, allow_keyed_single_turn=True), profile="zero-canon")
+    assert (d.action, d.reason) == (A.COLD_REJECT, R.NO_ASSISTANT_HISTORY)
+
+
+def test_turn_policy_input_review_profile_defaults_to_standard() -> None:
+    assert TurnPolicyInput(True, "oh", "chat", "", _hist(0), 200.0, 1).review_profile == "standard"
 
 
 # --------------------------------------------------------- session_resume_adapter
@@ -157,17 +175,18 @@ def env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[Callable[..
     _SRA.reset_explicit_adapters_for_tests()
 
 
-def _plan(process: str) -> SessionExecutionPlan:
-    return SessionExecutionPlan("v1", "pk", None, "ns", "aff", "rp", cast(Any, process), "CONTEXT_CONTINUE",
+def _plan(process: str, context: str = "CONTEXT_CONTINUE", chat: str | None = "chat-1", profile: str = "standard") -> SessionExecutionPlan:
+    return SessionExecutionPlan("v1", "pk", chat, "ns", "aff", profile, cast(Any, process), cast(Any, context),
                                 1, False, False, 30, 600, 512, 1, "t")
 
 
-def _prep(adapter: Any, messages: list[dict[str, str]], directive: str | None = None, now: float = 2000.0) -> Any:
-    hdrs = {"X-DSH-Chat-Id": "chat-1", "Authorization": "Bearer tok-owner-AAAA-1111"}
+def _prep(adapter: Any, messages: list[dict[str, str]], directive: str | None = None, now: float = 2000.0,
+          chat: str = "chat-1", profile: str = "standard") -> Any:
+    hdrs = {"X-DSH-Chat-Id": chat, "Authorization": "Bearer tok-owner-AAAA-1111"}
     if directive is not None:
         hdrs[DIRECTIVE_HEADER] = directive
     req = {"model": "m", "messages": messages}
-    return adapter.prepare_turn(_SRA.TurnHttpMeta(hdrs, "127.0.0.1", "standard", None),
+    return adapter.prepare_turn(_SRA.TurnHttpMeta(hdrs, "127.0.0.1", profile, None),
                                 _SRA.TurnPayloadMeta(req, {}, "m", "high", "/tmp/work", False, [], None, False), now)
 
 
@@ -178,18 +197,23 @@ def test_flags_default_off_and_read(env: Callable[..., Path]) -> None:
     assert (f1.keyed_single_turn_enabled, f1.signed_directive_enabled, f1.policy.allow_keyed_single_turn) == (True,) * 3
 
 
-@pytest.mark.parametrize("keyed,reason,commit", [(False, "no_assistant_history", False), (True, "history_diverged_supersede", True)])
-def test_adapter_keyed_single_turn(env: Callable[..., Path], tmp_path: Path, keyed: bool, reason: str, commit: bool) -> None:
-    cfg = env(BRIDGE_HOT_EXPLICIT_PLAIN_ENABLED="1", **({"BRIDGE_ZERO_CANON_KEYED_RESIDENT_ENABLED": "1"} if keyed else {}))
+@pytest.mark.parametrize("keyed,profile,reason,commit", [
+    (False, "standard", "no_assistant_history", False),
+    (False, "zero-canon", "no_assistant_history", False),
+    (True, "standard", "no_assistant_history", False),
+    (True, "zero-canon", "history_diverged_supersede", True),
+])
+def test_adapter_keyed_single_turn(env: Callable[..., Path], tmp_path: Path, keyed: bool, profile: str, reason: str, commit: bool) -> None:
+    cfg = env(BRIDGE_HOT_EXPLICIT_PLAIN_ENABLED="1", BRIDGE_HOT_ZC_PLAIN_ENABLED="1", **({"BRIDGE_ZERO_CANON_KEYED_RESIDENT_ENABLED": "1"} if keyed else {}))
     ad = _SRA.ExplicitResumeAdapter(tmp_path / "st", cfg)
     try:
         msgs = [{"role": "user", "content": "q"}]
-        st1 = _prep(ad, msgs)
+        st1 = _prep(ad, msgs, profile=profile)
         assert st1.decision_reason == "slot_empty" and ad.finalize_turn(st1, {"conversation_id": _CID, "text": "a"}, "commit", _CID_RE)
         assert ad._store.flush_now(timeout_s=2.0) is True
-        st2 = _prep(ad, msgs)
+        st2 = _prep(ad, msgs, profile=profile)
         assert (st2.decision_reason, st2.allow_commit, st2.is_resumed) == (reason, commit, False)
-        assert st2.supersede is keyed
+        assert st2.supersede is commit
     finally:
         ad.close()
 
@@ -217,9 +241,59 @@ def test_directive_bad_or_expired_hmac_fails_closed(env: Callable[..., Path], tm
         expired = encode_directive(_plan("WARM_SLOT_REUSE"), _SECRET, now_s=1000.0)
         for hdr in (forged, expired, good[:-4] + "0000", "garbage", good.replace("v1.", "v9.", 1)):
             st = _prep(ad, msgs, hdr)
-            assert (st.handled, st.force_cold, st.allow_commit, st.decision_reason) == (True, True, False, "directive_hmac_reject")
+            assert (st.handled, st.force_cold, st.allow_commit) == (True, True, False)
+            assert st.decision_reason.startswith("directive_hmac_reject:")
     finally:
         ad.close()
+
+
+def _directive_state(env: Callable[..., Path], tmp_path: Path, directive: str | None, **prep_kw: Any) -> Any:
+    cfg = env(BRIDGE_HOT_EXPLICIT_PLAIN_ENABLED="1", BRIDGE_HOT_ZC_PLAIN_ENABLED="1", BRIDGE_AGY_SIGNED_DIRECTIVE_ENABLED="1")
+    ad = _SRA.ExplicitResumeAdapter(tmp_path / "st", cfg)
+    try:
+        return _prep(ad, [{"role": "user", "content": "q"}], directive, **prep_kw)
+    finally:
+        ad.close()
+
+
+def _enc(plan: SessionExecutionPlan) -> str:
+    return encode_directive(plan, _SECRET, now_s=2000.0)
+
+
+def _assert_fail_closed(st: Any, reason: str) -> None:
+    assert (st.handled, st.force_cold, st.allow_commit, st.decision_reason) == (True, True, False, reason)
+
+
+def test_directive_missing_header_fails_closed(env: Callable[..., Path], tmp_path: Path) -> None:
+    _assert_fail_closed(_directive_state(env, tmp_path, None), "directive_missing")
+    _assert_fail_closed(_directive_state(env, tmp_path, "  "), "directive_missing")
+
+
+def test_directive_replay_other_chat_is_rejected(env: Callable[..., Path], tmp_path: Path) -> None:
+    chat_a = _enc(_plan("WARM_SLOT_REUSE", chat="chat-A"))
+    _assert_fail_closed(_directive_state(env, tmp_path, chat_a, chat="chat-B"), "directive_chat_mismatch")
+    _assert_fail_closed(_directive_state(env, tmp_path, _enc(_plan("WARM_SLOT_REUSE", chat=None)), chat="chat-B"), "directive_chat_mismatch")
+
+
+def test_directive_replay_other_profile_is_rejected(env: Callable[..., Path], tmp_path: Path) -> None:
+    std = _enc(_plan("WARM_SLOT_REUSE", profile="standard"))
+    _assert_fail_closed(_directive_state(env, tmp_path, std, profile="zero-canon"), "directive_profile_mismatch")
+
+
+@pytest.mark.parametrize("process,context", [
+    ("WARM_SLOT_REUSE", "SLOT_HARD_RESET"),
+    ("EPHEMERAL_KILL_AFTER_TURN", "CONTEXT_CONTINUE"),
+    ("EPHEMERAL_KILL_AFTER_TURN", "CONTEXT_RESET_LOGICAL"),
+])
+def test_directive_allowlist_rejects_everything_but_warm_continue_or_logical_reset(env: Callable[..., Path], tmp_path: Path, process: str, context: str) -> None:
+    _assert_fail_closed(_directive_state(env, tmp_path, _enc(_plan(process, context))), "directive_ephemeral")
+
+
+@pytest.mark.parametrize("profile", ["standard", "zero-canon"])
+def test_directive_valid_bound_logical_reset_passes_to_warm_path(env: Callable[..., Path], tmp_path: Path, profile: str) -> None:
+    d = _enc(_plan("WARM_SLOT_REUSE", "CONTEXT_RESET_LOGICAL", profile=profile))
+    st = _directive_state(env, tmp_path, d, profile=profile)
+    assert st.handled is True and st.force_cold is False and st.decision_reason == "slot_empty"
 
 
 def test_directive_ignored_when_flag_off(env: Callable[..., Path], tmp_path: Path) -> None:

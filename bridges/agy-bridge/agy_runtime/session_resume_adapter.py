@@ -4,6 +4,7 @@ from collections.abc import Callable, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, replace
 import hashlib
+import hmac
 import json
 from pathlib import Path
 import re
@@ -19,13 +20,14 @@ from core.hot_session_policy import (
     SlotState, TurnPolicyInput, build_session_key, compute_history_fingerprints,
     compute_owner_hmac, decide_turn, encode_length_prefixed,
 )
-from core.session_plane.directive_codec import DIRECTIVE_HEADER, verify_directive
+from core.session_plane.directive_codec import DIRECTIVE_HEADER, SignedDirectivePayload, verify_directive
 from core.session_plane.zc_env_guard import load_or_create_directive_key
 
 _LOOPBACK_HOSTS = frozenset(("127.0.0.1", "::1", "::ffff:127.0.0.1"))
 _CID_RE = re.compile(r"[0-9A-Fa-f-]{8,64}")
 _EMPTY_SNAP = SlotSnapshot(SlotState.EMPTY, "", "", 0, 0, 0, 0, 0.0, 0.0, 0, 0.0, 0.0)
 _TOGGLE_EPOCH_STEP = 1_000_007
+_WARM_CONTEXTS = frozenset(("CONTEXT_CONTINUE", "CONTEXT_RESET_LOGICAL"))
 _resolve_chat_key = cast("Callable[..., _chat_key.ChatKey]", _chat_key.resolve_chat_key)
 _INT_BOUNDS = (("guard_max_bytes", "BRIDGE_HOT_GUARD_MAX_BYTES", 2097152, (1024, 67_108_864)), ("guard_max_messages", "BRIDGE_HOT_GUARD_MAX_MESSAGES", 512, (4, 100_000)), ("max_turns", "BRIDGE_HOT_MAX_TURNS", 30, (1, 1000)), ("supersede_max_per_min", "BRIDGE_HOT_SUPERSEDE_MAX_PER_MIN", 3, (0, 1000)))
 _FLT_BOUNDS = (("idle_ttl_s", "BRIDGE_HOT_IDLE_TTL_S", 2700.0, (1.0, 604_800.0)), ("max_ttl_s", "BRIDGE_HOT_MAX_TTL_S", 86400.0, (1.0, 2_592_000.0)), ("in_flight_max_s", "BRIDGE_HOT_IN_FLIGHT_MAX_S", 960.0, (1.0, 86_400.0)))
@@ -91,25 +93,39 @@ def read_runtime_flags(config_path: Path | None = None) -> RuntimeFlags:
     ks = rb("BRIDGE_ZERO_CANON_KEYED_RESIDENT_ENABLED", "BRIDGE_ZERO_CANON_KEYED_RESIDENT_ENABLED", False, config_path=config_path)
     sd = rb("BRIDGE_AGY_SIGNED_DIRECTIVE_ENABLED", "BRIDGE_AGY_SIGNED_DIRECTIVE_ENABLED", False, config_path=config_path)
     epoch = read_int_setting("bridge_hot_epoch", "BRIDGE_HOT_EPOCH", 0, (0, 1_000_000), config_path=config_path)
-    kw: dict[str, int | float | bool] = {"enabled": any((ep, zp, za)), "allow_keyed_single_turn": ks}
+    kw: dict[str, int | float | bool | str] = {"enabled": any((ep, zp, za)), "allow_keyed_single_turn": ks, "keyed_single_turn_profile": "zero-canon" if ks else ""}
     for k, env, d, b in _INT_BOUNDS:
         kw[k] = read_int_setting(f"bridge_hot_{k}", env, d, b, config_path=config_path)
     for k, env, d, b in _FLT_BOUNDS:
         kw[k] = read_float_setting(f"bridge_hot_{k}", env, d, b, config_path=config_path)
     return RuntimeFlags(ep, zp, za, cn, epoch, PolicyConfig(**cast("dict[str, object]", kw)), ks, sd)  # type: ignore[arg-type]
-def _directive_gate(headers: Mapping[str, object] | None, flags: RuntimeFlags, epoch: int, now: float) -> ExplicitTurnState | None:
-    """Подписанная директива (fail-closed): плохая подпись/TTL -> directive_hmac_reject; EPHEMERAL -> холодный ход."""
-    raw = _header_str(headers, DIRECTIVE_HEADER).strip() if flags.signed_directive_enabled else ""
-    if not raw:
-        return None
-    try:
-        payload, _ = verify_directive(raw, load_or_create_directive_key(), now_s=now)
-    except (OSError, ValueError):
-        payload = None
-    if payload is not None and payload.process_directive != "EPHEMERAL_KILL_AFTER_TURN":
-        return None
-    reason = "directive_hmac_reject" if payload is None else "directive_ephemeral"
+def _directive_fail(flags: RuntimeFlags, epoch: int, reason: str) -> ExplicitTurnState:
     return ExplicitTurnState(handled=True, sort_keys=flags.canonical_tools_enabled, force_cold=True, allow_commit=False, decision_reason=reason, epoch=epoch)
+def _directive_binding_reject(payload: SignedDirectivePayload, profile_tag: str, explicit_chat_id: str) -> str:
+    """Криптографическая привязка к запросу и строгий allowlist; пустая строка = допущено."""
+    if payload.thread_epoch < 1:
+        return "directive_epoch_invalid"
+    if payload.review_profile != profile_tag:
+        return "directive_profile_mismatch"
+    if explicit_chat_id and not hmac.compare_digest(payload.chat_id_hash, hashlib.sha256(explicit_chat_id.encode("utf-8")).hexdigest()[:16]):
+        return "directive_chat_mismatch"
+    if payload.process_directive != "WARM_SLOT_REUSE" or payload.context_directive not in _WARM_CONTEXTS:
+        return "directive_ephemeral"
+    return ""
+def _directive_gate(headers: Mapping[str, object] | None, flags: RuntimeFlags, epoch: int, now: float, profile_tag: str = "", explicit_chat_id: str = "") -> ExplicitTurnState | None:
+    """Подписанная директива (fail-closed): нет/плохая подпись/TTL/чужой чат или профиль/не-WARM -> холодный ход."""
+    if not flags.signed_directive_enabled:
+        return None
+    if not (raw := _header_str(headers, DIRECTIVE_HEADER).strip()):
+        return _directive_fail(flags, epoch, "directive_missing")
+    try:
+        # min_config_revision=0: epoch agy (toggle-epoch) passthrough неизвестен; replay закрыт chat_id_hash+profile+TTL.
+        payload, reason = verify_directive(raw, load_or_create_directive_key(), now_s=now, min_config_revision=0)
+    except (OSError, ValueError):
+        payload, reason = None, "key_unavailable"
+    if payload is None or reason != "ok":
+        return _directive_fail(flags, epoch, f"directive_hmac_reject:{reason}")
+    return None if not (bad := _directive_binding_reject(payload, profile_tag, explicit_chat_id)) else _directive_fail(flags, epoch, bad)
 def _header_str(headers: Mapping[str, object] | None, name: str) -> str:
     if headers is None:
         return ""
@@ -234,7 +250,7 @@ class ExplicitResumeAdapter:
         route = classify_route(http_meta.profile_tag, tools_cnt, explicit_cid, "" if payload_meta.cwd_invalid else payload_meta.cwd, flags)
         if not route.handled:
             return ExplicitTurnState(handled=False)
-        if (gated := _directive_gate(http_meta.headers, flags, epoch, now)) is not None:
+        if (gated := _directive_gate(http_meta.headers, flags, epoch, now, http_meta.profile_tag, explicit_cid)) is not None:
             return gated
         val_c, cid_bad = _cid_value_bad(http_meta.raw_cid)
         if any((payload_meta.force_cold, cid_bad, all((http_meta.profile_tag == "standard", payload_meta.cwd_invalid)))):
@@ -255,7 +271,7 @@ class ExplicitResumeAdapter:
         raw_bytes = estimate_raw_messages_bytes(msgs, pol.guard_max_bytes)
         proj = project_messages(msgs) if raw_bytes <= pol.guard_max_bytes else []
         fp = compute_history_fingerprints(proj, slot.stored_len, hkey, raw_bytes, pol)
-        dec = decide_turn(slot, TurnPolicyInput(owner_ok, owner_hash, explicit_cid, client_cid, fp, now, epoch, recent_sup), pol)
+        dec = decide_turn(slot, TurnPolicyInput(owner_ok, owner_hash, explicit_cid, client_cid, fp, now, epoch, recent_sup, hm.profile_tag), pol)
         st = ExplicitTurnState(True, flags.canonical_tools_enabled, False, "", False, dec.allow_commit, dec.reason.value, skey, owner_hash, "", epoch, dec.supersede, dec.expected_gen, dec.expected_stored_digest, tuple(proj), fp.assistant_count)
         if dec.action == DecisionAction.RESUME:
             if (lease := store.claim_resume(skey, dec.cid, now, epoch)):

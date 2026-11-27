@@ -29,6 +29,15 @@ class SignedDirectivePayload:
     config_revision: int
     exp_ts: float
     decision_reason: str
+    chat_id_hash: str = ""
+
+
+def chat_id_hash_of(chat_id: str | None) -> str:
+    """16 hex sha256(chat_id) для привязки директивы к чату; пустой chat_id -> ``""``."""
+    return hashlib.sha256(chat_id.encode("utf-8")).hexdigest()[:16] if chat_id else ""
+
+
+_FIELDS = frozenset({"partition_key", "review_profile", "process_directive", "context_directive", "thread_epoch", "config_revision", "exp_ts", "decision_reason", "chat_id_hash"})
 
 
 def _now(value: float | None) -> float:
@@ -41,6 +50,7 @@ def _payload(plan: SessionExecutionPlan, exp_ts: float) -> dict[str, object]:
         "process_directive": plan.process_directive, "context_directive": plan.context_directive,
         "thread_epoch": plan.next_epoch, "config_revision": plan.config_revision,
         "exp_ts": exp_ts, "decision_reason": plan.decision_reason,
+        "chat_id_hash": chat_id_hash_of(plan.canonical_chat_id),
     }
 
 
@@ -63,18 +73,18 @@ def _decode_payload(encoded: str) -> SignedDirectivePayload | None:
     try:
         padded = encoded + "=" * (-len(encoded) % 4)
         data = json.loads(base64.urlsafe_b64decode(padded).decode("utf-8"))
-        if not isinstance(data, dict) or set(data) != {"partition_key", "review_profile", "process_directive", "context_directive", "thread_epoch", "config_revision", "exp_ts", "decision_reason"}:
+        if not isinstance(data, dict) or set(data) != _FIELDS:
             return None
         process, context = data["process_directive"], data["context_directive"]
         if process not in _PROCESSES or context not in _CONTEXTS:
             return None
-        if not isinstance(data["partition_key"], str) or not isinstance(data["review_profile"], str) or not isinstance(data["decision_reason"], str):
+        if not isinstance(data["partition_key"], str) or not isinstance(data["review_profile"], str) or not isinstance(data["decision_reason"], str) or not isinstance(data["chat_id_hash"], str):
             return None
         epoch, revision = data["thread_epoch"], data["config_revision"]
         exp_ts = data["exp_ts"]
         if isinstance(epoch, bool) or not isinstance(epoch, int) or isinstance(revision, bool) or not isinstance(revision, int) or isinstance(exp_ts, bool) or not isinstance(exp_ts, (int, float)) or not math.isfinite(float(exp_ts)):
             return None
-        return SignedDirectivePayload(data["partition_key"], data["review_profile"], process, context, epoch, revision, float(exp_ts), data["decision_reason"])
+        return SignedDirectivePayload(data["partition_key"], data["review_profile"], process, context, epoch, revision, float(exp_ts), data["decision_reason"], data["chat_id_hash"])
     except (ValueError, TypeError, UnicodeError, json.JSONDecodeError):
         return None
 
@@ -85,6 +95,8 @@ def verify_directive(header_value: str | None, secret: bytes, *, now_s: float | 
         return None, "weak_secret"
     if not isinstance(header_value, str) or not header_value:
         return None, "empty"
+    if len(header_value.encode("ascii", errors="ignore")) > MAX_DIRECTIVE_BYTES or not header_value.isascii():
+        return None, "oversized"
     parts = header_value.split(".")
     if len(parts) != 3 or parts[0] != "v1" or not parts[1] or not parts[2]:
         return None, "malformed"

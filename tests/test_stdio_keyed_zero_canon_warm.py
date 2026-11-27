@@ -6,16 +6,18 @@ import json
 import os
 import stat
 import sys
+from dataclasses import replace as dc_replace
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
 from core.backend_routing_models import Transcript, TranscriptItem
-from core.resident_history import CommittedSessionState, build_assistant_transcript_item, plan_history_transition
+from core.resident_history import CommittedSessionState, _logical_reset_allowed, build_assistant_transcript_item, plan_history_transition  # pyright: ignore[reportPrivateUsage]
 from core.resident_identity import IdentityInputs, ResidentIdentity, resolve_resident_identity
 from core.resident_turn_envelope import ResidentTurnEnvelope
-from core.session_plane import zc_env_guard
+from core.session_plane import capabilities as caps_mod, zc_env_guard
 from core.stdio_resident.codex_driver import CodexAppServerV2Driver
 from core.stdio_resident.config import StdioPoolConfig
 from core.stdio_resident.process_pool import ResidentProcessPool, SlotLeaseTimeoutError
@@ -232,3 +234,77 @@ def test_bounded_wait_queue(monkeypatch: pytest.MonkeyPatch) -> None:
     with pytest.raises(PreDispatchResidentError) as err:
         ResidentBridgeRuntime(_Full(), object())._acquire_slot(None, False, ([], "", None))  # type: ignore[arg-type]
     assert err.value.code == "slot_wait_queue_full" and err.value.http_status == 503
+
+
+def _warm_env(*, hashes: tuple[str, str] | None = None) -> ResidentTurnEnvelope:
+    ident = ResidentIdentity("o", "A", False, "", "t", "", "", "sid")
+    rpc = Transcript(items=(TranscriptItem("system", "s", "ds"), _u("n")))
+    kw: dict[str, Any] = dict(identity=ident, backend_id="codex", model="m", effort="low", cwd_norm="/w", secret=_SECRET, review_profile="zero-canon", rpc=rpc, full_prompt="n")
+    if hashes is None:
+        return ResidentTurnEnvelope(**kw)
+
+    class _Hashed(ResidentTurnEnvelope):  # frozen+slots базовый класс: хеши кладём в __dict__ подкласса
+        pass
+
+    env = _Hashed(**kw)
+    object.__setattr__(env, "runtime_binary_hash", hashes[0])
+    object.__setattr__(env, "certified_binary_hash", hashes[1])
+    return env
+
+
+def _base_committed(e: ResidentTurnEnvelope) -> CommittedSessionState:
+    return CommittedSessionState("s", 1, "o", "codex", e.env_digest, e.system_digest, e.tool_contract_fingerprint, "m", "low", "/w", "zero-canon", ("old",))
+
+
+@pytest.mark.parametrize("field,value,logical", [
+    ("system_digest", "other-system", True),
+    ("tool_fingerprint", "other-tools", True),
+    ("env_digest", "other-env", False),
+    ("cwd_norm", "/other", False),
+    ("model", "other-model", False),
+    ("effort", "high", False),
+    ("principal_hash", "other-principal", False),
+    ("review_profile", "standard", False),
+    ("backend_id", "claude", False),
+])
+def test_only_thread_headers_allow_logical_reset_field_diff(monkeypatch: pytest.MonkeyPatch, field: str, value: str, logical: bool) -> None:
+    monkeypatch.setenv(FLAG, "1")
+    env = _warm_env()
+    committed = dc_replace(_base_committed(env), **{field: value})
+    plan = plan_history_transition(committed, env, SlotBinding("s", 1))
+    assert (plan.logical_context_reset, plan.requires_slot_reset) == (logical, not logical)
+
+
+def test_unknown_future_field_diff_is_fail_closed() -> None:
+    from dataclasses import fields
+    from core import resident_history as rh
+
+    base = _base_committed(_warm_env())
+    known = rh._THREAD_ONLY_HEADER_FIELDS | rh._TRANSCRIPT_RUNTIME_FIELDS  # pyright: ignore[reportPrivateUsage]
+    process_level = {f.name for f in fields(CommittedSessionState)} - known
+    assert {"principal_hash", "backend_id", "env_digest", "model", "effort", "cwd_norm", "review_profile"} <= process_level
+    assert rh._only_thread_headers_changed(base, base) is False  # type: ignore[attr-defined]  # pyright: ignore[reportPrivateUsage]
+
+
+def test_binary_hash_drift_disables_logical_reset(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(FLAG, "1")
+    stub = SimpleNamespace(identity=SimpleNamespace(ephemeral=False), review_profile="zero-canon", protocol="codex-app-server-v2", backend_id="codex")
+    assert _logical_reset_allowed(stub) is True  # type: ignore[arg-type]
+    # envelope-level certified hash: mismatch (в т.ч. пустой runtime) -> fail-closed
+    assert _logical_reset_allowed(SimpleNamespace(**{**vars(stub), "runtime_binary_hash": "bad", "certified_binary_hash": "good"})) is False  # type: ignore[arg-type]
+    assert _logical_reset_allowed(SimpleNamespace(**{**vars(stub), "certified_binary_hash": "good"})) is False  # type: ignore[arg-type]
+    assert _logical_reset_allowed(SimpleNamespace(**{**vars(stub), "runtime_binary_hash": "good", "certified_binary_hash": "good"})) is True  # type: ignore[arg-type]
+    # registry-level certified hash: runtime hash доходит до effective_capabilities
+    certified = dc_replace(caps_mod.DEFAULT_CAPABILITIES["codex-app-server-v2"], certified_binary_hash="good")
+    monkeypatch.setitem(caps_mod.DEFAULT_CAPABILITIES, "codex-app-server-v2", certified)  # type: ignore[arg-type]
+    assert _logical_reset_allowed(SimpleNamespace(**{**vars(stub), "binary_sha256": "bad"})) is False  # type: ignore[arg-type]
+    assert _logical_reset_allowed(SimpleNamespace(**{**vars(stub), "binary_sha256": "good"})) is True  # type: ignore[arg-type]
+
+
+def test_binary_hash_drift_forces_slot_reset_in_plan(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(FLAG, "1")
+    ok_env, bad_env = _warm_env(hashes=("good", "good")), _warm_env(hashes=("bad", "good"))
+    warm = SlotBinding("s", 1)
+    assert plan_history_transition(_base_committed(ok_env), ok_env, warm).logical_context_reset is True
+    drifted = plan_history_transition(_base_committed(bad_env), bad_env, warm)
+    assert drifted.requires_slot_reset and not drifted.logical_context_reset

@@ -5,7 +5,7 @@ import json
 import threading
 from collections.abc import Sequence
 from collections import OrderedDict
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, fields, replace
 from typing import cast
 
 from core.backend_routing_models import TranscriptItem
@@ -200,9 +200,17 @@ def _plan(action: str, prompt: str, next_state: CommittedSessionState | None, fl
     return HistoryPlan(action, prompt, reset, next_state, ephemeral, reason)
 
 
-def _process_headers(state: CommittedSessionState) -> tuple[str, ...]:
-    """Process-level поля: их смена требует нового OS-процесса (thread-level `system_digest`/`tool_fingerprint` — нет)."""
-    return (state.principal_hash, state.backend_id, state.env_digest, state.model, state.effort, state.cwd_norm, state.review_profile)
+_THREAD_ONLY_HEADER_FIELDS = frozenset({"system_digest", "tool_fingerprint"})
+_TRANSCRIPT_RUNTIME_FIELDS = frozenset({"slot_id", "generation", "item_digests", "canonical_digests", "integrity_enabled"})
+
+
+def _only_thread_headers_changed(committed: CommittedSessionState, next_base: CommittedSessionState) -> bool:
+    """Fail-closed field-diff: любое иное (в т.ч. будущее) изменённое поле -> нужен новый OS-процесс."""
+    changed = {
+        f.name for f in fields(CommittedSessionState)
+        if f.name not in _TRANSCRIPT_RUNTIME_FIELDS and getattr(committed, f.name) != getattr(next_base, f.name)
+    }
+    return bool(changed) and changed <= _THREAD_ONLY_HEADER_FIELDS
 
 
 def _logical_reset_allowed(envelope: ResidentTurnEnvelope) -> bool:
@@ -212,7 +220,11 @@ def _logical_reset_allowed(envelope: ResidentTurnEnvelope) -> bool:
     if not is_zero_canon_keyed_resident_enabled():
         return False
     proto = str(getattr(envelope, "protocol", "") or envelope.backend_id)
-    return effective_capabilities(proto).supports_logical_context_reset
+    runtime_hash = str(getattr(envelope, "runtime_binary_hash", "") or getattr(envelope, "binary_sha256", "") or "")
+    certified_hash = str(getattr(envelope, "certified_binary_hash", "") or "")
+    if certified_hash and certified_hash != runtime_hash:
+        return False
+    return effective_capabilities(proto, runtime_binary_hash=runtime_hash).supports_logical_context_reset
 
 
 def _logical_reset_plan(envelope: ResidentTurnEnvelope, next_base: CommittedSessionState, reason: str) -> HistoryPlan:
@@ -281,7 +293,7 @@ def plan_history_transition(
     if not result:
         next_base = _base_state(envelope)
         rebase_reason = _committed_rebase_reason(committed, envelope, next_base)
-        thread_only = bool(committed) and _process_headers(cast(CommittedSessionState, committed)) == _process_headers(next_base)
+        thread_only = committed is not None and _only_thread_headers_changed(committed, next_base)
         if rebase_reason == "header_changed" and thread_only and _logical_reset_allowed(envelope):
             result = _logical_reset_plan(envelope, next_base, "history_diverged_logical_reset")
         elif rebase_reason:

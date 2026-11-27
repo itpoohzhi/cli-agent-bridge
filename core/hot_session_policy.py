@@ -122,6 +122,10 @@ class PolicyConfig:
     unconfirmed_max_s: float = 30.0
     supersede_max_per_min: int = 3
     allow_keyed_single_turn: bool = False
+    keyed_single_turn_profile: str = ""
+
+    def keyed_single_turn_ok(self, profile: str) -> bool:
+        return self.allow_keyed_single_turn and bool(self.keyed_single_turn_profile) and profile == self.keyed_single_turn_profile
 
 
 @dataclass(frozen=True, slots=True)
@@ -134,6 +138,7 @@ class TurnPolicyInput:
     now_s: float
     config_epoch: int
     recent_supersedes: int = 0
+    review_profile: str = "standard"
 
 
 @dataclass(frozen=True, slots=True)
@@ -176,17 +181,14 @@ def encode_length_prefixed(parts: Sequence[str]) -> bytes:
     return b"".join(f"{len(b)}:".encode("ascii") + b + b";" for b in raws)
 
 
-def compute_owner_hmac(
-    hmac_key: bytes, verified_token: str, client_principal: str = ""
-) -> str:
+def compute_owner_hmac(hmac_key: bytes, verified_token: str, client_principal: str = "") -> str:
     if not hmac_key or len(verified_token) < 8:
         return ""
     msg = encode_length_prefixed(("owner:v1", verified_token, client_principal))
     return hmac.new(hmac_key, msg, hashlib.sha256).hexdigest()
 
 
-def build_session_key(parts: SessionKeyParts) -> str:
-    p = parts
+def build_session_key(p: SessionKeyParts) -> str:
     if not p.owner_token_hash or not p.explicit_chat_id or not p.context_digest:
         return ""
     a = (p.schema_version, p.owner_token_hash, p.explicit_chat_id, p.subagent_id)
@@ -203,10 +205,8 @@ def compute_history_fingerprints(
     cfg: PolicyConfig,
 ) -> HistoryFingerprints:
     n = len(messages)
-    if raw_bytes > cfg.guard_max_bytes:
-        return HistoryFingerprints(n, 0, "", "", raw_bytes, False, _R.GUARD_BOUND_BYTES)
-    if n > cfg.guard_max_messages:
-        return HistoryFingerprints(n, 0, "", "", raw_bytes, False, _R.GUARD_BOUND_MSGS)
+    if (over := raw_bytes > cfg.guard_max_bytes) or n > cfg.guard_max_messages:
+        return HistoryFingerprints(n, 0, "", "", raw_bytes, False, _R.GUARD_BOUND_BYTES if over else _R.GUARD_BOUND_MSGS)
     hm, asst, prefix = hmac.new(hmac_key, digestmod=hashlib.sha256), 0, ""
     for idx, m in enumerate(messages):
         asst += int(m.role == "assistant")
@@ -248,7 +248,7 @@ def _check_pre(req: TurnPolicyInput, cfg: PolicyConfig) -> TurnDecision | None:
 def _ready(slot: SlotSnapshot, req: TurnPolicyInput, cfg: PolicyConfig) -> TurnDecision:
     if req.client_cid and req.client_cid != slot.cid:
         return TurnDecision(_A.COLD_REJECT, _R.UNOWNED_EXPLICIT_CID, False)
-    if req.history.assistant_count < 1 and not cfg.allow_keyed_single_turn:
+    if req.history.assistant_count < 1 and not cfg.keyed_single_turn_ok(req.review_profile):
         return TurnDecision(_A.COLD_REJECT, _R.NO_ASSISTANT_HISTORY, False)
     h, ok = req.history, req.history.message_count > slot.stored_len
     if ok and h.assistant_count >= slot.stored_asst and slot.stored_asst >= 1:
