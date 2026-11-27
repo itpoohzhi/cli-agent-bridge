@@ -36,7 +36,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, Unpack
 
 from core.backend_adapter import FleetViolation, build_catalog
-from core.backend_params import extract_backend_params
+from core.backend_params import extract_backend_params, serialize_sidecar_params
 from core.compile_model_records import CompileOptions, CompileResult, model_record as model_record
 from core.compile_routes_pipeline import compile_catalog as _compile_catalog
 from core.compile_routes_pipeline import render_fleet_json as _render_fleet_json
@@ -320,13 +320,7 @@ def _provider_sidecar(manifest: ProviderManifest, fingerprint: str) -> Dict[str,
         "fingerprint_sha256": fingerprint,
         "allow_base_url": _allow_dicts(manifest),
         "bridge": manifest.transport.bridge is not None,
-        "params": {
-            "effort_field": params.effort_field,
-            "effort_map": dict(params.effort_map),
-            "adaptive_whitelist": list(params.adaptive_whitelist),
-            "strip_always": list(params.strip_always),
-            "tool_emulation": params.tool_emulation,
-        },
+        "params": serialize_sidecar_params(params),
         "probe": {
             "enabled": manifest.probe.enabled,
             "max_parallel": manifest.probe.max_parallel,

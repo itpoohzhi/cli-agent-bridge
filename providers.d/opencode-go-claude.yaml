@@ -47,3 +47,4 @@ params:
   effort_field: reasoning_effort
   adaptive_whitelist: [reasoning_effort]
   strip_always: [thinking]
+  cache_control_strategy: anthropic_ephemeral

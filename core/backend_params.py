@@ -12,9 +12,12 @@ from typing import Any
 from core.param_adapter import GLOBAL_WHITELIST
 
 BACKEND_PARAMS_INVALID = "backend_params_invalid"
-BACKEND_PARAMS_KEYS = frozenset({"effort_field", "effort_map", "adaptive_whitelist", "strip_always"})
+BACKEND_PARAMS_KEYS = frozenset(
+    {"effort_field", "effort_map", "adaptive_whitelist", "strip_always", "cache_control_strategy"}
+)
 _EFFORT_FIELDS = ("reasoning_effort", "effort", "none")
 _DEFAULT_EFFORT_FIELD = "reasoning_effort"
+_CACHE_STRATEGIES = (None, "anthropic_ephemeral")
 
 
 def _str_list(value: Any) -> bool:
@@ -47,6 +50,8 @@ def validate_backend_params(params: Any) -> str:
             return BACKEND_PARAMS_INVALID
     if any(item not in GLOBAL_WHITELIST for item in params.get("adaptive_whitelist", ())):
         return BACKEND_PARAMS_INVALID
+    if params.get("cache_control_strategy") not in _CACHE_STRATEGIES:
+        return BACKEND_PARAMS_INVALID
     return ""
 
 
@@ -56,6 +61,7 @@ def _is_default(params: Any) -> bool:
         and not params.effort_map
         and tuple(params.adaptive_whitelist) == tuple(GLOBAL_WHITELIST)
         and not params.strip_always
+        and getattr(params, "cache_control_strategy", None) is None
     )
 
 
@@ -64,14 +70,31 @@ def extract_backend_params(manifest: Any) -> dict[str, Any]:
     params = getattr(manifest, "params", None)
     if params is None or _is_default(params):
         return {}
-    return {
-        "params": {
-            "effort_field": params.effort_field,
-            "effort_map": {k: _plain(v) for k, v in params.effort_map.items()},
-            "adaptive_whitelist": list(params.adaptive_whitelist),
-            "strip_always": list(params.strip_always),
-        }
+    out: dict[str, Any] = {
+        "effort_field": params.effort_field,
+        "effort_map": {k: _plain(v) for k, v in params.effort_map.items()},
+        "adaptive_whitelist": list(params.adaptive_whitelist),
+        "strip_always": list(params.strip_always),
     }
+    strategy = getattr(params, "cache_control_strategy", None)
+    if strategy is not None:
+        out["cache_control_strategy"] = strategy
+    return {"params": out}
+
+
+def serialize_sidecar_params(params: Any) -> dict[str, Any]:
+    """`params` для сайдкара `catalog-lock/1` (включая `tool_emulation`)."""
+    out: dict[str, Any] = {
+        "effort_field": params.effort_field,
+        "effort_map": dict(params.effort_map),
+        "adaptive_whitelist": list(params.adaptive_whitelist),
+        "strip_always": list(params.strip_always),
+        "tool_emulation": params.tool_emulation,
+    }
+    strategy = getattr(params, "cache_control_strategy", None)
+    if strategy is not None:
+        out["cache_control_strategy"] = strategy
+    return out
 
 
 def _plain(value: Any) -> Any:

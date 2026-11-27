@@ -14,6 +14,11 @@ from typing import Any, Final
 
 from core import passthrough_effort_map as _pem
 from core import param_adapter
+from core.anthropic_cache_control import (
+    STRATEGY_ANTHROPIC_EPHEMERAL,
+    inject_anthropic_cache_control,
+    is_anthropic_cache_control_enabled,
+)
 from core.backend_params import validate_backend_params
 from core.logical_effort import EFFORT_KEYS, LOGICAL_OFF, canonicalize_logical_effort, is_thinking_disabled
 from core.runtime_env import DynamicFlagSource
@@ -105,6 +110,8 @@ def _apply_manifest_dialect(
     thinking = out.get("thinking")
     if isinstance(thinking, dict) and thinking.get("type") == "enabled":
         out = param_adapter.clamp_thinking_budget(out)
+    if params.get("cache_control_strategy") == STRATEGY_ANTHROPIC_EPHEMERAL and is_anthropic_cache_control_enabled():
+        out = inject_anthropic_cache_control(out)
     return out
 
 
