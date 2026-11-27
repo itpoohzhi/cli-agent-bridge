@@ -13,11 +13,10 @@ from collections.abc import Callable, Iterator, Mapping
 from pathlib import Path
 from typing import IO, cast
 
-from core.stdio_resident.process_io import EOF as _STDIO_EOF
-from core.stdio_resident.process_io import LINE as _STDIO_LINE
-from core.stdio_resident.process_io import TIMEOUT as _STDIO_TIMEOUT
+from core.stdio_resident.process_io import EOF as _STDIO_EOF, LINE as _STDIO_LINE, TIMEOUT as _STDIO_TIMEOUT
 
 from .loss_contract_config import worker_bounds
+from .persistent_fresh_rotate import acquire_with_fresh_guard
 from .persistent_worker_adapter import AgyPersistentWorkerPool, StdioWriteError
 from .persistent_worker_config import (
     PersistentAcquireRequest, PersistentLease, PersistentReleaseParams, RunCloseContext,
@@ -62,16 +61,15 @@ def start_run_process(run: object, ctx: RunSpawnContext) -> float:
     try:
         lease: PersistentLease | None = None
         if pw_cfg.enabled and ctx.add_dir is None:
-            digest = compute_env_digest(
-                ctx.cli_mode, ctx.zero_canon, str(ctx.launch_env.get("HOME") or ""), ctx.settings_arg
-            )
+            home = str(ctx.launch_env.get("HOME") or "")
+            digest = compute_env_digest(ctx.cli_mode, ctx.zero_canon, home, ctx.settings_arg, launch_env=ctx.launch_env)
             req = PersistentAcquireRequest(
                 chat_key=ctx.chat_key, cid=run_cid, model=ctx.model, effort=ctx.effort,
                 cwd=ctx.work_dir, env_digest=digest,
                 review_profile="zero-canon" if ctx.zero_canon else "standard",
                 argv_builder=lambda: list(ctx.cmd), env=ctx.launch_env, resume_base_idx=ctx.resume_base_idx,
             )
-            lease = pool.acquire(req, pw_cfg)
+            lease = acquire_with_fresh_guard(pool, req, pw_cfg)
         if lease is not None:
             setattr(run, "_persistent_lease", lease)
             setattr(run, "_persistent_mode", True)
@@ -152,6 +150,9 @@ def iter_run_stdout_lines(run: object) -> Iterator[str]:
                 yield raw.decode("utf-8", "replace").strip()
         return
     stop_watch = cast(threading.Event, getattr(run, "_stop_watch"))
+    if lease.prefetched_init_line:
+        init_line, lease.prefetched_init_line = lease.prefetched_init_line, ""
+        yield init_line
     while not (stop_watch.is_set() or bool(getattr(run, "capacity_exhausted", ""))):
         kind, tagged = lease.handle.read_stdout_line_outcome(timeout_s=lease.pump_tick_s)
         if kind == _STDIO_LINE and tagged is not None:
@@ -163,20 +164,22 @@ def iter_run_stdout_lines(run: object) -> Iterator[str]:
 def finish_run_pump_drain(run: object, ctx: RunPumpDrainContext) -> int:
     """Завершить окно SQLite-drain и вычислить код возврата хода (persistent или cold)."""
     lease = _lease_of(run)
-    tail = cast(object, getattr(run, "_tail"))
-    proc_done = cast(threading.Event, getattr(run, "_proc_done"))
+    tail, proc_done = cast(object, getattr(run, "_tail")), cast(threading.Event, getattr(run, "_proc_done"))
     join_src = cast(Callable[..., None], getattr(run, "_join_source"))
     if lease is not None:
-        t_exit = time.monotonic()
-        drain_w = min(lease.drain_window_s, ctx.drain_max_s)
+        t_exit, drain_w = time.monotonic(), min(lease.drain_window_s, ctx.drain_max_s)
         setattr(run, "_drain_t0", t_exit)
-        setattr(tail, "drain_deadline", t_exit + drain_w)
+        for k, v in (
+            ("drain_deadline", t_exit + drain_w),
+            ("fast_complete_drain", lease.fast_drain_enabled),
+            ("fast_drain_min_s", lease.fast_drain_min_s),
+        ):
+            setattr(tail, k, v)
         proc_done.set()
         join_src(t_exit, drain_window_s=drain_w)
         turn_ok = bool(getattr(run, "_persistent_turn_ok", False))
         if not turn_ok:
-            tail_err = lease.handle.stderr_tail().strip()
-            if tail_err:
+            if tail_err := lease.handle.stderr_tail().strip():
                 cast(list[str], getattr(run, "err_box")).append(tail_err)
         return 0 if (ctx.result_ev and turn_ok) else 1
     try:
@@ -185,10 +188,7 @@ def finish_run_pump_drain(run: object, ctx: RunPumpDrainContext) -> int:
         rc = None
     time.sleep(0.05)
     t_exit = time.monotonic()
-    drain_w = min(
-        persistent_worker_settings(config_path=ctx.config_path).drain_window_s,
-        ctx.drain_max_s,
-    )
+    drain_w = min(persistent_worker_settings(config_path=ctx.config_path).drain_window_s, ctx.drain_max_s)
     setattr(run, "_drain_t0", t_exit)
     setattr(tail, "drain_deadline", t_exit + drain_w)
     proc_done.set()

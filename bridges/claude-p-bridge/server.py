@@ -42,6 +42,7 @@ from core.claude_session import (  # noqa: E402
     assert_zero_canon_argv_safe, build_session_argv, is_session_reuse_allowed_profile,
 )
 from core.http_accept import load_admission_idle_config  # noqa: E402
+from core.http_server_error import handle_accept_error  # noqa: E402
 from core.log_redaction import redact_log_text  # noqa: E402
 from core.log_rotation_adapters import emit_service_log as _emit_rotated_log  # noqa: E402
 from core.claude_zero_canon import (  # noqa: E402
@@ -707,10 +708,6 @@ class Handler(BaseHTTPRequestHandler):
 
     def log_message(self, format: str, *args: Any) -> None:
         _log("http " + (format % args))
-
-    def handle_error(self, request: Any, client_address: Any) -> None:
-        _log(f"http accept error from {client_address}")
-
     def _send(self, code: int, payload: dict) -> None:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         self.send_response(int(code))
@@ -1031,7 +1028,8 @@ class Server(ThreadingHTTPServer):
     daemon_threads = True
     request_queue_size = HTTP_BACKLOG
     allow_reuse_address = True
-
+    def handle_error(self, request: Any, client_address: Any) -> None:
+        handle_accept_error(client_address, _log, lambda: ThreadingHTTPServer.handle_error(self, request, client_address), ROOT / "dynamic_config.json")
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         self.session_store = SessionStore(SessionConfig.from_env())  # владелец состояния reuse (AD-004)

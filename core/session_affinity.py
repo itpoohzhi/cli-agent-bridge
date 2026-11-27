@@ -19,6 +19,9 @@ import fcntl
 
 from core.runtime_env import flag_enabled
 from core.session_affinity_anchor import messages_dialog_anchor
+from core.session_plane.identity import CHAT_ID_RE
+from core.session_plane.zc_env_guard import is_passthrough_canonical_affinity_enabled
+from core.subbridge_zero_canon import normalize_review_profile
 
 FLAG_STABLE_SESSION = "BRIDGE_STABLE_SESSION_AFFINITY_ENABLED"
 _DEFAULT_SALT_PATH = "~/.dsh/state/affinity_salt.bin"
@@ -416,10 +419,46 @@ def _input_identity(data: Mapping[str, Any]) -> list[dict[str, Any]] | None:
     return [*instructions, fallback] if fallback is not None else None
 
 
+def _canonical_enabled() -> bool:
+    """Живой GigaRC-флаг canonical affinity (default OFF)."""
+    return is_passthrough_canonical_affinity_enabled()
+
+
+def _stable_enabled() -> bool:
+    return flag_enabled(FLAG_STABLE_SESSION) or _canonical_enabled()
+
+
+def _canonical_chat_id(headers: Mapping[str, str]) -> str | None:
+    """Валидный `x-dsh-chat-id` (как в core.session_plane.identity), иначе None."""
+    raw = headers.get("x-dsh-chat-id")
+    if not isinstance(raw, str):
+        return None
+    value = raw.strip()
+    return value if CHAT_ID_RE.fullmatch(value) is not None else None
+
+
+def principal_fingerprint(headers: Mapping[str, str]) -> str:
+    """Непрозрачный HMAC-отпечаток клиентских credential-заголовков (или пусто)."""
+    lower = {str(name).lower(): value for name, value in headers.items()}
+    parts = [
+        _private_fingerprint(lower.get(name))
+        for name in ("authorization", "x-api-key", "api-key")
+    ]
+    if not any(parts):
+        return ""
+    raw = json.dumps(parts, separators=(",", ":")).encode("utf-8")
+    return hmac.new(_get_salt(), b"principal:" + raw, hashlib.sha256).hexdigest()[:32]
+
+
 def _identity(
     data: Mapping[str, Any], headers: Mapping[str, str], scope: str = ""
 ) -> Any:
     """Явная сессия и зарегистрированная Responses-цепочка задают диалоговый якорь."""
+    if _canonical_enabled():
+        chat_id = _canonical_chat_id(headers)
+        if chat_id is not None:
+            return {"dsh_chat_id": chat_id}
+
     prompt_key = data.get("prompt_cache_key")
     if isinstance(prompt_key, str) and prompt_key:
         return {"key": prompt_key}
@@ -479,6 +518,9 @@ def _scope(data: Mapping[str, Any], headers: Mapping[str, str], namespace: str) 
         _private_fingerprint(headers.get("api-key")),
         headers.get("x-subagent-id"),
     ]
+    if _canonical_enabled():
+        # standard и zero-canon на одном chat_id не должны делить affinity.
+        parts.append(normalize_review_profile(headers.get("x-review-profile")))
     raw = json.dumps(
         parts, ensure_ascii=True, separators=(",", ":"), sort_keys=True
     ).encode("utf-8")
@@ -487,7 +529,7 @@ def _scope(data: Mapping[str, Any], headers: Mapping[str, str], namespace: str) 
 
 def request_scope(raw_body: bytes, headers: Mapping[str, str], namespace: str) -> str:
     """Вычисляет непрозрачный scope_hash для изоляции цепочек ответов."""
-    if not flag_enabled(FLAG_STABLE_SESSION):
+    if not _stable_enabled():
         return ""
     try:
         data = json.loads(raw_body)
@@ -501,7 +543,7 @@ def request_scope(raw_body: bytes, headers: Mapping[str, str], namespace: str) -
 
 def session_affinity(raw_body: bytes, headers: Mapping[str, str], namespace: str) -> str:
     """HMAC из стабильного диалогового якоря и scope; default OFF даёт UUID4."""
-    if not flag_enabled(FLAG_STABLE_SESSION):
+    if not _stable_enabled():
         return str(uuid.uuid4())
     try:
         data = json.loads(raw_body)

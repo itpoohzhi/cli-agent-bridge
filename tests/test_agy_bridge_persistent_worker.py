@@ -732,6 +732,14 @@ class TestRunPersistentIntegration(unittest.TestCase):
                             release_fn()
                         return True
 
+                    def release_slots_and_admission(
+                        self, slots_obj: object, rt_release_fn: object, ticket_id: int,
+                        out: object, run: object | None, turn_id: str,
+                    ) -> bool:
+                        return srv.AgyP12CleanupSeam.release_slots_and_admission(
+                            self, slots_obj, rt_release_fn, ticket_id, out, run, turn_id,
+                        )
+
                 class _FakeRegistry:
                     def bind_cancel(self, _job: object, fn: object) -> None:
                         bind_cancel_calls.append(fn)

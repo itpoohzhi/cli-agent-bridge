@@ -117,12 +117,12 @@ def test_build_argv_adds_stream_json_model_conversation_without_dupes() -> None:
     base = ["agy.real"]
     argv = driver.build_argv(base, {"model": "gemini-x", "conversation_id": "cid-1"})
     assert base == ["agy.real"]
-    expected = ["agy.real", "--input-format", "stream-json", "--output-format", "stream-json", "--print-timeout", "30", "--model", "gemini-x", "--conversation", "cid-1"]
+    expected = ["agy.real", "--input-format", "stream-json", "--output-format", "stream-json", "--print-timeout", "30s", "--model", "gemini-x", "--conversation", "cid-1"]
     assert argv == expected
     assert driver.build_argv(argv, {"model": "gemini-x", "conversation_id": "cid-1"}) == argv
-    merged = driver.build_argv(["agy.real", "--input-format=stream-json", "--print-timeout=0"], {})
+    merged = driver.build_argv(["agy.real", "--input-format=stream-json", "--print-timeout=0"], {"print_timeout": 120})
     assert merged.count("--input-format=stream-json") == 1 and "--input-format" not in merged
-    assert merged.count("--print-timeout=30") == 1 and "--print-timeout" not in merged
+    assert merged.count("--print-timeout=120s") == 1 and "--print-timeout" not in merged
     assert "--effort" not in driver.build_argv(["agy.real"], {"effort": " off "})
 
 

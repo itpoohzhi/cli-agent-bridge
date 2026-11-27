@@ -12,6 +12,7 @@ from core.stdio_resident.process_io import ResidentProcessHandle
 from core.stdio_resident.process_pool import ResidentProcessPool
 
 from .long_session_config import (
+    classify_cloud_mode,
     read_bool_setting,
     read_float_setting,
     read_int_setting,
@@ -31,10 +32,20 @@ __all__ = [
 
 
 def compute_env_digest(
-    cli_mode: str, zero_canon: bool, clean_home: str, settings_arg: str = ""
+    cli_mode: str,
+    zero_canon: bool,
+    clean_home: str,
+    settings_arg: str = "",
+    launch_env: Mapping[str, str] | None = None,
 ) -> str:
-    """Стабильный отпечаток среды запуска слота (исключает смешение профилей)."""
+    """Стабильный отпечаток среды запуска слота (исключает смешение профилей).
+
+    При ``launch_env is None`` digest побитово совместим с прежней 3/4-аргументной
+    формулой; иначе добавляется сегмент сетевого режима (direct vs georouter).
+    """
     raw = f"mode={cli_mode}|zc={int(zero_canon)}|home={clean_home}|cfg={settings_arg}"
+    if launch_env is not None:
+        raw = f"{raw}|net={classify_cloud_mode(launch_env)}"
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:24]
 
 
@@ -53,6 +64,13 @@ class PersistentWorkerSettings:
     persistent_drain_window_s: float = 0.10
     drain_window_s: float = 0.35
     strict_cold_rotation: bool = True
+    standby_enabled: bool = False
+    standby_max_slots: int = 1
+    standby_init_timeout_s: float = 30.0
+    standby_ttl_s: float = 300.0
+    fast_drain_enabled: bool = False
+    fast_drain_min_s: float = 0.015
+    fresh_rotate_enabled: bool = False
 
 
 @dataclass(frozen=True)
@@ -80,6 +98,7 @@ class PersistentReleaseParams:
     cid: str = ""
     still_enabled: bool = True
     max_slots: int = 8
+    rotate: bool = False
 
 
 @dataclass
@@ -97,6 +116,10 @@ class PersistentLease:
     pump_tick_s: float
     drain_window_s: float
     released: bool = False
+    prefetched_init_line: str = ""
+    fast_drain_enabled: bool = False
+    fast_drain_min_s: float = 0.015
+    standby_claimed: bool = False
 
 
 @dataclass(frozen=True)
@@ -180,6 +203,36 @@ def _read_drain_windows(config_path: Path | None) -> tuple[float, float, float]:
     return pump_tick_s, persistent_drain_s, drain_s
 
 
+def _read_standby_and_fast_drain(
+    config_path: Path | None,
+) -> tuple[bool, int, float, float, bool, float]:
+    st_en = read_bool_setting(
+        "BRIDGE_AGY_STANDBY_ENABLED", "AGY_BRIDGE_STANDBY_ENABLED",
+        False, config_path=config_path,
+    )
+    st_max = read_int_setting(
+        "persistent_standby_max_slots", "AGY_BRIDGE_STANDBY_MAX_SLOTS",
+        1, (1, 4), config_path=config_path,
+    )
+    st_init = read_float_setting(
+        "persistent_standby_init_timeout_s", "AGY_BRIDGE_STANDBY_INIT_TIMEOUT_S",
+        30.0, (5.0, 60.0), config_path=config_path,
+    )
+    st_ttl = read_float_setting(
+        "persistent_standby_ttl_s", "AGY_BRIDGE_STANDBY_TTL_S",
+        300.0, (30.0, 1800.0), config_path=config_path,
+    )
+    fd_en = read_bool_setting(
+        "BRIDGE_AGY_PERSISTENT_FAST_DRAIN_ENABLED", "AGY_BRIDGE_PERSISTENT_FAST_DRAIN_ENABLED",
+        False, config_path=config_path,
+    )
+    fd_min = read_float_setting(
+        "persistent_fast_drain_min_s", "AGY_BRIDGE_PERSISTENT_FAST_DRAIN_MIN_S",
+        0.015, (0.005, 0.10), config_path=config_path,
+    )
+    return st_en, st_max, st_init, st_ttl, fd_en, fd_min
+
+
 def persistent_worker_settings(
     *, config_path: Path | None = None
 ) -> PersistentWorkerSettings:
@@ -204,10 +257,21 @@ def persistent_worker_settings(
         "strict_cold_rotation", "AGY_BRIDGE_STRICT_COLD_ROTATION",
         True, config_path=config_path,
     )
+    st_en, st_max, st_init, st_ttl, fd_en, fd_min = _read_standby_and_fast_drain(config_path)
+    fresh_rotate_enabled = read_bool_setting(
+        "BRIDGE_AGY_PERSISTENT_FRESH_ROTATE_ENABLED",
+        "AGY_BRIDGE_PERSISTENT_FRESH_ROTATE_ENABLED",
+        False,
+        config_path=config_path,
+    )
     return PersistentWorkerSettings(
         enabled=enabled, max_slots=max_slots, lease_wait_s=lease_wait_s,
         idle_timeout_s=idle_s, ttl_s=ttl_s, max_rss_mb=max_rss_mb,
         max_turns=max_turns, pump_tick_s=pump_tick_s,
         persistent_drain_window_s=persistent_drain_s, drain_window_s=drain_s,
         strict_cold_rotation=strict_cold,
+        standby_enabled=st_en, standby_max_slots=st_max,
+        standby_init_timeout_s=st_init, standby_ttl_s=st_ttl,
+        fast_drain_enabled=fd_en, fast_drain_min_s=fd_min,
+        fresh_rotate_enabled=fresh_rotate_enabled,
     )

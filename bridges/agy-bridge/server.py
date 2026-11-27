@@ -145,6 +145,7 @@ from agy_runtime import (  # noqa: E402
     long_session_config as _lsc, loss_contract_config as _lcc, midstream_resilience, slot_and_session, sqlite_ro_pool as _ro_pool,
     sqlite_tail_lifecycle, sse_body_runner, sse_stream_helpers, tool_turn_helpers, turn_usage_finalize as _u_fin, zc_static_cwd, zero_canon_profile,
 )
+from agy_runtime.drain_policy import run_post_eof_drain  # noqa: E402
 from agy_runtime.explicit_turn_commit import abort_explicit_turn_safe, finalize_deferred_explicit_turn  # noqa: E402
 from agy_runtime.hygiene_runtime import HygieneRuntime, ManagedSqliteRoPool  # noqa: E402
 from agy_runtime.orphan_coordinator import CoordinatorDecision  # noqa: E402
@@ -214,6 +215,7 @@ from core.runtime_build_info import UNKNOWN as BUILD_UNKNOWN, RuntimeBuildInfo  
 from core import resumed_tools_policy as _RESUMED_TOOLS, timeout_ladder as _tl, turn_resilience_facade as _TURN_RESILIENCE  # noqa: E402
 from core.log_redaction import mask_credential_context, mask_long_tokens, redact_log_text, safe_log_tokens  # noqa: E402
 from core.log_rotation_adapters import emit_service_log as _emit_rotated_log  # noqa: E402
+from core.http_server_error import handle_accept_error  # noqa: E402
 from core.recovery_flags import (  # noqa: E402
     read_diagnostic_redact_margin_chars, read_diagnostic_window_chars, read_post_call_cutoff_enabled,
     read_tool_call_cap_cutoff_enabled, read_tool_json_repair_enabled,
@@ -225,7 +227,8 @@ from core.agy_capacity_guard import (  # noqa: E402
     should_fast_fail_agy_capacity_503,
     summarize_capacity_text,
 )
-from core.chat_key import SOURCES_SESSION_ID, resolve_chat_key  # noqa: E402
+from agy_runtime.chat_key_policy import resolve_agy_chat_key  # noqa: E402
+from agy_runtime.effort_reject_fallback import record_effort_rejection, resolve_effort_with_fallback, should_fallback_effortless  # noqa: E402
 from core.session_continuity import ContinuityConfig, ContinuityIndex  # noqa: E402
 from core.prompt_truncation_notice import HISTORY_PRUNED_MARKER, MIDDLE_PRUNED_MARKER, NoticePolicy, with_truncation_notice  # noqa: E402
 from core.cli_rejection import is_deterministic_cli_rejection  # noqa: E402
@@ -2961,7 +2964,7 @@ def _resolve_chat_context(
     extra_map = extra if isinstance(extra, dict) else {}
     cwd = extra_map.get("cwd")
     has_cwd = all((isinstance(cwd, str), bool(str(cwd).strip()) if isinstance(cwd, str) else False))
-    chat = resolve_chat_key(req, headers, extra_map, sources=SOURCES_SESSION_ID)
+    chat = resolve_agy_chat_key(req, headers, extra_map, config_path=DYNAMIC_CONFIG_PATH)
     subagent_id, subagent_invalid = slot_and_session.resolve_subagent_id(headers)
     profile = review_profile if review_profile is not None else zero_canon_profile.resolve_turn_plan(headers, DYNAMIC_CONFIG_PATH).profile_tag
     result: tuple[str, bool, str] = ("", True, "")
@@ -4294,6 +4297,8 @@ class _TranscriptTail(InterruptionTailState):
         self.dead: bool = False
         self.end_marker: bool = False
         self.final_planner: bool = False
+        self._plain_final: bool = False  # последний PLANNER_RESPONSE: текст без tool_calls
+        self._last_byte_at: float = 0.0
         self.drain_deadline: float = 0.0
         self.drain_outcome: str = ""
         self.last_poll: str = ""
@@ -4469,6 +4474,7 @@ class _TranscriptTail(InterruptionTailState):
         # перечитывается старая история: активностью считаются только записи хода.
         self._in_rewrite = rewritten
         if chunk and not rewritten:
+            self._last_byte_at = time.monotonic()
             self._note_activity()
         while b"\n" in self._buf:
             line, self._buf = self._buf.split(b"\n", 1)
@@ -4620,6 +4626,7 @@ class _TranscriptTail(InterruptionTailState):
         content = rec.get("content")
         emit_content = self.emit_content
         has_tools = bool(rec.get("tool_calls"))
+        self._plain_final = not has_tools and isinstance(content, str) and bool(content.strip())
         if has_tools and idx is not None:
             tool_steps = getattr(self, "_tool_step_indices", None)
             if tool_steps is None:
@@ -4959,42 +4966,13 @@ class _TranscriptTail(InterruptionTailState):
     def _drain_post_eof(self) -> None:
         """Процесс вышел: дочитать источники в окне DRAIN_WINDOW_S (≤ DRAIN_MAX_S).
 
-        Эвристического раннего выхода нет: досрочно после DRAIN_MIN_S — только по
-        авторитетному маркеру конца хода (END_TURN/TURN_COMPLETE, exit=end_turn)
-        или по stop_event (exit=stop). Финальный PLANNER_RESPONSE без END_TURN/
-        TURN_COMPLETE выдерживает полное окно DRAIN_WINDOW_S (exit=window).
+        Досрочно: END_TURN/TURN_COMPLETE (exit=end_turn), stop_event (exit=stop) или
+        флаг-gated fast-exit (BRIDGE_AGY_DRAIN_EARLY_EXIT_ENABLED, exit=final_planner_fast_exit).
         """
-        started = time.monotonic()
-        deadline = (
-            self.drain_deadline if self.drain_deadline > 0 else started + DRAIN_WINDOW_S
-        )
-        deadline = min(deadline, started + DRAIN_MAX_S)
-        earliest = started + DRAIN_MIN_S
-        emitted_before = self.emitted
-        exit_kind = "window"
-        while True:
-            if self.stop_event.is_set():
-                exit_kind = "stop"
-                break
-            self._read_transcript()
-            if self.sqlite_active:
-                _ = self._poll_sqlite()
-            now = time.monotonic()
-            if now >= earliest and self.end_marker:
-                exit_kind = "end_turn"
-                break
-            if now >= deadline:
-                break
-            time.sleep(min(DRAIN_POLL_STEP_S, max(0.0, deadline - now)))
-        pending = self._pending_steps()
-        complete = pending == 0 and (self.final_planner or self.end_marker)
-        self.drain_outcome = "complete" if complete else "window_complete"
-        if exit_kind != "stop" and pending > 0:
-            _count_drain_deadline()
-        ms = int((time.monotonic() - started) * 1000)
-        _log(
-            f"drain cid={self._cid8()} ms={ms} emitted={self.emitted - emitted_before} "
-            f"outcome={self.drain_outcome} pending_steps={pending} exit={exit_kind} {getattr(self.run_ref, 'tag', '')}"
+        run_post_eof_drain(
+            self, drain_window_s=DRAIN_WINDOW_S, drain_max_s=DRAIN_MAX_S, drain_min_s=DRAIN_MIN_S,
+            poll_step_s=DRAIN_POLL_STEP_S, on_deadline_pending=_count_drain_deadline, log_fn=_log, dynamic_config_path=DYNAMIC_CONFIG_PATH,
+            fast_drain_enabled=_lsc.read_bool_setting("BRIDGE_AGY_DRAIN_EARLY_EXIT_ENABLED", "BRIDGE_AGY_DRAIN_EARLY_EXIT_ENABLED", False),
         )
 
 
@@ -6256,9 +6234,6 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, format: str, *args: Any) -> None:  # noqa: A003
         del format, args
 
-    def handle_error(self, request: Any, client_address: Any) -> None:
-        return
-
     def _client_tag(self) -> str:
         try:
             return "%s:%s" % (self.client_address[0], self.client_address[1])
@@ -6867,22 +6842,15 @@ class Handler(BaseHTTPRequestHandler):
         self, ctx: dict, on_text, on_tool_trace, on_reasoning, keepalive
     ) -> dict:
         if "stream_resilience_enabled" not in ctx:
-            ctx["stream_resilience_enabled"] = _new_flag(
-                "AGY_BRIDGE_STREAM_RESILIENCE_ENABLED", True
-            )
+            ctx["stream_resilience_enabled"] = _new_flag("AGY_BRIDGE_STREAM_RESILIENCE_ENABLED", True)
         model = ctx["model"]
-        effort = ctx["effort"]
+        effort, effort_fallback_used = ctx["effort"], False
         tag = ctx["tag"]
         t_enter = time.monotonic()
         raw_req_start = ctx.get("t_req_start")
-        t_req_start = (
-            float(raw_req_start) if isinstance(raw_req_start, (int, float)) else t_enter
-        )
+        t_req_start = float(raw_req_start) if isinstance(raw_req_start, (int, float)) else t_enter
         self._t_req_start = t_req_start
-        adm_dec = _hygiene_rt().acquire(
-            AdmissionKey(route="chat", backend="agy", model=str(model)),
-            config_path=DYNAMIC_CONFIG_PATH,
-        )
+        adm_dec = _hygiene_rt().acquire(AdmissionKey(route="chat", backend="agy", model=str(model)), config_path=DYNAMIC_CONFIG_PATH)
         if not adm_dec.admitted:
             self._log_reject("overloaded", model, ctx["model_len"])
             shed = _terminal_state("overloaded", "adaptive admission shed")
@@ -6927,11 +6895,7 @@ class Handler(BaseHTTPRequestHandler):
                     images = []
                     img_dir = None
                 else:
-                    gate = (
-                        None
-                        if universal
-                        else _image_gate(cast(str, model), cast(str, effort))
-                    )
+                    gate = None if universal else _image_gate(cast(str, model), cast(str, effort))
                     if gate is not None:
                         self._log_reject(gate.code, cast(str, model), cast(int, ctx["model_len"]))
                         rejected = _terminal_state("image_reject", gate.code)
@@ -6955,11 +6919,9 @@ class Handler(BaseHTTPRequestHandler):
                         img_dir = None
                         img_registered = False
             _retry_credit()
-            client_budget = calculate_retry_budget(T_REQ_BUDGET_S, ctx.get("client_retry_budget"))
-            for attempt in (1, 2):
-                cancelled = (
-                    self._registry_job is not None and self._registry_job.cancelled.is_set()
-                )
+            client_budget, attempt = calculate_retry_budget(T_REQ_BUDGET_S, ctx.get("client_retry_budget")), 0
+            while (attempt := attempt + 1) > 0:
+                cancelled = self._registry_job is not None and self._registry_job.cancelled.is_set()
                 policy = None if cancelled else _build_timeout_policy(t_req_start)
                 if not cancelled and policy is None and client_budget.allow_retry and client_budget.attempt_s:
                     policy = _TimeoutPolicy(t_req_start, min(IDLE_TIMEOUT_S, client_budget.attempt_s),
@@ -7097,8 +7059,8 @@ class Handler(BaseHTTPRequestHandler):
                     and _incident_retry_allowed(ctx, out, delivered, T_REQ_BUDGET_S)
                     and _is_transient_upstream_error(out.get("err"))
                 ):
-                    if attempt == 2 or not _TURN_RESILIENCE.take(ctx, out, _retry_take, _log):
-                        if attempt != 2:
+                    if attempt >= 2 or not _TURN_RESILIENCE.take(ctx, out, _retry_take, _log):
+                        if attempt < 2:
                             _log(f"retry-budget-exhausted state={out['state']} {tag}")
                         if isinstance((exp_st := ctx.get("explicit_state")), ExplicitTurnState) and exp_st.handled:
                             _explicit_adapter().on_hot_failure(exp_st, post_spawn=True)
@@ -7111,14 +7073,27 @@ class Handler(BaseHTTPRequestHandler):
                     )
                     time.sleep(_retry_pause_s(attempt))
                     continue
+                if not delivered and should_fallback_effortless(
+                    out, str(effort), already_retried=effort_fallback_used, config_path=DYNAMIC_CONFIG_PATH
+                ):
+                    if ctx.get("hot_resumed"):
+                        if isinstance((exp_st := ctx.get("explicit_state")), ExplicitTurnState) and exp_st.handled:
+                            _explicit_adapter().on_hot_failure(exp_st, post_spawn=True)
+                        else:
+                            _TURN_RESILIENCE.invalidate(ctx, out, _session_invalidate, _log)
+                        _cid_release(str(ctx["conversation_id"]), str(ctx.get("turn_id") or ""))
+                        ctx["hot_resumed"], ctx["conversation_id"] = False, ""
+                        ctx["prompt"] = resolve_ctx_prompt(ctx, "full_prompt")
+                    record_effort_rejection(str(model), str(effort))
+                    effort, ctx["effort"], ctx["effort_source"], effort_fallback_used = "off", "off", "effort_reject_fallback", True
+                    _log(f"effort-reject fallback retry without --effort {tag}")
+                    continue
                 if ctx.get("hot_resumed") and out["state"] != "client_gone":
                     if isinstance((exp_st := ctx.get("explicit_state")), ExplicitTurnState) and exp_st.handled:
                         _explicit_adapter().on_hot_failure(exp_st, post_spawn=True)
                     else:
                         _TURN_RESILIENCE.invalidate(ctx, out, _session_invalidate, _log)
-                    _cid_release(
-                        str(ctx["conversation_id"]), str(ctx.get("turn_id") or "")
-                    )
+                    _cid_release(str(ctx["conversation_id"]), str(ctx.get("turn_id") or ""))
                     ctx["hot_resumed"] = False
                     ctx["conversation_id"] = ""
                     ctx["prompt"] = resolve_ctx_prompt(ctx, "full_prompt")
@@ -7142,7 +7117,7 @@ class Handler(BaseHTTPRequestHandler):
                     and not _is_cli_rejection_outcome(out)
                     and _incident_retry_allowed(ctx, out, delivered, T_REQ_BUDGET_S)
                 )
-                if not transient or attempt == 2:
+                if not transient or attempt >= 2:
                     break
                 if not _TURN_RESILIENCE.take(ctx, out, _retry_take, _log):
                     _log(f"retry-budget-exhausted state={out['state']} {tag}")
@@ -7511,7 +7486,7 @@ class Handler(BaseHTTPRequestHandler):
                         model_len,
                     )
                     return
-                effort, effort_source = decision.effort, decision.source
+                effort, effort_source = resolve_effort_with_fallback(model_id, decision.effort, decision.source, config_path=DYNAMIC_CONFIG_PATH)
             if "reasoning" in req and req.get("reasoning") is not None:
                 self._reject(
                     400,
@@ -7628,7 +7603,6 @@ class Handler(BaseHTTPRequestHandler):
                     else _with_pure_text_protocol(text, has_attachments=attached)
                 )
                 return wrapped
-
             full_attached = all((bool(images), not force_cold))
             full_mat, stripped_mat = _lsc.build_lazy_prompt_pair(
                 stripped_base,
@@ -8013,6 +7987,8 @@ class Server(ThreadingHTTPServer):
     request_queue_size = _env_int("AGY_HTTP_REQUEST_QUEUE_SIZE", 64, 16, 4096)
     allow_reuse_address = True
 
+    def handle_error(self, request: Any, client_address: Any) -> None:
+        handle_accept_error(client_address, _log, lambda: ThreadingHTTPServer.handle_error(self, request, client_address), DYNAMIC_CONFIG_PATH)
     def __init__(self, *args: Any, **kwargs: Any):
         super().__init__(*args, **kwargs)
         self._conn_sem = threading.BoundedSemaphore(

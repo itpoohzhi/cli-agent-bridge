@@ -1,9 +1,10 @@
 """Адаптер явного продолжения сессий (Explicit Resume) и изоляции маршрутов agy-bridge."""
 from __future__ import annotations
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, replace
 import hashlib
+import hmac
 import json
 from pathlib import Path
 import re
@@ -13,19 +14,22 @@ from typing import cast, final
 from agy_runtime.long_session_config import read_bool_setting, read_float_setting, read_int_setting
 from agy_runtime.loss_contract_config import hot_overrides
 from agy_runtime.session_store import CommitPayload, ExplicitSessionStore, load_or_create_hmac_key
+from agy_runtime.chat_key_policy import resolve_agy_chat_key
+from agy_runtime.persistent_pool_support import estimate_raw_messages_bytes, extract_message_text
 from agy_runtime.slot_and_session import resolve_subagent_id
-from core import chat_key as _chat_key
 from core.hot_session_policy import (
     DecisionAction, ExecutionMode, PolicyConfig, ProjectedMessage, SessionKeyParts, SlotSnapshot,
     SlotState, TurnPolicyInput, build_session_key, compute_history_fingerprints,
     compute_owner_hmac, decide_turn, encode_length_prefixed,
 )
+from core.session_plane.directive_codec import DIRECTIVE_HEADER, SignedDirectivePayload, verify_directive
+from core.session_plane.zc_env_guard import load_or_create_directive_key
 
 _LOOPBACK_HOSTS = frozenset(("127.0.0.1", "::1", "::ffff:127.0.0.1"))
 _CID_RE = re.compile(r"[0-9A-Fa-f-]{8,64}")
 _EMPTY_SNAP = SlotSnapshot(SlotState.EMPTY, "", "", 0, 0, 0, 0, 0.0, 0.0, 0, 0.0, 0.0)
 _TOGGLE_EPOCH_STEP = 1_000_007
-_resolve_chat_key = cast("Callable[..., _chat_key.ChatKey]", _chat_key.resolve_chat_key)
+_WARM_CONTEXTS = frozenset(("CONTEXT_CONTINUE", "CONTEXT_RESET_LOGICAL"))
 _INT_BOUNDS = (("guard_max_bytes", "BRIDGE_HOT_GUARD_MAX_BYTES", 2097152, (1024, 67_108_864)), ("guard_max_messages", "BRIDGE_HOT_GUARD_MAX_MESSAGES", 512, (4, 100_000)), ("max_turns", "BRIDGE_HOT_MAX_TURNS", 30, (1, 1000)), ("supersede_max_per_min", "BRIDGE_HOT_SUPERSEDE_MAX_PER_MIN", 3, (0, 1000)))
 _FLT_BOUNDS = (("idle_ttl_s", "BRIDGE_HOT_IDLE_TTL_S", 2700.0, (1.0, 604_800.0)), ("max_ttl_s", "BRIDGE_HOT_MAX_TTL_S", 86400.0, (1.0, 2_592_000.0)), ("in_flight_max_s", "BRIDGE_HOT_IN_FLIGHT_MAX_S", 960.0, (1.0, 86_400.0)))
 @dataclass(frozen=True, slots=True)
@@ -36,6 +40,8 @@ class RuntimeFlags:
     canonical_tools_enabled: bool = False
     epoch: int = 0
     policy: PolicyConfig = PolicyConfig()
+    keyed_single_turn_enabled: bool = False
+    signed_directive_enabled: bool = False
 @dataclass(frozen=True, slots=True)
 class RouteClassification:
     handled: bool
@@ -85,13 +91,41 @@ def read_runtime_flags(config_path: Path | None = None) -> RuntimeFlags:
     zp = rb("bridge_hot_zc_plain_enabled", "BRIDGE_HOT_ZC_PLAIN_ENABLED", False, config_path=config_path)
     za = rb("bridge_hot_zc_agentic_enabled", "BRIDGE_HOT_ZC_AGENTIC_ENABLED", False, config_path=config_path)
     cn = rb("bridge_hot_canonical_tools_enabled", "BRIDGE_HOT_CANONICAL_TOOLS_ENABLED", False, config_path=config_path)
+    ks = rb("BRIDGE_ZERO_CANON_KEYED_RESIDENT_ENABLED", "BRIDGE_ZERO_CANON_KEYED_RESIDENT_ENABLED", False, config_path=config_path)
+    sd = rb("BRIDGE_AGY_SIGNED_DIRECTIVE_ENABLED", "BRIDGE_AGY_SIGNED_DIRECTIVE_ENABLED", False, config_path=config_path)
     epoch = read_int_setting("bridge_hot_epoch", "BRIDGE_HOT_EPOCH", 0, (0, 1_000_000), config_path=config_path)
-    kw: dict[str, int | float | bool] = {"enabled": any((ep, zp, za))}
+    kw: dict[str, int | float | bool | str] = {"enabled": any((ep, zp, za)), "allow_keyed_single_turn": ks, "keyed_single_turn_profile": "zero-canon" if ks else ""}
     for k, env, d, b in _INT_BOUNDS:
         kw[k] = read_int_setting(f"bridge_hot_{k}", env, d, b, config_path=config_path)
     for k, env, d, b in _FLT_BOUNDS:
         kw[k] = read_float_setting(f"bridge_hot_{k}", env, d, b, config_path=config_path)
-    return RuntimeFlags(ep, zp, za, cn, epoch, hot_overrides(PolicyConfig(**cast("dict[str, object]", kw)), config_path=config_path))  # type: ignore[arg-type]
+    return RuntimeFlags(ep, zp, za, cn, epoch, hot_overrides(PolicyConfig(**cast("dict[str, object]", kw)), config_path=config_path), ks, sd)  # type: ignore[arg-type]
+def _directive_fail(flags: RuntimeFlags, epoch: int, reason: str) -> ExplicitTurnState:
+    return ExplicitTurnState(handled=True, sort_keys=flags.canonical_tools_enabled, force_cold=True, allow_commit=False, decision_reason=reason, epoch=epoch)
+def _directive_binding_reject(payload: SignedDirectivePayload, profile_tag: str, explicit_chat_id: str) -> str:
+    """Криптографическая привязка к запросу и строгий allowlist; пустая строка = допущено."""
+    expected_hash = hashlib.sha256(explicit_chat_id.encode("utf-8")).hexdigest()[:16] if explicit_chat_id else ""
+    checks = (
+        (payload.thread_epoch < 1, "directive_epoch_invalid"),
+        (payload.review_profile != profile_tag, "directive_profile_mismatch"),
+        (not hmac.compare_digest(payload.chat_id_hash, expected_hash), "directive_chat_mismatch"),
+        (payload.process_directive != "WARM_SLOT_REUSE" or payload.context_directive not in _WARM_CONTEXTS, "directive_ephemeral"),
+    )
+    return next((reason for bad, reason in checks if bad), "")
+def _directive_reject_reason(headers: Mapping[str, object] | None, flags: RuntimeFlags, now: float, profile_tag: str, chat_id: str) -> str:
+    """Подписанная директива (fail-closed): причина отказа -> холодный ход; пустая строка = допущено/выключено."""
+    if not flags.signed_directive_enabled:
+        return ""
+    if not (raw := _header_str(headers, DIRECTIVE_HEADER).strip()):
+        return "directive_missing"
+    try:
+        # min_config_revision=0: epoch agy (toggle-epoch) passthrough неизвестен; replay закрыт chat_id_hash+profile+TTL.
+        payload, reason = verify_directive(raw, load_or_create_directive_key(), now_s=now, min_config_revision=0)
+    except (OSError, ValueError):
+        payload, reason = None, "key_unavailable"
+    if payload is None or reason != "ok":
+        return f"directive_hmac_reject:{reason}"
+    return _directive_binding_reject(payload, profile_tag, chat_id)
 def _header_str(headers: Mapping[str, object] | None, name: str) -> str:
     if headers is None:
         return ""
@@ -115,23 +149,6 @@ def classify_route(profile_tag: str, tools_count: int, explicit_chat_id: str, cw
         en, mode = (flags.zc_plain_enabled, ExecutionMode.PLAIN) if tools_count == 0 else (flags.zc_agentic_enabled, ExecutionMode.AGENTIC)
         return RouteClassification(en, mode, "zero-canon-ephemeral")
     return RouteClassification(False, ExecutionMode.PLAIN, "")
-def estimate_raw_messages_bytes(messages: Sequence[object], limit: int) -> int:
-    total, stack = 0, list(messages)
-    while stack:
-        item = stack.pop()
-        if isinstance(item, (str, bytes, bytearray)):
-            total += len(item) if isinstance(item, (bytes, bytearray)) else len(item.encode("utf-8", "replace")) + 2
-        elif isinstance(item, dict):
-            d = cast("dict[object, object]", item)
-            total, _ = total + 4 * len(d), [stack.extend((k, v)) for k, v in d.items()]
-        elif isinstance(item, (list, tuple)):
-            seq = cast("Sequence[object]", item)
-            total, _ = total + 2 * len(seq), stack.extend(seq)
-        else:
-            total += len(str(item).encode("utf-8", "replace"))
-        if total > limit:
-            return total
-    return total
 def _parse_json_dict(raw: object) -> dict[str, object]:
     if isinstance(raw, dict):
         return cast("dict[str, object]", raw)
@@ -144,25 +161,9 @@ def canonicalize_tool_calls(raw_calls: object) -> str:
         return ""
     items = [{"id": str(c.get("id") or ""), "name": str(fn.get("name") or c.get("name") or ""), "arguments": _parse_json_dict(fn.get("arguments") if fn.get("arguments") is not None else c.get("arguments"))} for c in (cast("dict[str, object]", r) for r in cast("Sequence[object]", raw_calls) if isinstance(r, dict)) for fn in (cast("dict[str, object]", c["function"]) if isinstance(c.get("function"), dict) else {},)]
     return _cjson(items) if items else ""
-def _extract_part(item: object, img_counter: list[int]) -> str:
-    if isinstance(item, str):
-        return item
-    if not isinstance(item, dict):
-        return ""
-    m = cast("dict[str, object]", item)
-    if m.get("type") == "image_url":
-        img_counter[0] += 1
-        return f"[image {img_counter[0]}]"
-    return "" if (t := m.get("text")) is None else str(t)
-def _extract_text(content: object, img_counter: list[int]) -> str:
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        return "\n".join(p for p in (_extract_part(x, img_counter) for x in cast("list[object]", content)) if p)
-    return "" if content is None else str(content)
 def project_messages(messages: Sequence[object]) -> list[ProjectedMessage]:
     ic = [0]
-    return [ProjectedMessage(str(d.get("role") or "user").strip().lower() or "user", _extract_text(d.get("content"), ic), str(d.get("name") or ""), str(d.get("tool_call_id") or ""), canonicalize_tool_calls(d.get("tool_calls"))) for d in (cast("dict[str, object]", m) for m in messages if isinstance(m, dict))]
+    return [ProjectedMessage(str(d.get("role") or "user").strip().lower() or "user", extract_message_text(d.get("content"), ic), str(d.get("name") or ""), str(d.get("tool_call_id") or ""), canonicalize_tool_calls(d.get("tool_calls"))) for d in (cast("dict[str, object]", m) for m in messages if isinstance(m, dict))]
 def _tool_sort_key(item: object) -> tuple[str, str]:
     if not isinstance(item, dict):
         return "", ""
@@ -170,7 +171,7 @@ def _tool_sort_key(item: object) -> tuple[str, str]:
     fn = cast("dict[str, object]", m["function"]) if isinstance(m.get("function"), dict) else m
     return str(fn.get("name") or ""), _cjson(cast("dict[str, object]", rp) if isinstance((rp := fn.get("parameters")), dict) else {})
 def compute_context_digest(messages: Sequence[object], tools: Sequence[object], tool_choice: object, sort_keys: bool) -> str:
-    sys_items = [{"role": r, "name": str(d.get("name") or ""), "text": _extract_text(d.get("content"), [0])} for d in (cast("dict[str, object]", m) for m in messages if isinstance(m, dict)) if (r := str(d.get("role") or "").strip().lower()) in ("system", "developer")]
+    sys_items = [{"role": r, "name": str(d.get("name") or ""), "text": extract_message_text(d.get("content"), [0])} for d in (cast("dict[str, object]", m) for m in messages if isinstance(m, dict)) if (r := str(d.get("role") or "").strip().lower()) in ("system", "developer")]
     ordered = sorted(tools, key=_tool_sort_key) if sort_keys else list(tools)
     return hashlib.sha256(encode_length_prefixed((_cjson(sys_items), _cjson(ordered), _cjson(tool_choice), "1" if sort_keys else "0"))).hexdigest()
 
@@ -209,13 +210,15 @@ class ExplicitResumeAdapter:
     def prepare_turn(self, http_meta: TurnHttpMeta, payload_meta: TurnPayloadMeta, now_s: float | None = None) -> ExplicitTurnState:
         now, flags = time.time() if now_s is None else float(now_s), read_runtime_flags(self._config_path)
         epoch = self._sync_epoch(flags)
-        chat = _resolve_chat_key(payload_meta.req, http_meta.headers, payload_meta.extra, sources=_chat_key.SOURCES_SESSION_ID)
+        chat = resolve_agy_chat_key(payload_meta.req, http_meta.headers, payload_meta.extra, config_path=self._config_path)
         sub_id, sub_bad = resolve_subagent_id(http_meta.headers)
         explicit_cid = "" if any((chat.invalid, sub_bad)) else chat.value
         tools_cnt = 0 if _tool_choice_is_none(payload_meta.tool_choice) else len(payload_meta.tools)
         route = classify_route(http_meta.profile_tag, tools_cnt, explicit_cid, "" if payload_meta.cwd_invalid else payload_meta.cwd, flags)
         if not route.handled:
             return ExplicitTurnState(handled=False)
+        if bad := _directive_reject_reason(http_meta.headers, flags, now, http_meta.profile_tag, explicit_cid):
+            return _directive_fail(flags, epoch, bad)
         val_c, cid_bad = _cid_value_bad(http_meta.raw_cid)
         if any((payload_meta.force_cold, cid_bad, all((http_meta.profile_tag == "standard", payload_meta.cwd_invalid)))):
             return ExplicitTurnState(handled=True, sort_keys=flags.canonical_tools_enabled, force_cold=True, allow_commit=False, decision_reason="force_cold", epoch=epoch)
@@ -235,7 +238,7 @@ class ExplicitResumeAdapter:
         raw_bytes = estimate_raw_messages_bytes(msgs, pol.guard_max_bytes)
         proj = project_messages(msgs) if raw_bytes <= pol.guard_max_bytes else []
         fp = compute_history_fingerprints(proj, slot.stored_len, hkey, raw_bytes, pol)
-        dec = decide_turn(slot, TurnPolicyInput(owner_ok, owner_hash, explicit_cid, client_cid, fp, now, epoch, recent_sup), pol)
+        dec = decide_turn(slot, TurnPolicyInput(owner_ok, owner_hash, explicit_cid, client_cid, fp, now, epoch, recent_sup, hm.profile_tag), pol)
         st = ExplicitTurnState(True, flags.canonical_tools_enabled, False, "", False, dec.allow_commit, dec.reason.value, skey, owner_hash, "", epoch, dec.supersede, dec.expected_gen, dec.expected_stored_digest, tuple(proj), fp.assistant_count)
         if dec.action == DecisionAction.RESUME:
             if (lease := store.claim_resume(skey, dec.cid, now, epoch)):
