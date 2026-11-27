@@ -299,7 +299,7 @@ class TestCapAndQueue(RpcCase):
         """TM-009: таймаут очереди -> 503 overloaded; отмена клиента возвращает билет; счётчики как раньше."""
         server.MAX_CONCURRENT = 1
         self.hub.script(
-            [{"steps": [{"op": "sleep", "s": 2.0}, {"op": "text", "text": "slow"}]}]
+            [{"steps": [{"op": "sleep", "s": 4.0}, {"op": "text", "text": "slow"}]}]
         )
         busy = self.conv("chat-busy2")
         first = threading.Thread(target=lambda: busy.ask("long"))

@@ -116,14 +116,9 @@ from core.resilience import (  # noqa: E402
     ResilienceManager,
 )
 from core.lifecycle import (  # noqa: E402,F401 - сохраняем прежние реэкспорты фасада
-    DEFAULT_DRAIN_SECONDS,
-    HubLifecycleManager,
-    KEEPALIVE_INTERVAL_S,
-    QoSSlotManager as QoSSlotManager,
-    QUEUE_TIMEOUT_S as QOS_DEFAULT_QUEUE_TIMEOUT_S,
-    RESERVED_INTERACTIVE_SLOTS,
-    get_qos_manager,
-    has_live_parent,
+    DEFAULT_DRAIN_SECONDS, KEEPALIVE_INTERVAL_S, RESERVED_INTERACTIVE_SLOTS,
+    QUEUE_TIMEOUT_S as QOS_DEFAULT_QUEUE_TIMEOUT_S, QoSSlotManager as QoSSlotManager,
+    HubLifecycleManager, get_qos_manager, has_live_parent, reset_qos_manager,
 )
 from core.prompt_prefix_stability import (  # noqa: E402
     compute_tools_budget_overhead as compute_tools_budget_overhead,
@@ -3677,6 +3672,7 @@ def _reset_rpc_state() -> None:
     POOL = ProcPool()  # pyright: ignore[reportConstantRedefinition]
     TURN_MANAGER.reset_state()
     LIFECYCLE.reset_state()
+    reset_qos_manager()
     _shutting_down = False
 
 
@@ -7132,17 +7128,16 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
         )
         is_interactive = subagent_id is None or str(subagent_id).strip() == ""
 
-        qos_timeout = _env_float("BRIDGE_QUEUE_TIMEOUT_S", QOS_DEFAULT_QUEUE_TIMEOUT_S)
+        def _qos_limit(env_key: str, default_val: float, fallback: float) -> float:
+            raw = _env_float(env_key, default_val)
+            return raw if env_key in os.environ else min(raw, max(0.1, fallback))
+
+        qos_timeout = _qos_limit("BRIDGE_QUEUE_TIMEOUT_S", QOS_DEFAULT_QUEUE_TIMEOUT_S, QUEUE_TIMEOUT_S)
         qos = get_qos_manager(
             max_concurrent=MAX_CONCURRENT,
-            reserved_interactive=_env_int_nonneg(
-                "BRIDGE_RESERVED_INTERACTIVE_SLOTS",
-                RESERVED_INTERACTIVE_SLOTS,
-            ),
+            reserved_interactive=_env_int_nonneg("BRIDGE_RESERVED_INTERACTIVE_SLOTS", RESERVED_INTERACTIVE_SLOTS),
             queue_timeout_s=qos_timeout,
-            keepalive_interval_s=_env_float(
-                "BRIDGE_KEEPALIVE_INTERVAL_S", KEEPALIVE_INTERVAL_S
-            ),
+            keepalive_interval_s=_qos_limit("BRIDGE_KEEPALIVE_INTERVAL_S", KEEPALIVE_INTERVAL_S, KEEPALIVE_S),
             drain_event=getattr(LIFECYCLE, "drain_started", None),
             max_queue_size=_env_int_nonneg("BRIDGE_MAX_QUEUE_SIZE", 128),
         )
@@ -7158,14 +7153,13 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
                 try:
                     if not headers_sent[0]:
                         headers_sent[0] = True
+                        self._response_status = 200
                         self._headers_already_sent = True  # pyright: ignore[reportAttributeAccessIssue]
                         self.send_response(200)
-                        self.send_header(
-                            "Content-Type", "text/event-stream; charset=utf-8"
-                        )
+                        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
                         self.send_header("Cache-Control", "no-cache")
-                        self.send_header("Connection", "keep-alive")
                         self.send_header("X-Accel-Buffering", "no")
+                        self.close_connection = True
                         self.end_headers()
                     self.wfile.write(b": keepalive\n\n")
                     self.wfile.flush()

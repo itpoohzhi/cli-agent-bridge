@@ -25,6 +25,7 @@ from core.pgid_cleanup_driver import (
 from core.pgid_cleanup_policy import CleanupKey, CleanupState, GroupProbeStatus
 from core.pgid_reaper import AlertCallback, BoundedPgidReaper, ReleaseCallback
 
+from . import slot_and_session
 from .orphan_coordinator import (
     CoordinatorContext,
     CoordinatorDecision,
@@ -160,6 +161,28 @@ class AgyP12CleanupSeam:
         )
         self._get_reaper().register_and_cancel(key, release_fn, reap_leader=proc.poll)
         return False
+
+    def release_slots_and_admission(
+        self,
+        slots_obj: Any,
+        rt_release_fn: Any,
+        ticket_id: int,
+        out: Any,
+        run: object | None,
+        turn_id: str,
+    ) -> bool:
+        """Release slot semaphore + admission guarded by confirmed-dead PGID quarantine."""
+        out_dict = cast_out = out if isinstance(out, dict) else {}
+
+        def _release_resources() -> None:
+            try:
+                slots_obj.release()
+            finally:
+                slot_and_session.release_admission_for_state(rt_release_fn, ticket_id, cast_out, run=run)
+
+        _ = out_dict
+        quarantine_run = None if getattr(run, "_persistent_mode", False) else run
+        return self.release_slot_after_run(_release_resources, quarantine_run, turn_id)
 
     def cleanup_state_for(self, turn_id: str, attempt_epoch: int) -> CleanupState:
         if self._reaper is None:
