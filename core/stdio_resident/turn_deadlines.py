@@ -156,16 +156,16 @@ def _pick_ladder_override(
     return None
 
 
-def _parse_strict_total_timeout(ctx: Mapping[str, Any], cfg: object) -> float | None:
+def _parse_strict_total_timeout(ctx: Mapping[str, Any], cfg: object) -> tuple[float | None, bool]:
     if (raw := ctx.get("turn_total_timeout_s")) is not None:
         if (parsed := _parse_pos_float(raw)) is None:
             raise ConfigError(f"invalid turn_total_timeout_s in ctx: {raw!r}")
-        return parsed
+        return parsed, True
     if (raw := getattr(cfg, "turn_total_timeout_s", None)) is not None:
         if (parsed := _parse_pos_float(raw)) is None:
             raise ConfigError(f"invalid turn_total_timeout_s in cfg: {raw!r}")
-        return None if parsed == _DEFAULT_POOL_TURN_TOTAL_S else parsed
-    return None
+        return (None, False) if parsed == _DEFAULT_POOL_TURN_TOTAL_S else (parsed, False)
+    return None, False
 
 
 def _pick_legacy_idle_timeout(ctx: Mapping[str, Any], cfg: object, env: Mapping[str, str]) -> float | None:
@@ -187,7 +187,7 @@ def _resolve_deadlines(
     cfg: object, ctx: Mapping[str, Any], now: float, *, environ: Mapping[str, str] | None = None
 ) -> _TurnDeadlines:
     env = os.environ if environ is None else environ
-    explicit_total = _parse_strict_total_timeout(ctx, cfg)
+    explicit_total, total_from_ctx = _parse_strict_total_timeout(ctx, cfg)
     ladder = _load_timeout_ladder(env)
     if not ladder.enabled:
         idle_s = _pick_legacy_idle_timeout(ctx, cfg, env)
@@ -221,12 +221,9 @@ def _resolve_deadlines(
     first_val = ladder.effective_first_event_s if first_ov is None else first_ov
     cap_ov = _pick_ladder_override(ctx, cfg, ("safety_cap_s", "turn_safety_cap_s"), "BRIDGE_STDIO_SAFETY_CAP_S", env)
     if cap_ov is None:
-        if explicit_total is not None:
-            cap_val = min(ladder.safety_cap_s, explicit_total)
-        else:
-            cap_val = max(ladder.safety_cap_s, first_val, idle_val)
+        cap_val = min(ladder.safety_cap_s, explicit_total) if explicit_total is not None else max(ladder.safety_cap_s, first_val, idle_val)
     else:
-        cap_val = cap_ov
+        cap_val = min(cap_ov, explicit_total) if (total_from_ctx and explicit_total is not None) else cap_ov
     eff_first = min(first_val, cap_val)
     eff_idle = min(idle_val, cap_val)
     effective_cfg = TimeoutLadderConfig(
