@@ -76,7 +76,7 @@ def test_stage_w2_n_both_models_use_their_own_env_and_quota_slot(slot: int) -> N
 def test_stage_w2_o_deepseek_uses_only_its_requested_env_slot() -> None:
     doc = _provider("deepseek-direct")
     expected = (
-        "deepseek-direct", "passthrough", True, 0, "DEEPSEEK_API_KEY",
+        "deepseek-direct", "passthrough", False, 0, "DEEPSEEK_API_KEY",
         "http://127.0.0.1:10830/sg-deepseek", "deepseek-direct", ("deepseek-v4.1-flash",),
     )
     semantic_equal(_slot(doc), expected, "deepseek_single_live_credential_slot")
