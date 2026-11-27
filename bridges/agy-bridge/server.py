@@ -159,8 +159,10 @@ from agy_runtime.persistent_worker_adapter import AgyPersistentWorkerPool  # noq
 from agy_runtime.input_guard_policy import ClientCompactionRequired  # noqa: E402
 from agy_runtime.loss_receipt_context import begin_request_scope, record_lossless, send_client_compaction_required, usage_payload  # noqa: E402
 from agy_runtime.lossless_prompt_facade import (  # noqa: E402
-    PromptRenderDeps, build_run_stdin_line, ensure_prompt_fits_or_pass, render_messages_prompt, send_rejection_response,
+    PromptRenderDeps, ensure_prompt_fits_or_pass, feed_run_stdin_or_lossless, iter_run_stdout_or_lossless,
+    prepare_run_lossless_state, release_run_lossless_resources, render_messages_prompt, send_rejection_response,
 )
+from agy_runtime.process_admission_guard import AdmissionOverloadError  # noqa: E402
 from core.resumed_tools_policy import CompactToolsQuery  # noqa: E402
 from agy_runtime.legacy_session_helpers import (  # noqa: E402
     LegacyLoadSpec, atomic_write_sessions_json, load_sessions_json_entries, normalize_request_cwd,
@@ -5411,8 +5413,8 @@ class Run:
         self.work_dir = work_dir
         self.mode = mode
         self.tag = tag
-        self.stdin_line = build_run_stdin_line(
-            prompt, head_pruning_enabled=AGY_BRIDGE_ENABLE_HEAD_PRUNING,
+        self.stdin_line = prepare_run_lossless_state(
+            self, prompt, head_pruning_enabled=AGY_BRIDGE_ENABLE_HEAD_PRUNING,
             ensure_fit_fn=_ensure_prompt_fits_ndjson, ndjson_user_line_fn=_ndjson_user_line,
             config_path=DYNAMIC_CONFIG_PATH,
         )
@@ -5783,7 +5785,7 @@ class Run:
         return snap
 
     def _feed_stdin(self) -> None:
-        feed_run_stdin(self)
+        feed_run_stdin_or_lossless(self, feed_run_stdin)
 
     def _drain_stderr(self) -> None:
         drain_run_stderr(self, _NOISE)
@@ -5848,7 +5850,7 @@ class Run:
                 return True
 
     def _iter_stdout_lines(self) -> Iterator[str]:
-        return iter_run_stdout_lines(self)
+        return iter_run_stdout_or_lossless(self, iter_run_stdout_lines)
 
     def _pump(self) -> None:
         """Разбор NDJSON agy 1.3.1.
@@ -6078,6 +6080,7 @@ class Run:
             kill_group=lambda proc: _kill_group(proc, send_sigint=True),
             unregister_proc=_unreg, join_timeout_s=JOIN_TIMEOUT_S,
         ))
+        release_run_lossless_resources(self)
 
 
 def _reasoning_suffix(seen: dict, rid: str, text: str) -> str:
@@ -7724,7 +7727,7 @@ class Handler(BaseHTTPRequestHandler):
                 self._serve_sse(ctx)
             else:
                 self._serve_json(ctx)
-        except ClientCompactionRequired as exc:
+        except (ClientCompactionRequired, AdmissionOverloadError) as exc:
             send_rejection_response(self, exc)
         finally:
             if not ctx.get("job_owns_cid"):

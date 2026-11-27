@@ -1,21 +1,34 @@
-"""Lossless prompt facade for agy-bridge: two-profile routing (legacy vs lossless chunked, 0 silent loss)."""
+"""Lossless prompt & runtime facade for agy-bridge (two-profile legacy vs chunked lossless, 0 silent loss)."""
 
 from __future__ import annotations
 
 import json
 import os
-from collections.abc import Callable
+import subprocess
+import threading
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
 from typing import Any
 
 from core.lossless_chunker import ChunkLimitExceededError, iter_ndjson_frames
-from core.lossless_contracts import LosslessLimits, LossReceipt, build_loss_receipt, resolve_lossless_limits
+from core.lossless_contracts import (
+    LosslessLimits,
+    LossReceipt,
+    build_loss_receipt,
+    resolve_lossless_limits,
+)
 from core.lossless_gate import GateAction, evaluate_delivery_gate
 
+from .chunk_delivery_adapter import ChunkDeliveryResult, deliver_chunked_prompt
 from .input_guard_policy import ClientCompactionRequired
 from .loss_receipt_context import send_client_compaction_required
+from .process_admission_guard import AdmissionOverloadError, ProcessAdmissionGuard
+
+_GUARD_LOCK = threading.Lock()
+_GUARDS: dict[str, ProcessAdmissionGuard] = {}
+_EPOCH_COUNTER = 0
 
 
 class LosslessRejectionError(ClientCompactionRequired):
@@ -25,24 +38,19 @@ class LosslessRejectionError(ClientCompactionRequired):
         Exception.__init__(self, f"lossless_rejected:{receipt.reason}")
         self.http_status: int = receipt.http_status
         self.receipt: LossReceipt = receipt
+        code = "prompt_too_large" if receipt.http_status == 413 else "context_length_exceeded"
+        msg = f"Lossless delivery refused ({receipt.reason}): prompt_bytes={receipt.prompt_bytes}, chunks={receipt.chunk_count}"
         self.body: dict[str, object] = {
             "error": {
-                "type": "invalid_request_error",
-                "code": "prompt_too_large" if receipt.http_status == 413 else "context_length_exceeded",
-                "param": "messages",
-                "x_reason": receipt.reason,
-                "message": (
-                    f"Lossless delivery refused ({receipt.reason}): "
-                    f"prompt_bytes={receipt.prompt_bytes}, chunks={receipt.chunk_count}"
-                ),
-                "x_bridge_loss": receipt.to_wire_dict(),
+                "type": "invalid_request_error", "code": code, "param": "messages",
+                "x_reason": receipt.reason, "message": msg, "x_bridge_loss": receipt.to_wire_dict(),
             }
         }
 
 
 @dataclass(frozen=True)
 class PromptRenderDeps:
-    """Injected pure/server callbacks keeping facade decoupled from server.py globals."""
+    """Injected server callbacks keeping facade decoupled from server.py globals."""
 
     render_message: Callable[..., str]
     attachments_block: Callable[[list[dict[str, object]]], str]
@@ -71,6 +79,25 @@ def read_agy_lossless_limits(config_path: Path) -> LosslessLimits:
     return resolve_lossless_limits(os.environ, _read_dynamic_cfg(config_path))
 
 
+def get_admission_guard(config_path: Path, limits: LosslessLimits | None = None) -> ProcessAdmissionGuard:
+    """Return process-wide ProcessAdmissionGuard keyed by config_path + capacity tuple."""
+    lim = read_agy_lossless_limits(config_path) if limits is None else limits
+    key = f"{config_path}:{lim.max_concurrency}:{lim.max_queue}:{lim.queue_wait_s}:{lim.kill_grace_s}"
+    with _GUARD_LOCK:
+        guard = _GUARDS.get(key)
+        if guard is None:
+            guard = ProcessAdmissionGuard.from_limits(lim)
+            _GUARDS[key] = guard
+        return guard
+
+
+def _next_epoch() -> int:
+    global _EPOCH_COUNTER
+    with _GUARD_LOCK:
+        _EPOCH_COUNTER += 1
+        return _EPOCH_COUNTER
+
+
 def render_messages_prompt(
     messages: list[Any],
     deps: PromptRenderDeps,
@@ -81,8 +108,7 @@ def render_messages_prompt(
     sort_keys: bool = False,
 ) -> str:
     """Render full turn prompt; in lossless mode never silently compacts/truncates."""
-    counter = [0]
-    img_counter = [img_start]
+    counter, img_counter = [0], [img_start]
     blocks: list[tuple[int, str, str]] = []
     for index, msg in enumerate(messages):
         rendered = deps.render_message(msg, counter, img_counter, sort_keys=sort_keys)
@@ -109,18 +135,12 @@ def render_messages_prompt(
     pruned = deps.prune_or_compact(blocks, tail_block, limit)
     if not deps.truncation_notice_enabled():
         return pruned
-    rp = partial(deps.prune_or_compact, blocks, tail_block)
-    return deps.with_notice(pruned, blocks, rp, deps.notice_policy, limit)
+    return deps.with_notice(pruned, blocks, partial(deps.prune_or_compact, blocks, tail_block), deps.notice_policy, limit)
 
 
 def ensure_prompt_fits_or_pass(
-    prompt: str,
-    *,
-    limit: int,
-    ndjson_bytes_fn: Callable[[str], int],
-    middle_prune_fn: Callable[[str, int], str],
-    log_fn: Callable[[str], None],
-    config_path: Path,
+    prompt: str, *, limit: int, ndjson_bytes_fn: Callable[[str], int],
+    middle_prune_fn: Callable[[str, int], str], log_fn: Callable[[str], None], config_path: Path,
 ) -> str:
     """Legacy middle-prune guard; bypassed cleanly when lossless chunked delivery is enabled."""
     if read_agy_lossless_limits(config_path).lossless_enabled:
@@ -134,43 +154,114 @@ def ensure_prompt_fits_or_pass(
 
 
 def build_run_stdin_line(
-    prompt: str,
-    *,
-    head_pruning_enabled: bool,
-    ensure_fit_fn: Callable[[str], str],
-    ndjson_user_line_fn: Callable[[str], str],
-    config_path: Path,
+    prompt: str, *, head_pruning_enabled: bool, ensure_fit_fn: Callable[[str], str],
+    ndjson_user_line_fn: Callable[[str], str], config_path: Path,
 ) -> str:
-    """Build NDJSON stdin payload: sequential lossless frames when enabled, single line in legacy."""
+    """Build NDJSON stdin payload (single line in legacy or validated NDJSON sequence in lossless)."""
     limits = read_agy_lossless_limits(config_path)
     if limits.lossless_enabled:
-        parts: list[str] = []
         try:
-            for frame in iter_ndjson_frames(
-                prompt,
-                safe_frame_bytes=limits.safe_frame_bytes,
-                max_chunks=limits.max_chunks,
-            ):
-                parts.append(frame.ndjson_bytes.decode("utf-8"))
+            return "".join(
+                f.ndjson_bytes.decode("utf-8")
+                for f in iter_ndjson_frames(prompt, safe_frame_bytes=limits.safe_frame_bytes, max_chunks=limits.max_chunks)
+            )
         except ChunkLimitExceededError as exc:
             receipt = build_loss_receipt(
-                reason="chunk_limit_exceeded",
-                http_status=413,
-                prompt_raw=prompt.encode("utf-8"),
-                chunk_count=exc.estimated_chunks,
-                digest_mode=limits.digest_mode,
+                reason="chunk_limit_exceeded", http_status=413, prompt_raw=prompt.encode("utf-8"),
+                chunk_count=exc.estimated_chunks, digest_mode=limits.digest_mode,
             )
             raise LosslessRejectionError(receipt) from exc
-        return "".join(parts)
-
     if head_pruning_enabled:
         prompt = ensure_fit_fn(prompt)
     return ndjson_user_line_fn(prompt)
 
 
-def send_rejection_response(handler: Any, error: ClientCompactionRequired) -> None:
-    """Send 413/400 for LosslessRejectionError or delegate to legacy 400 compaction response."""
+def prepare_run_lossless_state(
+    run: Any, prompt: str, *, head_pruning_enabled: bool, ensure_fit_fn: Callable[[str], str],
+    ndjson_user_line_fn: Callable[[str], str], config_path: Path,
+) -> str:
+    """Wire ProcessAdmissionGuard and chunk delivery metadata onto Run; returns stdin_line."""
+    limits = read_agy_lossless_limits(config_path)
+    setattr(run, "_lossless_slot_held", False)
+    setattr(run, "_lossless_chunked", False)
+    if not limits.lossless_enabled:
+        return ndjson_user_line_fn(ensure_fit_fn(prompt) if head_pruning_enabled else prompt)
+
+    decision = evaluate_delivery_gate(prompt, limits)
+    if decision.action is GateAction.REJECT and decision.receipt is not None:
+        raise LosslessRejectionError(decision.receipt)
+
+    guard = get_admission_guard(config_path, limits)
+    guard.acquire()
+    try:
+        stdin_payload = build_run_stdin_line(
+            prompt, head_pruning_enabled=False, ensure_fit_fn=ensure_fit_fn,
+            ndjson_user_line_fn=ndjson_user_line_fn, config_path=config_path,
+        )
+    except BaseException:
+        guard.release()
+        raise
+
+    for key, val in (
+        ("_lossless_guard", guard), ("_lossless_limits", limits), ("_lossless_prompt", prompt),
+        ("_lossless_epoch", _next_epoch()), ("_lossless_slot_held", True),
+        ("_lossless_chunked", decision.action is GateAction.DELIVER_CHUNKED),
+        ("_lossless_done", threading.Event()), ("_lossless_result", None),
+    ):
+        setattr(run, key, val)
+    return stdin_payload
+
+
+def feed_run_stdin_or_lossless(run: Any, legacy_feed_fn: Callable[[Any], None]) -> None:
+    """Dispatch Run._feed_stdin to sequential chunk_delivery_adapter when multi-chunk lossless is active."""
+    if not bool(getattr(run, "_lossless_chunked", False)):
+        legacy_feed_fn(run)
+        return
+    done: threading.Event = getattr(run, "_lossless_done")
+    try:
+        cancel_ev = getattr(run, "_stop_watch", None)
+        res = deliver_chunked_prompt(
+            getattr(run, "proc"), getattr(run, "_lossless_prompt"),
+            getattr(run, "_lossless_limits"), getattr(run, "_lossless_guard"),
+            epoch=int(getattr(run, "_lossless_epoch", 1)),
+            cancel_event=cancel_ev if isinstance(cancel_ev, threading.Event) else None,
+        )
+        setattr(run, "_lossless_result", res)
+    finally:
+        done.set()
+
+
+def iter_run_stdout_or_lossless(run: Any, legacy_iter_fn: Callable[[Any], Iterator[str]]) -> Iterator[str]:
+    """Yield only the final turn's stdout lines in multi-chunk lossless mode (synthetic ACKs filtered)."""
+    if not bool(getattr(run, "_lossless_chunked", False)):
+        yield from legacy_iter_fn(run)
+        return
+    getattr(run, "_lossless_done").wait()
+    res: ChunkDeliveryResult | None = getattr(run, "_lossless_result", None)
+    if res is not None and res.stdout_lines:
+        yield res.stdout_lines[-1]
+
+
+def release_run_lossless_resources(run: Any) -> None:
+    """Idempotently teardown PGID (if active) and release ProcessAdmissionGuard slot on Run.close."""
+    if not bool(getattr(run, "_lossless_slot_held", False)):
+        return
+    setattr(run, "_lossless_slot_held", False)
+    guard: ProcessAdmissionGuard | None = getattr(run, "_lossless_guard", None)
+    proc = getattr(run, "proc", None)
+    if guard is not None:
+        if isinstance(proc, subprocess.Popen):
+            guard.teardown_process(proc)
+        guard.release()
+
+
+def send_rejection_response(handler: Any, error: Exception) -> None:
+    """Send HTTP 413/429/400 for lossless/admission rejections or delegate to legacy 400 compaction."""
+    if isinstance(error, AdmissionOverloadError):
+        handler._send(429, {"error": {"type": "rate_limit_error", "code": "admission_overloaded", "message": str(error), "retry_after_s": error.retry_after_s}})  # noqa: SLF001
+        return
     if isinstance(error, LosslessRejectionError):
         handler._send(error.http_status, error.body)  # noqa: SLF001
         return
-    send_client_compaction_required(handler, error)
+    if isinstance(error, ClientCompactionRequired):
+        send_client_compaction_required(handler, error)
