@@ -7,6 +7,7 @@ DuckDB I/O на горячем пути нет. Врезка в монолиты
 
 from __future__ import annotations
 
+import contextlib
 import sys
 import time
 from collections.abc import Callable
@@ -228,12 +229,9 @@ def _record_unrecorded_exit(route: Any, active_exc: BaseException | None) -> Non
     if not (failed or gone):
         return
     rec = getattr(handler, "_record_telemetry", None)
-    if not callable(rec):
-        return
-    try:
-        rec(client_gone=gone)
-    except Exception:
-        return
+    if callable(rec):
+        with contextlib.suppress(Exception):
+            rec(client_gone=gone)
 
 
 def finalize_routes_exit(route: Any, reservation: Any) -> None:
