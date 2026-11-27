@@ -18,9 +18,10 @@ ERR_TOOL_EVENT_FORBIDDEN: Final[str] = "zero_canon_tool_event_forbidden"
 
 CODEX_EFFORT_MATRIX: Final[Mapping[str, tuple[str, ...]]] = MappingProxyType({
     "gpt-6.1-sol": ("low", "medium", "high", "xhigh", "max"),
+    "gpt-6.2-sol": ("low", "medium", "high", "xhigh", "max"),
     "gpt-6.1-terra": ("low", "medium", "high"),
 })
-CODEX_DEFAULT_EFFORTS: Final[Mapping[str, str]] = MappingProxyType({"gpt-6.1-sol": "high", "gpt-6.1-terra": "high"})
+CODEX_DEFAULT_EFFORTS: Final[Mapping[str, str]] = MappingProxyType({"gpt-6.1-sol": "high", "gpt-6.2-sol": "high", "gpt-6.1-terra": "high"})
 STRICT_STRIPPED_REQUEST_KEYS: Final[frozenset[str]] = frozenset(
     "tools tool_choice emulate_tools functions function_call parallel_tool_calls".split()
 )

@@ -26,6 +26,7 @@ from core.stdio_resident.codex_driver import _build_codex_argv  # noqa: E402
 from core.stdio_resident.codex_protocol_fsm import ProtocolPhase, ProtocolState  # noqa: E402
 from core.stdio_resident.turn_error_sse import ResidentTurnError, build_turn_error  # noqa: E402
 from core.stdio_resident.zero_canon_router import execute_routed_turn  # noqa: E402
+from core.zc_admission import TurnProofRecorder  # noqa: E402
 from core.zero_canon_attestation_http import ZeroCanonAdmissionProof, ZeroCanonHttpError, build_attestation_header  # noqa: E402
 
 TERRA, DUMMY_KEY = "gpt-6.1-terra", "sk-dummy-test-000"
@@ -79,7 +80,8 @@ def _seed_v2_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     dyn.write_text(json.dumps({"BRIDGE_CODEX_APP_SERVER_V2_ENABLED": True}), encoding="utf-8")
     for key, val in {
         "HOME": str(home), "CODEX_HOME": str(codex_dir), "BRIDGE_DYNAMIC_CONFIG_PATH": str(dyn),
-        "BRIDGE_STDIO_RESIDENT_ENABLED": "1", "BRIDGE_CODEX_APP_SERVER_V2_ENABLED": "1", "BRIDGE_STDIO_CANCEL_GRACE_S": "0.1",
+        "BRIDGE_STDIO_RESIDENT_ENABLED": "1", "BRIDGE_CODEX_APP_SERVER_V2_ENABLED": "1",
+        "BRIDGE_STDIO_CANCEL_GRACE_S": "0.1", "BRIDGE_ZC_STATIC_CWD_PATH": str(tmp_path / "zc-static-cwd"),
     }.items():
         monkeypatch.setenv(key, val)
     script = tmp_path / "fake_codex_v2.py"
@@ -234,8 +236,9 @@ def test_sse_header_gate_ensure_live_headers_fails_closed_without_admission() ->
 
 def test_zero_chunk_sse_turn_with_completed_emits_phase_completed() -> None:
     """W9 F-012: 0-chunk SSE turn after ProtocolPhase.COMPLETED emits phase=completed, never phase=admitted."""
-    done = ProtocolState(phase=ProtocolPhase.COMPLETED, thread_id="thr-srv-0", turn_id="trn-srv-0", zero_canon=True)
-    drv = type("_Drv", (), {"protocol_state": done, "last_turn_state": done})()
+    done = ProtocolState(phase=ProtocolPhase.COMPLETED, epoch=2, thread_id="thr-srv-0", turn_id="trn-srv-0", zero_canon=True)
+    proof_rec = TurnProofRecorder(handshake_acked=True, clean_home_verified=True, issued_thread_id="thr-srv-0", issued_turn_id="trn-srv-0", turn_epoch=2)
+    drv = type("_Drv", (), {"protocol_state": done, "last_turn_state": done, "turn_proof": proof_rec, "last_turn_proof": proof_rec})()
 
     def _dispatch(_ctx: dict[str, Any], _ka: Any, _sw: Any) -> dict[str, Any]:
         record_v2_turn_completion(drv, handler, model=TERRA, effort="medium", has_sse=True)

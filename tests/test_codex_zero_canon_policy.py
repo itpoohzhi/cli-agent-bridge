@@ -31,7 +31,7 @@ PERR, HERR = pol.CodexZeroCanonPolicyError, zhttp.ZeroCanonHttpError
 
 
 def test_effort_matrix_immutable_and_rejects_unsupported_without_clamp() -> None:
-    """ADR-001 Policy: immutable Sol/Terra effort matrix, no clamp, no 6.2 alias."""
+    """ADR-001 Policy: immutable Sol/Terra effort matrix, no clamp, unknown model rejected."""
     assert pol.CODEX_EFFORT_MATRIX[SOL] == ("low", "medium", "high", "xhigh", "max")
     assert pol.CODEX_EFFORT_MATRIX[TERRA] == ("low", "medium", "high")
     with pytest.raises(TypeError, match="item assignment"):
@@ -46,7 +46,7 @@ def test_effort_matrix_immutable_and_rejects_unsupported_without_clamp() -> None
         (TERRA, "xhigh", "unsupported_model_effort"),
         (TERRA, "max", "unsupported_model_effort"),
         (SOL, "ultra", "unsupported_model_effort"),
-        ("gpt-6.2-sol", "high", "unsupported_model"),
+        ("gpt-6.9-sol", "high", "unsupported_model"),
     )
     for model, effort, code in bad_pairs:
         with pytest.raises(PERR, match="Unsupported") as exc:
@@ -228,3 +228,59 @@ def test_secret_redaction_and_fs_nofollow_gigarc(tmp_path: Path) -> None:
     bad_cfg = tmp_path / "broken.json"
     bad_cfg.write_text("{not-json", encoding="utf-8")
     assert zfs.read_gigarc_bool(FLAG, bad_cfg, environ=env_on, default=False) is False
+
+
+def test_gpt62_sol_zero_canon_efforts_and_attestation() -> None:
+    for eff in ("low", "medium", "high", "xhigh", "max"):
+        assert pol.validate_codex_model_effort("gpt-6.2-sol", eff) == ("gpt-6.2-sol", eff)
+    assert pol.validate_codex_model_effort("gpt-6.2-sol", None) == ("gpt-6.2-sol", "high")
+    with pytest.raises(PERR) as exc:
+        pol.validate_codex_model_effort("gpt-6.2-sol", "ultra")
+    assert exc.value.http_status == 400
+    adm = zhttp.ZeroCanonAdmissionProof(
+        "gpt-6.2-sol", "high", "thr-srv-62", "trn-srv-62",
+        clean_home_verified=True, handshake_acked=True,
+        requested_model="gpt-6.2-sol", requested_effort="high",
+    )
+    assert "phase=admitted" in zhttp.build_attestation_header(adm, phase="admitted")
+    comp = zhttp.ZeroCanonCompletionProof(adm, terminal_status="completed", tool_events_seen=0)
+    assert "phase=completed" in zhttp.build_attestation_header(comp, phase="completed")
+
+
+def test_filter_zero_canon_providers_codex_ingress() -> None:
+    codex_p = [{"backend": "codex", "kind": "stdio_resident", "zero_canon_attested": True}]
+    qwen_p = [{"backend": "qwen", "kind": "passthrough",
+               "base_url": "http://127.0.0.1:10830/sg-qwen/v1"}]
+    with pytest.raises(HERR) as e1:
+        zhttp.filter_zero_canon_providers(
+            codex_p, ZC, codex_v2_enabled=True, model_id="gpt-6.9-unknown")
+    assert (e1.value.http_status, e1.value.code) == (400, "unsupported_model")
+    with pytest.raises(HERR) as e2:
+        zhttp.filter_zero_canon_providers(
+            codex_p, ZC, codex_v2_enabled=True,
+            model_id="gpt-6.2-sol", reasoning_effort="ultra")
+    assert (e2.value.http_status, e2.value.code) == (400, "unsupported_model_effort")
+    assert zhttp.filter_zero_canon_providers(
+        codex_p, ZC, codex_v2_enabled=True,
+        model_id="gpt-6.2-sol", reasoning_effort="high") == codex_p
+    assert zhttp.filter_zero_canon_providers(
+        qwen_p, ZC, codex_v2_enabled=True, model_id="qwen4-max") == qwen_p
+    assert zhttp.filter_zero_canon_providers(
+        [], ZC, codex_v2_enabled=True, model_id="gpt-6.9-unknown") == []
+    with pytest.raises(HERR) as e3:
+        zhttp.filter_zero_canon_providers([], "Zero-Canon", codex_v2_enabled=False, model_id="gpt-6.2-sol")
+    assert (e3.value.http_status, e3.value.code) == (503, "zero_canon_unsupported_by_driver")
+    assert zhttp.filter_zero_canon_providers([], "Zero-Canon", codex_v2_enabled=False, model_id="qwen4-max") == []
+    assert zhttp.filter_zero_canon_providers([], "Zero-Canon", codex_v2_enabled=False, model_id=None) == []
+
+
+def test_codex_catalog_policy_bidirectional_parity() -> None:
+    import yaml
+
+    cfg = yaml.safe_load((ROOT / "providers.d" / "codex.yaml").read_text(encoding="utf-8"))
+    static_models = set(cfg["discovery"]["static"])
+    assert static_models == set(pol.CODEX_EFFORT_MATRIX.keys())
+    assert static_models == set(pol.CODEX_DEFAULT_EFFORTS.keys())
+    for model, ov in cfg["models_overrides"].items():
+        assert tuple(ov["efforts"]) == pol.CODEX_EFFORT_MATRIX[model]
+        assert ov["default_effort"] == pol.CODEX_DEFAULT_EFFORTS[model]

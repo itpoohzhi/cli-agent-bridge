@@ -17,7 +17,7 @@ from core.codex_zero_canon_policy import (
     format_attestation_header,
     validate_codex_model_effort,
 )
-
+from core.zc_admission import is_valid_server_thread_id
 KIND_EPHEMERAL: Final[str] = EXECUTION_KIND_EPHEMERAL
 _ATTESTATION_LOWER: Final[str] = ATTESTATION_HEADER.lower()
 _POSTURE: Final[tuple[str, ...]] = (CODEX_BACKEND_ID, CODEX_V2_ROUTE_ID, "off", "read-only", "never")
@@ -110,7 +110,7 @@ def _validate_admission(proof: ZeroCanonAdmissionProof) -> tuple[str, str]:
     if not (proof.execution_kind == KIND_EPHEMERAL and proof.clean_home_verified and proof.handshake_acked):
         raise _fail_attest("unverified ephemeral admission")
     tid, turn_id = proof.thread_id.strip(), proof.turn_id.strip()
-    if not tid or tid.lower().startswith("th-") or not turn_id:
+    if not is_valid_server_thread_id(tid) or not turn_id:
         raise _fail_attest("missing server-issued threadId/turnId")
     if (proof.backend, proof.route_id, proof.tools, proof.sandbox, proof.approval) != _POSTURE:
         raise _fail_attest("invalid Zero-Canon execution posture")

@@ -12,6 +12,7 @@ from core.stdio_resident.codex_protocol_fsm import ProtocolPhase, ProtocolState
 from core.stdio_resident.sse_error_bridge import sanitize_log_text
 from core.stdio_resident.turn_error_sse import ResidentTurnError, build_turn_error, sanitize_error_message
 from core.subbridge_zero_canon import is_zero_canon_profile
+from core.zc_admission import TurnProofRecorder, ZeroCanonAdmissionError, evaluate_admission
 from core.zero_canon_attestation_http import (
     KIND_EPHEMERAL,
     ZeroCanonAdmissionProof,
@@ -37,38 +38,52 @@ def _is_usable_state(state: object, phases: frozenset[ProtocolPhase]) -> bool:
     return isinstance(state, ProtocolState) and state.phase in phases and bool(state.turn_id)
 
 
-def _select_state(driver: object, *, require_completed: bool) -> ProtocolState | None:
+def _consume_last_proof(driver: object) -> TurnProofRecorder | None:
+    consume = getattr(driver, "consume_last_turn_proof", None)
+    if callable(consume):
+        rec = consume()
+    else:
+        rec, driver.last_turn_proof = getattr(driver, "last_turn_proof", None), None  # single-use
+    return rec if isinstance(rec, TurnProofRecorder) else None
+
+
+def _select_completed_pair(driver: object) -> tuple[ProtocolState | None, TurnProofRecorder | None]:
     current, last = getattr(driver, "protocol_state", None), getattr(driver, "last_turn_state", None)
-    if require_completed:
-        return next((c for c in (current, last) if _is_usable_state(c, _COMPLETED_ONLY)), None)
-    if _is_usable_state(current, _ADMITTED_PHASES):
-        return current
-    return last if _is_usable_state(last, _COMPLETED_ONLY) else None
+    if _is_usable_state(current, _COMPLETED_ONLY):
+        rec = getattr(driver, "turn_proof", None)
+        return current, rec if isinstance(rec, TurnProofRecorder) else None
+    if _is_usable_state(last, _COMPLETED_ONLY):
+        return last, _consume_last_proof(driver)
+    return None, None
 
 
-def _proof_from_state(state: ProtocolState | None, *, model: str, effort: str) -> ZeroCanonAdmissionProof | None:
-    if state is None or not state.zero_canon:
+def _proof_from_state(state: ProtocolState | None, recorder: TurnProofRecorder | None, *, model: str, effort: str) -> ZeroCanonAdmissionProof | None:
+    if state is None or not state.zero_canon or recorder is None:
         return None
-    tid, turn_id = (state.thread_id or "").strip(), (state.turn_id or "").strip()
-    if not tid or tid.lower().startswith("th-") or not turn_id:
+    try:
+        evaluate_admission(recorder, state.thread_id, state.turn_id, state.epoch, require_zero_tools=True)
+    except ZeroCanonAdmissionError:
         return None
     return ZeroCanonAdmissionProof(
-        model=model, effort=effort, thread_id=tid, turn_id=turn_id, execution_kind=KIND_EPHEMERAL,
-        clean_home_verified=True, handshake_acked=True, requested_model=model, requested_effort=effort,
-    )
+        model=model, effort=effort, thread_id=(state.thread_id or "").strip(), turn_id=(state.turn_id or "").strip(), execution_kind=KIND_EPHEMERAL,
+        clean_home_verified=recorder.clean_home_verified, handshake_acked=recorder.handshake_acked, requested_model=model, requested_effort=effort)
 
 
 def build_v2_admission_proof(driver: object, *, model: str, effort: str) -> ZeroCanonAdmissionProof | None:
-    """Build verified pre-stream admission proof from Codex v2 driver protocol state."""
-    return _proof_from_state(_select_state(driver, require_completed=False), model=model, effort=effort)
+    """Build verified pre-stream admission proof from the ACTIVE Codex v2 protocol state only."""
+    current, rec = getattr(driver, "protocol_state", None), getattr(driver, "turn_proof", None)
+    if not _is_usable_state(current, _ADMITTED_PHASES) or not isinstance(rec, TurnProofRecorder):
+        return None
+    return _proof_from_state(current, rec, model=model, effort=effort)
 
 
 def build_v2_completion_proof(driver: object, *, model: str, effort: str) -> ZeroCanonCompletionProof | None:
     """Build verified terminal completion proof only after ProtocolPhase.COMPLETED."""
-    adm = _proof_from_state(_select_state(driver, require_completed=True), model=model, effort=effort)
-    if adm is None:
+    state, rec = _select_completed_pair(driver)
+    adm = _proof_from_state(state, rec, model=model, effort=effort)
+    if adm is None or rec is None:
         return None
-    return ZeroCanonCompletionProof(admission=adm, terminal_status="completed", tool_events_seen=0, error_code=None)
+    return ZeroCanonCompletionProof(admission=adm, terminal_status="completed", tool_events_seen=rec.tool_events_seen, error_code=None)
 
 
 def wrap_v2_sse_writer(

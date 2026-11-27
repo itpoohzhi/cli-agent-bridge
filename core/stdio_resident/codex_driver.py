@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
 import time
 import weakref
@@ -12,26 +13,13 @@ from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from typing import Any, ClassVar, Final, cast, override
 
-from core.stdio_resident.codex_cli_args import (  # noqa: F401  (приватные алиасы для обратной совместимости)
-    append_cli_args as _append_cli_args,
-    build_codex_argv as _build_codex_argv,
-    build_zero_canon_argv as _build_zero_canon_argv,
-    extract_cfg_arg as _extract_cfg_arg,
-    has_flag as _has_flag,
-    is_denied_cfg_key as _is_denied_cfg_key,
-    zero_canon_overrides as _zero_canon_overrides,
-)
-from core.stdio_resident.codex_protocol_fsm import (
-    EffectKind, EventKind, ProtocolEffect, ProtocolEvent, ProtocolPhase, ProtocolState, transition,
-)
-from core.stdio_resident.codex_std_home import (
-    is_codex_std_clean_home_enabled,
-    is_codex_usage_frame_guard_enabled,
-    prepare_codex_std_home,
-)
+from core.stdio_resident.codex_cli_args import append_cli_args as _append_cli_args, build_codex_argv as _build_codex_argv, build_zero_canon_argv as _build_zero_canon_argv, extract_cfg_arg as _extract_cfg_arg, has_flag as _has_flag, is_denied_cfg_key as _is_denied_cfg_key, zero_canon_overrides as _zero_canon_overrides  # noqa: F401  (приватные алиасы для обратной совместимости)
+from core.stdio_resident.codex_protocol_fsm import EffectKind, EventKind, ProtocolEffect, ProtocolEvent, ProtocolPhase, ProtocolState, transition
+from core.stdio_resident.codex_std_home import is_codex_std_clean_home_enabled, is_codex_usage_frame_guard_enabled, prepare_codex_std_home
 from core.stdio_resident.codex_usage import codex_v2_effects_to_chunk, extract_codex_legacy_usage
 from core.stdio_resident.protocol_driver import DecodedChunk, DriverCapabilities, StreamJsonDriver
 from core.subbridge_zero_canon import is_zero_canon_profile
+from core.zc_admission import TurnProofRecorder, build_thread_params as _build_thread_params, build_turn_params as _build_turn_params
 from core.zero_canon_fs import prepare_codex_zero_canon_home
 
 _TERMINAL_STATUSES = frozenset({"completed", "failed", "interrupted"})
@@ -77,25 +65,20 @@ def _is_legacy_terminal(payload: Mapping[str, Any]) -> bool:
     return payload.get("method") == "turn/completed" or ("id" in payload and ("result" in payload or "error" in payload))
 
 
-def _build_thread_params(ctx: Mapping[str, Any], zc: bool) -> dict[str, object]:
-    params: dict[str, object] = {"ephemeral": True, "zero_canon": zc}
-    model, cwd = ctx.get("model"), ctx.get("cwd")
-    if isinstance(model, str) and model and model != "default":
-        params["model"] = model
-    if isinstance(cwd, str) and cwd:
-        params["cwd"] = cwd
-    return params
-
-
-def _build_turn_params(prompt: str, ctx: Mapping[str, Any], zc: bool) -> dict[str, object]:
-    params: dict[str, object] = {"prompt": prompt, "zero_canon": zc}
-    if isinstance(ctx.get("input"), list):
-        params["input"] = ctx["input"]
-    for key in ("model", "effort"):
-        val = ctx.get(key)
-        if isinstance(val, str) and val and val != "default":
-            params[key] = val
-    return params
+def _verify_zc_clean_home(ctx: Mapping[str, Any]) -> bool:
+    raw = ctx.get("zero_canon_root")
+    if not (isinstance(raw, str) and raw.strip()):
+        cwd = ctx.get("cwd")
+        raw = cwd if isinstance(cwd, str) and os.path.basename(cwd.rstrip("/\\")).startswith("zc-") else ""
+    p = raw.strip().rstrip("/\\") if isinstance(raw, str) else ""
+    name = os.path.basename(p)
+    if not p or not name.startswith("zc-") or name == "zc-codex-empty-cwd":
+        return False
+    leaf = os.path.join(os.path.realpath(os.path.dirname(p)), name)
+    cdir = os.path.join(leaf, ".codex")
+    cfg, auth = os.path.join(cdir, "config.toml"), os.path.join(cdir, "auth.json")
+    return (os.path.isdir(leaf) and not os.path.islink(leaf) and os.path.isdir(cdir) and not os.path.islink(cdir)
+            and os.path.isfile(cfg) and not os.path.islink(cfg) and not os.path.islink(auth))
 
 
 class CodexAppServerDriver(StreamJsonDriver):
@@ -208,27 +191,17 @@ class _V2SlotState:
     last_turn_state: ProtocolState | None = None
     last_effects: tuple[ProtocolEffect, ...] = ()
     bound_handle: object | None = None
+    usage_guard_enabled: bool | None = None
+    handshake_acked: bool = False
+    turn_proof: TurnProofRecorder | None = None
+    last_turn_proof: TurnProofRecorder | None = None
 
 
 class CodexAppServerV2Driver(StreamJsonDriver):
-    """Contract-first Codex app-server v2 driver executing pure codex_protocol_fsm effects.
+    """Contract-first v2 driver: pure FSM effects; Zero-Canon truth in ProtocolState.zero_canon; per-thread
+    _V2SlotState via TLS; per-handle state (attr or identity-checked weakref) survives cross-thread handoff."""
 
-    Concurrency contract:
-    - `build_zero_canon_env` is pure (no TLS mutation); Zero-Canon mode has a single source
-      of truth in `ProtocolState.zero_canon`, set explicitly from `turn_context["review_profile"]`
-      in `prepare_turn` / `encode_turn`.
-    - Each turn runs synchronously on its request thread (`run_handshake` -> `prepare_turn` ->
-      `encode_turn` -> `decode_line` -> `perform_turn_teardown` -> attestation readers), bound
-      to its own `_V2SlotState` in `self._tls.ctx`.
-    - Persistent per-process FSM state is attached directly to the process `handle`
-      (`_codex_v2_slot_state`, or identity-checked weakref for `__slots__` handles), so hot
-      resident slots survive sequential cross-thread handoff under pool lease exclusivity with
-      zero `id()` aliasing or leak.
-    """
-
-    _capabilities: ClassVar[DriverCapabilities] = DriverCapabilities(
-        protocol_name="codex-app-server-v2", supports_soft_cancel=True, supports_multi_turn=True
-    )
+    _capabilities: ClassVar[DriverCapabilities] = DriverCapabilities(protocol_name="codex-app-server-v2", supports_soft_cancel=True, supports_multi_turn=True)
 
     def __init__(self) -> None:
         self._tls: threading.local = threading.local()
@@ -263,8 +236,7 @@ class CodexAppServerV2Driver(StreamJsonDriver):
         try:
             ref = weakref.ref(handle, _cleanup)
         except TypeError:
-            # Handle supports neither __dict__ nor __weakref__: hold object identity reference
-            # for the active turn (released in teardown), making CPython id() aliasing impossible.
+            # Neither __dict__ nor __weakref__: hold identity reference for the turn (released in teardown).
             slot.bound_handle = handle
             return
         with self._slot_lock:
@@ -342,6 +314,19 @@ class CodexAppServerV2Driver(StreamJsonDriver):
     def last_turn_state(self) -> ProtocolState | None:
         return self._ctx().last_turn_state
 
+    @property
+    def turn_proof(self) -> TurnProofRecorder | None:
+        return self._ctx().turn_proof
+
+    @property
+    def last_turn_proof(self) -> TurnProofRecorder | None:
+        return self._ctx().last_turn_proof
+
+    def consume_last_turn_proof(self) -> TurnProofRecorder | None:
+        p = self._ctx().last_turn_proof
+        self._ctx().last_turn_proof = None
+        return p
+
     def _apply(self, event: ProtocolEvent) -> tuple[ProtocolEffect, ...]:
         self._state, effects = transition(self._state, event)
         self._last_effects = effects
@@ -398,6 +383,7 @@ class CodexAppServerV2Driver(StreamJsonDriver):
             ok = self._await_phase(handle, ProtocolPhase.INITIALIZED, timeout_s)
         except Exception:
             ok = False
+        slot.handshake_acked = bool(ok and slot.state.phase is ProtocolPhase.INITIALIZED)
         if not ok:
             self._release_handle_state(handle)
             self._tls.ctx = None
@@ -415,6 +401,10 @@ class CodexAppServerV2Driver(StreamJsonDriver):
         profile_raw = ctx.get("review_profile")
         zc = is_zero_canon_profile(profile_raw) if isinstance(profile_raw, str) and profile_raw.strip() else False
         self._last_turn_state = None
+        slot = self._ctx()
+        slot.last_turn_proof = None
+        slot.turn_proof = None
+        slot.usage_guard_enabled = is_codex_usage_frame_guard_enabled()
         if self._state.phase is ProtocolPhase.IDLE:
             return False
         if not zc and not self._state.zero_canon and self._state.thread_id is not None and not ctx.get("new_thread"):
@@ -424,7 +414,12 @@ class CodexAppServerV2Driver(StreamJsonDriver):
             if self._state.phase is ProtocolPhase.FAILED:
                 return False
             self._send_effects(handle, effects)
-            return self._await_phase(handle, ProtocolPhase.THREAD_READY, timeout_s)
+            ok = self._await_phase(handle, ProtocolPhase.THREAD_READY, timeout_s)
+            if zc and ok:
+                rec = TurnProofRecorder(handshake_acked=slot.handshake_acked, clean_home_verified=_verify_zc_clean_home(ctx))
+                rec.record_thread(self._state.thread_id or "", self._state.epoch)
+                slot.turn_proof = rec
+            return ok
         except Exception:
             return False
 
@@ -433,14 +428,13 @@ class CodexAppServerV2Driver(StreamJsonDriver):
         if self._state.thread_id is None:
             raise ValueError("codex_v2_missing_server_thread_id")
         self._last_turn_state = None
+        self._ctx().last_turn_proof = None
         ctx = dict(turn_context or {})
         profile_raw = ctx.get("review_profile")
-        zc = (
-            is_zero_canon_profile(profile_raw)
-            if isinstance(profile_raw, str) and profile_raw.strip()
-            else self._state.zero_canon
-        )
+        zc = is_zero_canon_profile(profile_raw) if isinstance(profile_raw, str) and profile_raw.strip() else self._state.zero_canon
         effects = self._apply(ProtocolEvent(EventKind.START_TURN, _build_turn_params(prompt, ctx, zc)))
+        if (rec := self._ctx().turn_proof) is not None:
+            rec.turn_epoch = self._state.epoch
         frame = _first_send_frame(effects)
         if frame is None or self._state.phase is ProtocolPhase.FAILED:
             raise RuntimeError(self._state.error_code or "resident_protocol_failed")
@@ -453,10 +447,8 @@ class CodexAppServerV2Driver(StreamJsonDriver):
             params = _mapping(payload.get("params")) or {}
             turn = _mapping(params.get("turn"))
             tid, turn_id = params.get("threadId"), params.get("turnId") or (turn.get("id") if turn else None)
-            probe = ProtocolState(
-                phase=ProtocolPhase.TURN_ACTIVE, thread_id=tid if isinstance(tid, str) else None,
-                turn_id=turn_id if isinstance(turn_id, str) else None, zero_canon=self._zero_canon,
-            )
+            probe = ProtocolState(phase=ProtocolPhase.TURN_ACTIVE, thread_id=tid if isinstance(tid, str) else None,
+                                  turn_id=turn_id if isinstance(turn_id, str) else None, zero_canon=self._zero_canon)
         _, effects = transition(probe, ProtocolEvent(EventKind.SERVER_FRAME, payload, epoch=probe.epoch))
         return effects
 
@@ -470,11 +462,16 @@ class CodexAppServerV2Driver(StreamJsonDriver):
             if self._state.phase is not ProtocolPhase.IDLE
             else self._probe_effects(payload)
         )
-        return codex_v2_effects_to_chunk(
-            effects, payload,
-            active_thread_id=self._state.thread_id, active_turn_id=self._state.turn_id,
-            guard_enabled=is_codex_usage_frame_guard_enabled(),
-        )
+        if (rec := self._ctx().turn_proof) is not None:
+            if self._state.turn_id:
+                rec.record_turn(self._state.turn_id, self._state.epoch)
+            if any(e.kind is EffectKind.EMIT_ERROR and e.payload.get("code") == "zero_canon_tool_event_forbidden" for e in effects):
+                rec.record_tool_event()
+        guard = self._ctx().usage_guard_enabled
+        if guard is None:
+            guard = self._ctx().usage_guard_enabled = is_codex_usage_frame_guard_enabled()
+        return codex_v2_effects_to_chunk(effects, payload, active_thread_id=self._state.thread_id,
+                                         active_turn_id=self._state.turn_id, guard_enabled=guard)
 
     @override
     def is_terminal(self, raw_line: str, decoded: DecodedChunk | None) -> bool:
@@ -487,9 +484,7 @@ class CodexAppServerV2Driver(StreamJsonDriver):
         turn = _mapping(params.get("turn"))
         if turn is None or turn.get("status") not in _TERMINAL_STATUSES:
             return False
-        return True if self._state.phase is ProtocolPhase.IDLE else (
-            params.get("threadId") == self._state.thread_id and turn.get("id") == self._state.turn_id
-        )
+        return True if self._state.phase is ProtocolPhase.IDLE else (params.get("threadId") == self._state.thread_id and turn.get("id") == self._state.turn_id)
 
     @override
     def is_tool_stop(self, raw_line: str, decoded: DecodedChunk | None) -> bool:
@@ -499,10 +494,8 @@ class CodexAppServerV2Driver(StreamJsonDriver):
     def build_cancel_payload(self) -> bytes | None:
         if self._state.phase is ProtocolPhase.TURN_ACTIVE:
             return _first_send_frame(self._apply(ProtocolEvent(EventKind.CANCEL_TURN)))
-        return _encode_frame({
-            "jsonrpc": "2.0", "id": self._state.next_request_id, "method": "turn/interrupt",
-            "params": {"threadId": self._state.thread_id or "", "turnId": self._state.turn_id or ""},
-        })
+        return _encode_frame({"jsonrpc": "2.0", "id": self._state.next_request_id, "method": "turn/interrupt",
+                              "params": {"threadId": self._state.thread_id or "", "turnId": self._state.turn_id or ""}})
 
     def advance_epoch(self) -> int:
         _ = self._apply(ProtocolEvent(EventKind.ADVANCE_EPOCH))
@@ -516,10 +509,11 @@ class CodexAppServerV2Driver(StreamJsonDriver):
         self._tls.ctx = slot
         slot.last_turn_state = slot.state
         was_zero_canon = slot.state.zero_canon
+        slot.last_turn_proof = slot.turn_proof.snapshot() if slot.turn_proof is not None else None
+        slot.turn_proof = None
         _ = self.advance_epoch()
         if bound is None:
-            # Release strong reference held for bare non-weakref handles so GC can reclaim them
-            # and no future handle reusing the same address can match `bound_handle is handle`.
+            # Release identity reference for bare non-weakref handles so GC can reclaim and no id() alias matches.
             slot.bound_handle = None
         if was_zero_canon:
             self._release_handle_state(handle)
