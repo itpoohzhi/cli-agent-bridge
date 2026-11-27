@@ -36,13 +36,26 @@ def test_resolve_base_instructions_default_override_and_omit() -> None:
 
 def test_resolve_disabled_features_default_custom_and_empty() -> None:
     assert slim.resolve_disabled_features({}) == slim.DEFAULT_SLIM_DISABLE_FEATURES
+    assert slim.resolve_disabled_features({slim.DISABLE_FEATURES_ENV: "   "}) == slim.DEFAULT_SLIM_DISABLE_FEATURES
+    assert slim.resolve_disabled_features({slim.SLIM_ENABLED_ENV: "0"}) == ()
     assert slim.resolve_disabled_features({slim.DISABLE_FEATURES_ENV: "js_repl, apps , , shell_tool"}) == (
         "js_repl",
         "apps",
         "shell_tool",
     )
-    for sentinel in ("", "   ", "0", "off", "none"):
+    for sentinel in ("0", "false", "no", "off", "none", "disabled"):
         assert slim.resolve_disabled_features({slim.DISABLE_FEATURES_ENV: sentinel}) == ()
+
+
+def test_slim_forced_config_is_immutable_and_deep_copy_prevents_aliasing() -> None:
+    with pytest.raises(TypeError):
+        cast(dict[str, Any], slim.SLIM_FORCED_CONFIG)["web_search"] = "live"
+    nested: dict[str, Any] = {"model": "m", "nested": {"k": [1, 2]}}
+    out_on = slim.apply_codex_zero_canon_slim(nested, env={})
+    out_off = slim.apply_codex_zero_canon_slim(nested, env={slim.SLIM_ENABLED_ENV: "0"})
+    cast(dict[str, Any], out_on["nested"])["k"].append(99)
+    cast(dict[str, Any], out_off["nested"])["k"].append(88)
+    assert nested["nested"]["k"] == [1, 2]
 
 
 def test_apply_codex_zero_canon_slim_strips_bloat_and_preserves_proxy() -> None:
@@ -97,6 +110,11 @@ def test_enrich_zero_canon_thread_params_respects_zc_flag_and_explicit_override(
     )
     explicit = {**base, "base_instructions": "Explicit"}
     assert slim.enrich_zero_canon_thread_params(explicit, True, env={})["base_instructions"] == "Explicit"
+    # F-019: kill-switch and standard mode strip even pre-populated base_instructions.
+    assert "base_instructions" not in slim.enrich_zero_canon_thread_params(
+        explicit, True, env={slim.SLIM_ENABLED_ENV: "0"}
+    )
+    assert "base_instructions" not in slim.enrich_zero_canon_thread_params(explicit, False, env={})
 
 
 def test_fsm_and_zc_admission_emit_base_instructions_only_in_zero_canon() -> None:

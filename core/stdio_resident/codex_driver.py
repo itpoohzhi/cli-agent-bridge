@@ -13,13 +13,13 @@ from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from typing import Any, ClassVar, Final, cast, override
 
+from core.codex_zero_canon_slim import enrich_zero_canon_thread_params
 from core.stdio_resident.codex_cli_args import append_cli_args as _append_cli_args, build_codex_argv as _build_codex_argv, build_zero_canon_argv as _build_zero_canon_argv, extract_cfg_arg as _extract_cfg_arg, has_flag as _has_flag, is_denied_cfg_key as _is_denied_cfg_key, zero_canon_overrides as _zero_canon_overrides  # noqa: F401  (приватные алиасы для обратной совместимости)
 from core.stdio_resident.codex_protocol_fsm import EffectKind, EventKind, ProtocolEffect, ProtocolEvent, ProtocolPhase, ProtocolState, transition
 from core.stdio_resident.codex_std_home import is_codex_std_clean_home_enabled, is_codex_usage_frame_guard_enabled, prepare_codex_std_home
 from core.stdio_resident.codex_usage import codex_v2_effects_to_chunk, extract_codex_legacy_usage
 from core.stdio_resident.protocol_driver import DecodedChunk, DriverCapabilities, StreamJsonDriver
 from core.subbridge_zero_canon import is_zero_canon_profile
-from core.codex_zero_canon_slim import enrich_zero_canon_thread_params
 from core.zc_admission import TurnProofRecorder, build_thread_params as _build_thread_params, build_turn_params as _build_turn_params
 from core.zero_canon_fs import prepare_codex_zero_canon_home
 
@@ -409,7 +409,7 @@ class CodexAppServerV2Driver(StreamJsonDriver):
         if not zc and not self._state.zero_canon and self._state.thread_id is not None and not ctx.get("new_thread"):
             return True
         try:
-            tp = enrich_zero_canon_thread_params(_build_thread_params(ctx, zc), zc)
+            tp = enrich_zero_canon_thread_params(_build_thread_params(ctx, zc), zc, env=_mapping(ctx.get("env")))
             effects = self._apply(ProtocolEvent(EventKind.START_THREAD, tp))
             if self._state.phase is ProtocolPhase.FAILED:
                 return False
