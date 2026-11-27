@@ -176,9 +176,9 @@ def _pick_legacy_idle_timeout(ctx: Mapping[str, Any], cfg: object, env: Mapping[
     cfg_turn_idle = _parse_pos_float(getattr(cfg, "turn_idle_timeout_s", None))
     if cfg_turn_idle is not None and cfg_turn_idle != _DEFAULT_POOL_TURN_IDLE_S:
         return cfg_turn_idle
-    if (val := _parse_pos_float(getattr(cfg, "idle_timeout_s", None))) is not None:
-        return val
     if (val := _parse_pos_float(env.get("BRIDGE_STDIO_TURN_IDLE_TIMEOUT_S"))) is not None:
+        return val
+    if (val := _parse_pos_float(getattr(cfg, "idle_timeout_s", None))) is not None:
         return val
     return cfg_turn_idle
 

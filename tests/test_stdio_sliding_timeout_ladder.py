@@ -381,3 +381,6 @@ def test_explicit_ctx_total_equal_to_pool_default_caps_idle_and_cap_raw_not_trun
 
     dl_cap = _resolve_deadlines(StdioPoolConfig(), {"safety_cap_s": 2.0 * d}, now=0.0, environ={})
     assert dl_cap.safety_deadline == pytest.approx(2.0 * d)
+
+    dl_env_idle = _resolve_deadlines(StdioPoolConfig(), {}, now=0.0, environ={"BRIDGE_STDIO_TURN_IDLE_TIMEOUT_S": "515"})
+    assert dl_env_idle.idle_s == pytest.approx(515.0)

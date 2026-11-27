@@ -24,7 +24,7 @@ from core.telemetry_hooks import known_model
 _SAFE_CODE_RE = re.compile(r"^[a-z0-9_]{1,64}$")
 _CODE_SCAN_RE = re.compile(rb'"code"\s*:\s*"([^"\\]{1,64})"')
 _CODE_KEY_RE = re.compile(rb'"code"\s*:')
-_FAILURE_LEDGER: contextvars.ContextVar[set[tuple[int, int]] | None] = contextvars.ContextVar(
+_FAILURE_LEDGER: contextvars.ContextVar[set[tuple[int, int, int, str]] | None] = contextvars.ContextVar(
     "_route_failure_ledger", default=None
 )
 
@@ -137,7 +137,7 @@ def _record_failure(route: Any, status: int, error_type: str, nbytes: int, extra
     """Фиксирует исход: статус, note, телеметрию и лог; отсутствующие методы пропускаются."""
     ledger = _FAILURE_LEDGER.get()
     if ledger is not None:
-        key = (id(route), id(route.handler))
+        key = (id(route), id(route.handler), status, error_type)
         if key in ledger:
             return
         ledger.add(key)

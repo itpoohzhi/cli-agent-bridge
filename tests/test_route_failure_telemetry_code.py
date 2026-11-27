@@ -96,3 +96,10 @@ def test_contextvar_dedupe_sequential_and_concurrent_without_mutating_route_or_h
     with ThreadPoolExecutor(max_workers=4) as ex:
         list(ex.map(_worker, range(4)))
     assert len(handler.recorded) == 6
+
+    # Distinct (status, error_type) on same route/handler inside one scope are both recorded
+    err_503 = RouteRefusal(503, [("Content-Type", "application/json")], b'{"error":{"code":"bridge_draining"}}')
+    with route_failure_request_scope():
+        emit_route_failure(route, err, [], [], None)
+        emit_route_failure(route, err_503, [], [], None)
+    assert len(handler.recorded) == 8
