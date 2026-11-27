@@ -42,6 +42,8 @@ from core.claude_session import (  # noqa: E402
     assert_zero_canon_argv_safe, build_session_argv, is_session_reuse_allowed_profile,
 )
 from core.http_accept import load_admission_idle_config  # noqa: E402
+from core.log_redaction import redact_log_text  # noqa: E402
+from core.log_rotation_adapters import emit_service_log as _emit_rotated_log  # noqa: E402
 from core.claude_zero_canon import (  # noqa: E402
     CLAUDE_PRESERVED_CA_FILES, build_claude_zero_canon_env, build_claude_zero_canon_flags,
     filter_claude_settings, filter_claude_state, serialize_claude_json,
@@ -292,12 +294,7 @@ _active_lock = threading.Lock()
 _started = time.time()
 
 def _log(msg: str) -> None:
-    """Диагностика в stderr (файлы вне каталога моста не создаём)."""
-    try:
-        sys.stderr.write(f"{time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())} {msg}\n")  # fmt: skip
-        sys.stderr.flush()
-    except OSError:
-        pass
+    _emit_rotated_log("claude_p", f"{time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())} {msg}", ROOT, redact_fn=redact_log_text)
 
 
 def _auth_ok(handler: BaseHTTPRequestHandler) -> bool:

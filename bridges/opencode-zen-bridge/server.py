@@ -81,8 +81,18 @@ for _p in (str(_BRIDGE_DIR), str(_REPO_ROOT)):
 
 import zen_catalog as zc  # noqa: E402
 from core.chat_key import resolve_chat_key  # noqa: E402
+from core.log_rotation_adapters import emit_service_log as _emit_rotated_log  # noqa: E402
 from core.proc_groups import live_proc_groups  # noqa: E402
 from zen_bridge.adapters.zero_canon_runtime import apply_serve_zero_canon_env, apply_zero_canon_env, spawn_registered, zero_canon_scope  # noqa: E402
+from zen_bridge.p12_cleanup_seam import ZenP12CleanupSeam, capture_proc_identity  # noqa: E402
+_ZEN_P12_LOCK = threading.Lock()
+_ZEN_P12_SEAM: ZenP12CleanupSeam | None = None
+def _zen_p12_seam() -> ZenP12CleanupSeam:
+    global _ZEN_P12_SEAM
+    if (s := _ZEN_P12_SEAM) is not None: return s
+    with _ZEN_P12_LOCK:
+        if _ZEN_P12_SEAM is None: _ZEN_P12_SEAM = ZenP12CleanupSeam()
+        return _ZEN_P12_SEAM
 from core.runtime_env import synthesize_required_bash_desc_enabled  # noqa: E402
 from core.subbridge_lifecycle import SubbridgeHooks, SubbridgeLifecycle  # noqa: E402
 from core.tool_call_schema_policy import canonicalize_tool_invocation  # noqa: E402
@@ -2174,18 +2184,10 @@ _active_lock = threading.Lock()
 _LOG_LOCK = threading.Lock()
 
 def _log(msg: str) -> None:
-    line = f"{time.strftime('%Y-%m-%d %H:%M:%S')} {_mask_secrets(msg)}"
-    sys.stderr.write(line + "\n")
-    sys.stderr.flush()
-    try:
-        LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
-        with _LOG_LOCK, LOG_PATH.open("a", encoding="utf-8") as fh:
-            fh.write(line + "\n")
-    except OSError:
-        pass
+    _emit_rotated_log("zen", f"{time.strftime('%Y-%m-%d %H:%M:%S')} {_mask_secrets(msg)}", _ZEN_ROOT, legacy_target=(LOG_PATH, _LOG_LOCK))
 
 
-_LIFECYCLE = SubbridgeLifecycle(hooks=SubbridgeHooks(procs_fn=live_proc_groups, active_procs_fn=lambda: max(len(_active), len(live_proc_groups())), log_fn=_log), workspace=WORKSPACE)
+_LIFECYCLE = SubbridgeLifecycle(hooks=SubbridgeHooks(procs_fn=live_proc_groups, active_procs_fn=lambda: max(len(_active), len(live_proc_groups())), cleanup_fn=lambda: _ZEN_P12_SEAM.shutdown() if _ZEN_P12_SEAM is not None else None, log_fn=_log), workspace=WORKSPACE)
 
 
 class _RequestAttempts(_RequestAttemptsBase):
@@ -2506,6 +2508,7 @@ class _ServeLease:
         self._closed = False
         self._lock = threading.Lock()
         self.stderr_tail: bytearray = bytearray()
+        capture_proc_identity(helper)
 
     def cleanup(self) -> None:
         """Идемпотентная уборка только своей группы процессов."""
@@ -2560,6 +2563,8 @@ class _ServeLease:
                     _ACTIVE_SERVE_PORTS.discard(self.port)
         if self.state_dir and Path(self.state_dir).name.startswith("zen-serve-state-"):
             shutil.rmtree(self.state_dir, ignore_errors=True)
+        if not _zen_p12_seam().confirm_dead_before_fallback(self.helper, self.attempt_id, self.pgid):
+            raise ServeSecurityError("prior serve PGID quarantined; fallback spawn blocked")
 
 
 def _ensure_lease_dir(lease_dir: Path) -> None:
@@ -4020,19 +4025,8 @@ def _spawn_with_stdin(
     глотаются: дочерний мог выйти раньше (напр. остановка через _stop_proc
     при tool call, или ранний отказ) — это наблюдают читатели stdout/stderr.
     """
-    proc = spawn_registered(
-        cmd,
-        cwd=str(workdir),
-        env=env,
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        bufsize=1,
-        start_new_session=True,
-    )
+    proc = spawn_registered(cmd, cwd=str(workdir), env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace", bufsize=1, start_new_session=True)
+    capture_proc_identity(proc)
 
     def _feed() -> None:
         try:
@@ -7355,23 +7349,18 @@ class Handler(BaseHTTPRequestHandler):
             self._first_visible = None
             if gate is not None:
                 gate.release()
+            p12_q = _zen_p12_seam().pgid_quarantine_enabled()
             if proc is not None:
-                if feed is not None:
-                    feed.close()
+                if feed is not None: feed.close()
                 try:
-                    if proc.stderr is not None:
-                        proc.stderr.close()
-                except OSError:
-                    pass
-                if proc.poll() is None:
-                    try:
-                        proc.kill()
-                    except OSError:
-                        pass
-            with _active_lock:
-                _active.pop(run_id, None)
+                    if proc.stderr is not None: proc.stderr.close()
+                except OSError: pass
+                if proc.poll() is None and not p12_q:
+                    try: proc.kill()
+                    except OSError: pass
+            with _active_lock: _active.pop(run_id, None)
             attempts.commit()
-            res.slots.release()
+            _zen_p12_seam().release_slot_after_proc(res.slots.release, proc, run_id) if p12_q else res.slots.release()
 
     def _serve_json_serve(
         self,

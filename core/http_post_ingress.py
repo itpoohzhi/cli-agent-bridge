@@ -10,6 +10,7 @@ from urllib.parse import urlparse
 
 from core.http_post_context import PostHandler, PostHost, PostRequestContext
 from core.message_history_sanitizer import sanitize_request_payload
+from core.p12_hub_cancel_seam import strip_http_message_turn_mode
 from core.passthrough_autonomy import strip_passthrough_request
 from core.passthrough_exchange import internal_trace_scope
 from core.zero_canon_http import (
@@ -99,6 +100,7 @@ def _serve_control_endpoint(context: PostRequestContext) -> bool:
 
 def begin_post(handler: PostHandler, host: PostHost) -> PostRequestContext | None:
     """Инициализирует POST; None означает уже отправленный ранний ответ."""
+    strip_http_message_turn_mode(getattr(handler, "headers", None))
     handler._headers_already_sent = False
     handler._trace = None
     handler._response_status = 0
@@ -107,9 +109,7 @@ def begin_post(handler: PostHandler, host: PostHost) -> PostRequestContext | Non
     if context.path == "/v1/quarantine":
         handler._handle_quarantine_post()
         return None
-    match = re.fullmatch(r"/v1/turns/([^/]+)/cancel", context.path) if (
-        host._is_detached_enabled()
-    ) else None
+    match = re.fullmatch(r"/v1/turns/([^/]+)/cancel", context.path) if host._is_detached_enabled() else None
     context.cancel_turn_id = match.group(1) if match is not None else None
     if not _authorize(context) or not _admit_drain(context):
         return None
@@ -118,8 +118,7 @@ def begin_post(handler: PostHandler, host: PostHost) -> PostRequestContext | Non
     handler._trace = None
     handler._response_status = 0
     host._enforce_forward_kill_switch()
-    handler._active_managed_turn = None
-    handler._context_pruned = None
+    handler._active_managed_turn = handler._turn_mode = handler._context_pruned = None
     return context
 
 
