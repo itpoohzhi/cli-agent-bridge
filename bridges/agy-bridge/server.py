@@ -224,7 +224,7 @@ from core.agy_capacity_guard import (  # noqa: E402
     summarize_capacity_text,
 )
 from agy_runtime.chat_key_policy import resolve_agy_chat_key  # noqa: E402
-from agy_runtime.effort_reject_fallback import should_fallback_effortless  # noqa: E402
+from agy_runtime.effort_reject_fallback import record_effort_rejection, resolve_effort_with_fallback, should_fallback_effortless  # noqa: E402
 from core.session_continuity import ContinuityConfig, ContinuityIndex  # noqa: E402
 from core.prompt_truncation_notice import NoticePolicy, with_truncation_notice  # noqa: E402
 from core.cli_rejection import is_deterministic_cli_rejection  # noqa: E402
@@ -6944,8 +6944,8 @@ class Handler(BaseHTTPRequestHandler):
                         img_dir = None
                         img_registered = False
             _retry_credit()
-            client_budget = calculate_retry_budget(T_REQ_BUDGET_S, ctx.get("client_retry_budget"))
-            for attempt in (1, 2):
+            client_budget, attempt = calculate_retry_budget(T_REQ_BUDGET_S, ctx.get("client_retry_budget")), 0
+            while (attempt := attempt + 1) > 0:
                 cancelled = self._registry_job is not None and self._registry_job.cancelled.is_set()
                 policy = None if cancelled else _build_timeout_policy(t_req_start)
                 if not cancelled and policy is None and client_budget.allow_retry and client_budget.attempt_s:
@@ -7084,8 +7084,8 @@ class Handler(BaseHTTPRequestHandler):
                     and _incident_retry_allowed(ctx, out, delivered, T_REQ_BUDGET_S)
                     and _is_transient_upstream_error(out.get("err"))
                 ):
-                    if attempt == 2 or not _TURN_RESILIENCE.take(ctx, out, _retry_take, _log):
-                        if attempt != 2:
+                    if attempt >= 2 or not _TURN_RESILIENCE.take(ctx, out, _retry_take, _log):
+                        if attempt < 2:
                             _log(f"retry-budget-exhausted state={out['state']} {tag}")
                         if isinstance((exp_st := ctx.get("explicit_state")), ExplicitTurnState) and exp_st.handled:
                             _explicit_adapter().on_hot_failure(exp_st, post_spawn=True)
@@ -7109,7 +7109,8 @@ class Handler(BaseHTTPRequestHandler):
                         _cid_release(str(ctx["conversation_id"]), str(ctx.get("turn_id") or ""))
                         ctx["hot_resumed"], ctx["conversation_id"] = False, ""
                         ctx["prompt"] = resolve_ctx_prompt(ctx, "full_prompt")
-                    effort, ctx["effort_source"], effort_fallback_used = "off", "effort_reject_fallback", True
+                    record_effort_rejection(str(model), str(effort))
+                    effort, ctx["effort"], ctx["effort_source"], effort_fallback_used = "off", "off", "effort_reject_fallback", True
                     _log(f"effort-reject fallback retry without --effort {tag}")
                     continue
                 if ctx.get("hot_resumed") and out["state"] != "client_gone":
@@ -7141,7 +7142,7 @@ class Handler(BaseHTTPRequestHandler):
                     and not _is_cli_rejection_outcome(out)
                     and _incident_retry_allowed(ctx, out, delivered, T_REQ_BUDGET_S)
                 )
-                if not transient or attempt == 2:
+                if not transient or attempt >= 2:
                     break
                 if not _TURN_RESILIENCE.take(ctx, out, _retry_take, _log):
                     _log(f"retry-budget-exhausted state={out['state']} {tag}")
@@ -7527,7 +7528,7 @@ class Handler(BaseHTTPRequestHandler):
                         model_len,
                     )
                     return
-                effort, effort_source = decision.effort, decision.source
+                effort, effort_source = resolve_effort_with_fallback(model_id, decision.effort, decision.source, config_path=DYNAMIC_CONFIG_PATH)
             if "reasoning" in req and req.get("reasoning") is not None:
                 self._reject(
                     400,
@@ -7644,7 +7645,6 @@ class Handler(BaseHTTPRequestHandler):
                     else _with_pure_text_protocol(text, has_attachments=attached)
                 )
                 return wrapped
-
             full_attached = all((bool(images), not force_cold))
             full_mat, stripped_mat = _lsc.build_lazy_prompt_pair(
                 stripped_base,

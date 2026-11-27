@@ -5,6 +5,7 @@ import json
 import re
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -20,7 +21,10 @@ from agy_runtime.chat_key_policy import (  # noqa: E402
 )
 from agy_runtime.effort_reject_fallback import (  # noqa: E402
     FLAG_EFFORT_REJECT_FALLBACK,
+    clear_effort_rejections_for_tests,
     is_effort_reject_fallback_enabled,
+    record_effort_rejection,
+    resolve_effort_with_fallback,
     should_fallback_effortless,
 )
 from agy_runtime.session_resume_adapter import (  # noqa: E402
@@ -38,6 +42,7 @@ AUTH = {"Authorization": "Bearer tok-aaaaaaaa"}
 def _clean_env(monkeypatch):
     monkeypatch.delenv(FLAG_HOT_PCK, raising=False)
     monkeypatch.delenv(FLAG_EFFORT_REJECT_FALLBACK, raising=False)
+    clear_effort_rejections_for_tests()
 
 
 def _cfg(tmp_path: Path, **flags: bool) -> Path:
@@ -174,3 +179,80 @@ def test_effort_fallback_flag_on_negative_guards(tmp_path):
     assert should_fallback_effortless({"state": "agy_error", "err": "boom"}, "high", already_retried=False, config_path=cfg) is False
     assert should_fallback_effortless({"state": "done", "err": REJECT_ERR}, "high", already_retried=False, config_path=cfg) is False
     assert should_fallback_effortless({"state": "agy_error"}, "high", already_retried=False, config_path=cfg) is False
+
+
+def test_effort_rejection_cache_turn2_keeps_hot_resume(tmp_path):
+    """F-011: Turn 2+ rejected pair resolves to off without re-failing the hot session."""
+    cfg = _cfg(tmp_path, effort_reject_fallback_enabled=True)
+    assert resolve_effort_with_fallback("gemini-4-carbon", "high", "default", config_path=cfg) == ("high", "default")
+    record_effort_rejection("gemini-4-carbon", "high")
+    assert resolve_effort_with_fallback("gemini-4-carbon", " HIGH ", "default", config_path=cfg) == ("off", "effort_reject_fallback")
+    (off_cfg := tmp_path / "off.json").write_text("{}", encoding="utf-8")
+    assert resolve_effort_with_fallback("gemini-4-carbon", "high", "default", config_path=off_cfg) == ("high", "default")
+
+
+def test_effort_rejection_cache_bounded_64(tmp_path):
+    cfg = _cfg(tmp_path, effort_reject_fallback_enabled=True)
+    for i in range(70):
+        record_effort_rejection(f"m{i}", "high")
+    assert resolve_effort_with_fallback("m0", "high", "d", config_path=cfg) == ("high", "d")
+    assert resolve_effort_with_fallback("m69", "high", "d", config_path=cfg) == ("off", "effort_reject_fallback")
+
+
+class _Stub:
+    def __init__(self, **kw):
+        self.__dict__.update(kw)
+
+    def __getattr__(self, name):
+        return lambda *a, **k: None
+
+
+def test_run_once_transient_then_effort_reject_then_off(tmp_path, monkeypatch):
+    """F-008/F-010/F-012: attempt1 503 -> attempt2 effort-reject -> attempt3 off done."""
+    import importlib.util
+    _spec = importlib.util.spec_from_file_location("_agy_srv_w2", ROOT / "bridges" / "agy-bridge" / "server.py")
+    srv = importlib.util.module_from_spec(_spec)
+    sys.modules[_spec.name] = srv
+    _spec.loader.exec_module(srv)
+    cfg = _cfg(tmp_path, effort_reject_fallback_enabled=True)
+    monkeypatch.setattr(srv, "DYNAMIC_CONFIG_PATH", cfg)
+    monkeypatch.setattr(srv, "_hygiene_rt", lambda: _Stub(acquire=lambda *a, **k: SimpleNamespace(admitted=True, ticket_id="t", retry_after_s=0.0)))
+    monkeypatch.setattr(srv, "_TURN_RESILIENCE", _Stub(take=lambda *a, **k: True, delivered_after_commit=lambda c, o, d: d))
+    monkeypatch.setattr(srv, "_lsc", _Stub(usage_drain_settings=lambda **k: (False, 0.0), classify_cloud_mode=lambda e: "test"))
+    monkeypatch.setattr(srv, "_u_fin", _Stub())
+    monkeypatch.setattr(srv, "_p12_seam", lambda: _Stub())
+    for name, val in {"_launcher": lambda: None, "_retry_credit": lambda: None, "_retry_take": lambda: True,
+                      "_retry_pause_s": lambda a: 0.0, "_incident_retry_allowed": lambda *a: True,
+                      "_is_cli_rejection_outcome": lambda o: False, "_build_timeout_policy": lambda t: None,
+                      "should_allow_retry_attempt": lambda **k: (True, ""), "capture_run_identity": lambda r: None,
+                      "resolve_run_chat_key": lambda c: "", "_log": lambda *a, **k: None,
+                      "calculate_retry_budget": lambda *a, **k: SimpleNamespace(allow_retry=True, attempt_s=0.0)}.items():
+        monkeypatch.setattr(srv, name, val)
+    efforts = []
+    outs = [{"state": "agy_error", "err": "upstream 503", "rc": 1},
+            {"state": "agy_error", "err": REJECT_ERR, "rc": 1}, {"state": "done", "text": "ok"}]
+
+    monkeypatch.setattr(srv, "Run", lambda p, m, e, *a, **k: SimpleNamespace(
+        effort=e, _persistent_mode=False, proc=SimpleNamespace(pid=0, poll=lambda: None), close=lambda: None))
+    cls = next(v for v in vars(srv).values() if isinstance(v, type) and "_run_once_impl" in v.__dict__)
+
+    class _H(cls):
+        def __getattr__(self, name):
+            return lambda *a, **k: None
+
+    h = _H.__new__(_H)
+    h._registry_job = None
+    h._acquire_slot = lambda keepalive: ""
+
+    def _execute(run, *a, **k):
+        efforts.append(run.effort)
+        return dict(outs[len(efforts) - 1])
+
+    h._execute = _execute
+    ctx = {"model": "gemini-4-carbon", "effort": "high", "effort_source": "default", "tag": "t1",
+           "model_len": 10, "prompt": "hi", "tools_count": 0, "cwd": str(tmp_path),
+           "stream_resilience_enabled": False, "conversation_id": "", "turn_id": ""}
+    res = h._run_once_impl(ctx, lambda *a: None, lambda *a: None, lambda *a: None, lambda *a: None)
+    assert efforts == ["high", "high", "off"]
+    assert res["state"] == "done"
+    assert ctx["effort"] == "off" and ctx["effort_source"] == "effort_reject_fallback"
