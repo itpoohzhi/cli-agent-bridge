@@ -6751,6 +6751,9 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
         if path == "/v1/telemetry":
             return self._telemetry_serve_get()
         if path == "/v1/quarantine":
+            if not _auth_ok(self):
+                self._send(401, {"error": {"message": "unauthorized", "type": "auth_error", "code": 401}})
+                return
             catalog_models = []
             models_source = BACKENDS.models() if hasattr(BACKENDS, "models") else []
             for item in models_source:

@@ -27,7 +27,10 @@ from core.observability_endpoint import (  # noqa: E402
     ObservabilityRateLimiter,
     serve_observability_get,
 )
-from core.observability_policy import is_loopback_ip  # noqa: E402
+from core.observability_policy import (  # noqa: E402
+    is_loopback_ip,
+    is_observability_request_allowed,
+)
 
 _HEALTH_KEYS = frozenset(
     {
@@ -209,3 +212,66 @@ def test_health_invariant_seven_keys(monkeypatch, tmp_path, enabled):
     status, body = _serve_live(monkeypatch, tmp_path, _health, enabled=enabled)
     assert status == 200
     assert set(json.loads(body)) == _HEALTH_KEYS, body
+
+
+def test_duplicate_security_headers_fail_closed_policy_and_live(monkeypatch, tmp_path):
+    """RW-001/RW-010: repeated security headers cannot override with a trailing benign one."""
+
+    class _DupHeaders:
+        def __init__(self, pairs: list[tuple[str, str]]) -> None:
+            self._pairs = pairs
+
+        def items(self):
+            return list(self._pairs)
+
+    for pairs in (
+        [("Origin", "https://evil.example"), ("Origin", "")],
+        [("Origin", ""), ("Origin", "")],
+        [("Sec-Fetch-Site", "cross-site"), ("Sec-Fetch-Site", "same-origin")],
+        [("X-Forwarded-For", "10.0.0.5"), ("X-Forwarded-For", "")],
+        [("Forwarded", "for=10.0.0.5"), ("Forwarded", "")],
+    ):
+        assert not is_observability_request_allowed("127.0.0.1", _DupHeaders(pairs)), (
+            pairs
+        )
+
+    def probe_dup_raw(port):
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5.0)
+        try:
+            conn.putrequest("GET", "/v1/observability")
+            conn.putheader("Origin", "https://evil.example")
+            conn.putheader("Origin", "")
+            conn.endheaders()
+            resp = conn.getresponse()
+            return (
+                resp.status,
+                {k.lower(): v for k, v in resp.getheaders()},
+                resp.read(),
+            )
+        finally:
+            conn.close()
+
+    status, headers, body = _serve_live(monkeypatch, tmp_path, probe_dup_raw)
+    assert status == 403, (status, body[:400])
+    assert headers.get("cache-control") == "no-store", headers
+
+
+def test_existing_protected_get_routes_keep_401_without_auth(monkeypatch, tmp_path):
+    """RW-015: /v1/observability fast-path never weakens auth on /v1/quarantine or /v1/resilience."""
+    monkeypatch.setattr(server, "AUTH_KEY", "secret-token")
+
+    def probe(port):
+        out = {}
+        for route in ("/v1/quarantine", "/v1/resilience"):
+            conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5.0)
+            try:
+                conn.request("GET", route)
+                resp = conn.getresponse()
+                out[route] = (resp.status, resp.read())
+            finally:
+                conn.close()
+        return out
+
+    results = _serve_live(monkeypatch, tmp_path, probe, enabled=True)
+    for route, (status, body) in results.items():
+        assert status == 401, (route, status, body[:400])

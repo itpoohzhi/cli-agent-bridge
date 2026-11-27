@@ -21,59 +21,47 @@ DISCONNECT_ERRNOS = frozenset(
     }
 )
 
-_PEER_FIELD_MAX_CHARS = 40
-_LOG_LINE_MAX_CHARS = 78
+_PEER_FIELD_MAX_BYTES = 26
+_EXC_FIELD_MAX_BYTES = 22
+_LOG_LINE_MAX_BYTES = 78
 
 
-def _iter_exception_chain(exc: BaseException) -> list[BaseException]:
-    """Iteratively walk exc/__cause__/__context__/group members, cycle-safe."""
-    seen: set[int] = set()
-    stack: list[BaseException] = [exc]
-    found: list[BaseException] = []
-    while stack:
-        current = stack.pop()
-        marker = id(current)
-        if marker in seen:
-            continue
-        seen.add(marker)
-        found.append(current)
-        stack.extend(
-            child for child in (current.__cause__, current.__context__) if child
-        )
-        if isinstance(current, BaseExceptionGroup):
-            stack.extend(current.exceptions)
-    return found
+_GoneCls = type[BaseException] | tuple[type[BaseException], ...] | None
 
 
-def _matches_disconnect(
+def _is_disconnect_chain(
     exc: BaseException,
-    client_gone_cls: type[BaseException] | tuple[type[BaseException], ...] | None,
+    gone_types: tuple[type[BaseException], ...],
+    seen: set[int],
 ) -> bool:
-    return (
-        (client_gone_cls is not None and isinstance(exc, client_gone_cls))
-        or isinstance(exc, DISCONNECT_EXC_TYPES)
-        or (isinstance(exc, OSError) and exc.errno in DISCONNECT_ERRNOS)
-    )
+    """Walk explicit __cause__ links only (never __context__); groups require all leaves."""
+    cur: BaseException | None = exc
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        os_gone = isinstance(cur, OSError) and cur.errno in DISCONNECT_ERRNOS
+        grp = cur.exceptions if isinstance(cur, BaseExceptionGroup) else ()
+        grp_ok = bool(grp) and all(
+            _is_disconnect_chain(s, gone_types, seen) for s in grp
+        )
+        if isinstance(cur, gone_types) or os_gone or grp_ok:
+            return True
+        cur = cur.__cause__
+    return False
 
 
 def classify_client_disconnect(
     exc: BaseException,
-    client_gone_cls: type[BaseException]
-    | tuple[type[BaseException], ...]
-    | None = None,
+    client_gone_cls: _GoneCls = None,
 ) -> bool:
-    """True if exc or any linked/grouped exception signals a gone client."""
-    return any(
-        _matches_disconnect(linked, client_gone_cls)
-        for linked in _iter_exception_chain(exc)
-    )
+    """True if exc, its explicit __cause__, or every leaf in a group is client-gone."""
+    cls = client_gone_cls
+    extra = (cls,) if isinstance(cls, type) else (cls or ())
+    return _is_disconnect_chain(exc, extra + DISCONNECT_EXC_TYPES, set())
 
 
-def _sanitize_field(text: str, max_chars: int) -> str:
-    cleaned = "".join(
-        "_" if ch.isspace() or ord(ch) < 0x20 or ord(ch) == 0x7F else ch for ch in text
-    )
-    return cleaned[:max_chars]
+def _sanitize_field(text: str, max_bytes: int) -> str:
+    cleaned = "".join(ch if 0x21 <= ord(ch) <= 0x7E else "_" for ch in text)
+    return cleaned[:max_bytes]
 
 
 def _peer_text(peer: object) -> str:
@@ -84,11 +72,11 @@ def _peer_text(peer: object) -> str:
 
 
 def format_client_disconnect_log(peer: object, exc: BaseException) -> str:
-    """Single sanitized line without the exception message text."""
-    peer_field = _sanitize_field(_peer_text(peer), _PEER_FIELD_MAX_CHARS)
-    exc_field = _sanitize_field(type(exc).__name__, _PEER_FIELD_MAX_CHARS)
+    """Single ASCII/UTF-8 bounded line (<=78 B) without the exception message text."""
+    peer_field = _sanitize_field(_peer_text(peer), _PEER_FIELD_MAX_BYTES)
+    exc_field = _sanitize_field(type(exc).__name__, _EXC_FIELD_MAX_BYTES)
     line = f"client_disconnected peer={peer_field} exc={exc_field}"
-    return line[:_LOG_LINE_MAX_CHARS]
+    return line.encode("utf-8")[:_LOG_LINE_MAX_BYTES].decode("utf-8", "ignore")
 
 
 def should_suppress_disconnect_traceback(

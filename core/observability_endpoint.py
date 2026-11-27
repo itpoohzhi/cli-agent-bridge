@@ -85,11 +85,8 @@ def _active_limiter(
     handler: Any,  # pyright: ignore[reportExplicitAny, reportAny]
     limiter: ObservabilityRateLimiter | None,
 ) -> ObservabilityRateLimiter:
-    return (
-        limiter
-        if limiter is not None
-        else _server_limiter(cast("object", handler.server))
-    )
+    srv = cast("object", handler.server)
+    return limiter if limiter is not None else _server_limiter(srv)
 
 
 def _admission_snapshot(

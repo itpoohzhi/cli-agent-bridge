@@ -6,6 +6,7 @@ from __future__ import annotations
 import ipaddress
 import math
 from collections.abc import Iterable, Mapping
+from types import MappingProxyType
 from typing import cast
 
 OBSERVABILITY_SCHEMA_VERSION = "1.0"
@@ -34,31 +35,35 @@ def is_loopback_ip(peer_host: str | None) -> bool:
     return bool(addr.is_loopback or (mapped is not None and mapped.is_loopback))
 
 
-def _header_map(headers: object) -> dict[str, str]:
+_ALLOWED_HEADER_VALS: Mapping[str, tuple[str, ...]] = MappingProxyType(
+    {
+        "origin": ("",),
+        "sec-fetch-site": ("", "none", "same-origin"),
+        "x-forwarded-for": ("",),
+        "forwarded": ("",),
+    }
+)
+
+
+def _has_forbidden_security_headers(headers: object) -> bool:
+    """Fail-closed header scan: reject forbidden values and duplicate security headers."""
     items_fn = getattr(headers, "items", None)
-    raw_items = cast("Iterable[object]", items_fn()) if callable(items_fn) else ()
-    out: dict[str, str] = {}
-    for entry in raw_items:
-        if isinstance(entry, tuple):
-            pair = cast("tuple[object, ...]", entry)
-            if len(pair) == 2:
-                out[str(pair[0]).lower()] = str(pair[1])
-    return out
+    raw = cast("Iterable[object]", items_fn()) if callable(items_fn) else ()
+    seen: set[str] = set()
+    for e in raw:
+        if isinstance(e, tuple) and len(p := cast("tuple[object, ...]", e)) == 2:
+            name = str(p[0]).strip().lower()
+            val = str(p[1]).strip().lower()
+            if allowed := _ALLOWED_HEADER_VALS.get(name):
+                if name in seen or val not in allowed:
+                    return True
+                seen.add(name)
+    return False
 
 
 def is_observability_request_allowed(peer_host: str | None, headers: object) -> bool:
-    """Loopback-only gate rejecting cross-site and proxied requests."""
-    lowered = _header_map(headers)
-    fetch_site = lowered.get("sec-fetch-site", "").strip().lower()
-    proxied = any(
-        lowered.get(hdr, "").strip() for hdr in ("x-forwarded-for", "forwarded")
-    )
-    return (
-        is_loopback_ip(peer_host)
-        and not lowered.get("origin", "").strip()
-        and fetch_site in ("", "none", "same-origin")
-        and not proxied
-    )
+    """Loopback-only gate rejecting cross-site, proxied, and conflicting headers."""
+    return is_loopback_ip(peer_host) and not _has_forbidden_security_headers(headers)
 
 
 def step_token_bucket(
@@ -68,11 +73,8 @@ def step_token_bucket(
     burst: float = 20.0,
 ) -> bool:
     """Consume one token from the caller-owned bucket; True if allowed."""
-    if (
-        not all(math.isfinite(v) for v in (now_ts, rate_per_s, burst))
-        or rate_per_s < 0.0
-        or burst < 1.0
-    ):
+    bad_cfg = not all(map(math.isfinite, (now_ts, rate_per_s, burst)))
+    if bad_cfg or rate_per_s < 0.0 or burst < 1.0:
         raise ValueError("token bucket requires finite rate_per_s >= 0 and burst >= 1")
     tokens = float(state.get("tokens", burst))
     last_ts = float(state.get("last_ts", now_ts))
@@ -85,11 +87,7 @@ def step_token_bucket(
 
 
 def _numeric_or_zero(value: object, default: float) -> int | float:
-    return (
-        value
-        if isinstance(value, (int, float)) and not isinstance(value, bool)
-        else default
-    )
+    return cast("int | float", value) if type(value) in (int, float) else default
 
 
 def _project_counts(

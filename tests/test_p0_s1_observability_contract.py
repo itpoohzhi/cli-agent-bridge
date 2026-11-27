@@ -135,7 +135,29 @@ def test_disconnect_policy_classification():
         "127.0.0.1:54321", BrokenPipeError(errno.EPIPE, "Broken pipe")
     )
     assert "\n" not in line and "\r" not in line
-    assert len(line.encode("utf-8")) <= 80, line
+    assert len(line.encode("utf-8")) <= 78, line
+
+
+def test_disconnect_policy_context_group_and_byte_cap():
+    from core.http_disconnect_policy import (
+        classify_client_disconnect,
+        format_client_disconnect_log,
+    )
+
+    ctx_bug = RuntimeError("cleanup bug after disconnect")
+    ctx_bug.__context__ = BrokenPipeError(errno.EPIPE, "prior disconnect")
+    assert not classify_client_disconnect(ctx_bug)
+    assert not classify_client_disconnect(
+        ExceptionGroup("mixed", [BrokenPipeError(), RuntimeError("boom")])
+    )
+    assert classify_client_disconnect(
+        ExceptionGroup("pure", [BrokenPipeError(), ConnectionResetError()])
+    )
+    non_ascii = format_client_disconnect_log(
+        "юникод-" * 10, ConnectionAbortedError("x")
+    )
+    assert len(non_ascii.encode("utf-8")) <= 78, non_ascii
+    assert "exc=ConnectionAbortedError" in non_ascii, non_ascii
 
 
 def test_observability_policy_loopback_origin_ratelimit_and_allowlist():
