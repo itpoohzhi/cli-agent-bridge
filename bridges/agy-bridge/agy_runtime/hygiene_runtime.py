@@ -18,8 +18,9 @@ if str(_REPO_ROOT) not in sys.path:
 from core.adaptive_admission import AdaptiveAdmissionRegistry, AdmissionDecision, AdmissionKey, OutcomeKind, canonical_key  # noqa: E402
 
 from . import long_session_config as _lsc  # noqa: E402
+from .dual_cache import DualCache as _DualCache  # noqa: E402
 from .slot_and_session import SqliteRoPoolBackoffError, is_cold_sqlite_wal_wait  # noqa: E402
-from .state_hygiene_policy import BoundedLruTtl, CachePolicyConfig, DisconnectOutcome, HygieneFlags, OrphanFsm, OrphanSweepAction, PoolHealthFSM, compute_epoch_delta, session_store_config, sha_cache_config  # noqa: E402
+from .state_hygiene_policy import DisconnectOutcome, HygieneFlags, OrphanFsm, OrphanSweepAction, PoolHealthFSM, compute_epoch_delta, session_store_config, sha_cache_config  # noqa: E402
 
 _T = TypeVar("_T")
 UPSTREAM_LIMIT: Final[int] = 16
@@ -44,66 +45,48 @@ class LegacyAdmissionLike(Protocol):
 
 
 def _invalid_pgid(pgid: int) -> bool:
-    try: return pgid <= 1 or pgid == os.getpgrp()
-    except OSError: return True
+    try:
+        return pgid <= 1 or pgid == os.getpgrp()
+    except OSError:
+        return True
+
 
 def _safe_kill(pgid: int, sig: int) -> None:
     if not _invalid_pgid(pgid):
-        try: os.killpg(pgid, sig)
-        except OSError: pass
+        try:
+            os.killpg(pgid, sig)
+        except OSError:
+            pass
+
 
 def _default_waiter(pgid: int, timeout_s: float, reap_leader: Callable[[], int | None] | None = None) -> bool:
     """Popen-safe PGID waiter without raw waitpid(-pgid) (W06, CLM-P03)."""
     deadline = time.monotonic() + max(0.0, timeout_s)
     while time.monotonic() < deadline:
         if reap_leader is not None:
-            try: _ = reap_leader()
-            except OSError: pass
-        try: os.killpg(pgid, 0)
-        except ProcessLookupError: return True
-        except OSError: pass
+            try:
+                _ = reap_leader()
+            except OSError:
+                pass
+        try:
+            os.killpg(pgid, 0)
+        except ProcessLookupError:
+            return True
+        except OSError:
+            pass
         time.sleep(0.01)
     return False
 
+
 def _bounded_teardown(pgid: int, kill_fn: Callable[[int, int], None] | None, waiter: Callable[[int, float], bool] | None, reap_leader: Callable[[], int | None] | None = None) -> None:
-    if _invalid_pgid(pgid): return
+    if _invalid_pgid(pgid):
+        return
     k = kill_fn or _safe_kill
     w = waiter or (lambda p, t: _default_waiter(p, t, reap_leader))
     k(pgid, signal.SIGTERM)
     if not w(pgid, 0.4):
         k(pgid, signal.SIGKILL)
         _ = w(pgid, 0.6)
-
-
-@final
-class _DualCache:
-    def __init__(self, cfg: CachePolicyConfig) -> None:
-        self._lock, self._lru, self._raw = threading.Lock(), BoundedLruTtl[str](cfg), dict[str, str]()
-    def get(self, key: str, bounded: bool) -> str | None:
-        with self._lock:
-            return self._lru.get(key, time.monotonic()) if bounded else self._raw.get(key)
-    def put(self, key: str, val: str, bounded: bool) -> None:
-        with self._lock:
-            _ = self._lru.put(key, val, len(val.encode("utf-8")), time.monotonic()) if bounded else self._raw.__setitem__(key, val)
-    def claim(self, key: str, val: str, bounded: bool) -> bool:
-        now = time.monotonic()
-        with self._lock:
-            if bounded:
-                return False if self._lru.get(key, now) is not None else self._lru.put(key, val, len(val.encode("utf-8")), now)
-            return False if key in self._raw else (self._raw.__setitem__(key, val) is None)
-    def remove(self, key: str) -> None:
-        with self._lock:
-            _ = (self._raw.pop(key, None), self._lru.remove(key))
-    def clear_or_prune(self, clear: bool, bounded: bool) -> int:
-        with self._lock:
-            if clear:
-                self._raw.clear()
-                self._lru.clear()
-                return 0
-            return self._lru.purge_expired(time.monotonic()) if bounded else 0
-    def count(self, bounded: bool) -> int:
-        with self._lock:
-            return len(self._lru) if bounded else len(self._raw)
 
 
 @final
@@ -128,8 +111,10 @@ class ManagedSqliteRoPool:
                 _ = self._fsm.record_error(time.monotonic()) if self._enabled else None
         self.release_thread()
     def _exec(self, call: Callable[[PoolLike], _T], db_path: Path | None = None) -> _T:
-        if not self._allow_checkout(): raise SqliteRoPoolBackoffError("sqlite_ro_pool_backoff")
-        if self._inner is None: raise RuntimeError("sqlite_ro_pool_unavailable")
+        if not self._allow_checkout():
+            raise SqliteRoPoolBackoffError("sqlite_ro_pool_backoff")
+        if self._inner is None:
+            raise RuntimeError("sqlite_ro_pool_unavailable")
         try:
             res = call(self._inner)
         except Exception as exc:
@@ -225,11 +210,13 @@ class HygieneRuntime:
             with self._admission_lock:
                 self._legacy_adm.release(key)
     def bind_reaper(self, pgid: int, reap_leader: Callable[[], int | None] | None) -> None:
-        if reap_leader is not None and _invalid_pgid(pgid): return
+        if reap_leader is not None and _invalid_pgid(pgid):
+            return
         with self._orphan_lock:
             self._reapers.pop(pgid, None) if reap_leader is None else self._reapers.__setitem__(pgid, reap_leader)
     def handle_disconnect(self, pgid: int, ttfc_received: bool, tools_count: int, kill_fn: Callable[[int, int], None] | None = None, waiter: Callable[[int, float], bool] | None = None) -> bool:
-        if _invalid_pgid(pgid): return False
+        if _invalid_pgid(pgid):
+            return False
         fast = self.snapshot_flags(self._config_path).fast_client_gone_enabled if self._config_path else self._cur_flags().fast_client_gone_enabled
         now_s = time.monotonic()
         with self._orphan_lock:
@@ -254,10 +241,13 @@ class HygieneRuntime:
             self._reapers.pop(pgid, None)
             return self._detached.pop(pgid, None) is not None
     def _drain_pgids(self, pgids: list[int], kill_fn: Callable[[int, int], None] | None, waiter: Callable[[int, float], bool] | None) -> int:
-        with self._orphan_lock: reapers = {p: self._reapers.pop(p, None) for p in pgids}
-        for pgid in pgids: _bounded_teardown(pgid, kill_fn, waiter, reap_leader=reapers.get(pgid))
         with self._orphan_lock:
-            for pgid in pgids: _ = (self._detached.pop(pgid, None), self._cancelling.discard(pgid))
+            reapers = {p: self._reapers.pop(p, None) for p in pgids}
+        for pgid in pgids:
+            _bounded_teardown(pgid, kill_fn, waiter, reap_leader=reapers.get(pgid))
+        with self._orphan_lock:
+            for pgid in pgids:
+                _ = (self._detached.pop(pgid, None), self._cancelling.discard(pgid))
         return len(pgids)
     def sweep_orphans(self, kill_fn: Callable[[int, int], None] | None = None, waiter: Callable[[int, float], bool] | None = None) -> int:
         now_s = time.monotonic()
