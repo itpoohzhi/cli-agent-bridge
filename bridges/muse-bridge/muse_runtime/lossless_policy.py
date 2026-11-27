@@ -92,6 +92,45 @@ def _build_refused_response(
     )
 
 
+def _evaluate_lossless_branch(
+    raw_messages: list[Any],
+    *,
+    limit: int,
+    full_prompt: str,
+    est_before: int,
+    refuse_mode: RefuseStatusMode,
+    digest_mode: str,
+    redact_fn: Callable[[str], str],
+) -> MusePromptDecision:
+    total = len(raw_messages)
+    if est_before <= limit:
+        res = PruneResult(
+            "ok", list(raw_messages), full_prompt, est_before, est_before, total, total, 0, est_before, 0
+        )
+        return MusePromptDecision(ok=True, prompt=full_prompt, est_after=est_before, prune_result=res)
+
+    res = PruneResult("refused", [], "", est_before, est_before, total, 0, 0, est_before, 0)
+    detail = f"lossless context exceeds budget (est_tokens={est_before}, limit={limit})"
+    err_msg = f"muse turn refused in lossless mode: {detail}"
+    code, body = _build_refused_response(
+        detail=detail,
+        err_msg=err_msg,
+        prompt_raw=full_prompt.encode("utf-8"),
+        mode=refuse_mode,
+        digest_mode=digest_mode,
+        redact_fn=redact_fn,
+    )
+    return MusePromptDecision(
+        ok=False,
+        prompt="",
+        est_after=est_before,
+        prune_result=res,
+        http_status=code,
+        error_body=body,
+        log_reason="refused_lossless",
+    )
+
+
 def evaluate_muse_prompt_policy(
     raw_messages: list[Any],
     *,
@@ -108,58 +147,18 @@ def evaluate_muse_prompt_policy(
 ) -> MusePromptDecision:
     """Evaluate muse prompt with decoupled lossless kill-switch and opt-in 413 status mapping."""
     lossless_enabled, refuse_mode, digest_mode = read_muse_policy_flags(env)
-
     if lossless_enabled:
         _, _, full_prompt = assemble_fn(
             raw_messages, tools=tools, tool_choice=tool_choice, raw_tools=raw_tools
         )
-        est_before = estimate_fn(full_prompt)
-        total = len(raw_messages)
-        if est_before <= limit:
-            res = PruneResult(
-                status="ok",
-                messages=list(raw_messages),
-                prompt=full_prompt,
-                est_before=est_before,
-                est_after=est_before,
-                msgs_total=total,
-                msgs_kept=total,
-                msgs_dropped=0,
-                mandatory_est=est_before,
-                overhead_est=0,
-            )
-            return MusePromptDecision(ok=True, prompt=full_prompt, est_after=est_before, prune_result=res)
-
-        res = PruneResult(
-            status="refused",
-            messages=[],
-            prompt="",
-            est_before=est_before,
-            est_after=est_before,
-            msgs_total=total,
-            msgs_kept=0,
-            msgs_dropped=0,
-            mandatory_est=est_before,
-            overhead_est=0,
-        )
-        detail = f"lossless context exceeds budget (est_tokens={est_before}, limit={limit})"
-        err_msg = f"muse turn refused in lossless mode: {detail}"
-        code, body = _build_refused_response(
-            detail=detail,
-            err_msg=err_msg,
-            prompt_raw=full_prompt.encode("utf-8"),
-            mode=refuse_mode,
+        return _evaluate_lossless_branch(
+            raw_messages,
+            limit=limit,
+            full_prompt=full_prompt,
+            est_before=estimate_fn(full_prompt),
+            refuse_mode=refuse_mode,
             digest_mode=digest_mode,
             redact_fn=redact_fn,
-        )
-        return MusePromptDecision(
-            ok=False,
-            prompt="",
-            est_after=est_before,
-            prune_result=res,
-            http_status=code,
-            error_body=body,
-            log_reason="refused_lossless",
         )
 
     prune_res = prune_fn(
