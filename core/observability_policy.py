@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import ipaddress
 import math
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from types import MappingProxyType
 from typing import cast
 
@@ -46,18 +46,22 @@ _ALLOWED_HEADER_VALS: Mapping[str, tuple[str, ...]] = MappingProxyType(
 
 
 def _has_forbidden_security_headers(headers: object) -> bool:
-    """Fail-closed header scan: reject forbidden values and duplicate security headers."""
-    items_fn = getattr(headers, "items", None)
-    raw = cast("Iterable[object]", items_fn()) if callable(items_fn) else ()
+    """Fail-closed header scan: reject invalid containers, duplicates, bad values."""
+    try:
+        items_fn = cast("Callable[[], Iterable[object]]", getattr(headers, "items"))
+        raw = list(items_fn())
+    except (AttributeError, TypeError):
+        return True
     seen: set[str] = set()
     for e in raw:
-        if isinstance(e, tuple) and len(p := cast("tuple[object, ...]", e)) == 2:
-            name = str(p[0]).strip().lower()
-            val = str(p[1]).strip().lower()
-            if allowed := _ALLOWED_HEADER_VALS.get(name):
-                if name in seen or val not in allowed:
-                    return True
-                seen.add(name)
+        if not (isinstance(e, tuple) and len(p := cast("tuple[object, ...]", e)) == 2):
+            return True
+        name = str(p[0]).strip().lower()
+        val = str(p[1]).strip().lower()
+        if allowed := _ALLOWED_HEADER_VALS.get(name):
+            if name in seen or val not in allowed:
+                return True
+            seen.add(name)
     return False
 
 
@@ -86,27 +90,26 @@ def step_token_bucket(
     return allowed
 
 
-def _numeric_or_zero(value: object, default: float) -> int | float:
-    return cast("int | float", value) if type(value) in (int, float) else default
+def _numeric_or_zero(v: object, default: float) -> int | float:
+    return v if type(v) is int or (type(v) is float and math.isfinite(v)) else default
 
 
 def _project_counts(
     source: Mapping[str, object], keys: tuple[str, ...], float_key: str
 ) -> dict[str, int | float]:
+    defaults: dict[str, int | float] = {float_key: 0.0}
     return {
-        key: _numeric_or_zero(source.get(key), 0.0 if key == float_key else 0)
-        for key in keys
+        key: _numeric_or_zero(source.get(key), defaults.get(key, 0)) for key in keys
     }
 
 
 def _project_rotation(source: Mapping[str, object]) -> dict[str, bool | int | float]:
     out: dict[str, bool | int | float] = {}
-    for key, value in source.items():
-        lowered = key.lower()
-        if any(blocked in lowered for blocked in _ROTATION_KEY_BLOCKLIST):
+    for key, v in source.items():
+        if any(map(key.lower().__contains__, _ROTATION_KEY_BLOCKLIST)):
             continue
-        if isinstance(value, (bool, int, float)):
-            out[key] = value
+        if isinstance(v, int) or (isinstance(v, float) and math.isfinite(v)):
+            out[key] = v
     return out
 
 

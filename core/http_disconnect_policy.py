@@ -32,19 +32,20 @@ _GoneCls = type[BaseException] | tuple[type[BaseException], ...] | None
 def _is_disconnect_chain(
     exc: BaseException,
     gone_types: tuple[type[BaseException], ...],
-    seen: set[int],
+    seen: frozenset[int],
 ) -> bool:
     """Walk explicit __cause__ links only (never __context__); groups require all leaves."""
     cur: BaseException | None = exc
     while cur is not None and id(cur) not in seen:
-        seen.add(id(cur))
+        path_seen = seen | {id(cur)}
         os_gone = isinstance(cur, OSError) and cur.errno in DISCONNECT_ERRNOS
         grp = cur.exceptions if isinstance(cur, BaseExceptionGroup) else ()
         grp_ok = bool(grp) and all(
-            _is_disconnect_chain(s, gone_types, seen) for s in grp
+            _is_disconnect_chain(s, gone_types, path_seen) for s in grp
         )
         if isinstance(cur, gone_types) or os_gone or grp_ok:
             return True
+        seen = path_seen
         cur = cur.__cause__
     return False
 
@@ -56,7 +57,7 @@ def classify_client_disconnect(
     """True if exc, its explicit __cause__, or every leaf in a group is client-gone."""
     cls = client_gone_cls
     extra = (cls,) if isinstance(cls, type) else (cls or ())
-    return _is_disconnect_chain(exc, extra + DISCONNECT_EXC_TYPES, set())
+    return _is_disconnect_chain(exc, extra + DISCONNECT_EXC_TYPES, frozenset())
 
 
 def _sanitize_field(text: str, max_bytes: int) -> str:

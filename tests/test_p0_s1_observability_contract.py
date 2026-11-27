@@ -231,3 +231,26 @@ def test_p12_seam_snapshot_counts_defaults():
         "quarantined": 0,
         "bound": 128,
     }
+
+
+def test_non_finite_floats_and_shared_disconnect_group_cause():
+    from core import http_disconnect_policy as dp
+    from core import observability_policy as op
+
+    projected = op.project_observability_payload(
+        {"active": 1, "max_idle_age_s": float("nan")},
+        {"active": 0, "quarantined": 0, "bound": 128},
+        {"enabled": True, "bad_inf": float("inf"), "bad_nan": float("-inf")},
+    )
+    assert projected["admission"]["max_idle_age_s"] == 0.0
+    assert "bad_inf" not in projected["p13_rotation"]
+    assert "bad_nan" not in projected["p13_rotation"]
+    json.dumps(projected, allow_nan=False)
+
+    shared = BrokenPipeError("shared")
+    e1 = ValueError("wrap1")
+    e2 = ValueError("wrap2")
+    e1.__cause__ = shared
+    e2.__cause__ = shared
+    grp = ExceptionGroup("shared-cause", [e1, e2])
+    assert dp.classify_client_disconnect(grp) is True

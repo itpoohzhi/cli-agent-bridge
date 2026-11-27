@@ -275,3 +275,26 @@ def test_existing_protected_get_routes_keep_401_without_auth(monkeypatch, tmp_pa
     results = _serve_live(monkeypatch, tmp_path, probe, enabled=True)
     for route, (status, body) in results.items():
         assert status == 401, (route, status, body[:400])
+
+
+def test_malformed_headers_container_fails_closed():
+    """F-002: non-mapping, None, non-iterable .items(), or non-2-tuple fail closed."""
+
+    class _NonIter:
+        def items(self):
+            return 42
+
+    class _BadTuple:
+        def items(self):
+            return [("Host", "127.0.0.1", "extra")]
+
+    for bad_headers in (
+        None,
+        object(),
+        [("Origin", "")],
+        _NonIter(),
+        _BadTuple(),
+    ):
+        assert not is_observability_request_allowed("127.0.0.1", bad_headers), (
+            bad_headers
+        )

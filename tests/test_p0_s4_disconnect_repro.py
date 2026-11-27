@@ -12,7 +12,6 @@ import errno
 import http.client
 import io
 import json
-import socket
 import sys
 import threading
 import time
@@ -66,7 +65,7 @@ def _isolate_dynamic_config(monkeypatch, tmp_path, flags: dict) -> None:
     monkeypatch.setenv("BRIDGE_DYNAMIC_CONFIG_PATH", str(cfg))
 
 
-def _run_gone_hub_get() -> None:
+def _run_gone_hub_get(logs: list[str], stderr: io.StringIO) -> None:
     class _GoneClientHandler(server.Handler):
         def setup(self) -> None:
             super().setup()
@@ -81,10 +80,8 @@ def _run_gone_hub_get() -> None:
         )
         try:
             conn.connect()
-            conn.sock.setsockopt(
-                socket.SOL_SOCKET, socket.SO_LINGER, b"\x01\x00\x00\x00\x00\x00\x00\x00"
-            )
             conn.request("GET", "/health")
+            _wait_disconnect_outcome(logs, stderr)
         finally:
             conn.close()
     finally:
@@ -109,8 +106,7 @@ def test_red_repro_hub_server_disconnect_writes_single_line_not_stderr(
     stderr = io.StringIO()
     monkeypatch.setattr(server, "_log", logs.append)
     monkeypatch.setattr(sys, "stderr", stderr)
-    _run_gone_hub_get()
-    _wait_disconnect_outcome(logs, stderr)
+    _run_gone_hub_get(logs, stderr)
     captured = stderr.getvalue()
     assert "Traceback (most recent call last):" not in captured, captured
     assert len(captured) == 0, captured
