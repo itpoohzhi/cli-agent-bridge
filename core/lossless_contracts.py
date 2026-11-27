@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import secrets
 from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import Enum
@@ -21,6 +22,7 @@ DEFAULT_MAX_QUEUE: Final[int] = 2
 DEFAULT_QUEUE_WAIT_S: Final[float] = 10.0
 DEFAULT_KILL_GRACE_S: Final[float] = 1.5
 DEFAULT_DIGEST_MODE: Final[str] = "salted_hmac"
+_PROCESS_EPHEMERAL_SALT: Final[bytes] = secrets.token_bytes(32)
 
 _BOOL_MAP: Final[dict[str, bool]] = {
     "1": True,
@@ -259,7 +261,7 @@ def build_loss_receipt(
     if mode == "omitted":
         digest = ""
     else:
-        key = salt if salt else b"bridge-loss-default-salt"
+        key = salt if (salt is not None and len(salt) > 0) else _PROCESS_EPHEMERAL_SALT
         digest = hmac.new(key, prompt_raw, hashlib.sha256).hexdigest()[:16]
     return LossReceipt(
         reason=reason,

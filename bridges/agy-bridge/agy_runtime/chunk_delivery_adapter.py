@@ -36,6 +36,7 @@ class ChunkDeliveryResult:
     chunks_delivered: int
     anchor_committed: bool
     stdout_lines: tuple[str, ...]
+    final_turn_lines: tuple[str, ...] = ()
     http_status: int = 200
     receipt: LossReceipt | None = None
     reason: str = ""
@@ -240,9 +241,12 @@ def deliver_chunked_prompt(
         epoch, frame_timeout_s, cancel_event, on_line, salt,
     )
     try:
+        final_start_idx = 0
         for frame in iter_ndjson_frames(
             prompt_text, safe_frame_bytes=limits.safe_frame_bytes, max_chunks=limits.max_chunks, epoch=epoch,
         ):
+            if not getattr(frame, "is_synthetic", True):
+                final_start_idx = len(collected)
             snap, failure = _deliver_single_frame(snap, frame, ctx)
             if failure is not None:
                 return failure
@@ -264,6 +268,7 @@ def deliver_chunked_prompt(
         chunks_delivered=snap.acked_chunks,
         anchor_committed=snap.anchor_committed,
         stdout_lines=tuple(collected),
+        final_turn_lines=tuple(collected[final_start_idx:]),
         http_status=200 if snap.state is SessionState.COMPLETED else 400,
         reason=snap.terminal_reason,
     )

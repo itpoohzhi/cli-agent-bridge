@@ -231,15 +231,36 @@ def feed_run_stdin_or_lossless(run: Any, legacy_feed_fn: Callable[[Any], None]) 
         done.set()
 
 
-def iter_run_stdout_or_lossless(run: Any, legacy_iter_fn: Callable[[Any], Iterator[str]]) -> Iterator[str]:
-    """Yield only the final turn's stdout lines in multi-chunk lossless mode (synthetic ACKs filtered)."""
+def iter_run_stdout_or_lossless(
+    run: Any,
+    legacy_iter_fn: Callable[[Any], Iterator[str]],
+    *,
+    wait_timeout_s: float | None = None,
+) -> Iterator[str]:
+    """Yield all stdout lines of the final turn in lossless mode with bounded wait (synthetic ACKs filtered)."""
     if not bool(getattr(run, "_lossless_chunked", False)):
         yield from legacy_iter_fn(run)
         return
-    getattr(run, "_lossless_done").wait()
+    limits: LosslessLimits | None = getattr(run, "_lossless_limits", None)
+    timeout = wait_timeout_s if wait_timeout_s is not None else ((limits.max_chunks if limits else 16) * 15.0 + 5.0)
+    done: threading.Event = getattr(run, "_lossless_done")
+    if not done.wait(timeout=max(0.05, timeout)):
+        release_run_lossless_resources(run)
+        return
     res: ChunkDeliveryResult | None = getattr(run, "_lossless_result", None)
-    if res is not None and res.stdout_lines:
-        yield res.stdout_lines[-1]
+    if res is None:
+        return
+    lines = res.final_turn_lines if res.final_turn_lines else res.stdout_lines[-1:]
+    yield from lines
+
+
+def run_with_lossless_cleanup(run: Any, init_fn: Callable[[], None]) -> None:
+    """Execute Run initialization tail and guarantee slot/PGID release if any step raises."""
+    try:
+        init_fn()
+    except BaseException:
+        release_run_lossless_resources(run)
+        raise
 
 
 def release_run_lossless_resources(run: Any) -> None:

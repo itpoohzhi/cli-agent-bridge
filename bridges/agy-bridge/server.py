@@ -159,8 +159,9 @@ from agy_runtime.persistent_worker_adapter import AgyPersistentWorkerPool  # noq
 from agy_runtime.input_guard_policy import ClientCompactionRequired  # noqa: E402
 from agy_runtime.loss_receipt_context import begin_request_scope, record_lossless, send_client_compaction_required, usage_payload  # noqa: E402
 from agy_runtime.lossless_prompt_facade import (  # noqa: E402
-    PromptRenderDeps, ensure_prompt_fits_or_pass, feed_run_stdin_or_lossless, iter_run_stdout_or_lossless,
-    prepare_run_lossless_state, release_run_lossless_resources, render_messages_prompt, send_rejection_response,
+    LosslessRejectionError, PromptRenderDeps, ensure_prompt_fits_or_pass, feed_run_stdin_or_lossless,
+    iter_run_stdout_or_lossless, prepare_run_lossless_state, release_run_lossless_resources,
+    render_messages_prompt, run_with_lossless_cleanup, send_rejection_response,
 )
 from agy_runtime.process_admission_guard import AdmissionOverloadError  # noqa: E402
 from core.resumed_tools_policy import CompactToolsQuery  # noqa: E402
@@ -5413,11 +5414,6 @@ class Run:
         self.work_dir = work_dir
         self.mode = mode
         self.tag = tag
-        self.stdin_line = prepare_run_lossless_state(
-            self, prompt, head_pruning_enabled=AGY_BRIDGE_ENABLE_HEAD_PRUNING,
-            ensure_fit_fn=_ensure_prompt_fits_ndjson, ndjson_user_line_fn=_ndjson_user_line,
-            config_path=DYNAMIC_CONFIG_PATH,
-        )
         cli_mode = slot_and_session.resolve_cli_mode(mode)
         settings_arg = zero_canon_settings_cli_arg() if zero_canon else ""
         cmd = [
@@ -5456,7 +5452,13 @@ class Run:
             plan.anchored = False
             plan.reason = "cid_busy"
         launch_env = _launch_env(zero_canon=zero_canon, req_id=req_id, extra_env=extra_env)
-        spawn_started = start_run_process(self, RunSpawnContext(
+        self.stdin_line = prepare_run_lossless_state(
+            self, prompt, head_pruning_enabled=AGY_BRIDGE_ENABLE_HEAD_PRUNING,
+            ensure_fit_fn=_ensure_prompt_fits_ndjson, ndjson_user_line_fn=_ndjson_user_line,
+            config_path=DYNAMIC_CONFIG_PATH,
+        )
+        spawn_box: list[float] = []
+        run_with_lossless_cleanup(self, lambda: spawn_box.append(start_run_process(self, RunSpawnContext(
             pool=_PERSISTENT_POOL, config_path=DYNAMIC_CONFIG_PATH, cmd=cmd, work_dir=work_dir,
             launch_env=launch_env, model=model, effort=effort, cli_mode=cli_mode,
             zero_canon=zero_canon, settings_arg=settings_arg, add_dir=add_dir, chat_key=chat_key,
@@ -5466,7 +5468,8 @@ class Run:
                 stderr=subprocess.PIPE, start_new_session=True, env=launch_env,
             ),
             on_cold_fail=lambda: _cid_release(self.run_cid, self.turn_id),
-        ))
+        ))))
+        spawn_started = spawn_box[0]
         self.started = time.monotonic()
         self.req_id = req_id
         self.spawn_ms = 0 if self._persistent_reused else int((self.started - spawn_started) * 1000)
@@ -7727,7 +7730,7 @@ class Handler(BaseHTTPRequestHandler):
                 self._serve_sse(ctx)
             else:
                 self._serve_json(ctx)
-        except (ClientCompactionRequired, AdmissionOverloadError) as exc:
+        except (ClientCompactionRequired, LosslessRejectionError, AdmissionOverloadError) as exc:
             send_rejection_response(self, exc)
         finally:
             if not ctx.get("job_owns_cid"):

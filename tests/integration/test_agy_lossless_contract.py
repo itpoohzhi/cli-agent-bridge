@@ -24,6 +24,7 @@ from agy_runtime.lossless_prompt_facade import (  # noqa: E402
     iter_run_stdout_or_lossless,
     prepare_run_lossless_state,
     release_run_lossless_resources,
+    run_with_lossless_cleanup,
     send_rejection_response,
 )
 from agy_runtime.process_admission_guard import AdmissionOverloadError, is_pgid_alive  # noqa: E402
@@ -205,3 +206,98 @@ def test_runtime_run_lifecycle_wires_chunk_delivery_and_admission_guard_429(
     assert all(mk in prompt for mk in markers)
     assert not is_pgid_alive(pgid)
     assert guard.snapshot().active == 0
+
+
+def test_runtime_slot_released_on_run_init_exception_and_bounded_stdout_wait(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Verify slot does not leak when spawn fails after prepare_run_lossless_state, and wait is bounded."""
+    import threading
+
+    srv = _load_agy_server()
+    cfg = tmp_path / "dynamic_config.json"
+    cfg.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(srv, "DYNAMIC_CONFIG_PATH", cfg)
+    monkeypatch.setenv("AGY_BRIDGE_LOSSLESS_ENABLED", "true")
+    monkeypatch.setenv("AGY_BRIDGE_LOSSLESS_MAX_CONCURRENCY", "1")
+    monkeypatch.setenv("AGY_BRIDGE_LOSSLESS_MAX_QUEUE", "0")
+
+    class _Run:
+        _stop_watch = None
+        proc = None
+
+    run = _Run()
+    _ = prepare_run_lossless_state(
+        run,
+        "hello",
+        head_pruning_enabled=True,
+        ensure_fit_fn=srv._ensure_prompt_fits_ndjson,
+        ndjson_user_line_fn=srv._ndjson_user_line,
+        config_path=cfg,
+    )
+    guard = get_admission_guard(cfg)
+    assert guard.snapshot().active == 1
+
+    with pytest.raises(RuntimeError, match="spawn_failed"):
+        run_with_lossless_cleanup(run, lambda: (_ for _ in ()).throw(RuntimeError("spawn_failed")))
+    assert guard.snapshot().active == 0
+
+    # Bounded wait on iter_run_stdout_or_lossless when done event never fires
+    run_stuck = _Run()
+    setattr(run_stuck, "_lossless_chunked", True)
+    setattr(run_stuck, "_lossless_slot_held", True)
+    setattr(run_stuck, "_lossless_guard", guard)
+    setattr(run_stuck, "_lossless_done", threading.Event())
+    guard.acquire()
+    lines = list(iter_run_stdout_or_lossless(run_stuck, lambda _r: iter(()), wait_timeout_s=0.05))
+    assert lines == []
+    assert guard.snapshot().active == 0
+
+
+def test_runtime_multiline_final_turn_stdout_preserved_and_413_end_to_end(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Verify multi-line final turn stdout events are preserved while synthetic chunk ACKs are filtered."""
+    srv = _load_agy_server()
+    cfg = tmp_path / "dynamic_config.json"
+    cfg.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(srv, "DYNAMIC_CONFIG_PATH", cfg)
+    monkeypatch.setenv("AGY_BRIDGE_LOSSLESS_ENABLED", "true")
+    monkeypatch.setenv("AGY_BRIDGE_LOSSLESS_MAX_CONCURRENCY", "2")
+    monkeypatch.setenv("AGY_BRIDGE_LOSSLESS_MAX_QUEUE", "1")
+
+    stub = (
+        "import json, sys\n"
+        "idx = 0\n"
+        "for raw in sys.stdin:\n"
+        "    if not raw.strip(): continue\n"
+        "    idx += 1\n"
+        "    sys.stdout.write(json.dumps({'type':'step_update','chunk':idx,'text':'part'})+'\\n')\n"
+        "    sys.stdout.write(json.dumps({'type':'result','chunk':idx})+'\\n')\n"
+        "    sys.stdout.flush()\n"
+    )
+    msgs, _ = _make_cold_hermes_messages()
+    prompt = srv._messages_to_prompt(msgs, reserve_bytes=35307)
+
+    class _Run:
+        _stop_watch = None
+        proc = None
+
+    run = _Run()
+    _ = prepare_run_lossless_state(
+        run, prompt, head_pruning_enabled=True,
+        ensure_fit_fn=srv._ensure_prompt_fits_ndjson, ndjson_user_line_fn=srv._ndjson_user_line, config_path=cfg,
+    )
+    guard = get_admission_guard(cfg)
+    run.proc = guard.spawn_isolated([sys.executable, "-c", stub])
+    try:
+        feed_run_stdin_or_lossless(run, lambda _r: None)
+        out_lines = list(iter_run_stdout_or_lossless(run, lambda _r: iter(())))
+    finally:
+        release_run_lossless_resources(run)
+
+    # Final turn emitted 2 lines (step_update + result) and both are preserved; earlier chunk lines excluded
+    assert len(out_lines) == 2
+    assert json.loads(out_lines[0])["type"] == "step_update"
+    assert json.loads(out_lines[1])["type"] == "result"
+    assert json.loads(out_lines[0])["chunk"] == json.loads(out_lines[1])["chunk"] >= 4
