@@ -26,6 +26,7 @@ _FLAG_NAMES = (
     "BRIDGE_SESSION_PLANE_ENABLED", "BRIDGE_ZERO_CANON_KEYED_RESIDENT_ENABLED",
     "BRIDGE_AGY_DRAIN_EARLY_EXIT_ENABLED", "BRIDGE_AGY_SIGNED_DIRECTIVE_ENABLED",
     "BRIDGE_PASSTHROUGH_CANONICAL_AFFINITY_ENABLED",
+    "BRIDGE_SESSION_PLANE_PROMPT_CACHE_KEY_ENABLED",
 )
 
 
@@ -179,3 +180,9 @@ def is_agy_signed_directive_enabled(environ: Mapping[str, str] | None = None, *,
 
 def is_passthrough_canonical_affinity_enabled(environ: Mapping[str, str] | None = None, *, config_path: Path | None = None) -> bool:
     return _flag(_FLAG_NAMES[4], environ, config_path)
+
+
+def is_session_plane_prompt_cache_key_enabled(
+    environ: Mapping[str, str] | None = None, *, config_path: Path | None = None
+) -> bool:
+    return _flag(_FLAG_NAMES[5], environ, config_path)

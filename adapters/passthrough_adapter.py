@@ -115,14 +115,9 @@ from core.session_affinity import (
     session_affinity,
 )
 from core.session_plane import (
-    DIRECTIVE_HEADER,
-    SessionIdentityError,
-    SessionIdentityInput,
-    decide_session_plan,
-    effective_capabilities,
-    encode_directive,
-    is_agy_signed_directive_enabled,
-    load_or_create_directive_key,
+    DIRECTIVE_HEADER, SessionIdentityError, SessionIdentityInput, decide_session_plan,
+    effective_capabilities, encode_directive, is_agy_signed_directive_enabled,
+    is_session_plane_prompt_cache_key_enabled, load_or_create_directive_key,
     resolve_canonical_identity,
 )
 from core.subbridge_zero_canon import should_forward_review_profile
@@ -1353,9 +1348,9 @@ class PassthroughAdapter(BackendAdapter):
         }
         result: dict[str, str] = {}
         try:
-            identity = resolve_canonical_identity(
-                SessionIdentityInput(**base, headers=lower, request_body=data)
-            )
+            identity = resolve_canonical_identity(SessionIdentityInput(
+                **base, headers=lower, request_body=data,
+                allow_prompt_cache_key=is_session_plane_prompt_cache_key_enabled()))
         except SessionIdentityError:
             # Fail-closed: подделанный/конфликтующий ключ не пробрасываем, процесс не греем.
             identity = resolve_canonical_identity(SessionIdentityInput(**base))
