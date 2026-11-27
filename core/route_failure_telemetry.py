@@ -135,21 +135,24 @@ def extract_safe_refusal_code(body: bytes | bytearray | str | None) -> str | Non
 
 def _record_failure(route: Any, status: int, error_type: str, nbytes: int, extra: str = "") -> None:
     """Фиксирует исход: статус, note, телеметрию и лог; отсутствующие методы пропускаются."""
+    handler = getattr(route, "handler", None)
+    host = getattr(route, "host", None)
     ledger = _FAILURE_LEDGER.get()
     if ledger is not None:
-        key = (id(route), id(route.handler), status, error_type)
+        key = (id(route), id(handler), status, error_type)
         if key in ledger:
             return
         ledger.add(key)
-    handler, host = route.handler, route.host
     norm = _norm_model(getattr(route, "model_id", None))
-    handler._response_status = status
-    if norm:
-        _call(handler, "_telemetry_meta", model=norm)
-    _call(handler, "_telemetry_note", nbytes)
-    _call(handler, "_record_telemetry", status_code=status, error_type=error_type)
+    if handler is not None:
+        handler._response_status = status
+        if norm:
+            _call(handler, "_telemetry_meta", model=norm)
+        _call(handler, "_telemetry_note", nbytes)
+        _call(handler, "_record_telemetry", status_code=status, error_type=error_type)
     line = f"route_failure status={status} reason={error_type} model={norm or '-'}{extra} {_trace_fields(handler)}"
-    _call(host, "_log", line.rstrip())
+    if host is not None:
+        _call(host, "_log", line.rstrip())
 
 
 def _make_sink(route: Any) -> Any:
