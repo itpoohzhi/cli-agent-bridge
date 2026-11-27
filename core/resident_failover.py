@@ -117,8 +117,7 @@ def _log_precommit_refusal(
         return
     raw_code = exc.response.code or ""
     safe_code = raw_code if _SAFE_CODE_RE.fullmatch(raw_code) else "unknown"
-    safe_err = sanitize_log_text(exc.response.message, extra_code=safe_code)
-    log_fn(f"resident_precommit_refusal status={exc.status} code={safe_code} err={safe_err!r}")
+    log_fn(f"resident_precommit_refusal status={exc.status} code={safe_code}")
 
 
 def handle_json_resident_error(
