@@ -1,6 +1,6 @@
 """Адаптер явного продолжения сессий (Explicit Resume) и изоляции маршрутов agy-bridge."""
 from __future__ import annotations
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, replace
 import hashlib
@@ -12,8 +12,8 @@ import time
 from typing import cast, final
 from agy_runtime.long_session_config import read_bool_setting, read_float_setting, read_int_setting
 from agy_runtime.session_store import CommitPayload, ExplicitSessionStore, load_or_create_hmac_key
+from agy_runtime.chat_key_policy import resolve_agy_chat_key
 from agy_runtime.slot_and_session import resolve_subagent_id
-from core import chat_key as _chat_key
 from core.hot_session_policy import (
     DecisionAction, ExecutionMode, PolicyConfig, ProjectedMessage, SessionKeyParts, SlotSnapshot,
     SlotState, TurnPolicyInput, build_session_key, compute_history_fingerprints,
@@ -24,7 +24,6 @@ _LOOPBACK_HOSTS = frozenset(("127.0.0.1", "::1", "::ffff:127.0.0.1"))
 _CID_RE = re.compile(r"[0-9A-Fa-f-]{8,64}")
 _EMPTY_SNAP = SlotSnapshot(SlotState.EMPTY, "", "", 0, 0, 0, 0, 0.0, 0.0, 0, 0.0, 0.0)
 _TOGGLE_EPOCH_STEP = 1_000_007
-_resolve_chat_key = cast("Callable[..., _chat_key.ChatKey]", _chat_key.resolve_chat_key)
 _INT_BOUNDS = (("guard_max_bytes", "BRIDGE_HOT_GUARD_MAX_BYTES", 2097152, (1024, 67_108_864)), ("guard_max_messages", "BRIDGE_HOT_GUARD_MAX_MESSAGES", 512, (4, 100_000)), ("max_turns", "BRIDGE_HOT_MAX_TURNS", 30, (1, 1000)), ("supersede_max_per_min", "BRIDGE_HOT_SUPERSEDE_MAX_PER_MIN", 3, (0, 1000)))
 _FLT_BOUNDS = (("idle_ttl_s", "BRIDGE_HOT_IDLE_TTL_S", 2700.0, (1.0, 604_800.0)), ("max_ttl_s", "BRIDGE_HOT_MAX_TTL_S", 86400.0, (1.0, 2_592_000.0)), ("in_flight_max_s", "BRIDGE_HOT_IN_FLIGHT_MAX_S", 960.0, (1.0, 86_400.0)))
 @dataclass(frozen=True, slots=True)
@@ -208,7 +207,7 @@ class ExplicitResumeAdapter:
     def prepare_turn(self, http_meta: TurnHttpMeta, payload_meta: TurnPayloadMeta, now_s: float | None = None) -> ExplicitTurnState:
         now, flags = time.time() if now_s is None else float(now_s), read_runtime_flags(self._config_path)
         epoch = self._sync_epoch(flags)
-        chat = _resolve_chat_key(payload_meta.req, http_meta.headers, payload_meta.extra, sources=_chat_key.SOURCES_SESSION_ID)
+        chat = resolve_agy_chat_key(payload_meta.req, http_meta.headers, payload_meta.extra, config_path=self._config_path)
         sub_id, sub_bad = resolve_subagent_id(http_meta.headers)
         explicit_cid = "" if any((chat.invalid, sub_bad)) else chat.value
         tools_cnt = 0 if _tool_choice_is_none(payload_meta.tool_choice) else len(payload_meta.tools)
