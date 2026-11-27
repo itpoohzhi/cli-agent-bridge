@@ -392,3 +392,11 @@ def test_explicit_ctx_total_equal_to_pool_default_caps_idle_and_cap_raw_not_trun
         environ={FLAG_TIMEOUT_LADDER: "true"},
     )
     assert dl_ladder_cap.safety_deadline == pytest.approx(30.0)
+
+    dl_mono = _resolve_deadlines(
+        StdioPoolConfig(),
+        {"turn_idle_timeout_s": 4000.0, "turn_total_timeout_s": 4500.0},
+        now=0.0,
+        environ={FLAG_TIMEOUT_LADDER: "true"},
+    )
+    assert dl_mono.safety_deadline == pytest.approx(4000.0)

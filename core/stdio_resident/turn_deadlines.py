@@ -221,7 +221,8 @@ def _resolve_deadlines(
     first_val = ladder.effective_first_event_s if first_ov is None else first_ov
     cap_ov = _pick_ladder_override(ctx, cfg, ("safety_cap_s", "turn_safety_cap_s"), "BRIDGE_STDIO_SAFETY_CAP_S", env)
     if cap_ov is None:
-        cap_val = min(ladder.safety_cap_s, explicit_total) if explicit_total is not None else max(ladder.safety_cap_s, first_val, idle_val)
+        base_cap = max(ladder.safety_cap_s, first_val, idle_val)
+        cap_val = min(base_cap, explicit_total) if explicit_total is not None else base_cap
     else:
         cap_val = min(cap_ov, explicit_total) if (total_from_ctx and explicit_total is not None) else cap_ov
     eff_first = min(first_val, cap_val)
