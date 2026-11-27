@@ -34,6 +34,7 @@ for _p in (_REPO_ROOT, Path(__file__).resolve().parents[1], Path(__file__).resol
         sys.path.insert(0, str(_p))
 
 from core.admission_idle_policy import format_claude_done_fields  # noqa: E402
+from core.bridge_watchdog_settings import BridgeWatchdogFacade  # noqa: E402
 from core.chat_key import SOURCES_SESSION_ID, resolve_chat_key  # noqa: E402
 from core.claude_bridge_telemetry import format_done_usage_suffix, project_wire_usage  # noqa: E402
 from core.claude_prompt import PromptBudgetConfig, prepare_prompt_with_cap, wire_cache_creation_enabled  # noqa: E402
@@ -120,68 +121,11 @@ def _env_positive_int(name: str, default: int) -> int:
     return value if value > 0 else default
 
 
-_ALLOWED_SETTINGS_KEYS = frozenset({
-    "CLAUDE_P_BRIDGE_WATCHDOG_ENABLED", "CLAUDE_P_BRIDGE_IDLE_TIMEOUT_S", "CLAUDE_P_BRIDGE_IO_WAIT_CAP_S",
-    "CLAUDE_P_BRIDGE_SAFETY_CAP_S", "CLAUDE_P_BRIDGE_WATCHDOG_INTERVAL_S", "BRIDGE_IDLE_TIMEOUT_S",
-    "BRIDGE_IO_WAIT_CAP_S", "BRIDGE_SAFETY_CAP_S", "BRIDGE_WATCHDOG_INTERVAL_S",
-})
-
-def _read_dsh_env_file() -> dict[str, str]:
-    """Безопасно читает только несекретные настройки из ~/.dsh/.env.
-
-    НЕ мутирует os.environ, гарантируя полную изоляцию от окружения pytest и подпроцессов.
-    """
-    env_file = Path.home() / ".dsh" / ".env"
-    if not env_file.is_file():
-        return {}
-    res: dict[str, str] = {}
-    try:
-        with open(env_file, "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line or line.startswith("#") or "=" not in line:
-                    continue
-                if line.startswith("export "):
-                    line = line[len("export "):].strip()
-                k, v = line.split("=", 1)
-                k = k.strip()
-                v = v.strip().strip("'\"")
-                if k in _ALLOWED_SETTINGS_KEYS:
-                    res[k] = v
-    except OSError:
-        pass
-    return res
-
-
-_DSH_ENV = _read_dsh_env_file()
-
-def _get_setting(name: str, fallback_name: str | None = None, default: str = "") -> str:
-    """Двухступенчатый каскад чтения: os.environ -> _DSH_ENV -> fallback -> default."""
-    for k in (name, fallback_name) if fallback_name else (name,):
-        val = os.environ.get(k)
-        if val is not None and val.strip():
-            return val.strip()
-        val = _DSH_ENV.get(k)
-        if val is not None and val.strip():
-            return val.strip()
-    return default
-
-
-def _get_positive_float(name: str, fallback_name: str | None = None, default: float = 0.0) -> float:
-    raw = _get_setting(name, fallback_name)
-    if not raw:
-        return default
-    try:
-        val = float(raw)
-        return val if 0 < val < float("inf") else default
-    except (ValueError, TypeError):
-        return default
-
-
-def _is_watchdog_enabled() -> bool:
-    raw = _get_setting("CLAUDE_P_BRIDGE_WATCHDOG_ENABLED", default="1").lower()
-    return raw not in ("0", "false", "no", "off")
-
+# Несекретный фасад watchdog-настроек (AD-002): os.environ > ~/.dsh/.env > fallback > default.
+_WATCHDOG_SETTINGS = BridgeWatchdogFacade.for_prefix("CLAUDE_P_BRIDGE_", first_progress_keys=("BRIDGE_NONSTREAM_FIRST_PROGRESS_TIMEOUT_S",))
+_get_positive_float = _WATCHDOG_SETTINGS.get_positive_float
+_is_watchdog_enabled = _WATCHDOG_SETTINGS.is_watchdog_enabled
+CLAUDE_P_BRIDGE_FIRST_TOKEN_TIMEOUT_S = _WATCHDOG_SETTINGS.first_token_timeout_s
 
 CLAUDE_P_BRIDGE_IDLE_TIMEOUT_S = _get_positive_float("CLAUDE_P_BRIDGE_IDLE_TIMEOUT_S", "BRIDGE_IDLE_TIMEOUT_S", 600.0)
 CLAUDE_P_BRIDGE_IO_WAIT_CAP_S = _get_positive_float("CLAUDE_P_BRIDGE_IO_WAIT_CAP_S", "BRIDGE_IO_WAIT_CAP_S", 900.0)
@@ -584,6 +528,7 @@ def _watchdog_for(run: Run) -> Any:
         safety_cap_s=CLAUDE_P_BRIDGE_SAFETY_CAP_S,
         io_wait_cap_s=CLAUDE_P_BRIDGE_IO_WAIT_CAP_S,
         watchdog_interval_s=CLAUDE_P_BRIDGE_WATCHDOG_INTERVAL_S,
+        first_token_timeout_s=CLAUDE_P_BRIDGE_FIRST_TOKEN_TIMEOUT_S,
     )
     controller.register_pgid(pid)
     return controller
