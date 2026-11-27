@@ -225,7 +225,7 @@ class HubP12CancelSeam:
     ) -> SlotReleaseDecision:
         """Gate slot release on confirmed-dead PGID ONLY when flag #4 on AND pgid registered."""
         pgid_ok = isinstance(pgid, int) and pgid > 1
-        dead = (self._probe.probe_group(pgid) is GroupProbeStatus.GONE_ESRCH) if pgid_ok else True
+        dead = (self._probe.probe_group(pgid) is GroupProbeStatus.GONE_ESRCH) if isinstance(pgid, int) and pgid > 1 else True
         decision = decide_slot_release(self.nondetached_cancel_enabled(), pgid_ok, dead)
         if decision is SlotReleaseDecision.RELEASE_IMMEDIATE:
             release_fn()
@@ -243,6 +243,13 @@ class HubP12CancelSeam:
         self._get_reaper().register_and_cancel(key, cb, reap_leader=reap_leader)
         return decision
 
+    def snapshot_counts(self) -> dict[str, int]:
+        """Thread-safe P1.2 counters for /v1/observability; no lazy reaper start."""
+        with self._lock:
+            if self._reaper is None:
+                return {"active": 0, "quarantined": 0, "bound": 128}
+            return self._reaper.snapshot_counts()
+
     def shutdown(self, timeout_s: float = 1.0) -> None:
         if self._reaper is not None:
             self._reaper.shutdown(timeout_s=timeout_s)
@@ -258,7 +265,7 @@ def get_hub_p12_seam() -> HubP12CancelSeam:
         return s
     with _HUB_P12_LOCK:
         if _HUB_P12_SEAM is None:
-            _HUB_P12_SEAM = HubP12CancelSeam()
+            _HUB_P12_SEAM = HubP12CancelSeam()  # pyright: ignore[reportConstantRedefinition]
         return _HUB_P12_SEAM
 
 
@@ -267,4 +274,4 @@ def reset_hub_p12_seam_for_tests() -> None:
     with _HUB_P12_LOCK:
         if _HUB_P12_SEAM is not None:
             _HUB_P12_SEAM.shutdown()
-        _HUB_P12_SEAM = None
+        _HUB_P12_SEAM = None  # pyright: ignore[reportConstantRedefinition]

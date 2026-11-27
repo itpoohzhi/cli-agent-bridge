@@ -82,6 +82,7 @@ for _p in (str(_BRIDGE_DIR), str(_REPO_ROOT)):
 import zen_catalog as zc  # noqa: E402
 from core.chat_key import resolve_chat_key  # noqa: E402
 from core.log_rotation_adapters import emit_service_log as _emit_rotated_log  # noqa: E402
+from core.http_server_error import handle_accept_error  # noqa: E402
 from core.proc_groups import live_proc_groups  # noqa: E402
 from zen_bridge.adapters.zero_canon_runtime import apply_serve_zero_canon_env, apply_zero_canon_env, spawn_registered, zero_canon_scope  # noqa: E402
 from zen_bridge.p12_cleanup_seam import capture_proc_identity, get_zen_p12_seam as _zen_p12_seam, shutdown_zen_p12_seam  # noqa: E402
@@ -5536,9 +5537,6 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, format: str, *args: Any) -> None:
         _log("http " + (format % args))
 
-    def handle_error(self, request: Any, client_address: Any) -> None:
-        _log(f"http accept error from {client_address}")
-
     _xs: dict[str, Any] | None = None
     _serve_stream_usage: dict[str, int] | None = None
     _first_visible: threading.Event | None = None
@@ -8361,6 +8359,8 @@ class Server(ThreadingHTTPServer):
     allow_reuse_address = True
     request_queue_size = 64
 
+    def handle_error(self, request: Any, client_address: Any) -> None:
+        handle_accept_error(client_address, _log, lambda: ThreadingHTTPServer.handle_error(self, request, client_address), DYNAMIC_CONFIG_PATH)
     def __init__(
         self,
         server_address: Any,

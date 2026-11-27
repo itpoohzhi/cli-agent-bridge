@@ -90,6 +90,9 @@ from tools.receipt_schema import (  # noqa: E402,F401
     validate_receipt_components,
 )
 from core.http_accept import AdmissionBudget, ConnectionTracker, apply_connection_phase_timeout, configure_accepted_socket, emit_legacy_knob_warning, send_overloaded_503  # noqa: E402
+from core.http_server_error import handle_accept_error  # noqa: E402
+from core.observability_endpoint import serve_observability_get  # noqa: E402
+from core.p12_hub_cancel_seam import get_hub_p12_seam  # noqa: E402
 from adapters import ADAPTER_KINDS  # noqa: E402  - реестр видов адаптеров задан в коде
 from adapters.passthrough_adapter import (  # noqa: E402
     ClientGone,
@@ -5429,9 +5432,6 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
     def log_message(self, fmt: str, *args: Any) -> None:
         _log("http " + (fmt % args))
 
-    def handle_error(self, request: Any, client_address: Any) -> None:
-        _log(f"http accept error from {client_address}")
-
     def _client_tag(self) -> str:
         return f"{self.client_address[0]}:{self.client_address[1]}"
 
@@ -6702,6 +6702,8 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
             None  # GET-ответы (_send) в телеметрию запросов не попадают
         )
         path = self.path.split("?", 1)[0]
+        if path == "/v1/observability":
+            return serve_observability_get(self, get_hub_p12_seam())
         if path in ("/health", "/v1/health"):
             # Контракт из семи ключей прежний (расширять запрещено); ok = AND по обязательным
             # бэкендам (droid: невалидный receipt = spawn невозможен -> ok=false, RW-015),
@@ -6750,16 +6752,7 @@ class Handler(TelemetryHooksMixin, BaseHTTPRequestHandler):
             return self._telemetry_serve_get()
         if path == "/v1/quarantine":
             if not _auth_ok(self):
-                self._send(
-                    401,
-                    {
-                        "error": {
-                            "message": "unauthorized",
-                            "type": "auth_error",
-                            "code": 401,
-                        }
-                    },
-                )
+                self._send(401, {"error": {"message": "unauthorized", "type": "auth_error", "code": 401}})
                 return
             catalog_models = []
             models_source = BACKENDS.models() if hasattr(BACKENDS, "models") else []
@@ -7649,6 +7642,9 @@ class Server(ThreadingHTTPServer):
         sock, addr = super().get_request()
         configure_accepted_socket(sock)
         return sock, addr
+
+    def handle_error(self, request: Any, client_address: Any) -> None:
+        handle_accept_error(client_address, _log, lambda: ThreadingHTTPServer.handle_error(self, request, client_address), client_gone_cls=ClientGone)
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         self._listener_close_lock = threading.Lock()
