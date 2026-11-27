@@ -150,6 +150,9 @@ def iter_run_stdout_lines(run: object) -> Iterator[str]:
                 yield raw.decode("utf-8", "replace").strip()
         return
     stop_watch = cast(threading.Event, getattr(run, "_stop_watch"))
+    if lease.prefetched_init_line:
+        init_line, lease.prefetched_init_line = lease.prefetched_init_line, ""
+        yield init_line
     while not (stop_watch.is_set() or bool(getattr(run, "capacity_exhausted", ""))):
         kind, tagged = lease.handle.read_stdout_line_outcome(timeout_s=lease.pump_tick_s)
         if kind == _STDIO_LINE and tagged is not None:
@@ -161,20 +164,22 @@ def iter_run_stdout_lines(run: object) -> Iterator[str]:
 def finish_run_pump_drain(run: object, ctx: RunPumpDrainContext) -> int:
     """Завершить окно SQLite-drain и вычислить код возврата хода (persistent или cold)."""
     lease = _lease_of(run)
-    tail = cast(object, getattr(run, "_tail"))
-    proc_done = cast(threading.Event, getattr(run, "_proc_done"))
+    tail, proc_done = cast(object, getattr(run, "_tail")), cast(threading.Event, getattr(run, "_proc_done"))
     join_src = cast(Callable[..., None], getattr(run, "_join_source"))
     if lease is not None:
-        t_exit = time.monotonic()
-        drain_w = min(lease.drain_window_s, ctx.drain_max_s)
+        t_exit, drain_w = time.monotonic(), min(lease.drain_window_s, ctx.drain_max_s)
         setattr(run, "_drain_t0", t_exit)
-        setattr(tail, "drain_deadline", t_exit + drain_w)
+        for k, v in (
+            ("drain_deadline", t_exit + drain_w),
+            ("fast_complete_drain", lease.fast_drain_enabled),
+            ("fast_drain_min_s", lease.fast_drain_min_s),
+        ):
+            setattr(tail, k, v)
         proc_done.set()
         join_src(t_exit, drain_window_s=drain_w)
         turn_ok = bool(getattr(run, "_persistent_turn_ok", False))
         if not turn_ok:
-            tail_err = lease.handle.stderr_tail().strip()
-            if tail_err:
+            if tail_err := lease.handle.stderr_tail().strip():
                 cast(list[str], getattr(run, "err_box")).append(tail_err)
         return 0 if (ctx.result_ev and turn_ok) else 1
     try:
@@ -183,10 +188,7 @@ def finish_run_pump_drain(run: object, ctx: RunPumpDrainContext) -> int:
         rc = None
     time.sleep(0.05)
     t_exit = time.monotonic()
-    drain_w = min(
-        persistent_worker_settings(config_path=ctx.config_path).drain_window_s,
-        ctx.drain_max_s,
-    )
+    drain_w = min(persistent_worker_settings(config_path=ctx.config_path).drain_window_s, ctx.drain_max_s)
     setattr(run, "_drain_t0", t_exit)
     setattr(tail, "drain_deadline", t_exit + drain_w)
     proc_done.set()

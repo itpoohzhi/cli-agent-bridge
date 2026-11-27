@@ -8,36 +8,19 @@ import threading
 from typing import final
 
 from core.stdio_resident.config import StdioPoolConfig
-from core.stdio_resident.process_io import (
-    EOF,
-    LINE,
-    ResidentProcessHandle,
-    StdioIoError,
-    StdioWriteError,
-)
-from core.stdio_resident.process_pool import (
-    PoolClosedError,
-    ResidentProcessPool,
-    SlotLeaseTimeoutError,
-)
+from core.stdio_resident.process_io import EOF, LINE, ResidentProcessHandle, StdioIoError, StdioWriteError
+from core.stdio_resident.process_pool import PoolClosedError, ResidentProcessPool, SlotLeaseTimeoutError
 from core.stdio_resident.types import SlotAffinityKey, SlotState
 
+from .persistent_standby_pool import AgyStandbyManager, StandbyProfileKey, standby_argv_digest
 from .persistent_worker_config import (
-    PersistentAcquireRequest,
-    PersistentLease,
-    PersistentReleaseParams,
-    PersistentWorkerSettings,
-    compute_env_digest,
+    PersistentAcquireRequest, PersistentLease, PersistentReleaseParams,
+    PersistentWorkerSettings, compute_env_digest,
 )
 
 __all__ = [
-    "AgyPersistentWorkerPool",
-    "PersistentAcquireRequest",
-    "PersistentLease",
-    "PersistentReleaseParams",
-    "StdioIoError",
-    "StdioWriteError",
-    "compute_env_digest",
+    "AgyPersistentWorkerPool", "PersistentAcquireRequest", "PersistentLease",
+    "PersistentReleaseParams", "StdioIoError", "StdioWriteError", "compute_env_digest",
 ]
 
 _LOGGER = logging.getLogger(__name__)
@@ -58,6 +41,7 @@ class AgyPersistentWorkerPool:
         self._pool_active: dict[int, int] = {}
         self._slot_turns: dict[str, int] = {}
         self._cid_to_chat_key: collections.OrderedDict[str, str] = collections.OrderedDict()
+        self._standby: AgyStandbyManager = AgyStandbyManager()
         self._hits = self._misses = self._fallbacks = 0
         self._teardowns_error = self._teardowns_cancel = self._desync_evictions = 0
 
@@ -78,6 +62,7 @@ class AgyPersistentWorkerPool:
         old = self._pool
         self._pool = None
         self._pool_sig = None
+        self._standby.clear(drop_aliases=True)
         if old is None:
             return None
         pid_key = id(old)
@@ -147,12 +132,14 @@ class AgyPersistentWorkerPool:
         return kind in (LINE, EOF)
 
     def _evict_desynced(
-        self, pool: ResidentProcessPool, slot_id: str, lease_id: str, cid: str
+        self, pool: ResidentProcessPool, slot_id: str, lease_id: str, cid: str, chat_key: str = ""
     ) -> None:
         try:
             _ = pool.release(slot_id, success=False, cancel=True, lease_id=lease_id)
         except _SHUTDOWN_ERRORS as exc:
             _LOGGER.warning("persistent desync eviction release error: %s", exc)
+        if chat_key:
+            self._standby.drop_alias(chat_key)
         with self._lock:
             _ = self._slot_turns.pop(slot_id, None)
             if cid:
@@ -160,52 +147,65 @@ class AgyPersistentWorkerPool:
             self._desync_evictions += 1
             self._fallbacks += 1
 
-    def acquire(
-        self, req: PersistentAcquireRequest, cfg: PersistentWorkerSettings
-    ) -> PersistentLease | None:
-        """Арендовать живой слот или вернуть None для прозрачного fallback на cold-spawn."""
+    def acquire(self, req: PersistentAcquireRequest, cfg: PersistentWorkerSettings) -> PersistentLease | None:
+        """Арендовать живой слот (включая standby на turn 0) или вернуть None для cold-spawn."""
         pool = self._ensure_pool(cfg)
         if pool is None:
             return None
+        if not cfg.standby_enabled:
+            self._standby.clear(drop_aliases=False, pool=pool)
         with self._lock:
             eff_chat_key = self._resolve_chat_key_locked(req.chat_key, req.cid)
         if not eff_chat_key:
             return None
+        profile_key: StandbyProfileKey | None = None
+        if cfg.standby_enabled and not req.cid and req.review_profile != "zero-canon":
+            if (ad := standby_argv_digest(req.argv_builder())) is not None:
+                profile_key = StandbyProfileKey(req.model, req.effort, req.cwd, req.env_digest, req.review_profile, ad)
+        standby = self._standby.claim_ready(profile_key, pool, cfg) if (profile_key and not self._standby.has_alias(eff_chat_key)) else None
+        if standby is not None:
+            self._standby.bind_alias(eff_chat_key, standby.standby_chat_key, cfg.max_slots)
         affinity = SlotAffinityKey(
-            owner_hash=_OWNER_HASH, chat_key=eff_chat_key, backend_id=_BACKEND_ID,
-            model=req.model, effort=req.effort, cwd_norm=req.cwd,
+            owner_hash=_OWNER_HASH, chat_key=self._standby.resolve_alias(eff_chat_key),
+            backend_id=_BACKEND_ID, model=req.model, effort=req.effort, cwd_norm=req.cwd,
             env_digest=req.env_digest, review_profile=req.review_profile,
         )
         try:
-            entry = pool.acquire(
-                affinity, argv_builder=req.argv_builder, cwd=req.cwd, env=req.env, is_ephemeral=False
-            )
+            entry = pool.acquire(affinity, argv_builder=req.argv_builder, cwd=req.cwd, env=req.env, is_ephemeral=False)
         except (SlotLeaseTimeoutError, PoolClosedError, OSError, StdioIoError):
+            if standby is not None:
+                self._standby.drop_alias(eff_chat_key)
+                self._standby.close_slot(pool, standby)
             with self._lock:
                 self._fallbacks += 1
             return None
         lease_id = entry.lease_id or ""
+        standby_matched = standby is not None and entry.slot_id == standby.slot_id and entry.handle.generation == standby.generation
+        prefetched_init = standby.init_line if (standby_matched and standby is not None) else ""
+        if standby is not None and not standby_matched:
+            self._standby.close_slot(pool, standby)
         with self._lock:
             turns_before = self._slot_turns.get(entry.slot_id, 0)
             reused = turns_before > 0 or entry.handle.generation > 0
         if reused and self._has_stale_stdout_or_eof(entry.handle):
-            self._evict_desynced(pool, entry.slot_id, lease_id, req.cid)
+            self._evict_desynced(pool, entry.slot_id, lease_id, req.cid, eff_chat_key)
             return None
         with self._lock:
-            pid_key = id(pool)
-            self._pool_active[pid_key] = self._pool_active.get(pid_key, 0) + 1
+            self._pool_active[id(pool)] = self._pool_active.get(id(pool), 0) + 1
             self._hits += int(reused)
             self._misses += int(not reused)
+        if profile_key is not None:
+            self._standby.schedule_prewarm(profile_key, pool, req.argv_builder, req.cwd, req.env, cfg)
         return PersistentLease(
             pool=pool, slot_id=entry.slot_id, lease_id=lease_id, handle=entry.handle,
             chat_key=eff_chat_key, reused=reused, turns_before=turns_before,
             max_turns=cfg.max_turns, pump_tick_s=cfg.pump_tick_s,
-            drain_window_s=cfg.persistent_drain_window_s,
+            drain_window_s=cfg.persistent_drain_window_s, prefetched_init_line=prefetched_init,
+            fast_drain_enabled=cfg.fast_drain_enabled, fast_drain_min_s=cfg.fast_drain_min_s,
+            standby_claimed=standby_matched,
         )
 
-    def _decide_release_locked(
-        self, lease: PersistentLease, params: PersistentReleaseParams
-    ) -> bool | None:
+    def _decide_release_locked(self, lease: PersistentLease, params: PersistentReleaseParams) -> bool | None:
         if lease.released:
             return None
         lease.released = True
@@ -220,6 +220,7 @@ class AgyPersistentWorkerPool:
             self._record_cid_locked(params.cid, lease.chat_key, params.max_slots)
             return True
         _ = self._slot_turns.pop(lease.slot_id, None)
+        self._standby.drop_alias(lease.chat_key)
         if params.cid and (params.cancel or not params.success):
             _ = self._cid_to_chat_key.pop(params.cid, None)
         self._teardowns_cancel += int(params.cancel)
@@ -284,14 +285,12 @@ class AgyPersistentWorkerPool:
         """Завершить активный и все отцепленные пулы при остановке моста."""
         pools: list[ResidentProcessPool] = []
         with self._lock:
+            self._standby.clear(drop_aliases=True)
             if self._pool is not None:
                 pools.append(self._pool)
-                self._pool = None
-                self._pool_sig = None
+                self._pool = self._pool_sig = None
             pools.extend(self._detached_pools.values())
-            self._detached_pools.clear()
-            self._pool_active.clear()
-            self._slot_turns.clear()
-            self._cid_to_chat_key.clear()
+            for store in (self._detached_pools, self._pool_active, self._slot_turns, self._cid_to_chat_key):
+                store.clear()
         for pool in pools:
             self._safe_shutdown_pool(pool, timeout_s=timeout_s)
