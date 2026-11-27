@@ -289,7 +289,7 @@ def resolve_run_chat_key(ctx: Mapping[str, object]) -> str:
         raw = "\x1f".join(str(p) for p in cast(tuple[object, ...] | list[object], sess_key))
         return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:32]
     if sess_key:
-        return hashlib.sha256(str(sess_key).encode("utf-8")).hexdigest()[:32]
+        return hashlib.sha256(str(cast(object, sess_key)).encode("utf-8")).hexdigest()[:32]
     exp_st = ctx.get("explicit_state")
     if exp_st is not None and bool(getattr(exp_st, "handled", False)):
         exp_key = str(cast(object, getattr(exp_st, "session_key", "")) or "")
