@@ -61,7 +61,7 @@ def start_run_process(run: object, ctx: RunSpawnContext) -> float:
         lease: PersistentLease | None = None
         if pw_cfg.enabled and ctx.add_dir is None:
             digest = compute_env_digest(
-                ctx.cli_mode, ctx.zero_canon, str(ctx.launch_env.get("HOME") or ""), ctx.settings_arg
+                ctx.cli_mode, ctx.zero_canon, str(ctx.launch_env.get("HOME") or ""), ctx.settings_arg, launch_env=ctx.launch_env
             )
             req = PersistentAcquireRequest(
                 chat_key=ctx.chat_key, cid=run_cid, model=ctx.model, effort=ctx.effort,

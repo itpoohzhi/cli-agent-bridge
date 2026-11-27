@@ -124,6 +124,7 @@ from agy_runtime.retry_budget import should_allow_retry_attempt  # noqa: E402 # 
 from agy_runtime.stream_relay import StreamRelay  # noqa: E402 # pyright: ignore[reportImplicitRelativeImport]
 from agy_runtime.arbiter_types import _StepState  # noqa: E402 # pyright: ignore[reportImplicitRelativeImport]
 from agy_runtime.content_arbiter import _ContentArbiter  # noqa: E402 # pyright: ignore[reportImplicitRelativeImport]
+from agy_runtime.drain_fast_path_adapter import should_drain_fast_exit  # noqa: E402 # pyright: ignore[reportImplicitRelativeImport]
 from agy_runtime.media_normalizer import (  # noqa: E402 # pyright: ignore[reportImplicitRelativeImport]
     _IMAGE_OMITTED, _lower_keys, _classify_part, _part_text, _content_items,
     _image_part_canonical, _media_part_counts, _collect_image_parts_universal,
@@ -4958,13 +4959,7 @@ class _TranscriptTail(InterruptionTailState):
         )
 
     def _drain_post_eof(self) -> None:
-        """Процесс вышел: дочитать источники в окне DRAIN_WINDOW_S (≤ DRAIN_MAX_S).
-
-        Эвристического раннего выхода нет: досрочно после DRAIN_MIN_S — только по
-        авторитетному маркеру конца хода (END_TURN/TURN_COMPLETE, exit=end_turn)
-        или по stop_event (exit=stop). Финальный PLANNER_RESPONSE без END_TURN/
-        TURN_COMPLETE выдерживает полное окно DRAIN_WINDOW_S (exit=window).
-        """
+        """Процесс вышел: дочитать источники в окне DRAIN_WINDOW_S (≤ DRAIN_MAX_S); ранний выход end_turn/stop/fast_complete/fast_clean (AD-002)."""
         started = time.monotonic()
         deadline = min(self.drain_deadline if self.drain_deadline > 0 else started + DRAIN_WINDOW_S, started + DRAIN_MAX_S)
         earliest, emitted_before, exit_kind = started + DRAIN_MIN_S, self.emitted, "window"
@@ -4978,6 +4973,9 @@ class _TranscriptTail(InterruptionTailState):
             if self.sqlite_active:
                 _ = self._poll_sqlite()
             now = time.monotonic()
+            if should_drain_fast_exit(self, DYNAMIC_CONFIG_PATH):
+                exit_kind = "fast_clean"
+                break
             if now >= earliest and self.end_marker:
                 exit_kind = "end_turn"
                 break
