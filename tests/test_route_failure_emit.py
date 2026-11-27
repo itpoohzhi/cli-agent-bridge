@@ -270,10 +270,11 @@ SINK_CASES = [  # (last_error, refusals, cb_retry_after, status, error_type)
         ("write", ConnectionResetError("reset")),
     ],
 )
-@pytest.mark.parametrize(("err", "refusals", "cb", "status", "etype"), SINK_CASES)
+@pytest.mark.parametrize("case", SINK_CASES)
 def test_sink_failure_still_records_once(
-    op: str, exc: Exception, err: Any, refusals: Any, cb: Any, status: int, etype: str
+    op: str, exc: Exception, case: tuple[Any, Any, Any, int, str]
 ) -> None:
+    err, refusals, cb, status, etype = case
     route = make_route(Wire(fail=(op, exc)))
     with pytest.raises(type(exc)):
         emit_route_failure(route, err, refusals, [], cb)
