@@ -66,12 +66,13 @@ def test_cli_refusal_outside_failover_records() -> None:
 
 def test_cli_refusal_without_attempt_attr_records() -> None:
     handler, logs = make_handler(), []
-    del handler._transport_attempt
+    del handler._transport_attempt, handler._response_status
     run_in_except(
         RouteRefusal(503),
         lambda: finalize_cli_serve(handler, rft.time.monotonic(), logs.append),
     )
     assert handler.calls == [{"status_code": 503, "error_type": "RouteRefusal"}]
+    assert handler._response_status == 503
 
 
 def _finalize_refusal(handler: Any, log_fn: Any) -> None:
