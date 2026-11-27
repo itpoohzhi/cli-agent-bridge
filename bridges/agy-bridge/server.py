@@ -145,6 +145,7 @@ from agy_runtime import (  # noqa: E402
     long_session_config as _lsc, midstream_resilience, slot_and_session, sqlite_ro_pool as _ro_pool,
     sqlite_tail_lifecycle, sse_body_runner, sse_stream_helpers, tool_turn_helpers, turn_usage_finalize as _u_fin, zc_static_cwd, zero_canon_profile,
 )
+from agy_runtime.drain_policy import run_post_eof_drain  # noqa: E402
 from agy_runtime.explicit_turn_commit import abort_explicit_turn_safe, finalize_deferred_explicit_turn  # noqa: E402
 from agy_runtime.hygiene_runtime import HygieneRuntime, ManagedSqliteRoPool  # noqa: E402
 from agy_runtime.orphan_coordinator import CoordinatorDecision  # noqa: E402
@@ -4294,6 +4295,8 @@ class _TranscriptTail(InterruptionTailState):
         self.dead: bool = False
         self.end_marker: bool = False
         self.final_planner: bool = False
+        self._plain_final: bool = False  # последний PLANNER_RESPONSE: текст без tool_calls
+        self._last_byte_at: float = 0.0
         self.drain_deadline: float = 0.0
         self.drain_outcome: str = ""
         self.last_poll: str = ""
@@ -4469,6 +4472,7 @@ class _TranscriptTail(InterruptionTailState):
         # перечитывается старая история: активностью считаются только записи хода.
         self._in_rewrite = rewritten
         if chunk and not rewritten:
+            self._last_byte_at = time.monotonic()
             self._note_activity()
         while b"\n" in self._buf:
             line, self._buf = self._buf.split(b"\n", 1)
@@ -4620,6 +4624,7 @@ class _TranscriptTail(InterruptionTailState):
         content = rec.get("content")
         emit_content = self.emit_content
         has_tools = bool(rec.get("tool_calls"))
+        self._plain_final = not has_tools and isinstance(content, str) and bool(content.strip())
         if has_tools and idx is not None:
             tool_steps = getattr(self, "_tool_step_indices", None)
             if tool_steps is None:
@@ -4959,42 +4964,13 @@ class _TranscriptTail(InterruptionTailState):
     def _drain_post_eof(self) -> None:
         """Процесс вышел: дочитать источники в окне DRAIN_WINDOW_S (≤ DRAIN_MAX_S).
 
-        Эвристического раннего выхода нет: досрочно после DRAIN_MIN_S — только по
-        авторитетному маркеру конца хода (END_TURN/TURN_COMPLETE, exit=end_turn)
-        или по stop_event (exit=stop). Финальный PLANNER_RESPONSE без END_TURN/
-        TURN_COMPLETE выдерживает полное окно DRAIN_WINDOW_S (exit=window).
+        Досрочно: END_TURN/TURN_COMPLETE (exit=end_turn), stop_event (exit=stop) или
+        флаг-gated fast-exit (BRIDGE_AGY_DRAIN_EARLY_EXIT_ENABLED, exit=final_planner_fast_exit).
         """
-        started = time.monotonic()
-        deadline = (
-            self.drain_deadline if self.drain_deadline > 0 else started + DRAIN_WINDOW_S
-        )
-        deadline = min(deadline, started + DRAIN_MAX_S)
-        earliest = started + DRAIN_MIN_S
-        emitted_before = self.emitted
-        exit_kind = "window"
-        while True:
-            if self.stop_event.is_set():
-                exit_kind = "stop"
-                break
-            self._read_transcript()
-            if self.sqlite_active:
-                _ = self._poll_sqlite()
-            now = time.monotonic()
-            if now >= earliest and self.end_marker:
-                exit_kind = "end_turn"
-                break
-            if now >= deadline:
-                break
-            time.sleep(min(DRAIN_POLL_STEP_S, max(0.0, deadline - now)))
-        pending = self._pending_steps()
-        complete = pending == 0 and (self.final_planner or self.end_marker)
-        self.drain_outcome = "complete" if complete else "window_complete"
-        if exit_kind != "stop" and pending > 0:
-            _count_drain_deadline()
-        ms = int((time.monotonic() - started) * 1000)
-        _log(
-            f"drain cid={self._cid8()} ms={ms} emitted={self.emitted - emitted_before} "
-            f"outcome={self.drain_outcome} pending_steps={pending} exit={exit_kind} {getattr(self.run_ref, 'tag', '')}"
+        run_post_eof_drain(
+            self, drain_window_s=DRAIN_WINDOW_S, drain_max_s=DRAIN_MAX_S, drain_min_s=DRAIN_MIN_S,
+            poll_step_s=DRAIN_POLL_STEP_S, on_deadline_pending=_count_drain_deadline, log_fn=_log,
+            fast_drain_enabled=_lsc.read_bool_setting("BRIDGE_AGY_DRAIN_EARLY_EXIT_ENABLED", "BRIDGE_AGY_DRAIN_EARLY_EXIT_ENABLED", False),
         )
 
 

@@ -121,6 +121,7 @@ class PolicyConfig:
     in_flight_max_s: float = 960.0
     unconfirmed_max_s: float = 30.0
     supersede_max_per_min: int = 3
+    allow_keyed_single_turn: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -247,15 +248,14 @@ def _check_pre(req: TurnPolicyInput, cfg: PolicyConfig) -> TurnDecision | None:
 def _ready(slot: SlotSnapshot, req: TurnPolicyInput, cfg: PolicyConfig) -> TurnDecision:
     if req.client_cid and req.client_cid != slot.cid:
         return TurnDecision(_A.COLD_REJECT, _R.UNOWNED_EXPLICIT_CID, False)
-    if req.history.assistant_count < 1:
+    if req.history.assistant_count < 1 and not cfg.allow_keyed_single_turn:
         return TurnDecision(_A.COLD_REJECT, _R.NO_ASSISTANT_HISTORY, False)
     h, ok = req.history, req.history.message_count > slot.stored_len
     if ok and h.assistant_count >= slot.stored_asst and slot.stored_asst >= 1:
         if hmac.compare_digest(h.prefix_digest, slot.stored_digest):
             return TurnDecision(_A.RESUME, _R.APPEND_ONLY_MATCH, True, cid=slot.cid)
     if req.recent_supersedes < cfg.supersede_max_per_min:
-        g, sd, sup = slot.gen, slot.stored_digest, _R.HISTORY_DIVERGED_SUPERSEDE
-        return TurnDecision(_A.COLD_SEED, sup, True, "", True, g, sd)
+        return TurnDecision(_A.COLD_SEED, _R.HISTORY_DIVERGED_SUPERSEDE, True, "", True, slot.gen, slot.stored_digest)
     return TurnDecision(_A.COLD_REJECT, _R.HISTORY_DIVERGED_RATE_LIMITED, False)
 
 

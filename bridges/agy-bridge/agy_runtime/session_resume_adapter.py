@@ -19,6 +19,8 @@ from core.hot_session_policy import (
     SlotState, TurnPolicyInput, build_session_key, compute_history_fingerprints,
     compute_owner_hmac, decide_turn, encode_length_prefixed,
 )
+from core.session_plane.directive_codec import DIRECTIVE_HEADER, verify_directive
+from core.session_plane.zc_env_guard import load_or_create_directive_key
 
 _LOOPBACK_HOSTS = frozenset(("127.0.0.1", "::1", "::ffff:127.0.0.1"))
 _CID_RE = re.compile(r"[0-9A-Fa-f-]{8,64}")
@@ -35,6 +37,8 @@ class RuntimeFlags:
     canonical_tools_enabled: bool = False
     epoch: int = 0
     policy: PolicyConfig = PolicyConfig()
+    keyed_single_turn_enabled: bool = False
+    signed_directive_enabled: bool = False
 @dataclass(frozen=True, slots=True)
 class RouteClassification:
     handled: bool
@@ -84,13 +88,28 @@ def read_runtime_flags(config_path: Path | None = None) -> RuntimeFlags:
     zp = rb("bridge_hot_zc_plain_enabled", "BRIDGE_HOT_ZC_PLAIN_ENABLED", False, config_path=config_path)
     za = rb("bridge_hot_zc_agentic_enabled", "BRIDGE_HOT_ZC_AGENTIC_ENABLED", False, config_path=config_path)
     cn = rb("bridge_hot_canonical_tools_enabled", "BRIDGE_HOT_CANONICAL_TOOLS_ENABLED", False, config_path=config_path)
+    ks = rb("BRIDGE_ZERO_CANON_KEYED_RESIDENT_ENABLED", "BRIDGE_ZERO_CANON_KEYED_RESIDENT_ENABLED", False, config_path=config_path)
+    sd = rb("BRIDGE_AGY_SIGNED_DIRECTIVE_ENABLED", "BRIDGE_AGY_SIGNED_DIRECTIVE_ENABLED", False, config_path=config_path)
     epoch = read_int_setting("bridge_hot_epoch", "BRIDGE_HOT_EPOCH", 0, (0, 1_000_000), config_path=config_path)
-    kw: dict[str, int | float | bool] = {"enabled": any((ep, zp, za))}
+    kw: dict[str, int | float | bool] = {"enabled": any((ep, zp, za)), "allow_keyed_single_turn": ks}
     for k, env, d, b in _INT_BOUNDS:
         kw[k] = read_int_setting(f"bridge_hot_{k}", env, d, b, config_path=config_path)
     for k, env, d, b in _FLT_BOUNDS:
         kw[k] = read_float_setting(f"bridge_hot_{k}", env, d, b, config_path=config_path)
-    return RuntimeFlags(ep, zp, za, cn, epoch, PolicyConfig(**cast("dict[str, object]", kw)))  # type: ignore[arg-type]
+    return RuntimeFlags(ep, zp, za, cn, epoch, PolicyConfig(**cast("dict[str, object]", kw)), ks, sd)  # type: ignore[arg-type]
+def _directive_gate(headers: Mapping[str, object] | None, flags: RuntimeFlags, epoch: int, now: float) -> ExplicitTurnState | None:
+    """Подписанная директива (fail-closed): плохая подпись/TTL -> directive_hmac_reject; EPHEMERAL -> холодный ход."""
+    raw = _header_str(headers, DIRECTIVE_HEADER).strip() if flags.signed_directive_enabled else ""
+    if not raw:
+        return None
+    try:
+        payload, _ = verify_directive(raw, load_or_create_directive_key(), now_s=now)
+    except (OSError, ValueError):
+        payload = None
+    if payload is not None and payload.process_directive != "EPHEMERAL_KILL_AFTER_TURN":
+        return None
+    reason = "directive_hmac_reject" if payload is None else "directive_ephemeral"
+    return ExplicitTurnState(handled=True, sort_keys=flags.canonical_tools_enabled, force_cold=True, allow_commit=False, decision_reason=reason, epoch=epoch)
 def _header_str(headers: Mapping[str, object] | None, name: str) -> str:
     if headers is None:
         return ""
@@ -215,6 +234,8 @@ class ExplicitResumeAdapter:
         route = classify_route(http_meta.profile_tag, tools_cnt, explicit_cid, "" if payload_meta.cwd_invalid else payload_meta.cwd, flags)
         if not route.handled:
             return ExplicitTurnState(handled=False)
+        if (gated := _directive_gate(http_meta.headers, flags, epoch, now)) is not None:
+            return gated
         val_c, cid_bad = _cid_value_bad(http_meta.raw_cid)
         if any((payload_meta.force_cold, cid_bad, all((http_meta.profile_tag == "standard", payload_meta.cwd_invalid)))):
             return ExplicitTurnState(handled=True, sort_keys=flags.canonical_tools_enabled, force_cold=True, allow_commit=False, decision_reason="force_cold", epoch=epoch)
