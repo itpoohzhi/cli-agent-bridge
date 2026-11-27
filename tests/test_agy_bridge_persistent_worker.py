@@ -12,6 +12,7 @@ import threading
 import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -591,6 +592,28 @@ class TestRunPersistentIntegration(unittest.TestCase):
             resolve_run_chat_key({"sess_key": [], "explicit_state": None, "chat_id": "chat-99"}),
             "chat-99",
         )
+        # F-002: пустые/None/пробельные элементы в кортеже/строке уходят в fallback
+        self.assertEqual(
+            resolve_run_chat_key({"sess_key": ("", ""), "explicit_state": _Exp(), "chat_id": "cid"}),
+            "exp-key-42",
+        )
+        self.assertEqual(
+            resolve_run_chat_key({"sess_key": (None, "   "), "explicit_state": None, "chat_id": "chat-99"}),
+            "chat-99",
+        )
+        self.assertEqual(
+            resolve_run_chat_key({"sess_key": "   ", "explicit_state": _Exp(), "chat_id": "cid"}),
+            "exp-key-42",
+        )
+        # F-004: инъективное JSON-кодирование — без коллизий разделителя и скаляр vs кортеж
+        self.assertNotEqual(
+            resolve_run_chat_key({"sess_key": ("a\x1fb", "c")}),
+            resolve_run_chat_key({"sess_key": ("a", "b\x1fc")}),
+        )
+        self.assertNotEqual(
+            resolve_run_chat_key({"sess_key": ("x",)}),
+            resolve_run_chat_key({"sess_key": "x"}),
+        )
         self.assertEqual(
             resolve_run_chat_key({"sess_key": None, "explicit_state": None, "chat_id": "chat-99"}),
             "chat-99",
@@ -674,6 +697,110 @@ class TestRunPersistentIntegration(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 start_run_process(_DummyRun(), ctx)
         self.assertEqual(released, ["released"])
+
+    def test_persistent_run_skips_p12_pgid_bind_reaper_and_quarantine(self) -> None:
+        """F-001: реальный Handler._run_once_impl не отдаёт persistent PID в job.pgid, bind_reaper и p12."""
+        srv = _load_agy_server()
+        with tempfile.TemporaryDirectory() as td:
+            td_path = Path(td)
+            launcher = _write_fake_launcher(td_path)
+            dyn_on = td_path / "dyn_on.json"
+            dyn_on.write_text(
+                json.dumps({"BRIDGE_AGY_PERSISTENT_WORKER_ENABLED": True, "persistent_drain_window_s": 0.02}),
+                encoding="utf-8",
+            )
+            dyn_off = td_path / "dyn_off.json"
+            dyn_off.write_text(json.dumps({"BRIDGE_AGY_PERSISTENT_WORKER_ENABLED": False}), encoding="utf-8")
+            srv._PERSISTENT_POOL.shutdown()
+
+            def _run_through_handler(cfg_path: Path) -> tuple[object, list[tuple[int, object]], list[object], list[object], list[object]]:
+                bind_reaper_calls: list[tuple[int, object]] = []
+                bind_cancel_calls: list[object] = []
+                release_slot_runs: list[object] = []
+                capture_calls: list[object] = []
+                fake_job = SimpleNamespace(pgid=0, cancelled=threading.Event())
+
+                class _FakeHygiene:
+                    def acquire(self, *_a: object, **_kw: object) -> object:
+                        return SimpleNamespace(admitted=True, ticket_id="t-1")
+
+                    def bind_reaper(self, pgid: int, fn: object) -> None:
+                        bind_reaper_calls.append((pgid, fn))
+
+                    def release(self, *_a: object, **_kw: object) -> None:
+                        return None
+
+                class _FakeP12:
+                    def release_slot_after_run(self, release_fn: object, run: object, _tid: str) -> bool:
+                        release_slot_runs.append(run)
+                        if callable(release_fn):
+                            release_fn()
+                        return True
+
+                class _FakeRegistry:
+                    def bind_cancel(self, _job: object, fn: object) -> None:
+                        bind_cancel_calls.append(fn)
+
+                handler = object.__new__(srv.Handler)
+                handler._registry_job = fake_job
+                handler._acquire_slot = lambda _ka: ""
+                handler._execute = lambda run, *_a, **_kw: (
+                    [None for _ in iter(lambda: run.q.get(timeout=5.0)[0], "done")]
+                    and {"state": "done", "text": "ok", "rc": 0}
+                ) or {"state": "done", "text": "ok", "rc": 0}
+                handler._attach_resolved_usage = lambda *_a, **_kw: None
+                handler._log_done = lambda *_a, **_kw: None
+
+                ctx = {
+                    "model": "gemini-4-neon",
+                    "effort": "high",
+                    "effort_source": "request",
+                    "prompt": "hi-p12",
+                    "cwd": str(td_path),
+                    "tag": "r-p12",
+                    "tools_count": 0,
+                    "model_len": 1,
+                    "chat_id": "p12-chat",
+                }
+                with (
+                    mock.patch.object(srv, "DYNAMIC_CONFIG_PATH", cfg_path),
+                    mock.patch.object(srv, "_launcher", return_value=str(launcher)),
+                    mock.patch.object(srv, "_launch_env", return_value=os.environ.copy()),
+                    mock.patch.object(srv, "_hygiene_rt", return_value=_FakeHygiene()),
+                    mock.patch.object(srv, "_p12_seam", return_value=_FakeP12()),
+                    mock.patch.object(srv, "_JOB_REGISTRY", _FakeRegistry()),
+                    mock.patch.object(srv, "capture_run_identity", side_effect=lambda r: capture_calls.append(r)),
+                    mock.patch.object(srv._slots, "release"),
+                ):
+                    out = srv.Handler._run_once_impl(handler, ctx, lambda _t: None, lambda _e: None, lambda _r: None, lambda: None)
+                self.assertEqual(out["state"], "done")
+                return (fake_job, bind_reaper_calls, bind_cancel_calls, release_slot_runs, capture_calls)
+
+            try:
+                job_p, reapers_p, cancels_p, p12_runs_p, cap_p = _run_through_handler(dyn_on)
+                self.assertEqual(job_p.pgid, 0)
+                self.assertEqual(reapers_p, [])
+                self.assertEqual(cap_p, [])
+                self.assertEqual(len(cancels_p), 2)
+                self.assertTrue(callable(cancels_p[0]) and getattr(cancels_p[0], "__name__", "") == "cancel_persistent")
+                self.assertIsNone(cancels_p[1])
+                self.assertEqual(p12_runs_p, [None])
+                self.assertEqual(srv._PERSISTENT_POOL.health_snapshot(enabled=True)["slots"], 1)
+
+                # Ephemeral cold run MUST still register job.pgid, bind_reaper, capture_run_identity, and p12 release!
+                job_c, reapers_c, cancels_c, p12_runs_c, cap_c = _run_through_handler(dyn_off)
+                self.assertGreater(job_c.pgid, 0)
+                self.assertEqual(len(reapers_c), 2)
+                self.assertEqual(reapers_c[0][0], job_c.pgid)
+                self.assertTrue(callable(reapers_c[0][1]))
+                self.assertEqual(reapers_c[1], (job_c.pgid, None))
+                self.assertEqual(len(cap_c), 1)
+                self.assertEqual(len(p12_runs_c), 1)
+                self.assertIsNotNone(p12_runs_c[0])
+                self.assertEqual(len(cancels_c), 2)
+                self.assertIsNone(cancels_c[1])
+            finally:
+                srv._PERSISTENT_POOL.shutdown()
 
 
 if __name__ == "__main__":

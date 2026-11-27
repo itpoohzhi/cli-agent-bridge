@@ -7009,7 +7009,9 @@ class Handler(BaseHTTPRequestHandler):
                         chat_key=resolve_run_chat_key(ctx),
                     )
                     self._metric_run = run
-                    capture_run_identity(run)
+                    is_persistent = bool(getattr(run, "_persistent_mode", False))
+                    if not is_persistent:
+                        capture_run_identity(run)
                 except LauncherUnavailable:
                     self._reject(503, "launcher_unavailable", "canonical launcher is missing or not executable", model=model, model_len=ctx["model_len"])
                     out = _terminal_state("launcher_unavailable")
@@ -7019,14 +7021,12 @@ class Handler(BaseHTTPRequestHandler):
                     break
                 job = getattr(self, "_registry_job", None)
                 if job is not None:
-                    job.pgid = int(getattr(run.proc, "pid", 0) or 0)
-                    _hygiene_rt().bind_reaper(job.pgid, run.proc.poll)
-                    _JOB_REGISTRY.bind_cancel(
-                        job,
-                        run.cancel_persistent
-                        if getattr(run, "_persistent_lease", None) is not None
-                        else (lambda: _kill_group(run.proc)),
-                    )
+                    if is_persistent:
+                        _JOB_REGISTRY.bind_cancel(job, run.cancel_persistent)
+                    else:
+                        job.pgid = int(getattr(run.proc, "pid", 0) or 0)
+                        _hygiene_rt().bind_reaper(job.pgid, run.proc.poll)
+                        _JOB_REGISTRY.bind_cancel(job, lambda: _kill_group(run.proc))
                 stop_hook = ctx.get("tool_stop")
                 try:
                     out = self._execute(run, on_text, on_tool_trace, on_reasoning, keepalive, **({"turn_complete": stop_hook} if stop_hook is not None else {}))
@@ -7048,7 +7048,8 @@ class Handler(BaseHTTPRequestHandler):
                 finally:
                     run.close()
                     if job is not None:
-                        _hygiene_rt().bind_reaper(job.pgid, None)
+                        if not is_persistent:
+                            _hygiene_rt().bind_reaper(job.pgid, None)
                         _JOB_REGISTRY.bind_cancel(job, None)
                 if out["state"] == "done":
                     break
@@ -7182,7 +7183,8 @@ class Handler(BaseHTTPRequestHandler):
             def _release_resources(_out=cast("dict[str, object]", out), _run=self._metric_run) -> None:
                 try: _slots.release()
                 finally: slot_and_session.release_admission_for_state(_hygiene_rt().release, adm_dec.ticket_id, _out, run=_run)
-            _p12_seam().release_slot_after_run(_release_resources, self._metric_run, str(ctx.get("turn_id") or tag))
+            p12_run = None if getattr(self._metric_run, "_persistent_mode", False) else self._metric_run
+            _p12_seam().release_slot_after_run(_release_resources, p12_run, str(ctx.get("turn_id") or tag))
         self._log_done(cast(str, ctx["model"]), cast("dict[str, object]", out), t0, cast(str, ctx["tag"]))
         return out
 

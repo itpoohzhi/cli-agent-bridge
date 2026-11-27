@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import re
 import subprocess
@@ -18,14 +19,8 @@ from core.stdio_resident.process_io import TIMEOUT as _STDIO_TIMEOUT
 
 from .persistent_worker_adapter import AgyPersistentWorkerPool, StdioWriteError
 from .persistent_worker_config import (
-    PersistentAcquireRequest,
-    PersistentLease,
-    PersistentReleaseParams,
-    RunCloseContext,
-    RunPumpDrainContext,
-    RunSpawnContext,
-    compute_env_digest,
-    persistent_worker_settings,
+    PersistentAcquireRequest, PersistentLease, PersistentReleaseParams, RunCloseContext,
+    RunPumpDrainContext, RunSpawnContext, compute_env_digest, persistent_worker_settings,
 )
 
 __all__ = [
@@ -52,8 +47,9 @@ def start_run_process(run: object, ctx: RunSpawnContext) -> float:
     run_cid = str(cast(object, getattr(run, "run_cid", "")))
     for k, v in (
         ("_release_lock", threading.Lock()), ("_persistent_lease", None),
-        ("_persistent_reused", False), ("_persistent_turn_ok", False),
-        ("_persistent_cancelled", False), ("_persistent_resolved_cid", run_cid),
+        ("_persistent_mode", False), ("_persistent_reused", False),
+        ("_persistent_turn_ok", False), ("_persistent_cancelled", False),
+        ("_persistent_resolved_cid", run_cid),
     ):
         setattr(run, k, v)
     pw_cfg = persistent_worker_settings(config_path=ctx.config_path)
@@ -76,6 +72,7 @@ def start_run_process(run: object, ctx: RunSpawnContext) -> float:
             lease = pool.acquire(req, pw_cfg)
         if lease is not None:
             setattr(run, "_persistent_lease", lease)
+            setattr(run, "_persistent_mode", True)
             setattr(run, "_persistent_reused", lease.reused)
             setattr(run, "proc", lease.handle.proc)
             return t0
@@ -285,14 +282,17 @@ def close_run_resources(run: object, ctx: RunCloseContext) -> None:
 def resolve_run_chat_key(ctx: Mapping[str, object]) -> str:
     """Извлечь нормализованный ключ сессии хода (sess_key > explicit_state.session_key > chat_id)."""
     sess_key = ctx.get("sess_key")
-    if isinstance(sess_key, (tuple, list)) and sess_key:
-        raw = "\x1f".join(str(p) for p in cast(tuple[object, ...] | list[object], sess_key))
-        return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:32]
-    if sess_key:
-        return hashlib.sha256(str(cast(object, sess_key)).encode("utf-8")).hexdigest()[:32]
+    if isinstance(sess_key, (tuple, list)):
+        parts = [s for p in cast(tuple[object, ...] | list[object], sess_key) if p is not None and (s := str(p).strip())]
+        if parts:
+            return hashlib.sha256(json.dumps(parts, ensure_ascii=False, separators=(",", ":")).encode("utf-8")).hexdigest()[:32]
+    elif isinstance(sess_key, str):
+        if s_key := sess_key.strip():
+            return hashlib.sha256(json.dumps(s_key, ensure_ascii=False).encode("utf-8")).hexdigest()[:32]
+    elif sess_key:
+        return hashlib.sha256(json.dumps(str(sess_key), ensure_ascii=False).encode("utf-8")).hexdigest()[:32]
     exp_st = ctx.get("explicit_state")
     if exp_st is not None and bool(getattr(exp_st, "handled", False)):
-        exp_key = str(cast(object, getattr(exp_st, "session_key", "")) or "")
-        if exp_key:
+        if exp_key := str(cast(object, getattr(exp_st, "session_key", "")) or "").strip():
             return exp_key
-    return str(ctx.get("chat_id") or "")
+    return str(ctx.get("chat_id") or "").strip()
