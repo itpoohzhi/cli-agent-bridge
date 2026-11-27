@@ -63,7 +63,6 @@ class PersistentWorkerSettings:
     pump_tick_s: float = 0.5
     persistent_drain_window_s: float = 0.10
     drain_window_s: float = 0.35
-    strict_cold_rotation: bool = True
     standby_enabled: bool = False
     standby_max_slots: int = 1
     standby_init_timeout_s: float = 30.0
@@ -71,6 +70,7 @@ class PersistentWorkerSettings:
     fast_drain_enabled: bool = False
     fast_drain_min_s: float = 0.015
     fresh_rotate_enabled: bool = False
+    strict_cold_rotation: bool = True
 
 
 @dataclass(frozen=True)
