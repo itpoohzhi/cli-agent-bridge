@@ -93,6 +93,27 @@ def _inside(path: Path, root: Path) -> bool:
         return False
 
 
+_CODEX_ARG0_LINK_NAMES = frozenset({"applypatch", "apply_patch"})
+
+
+def _is_allowed_codex_arg0_symlink(item: Path, home: Path) -> bool:
+    """Fail-closed allowlist внутренних busybox-симлинков Codex (`.codex/tmp/arg0-*/codex-arg0*/`)."""
+    try:
+        if item.name not in _CODEX_ARG0_LINK_NAMES:
+            return False
+        rel = item.relative_to(home).parts
+        if len(rel) != 5 or rel[0] != ".codex" or rel[1] != "tmp":
+            return False
+        if not rel[2].startswith("arg0-") or not rel[3].startswith("codex-arg0") or rel[4] != item.name:
+            return False
+        parents = (home / rel[0], home / rel[0] / rel[1], home / rel[0] / rel[1] / rel[2], home / rel[0] / rel[1] / rel[2] / rel[3])
+        if any(p.is_symlink() or not p.is_dir() for p in parents):
+            return False
+        return item.is_file() and not item.is_dir()
+    except (OSError, ValueError):
+        return False
+
+
 def verify_zc_slot_home(home_dir: Path, *, base_root: Path | None = None) -> tuple[bool, str]:
     """Проверяет владельца, права, containment и отсутствие утечек в HOME."""
     try:
@@ -108,7 +129,7 @@ def verify_zc_slot_home(home_dir: Path, *, base_root: Path | None = None) -> tup
         for current, dirs, files in os.walk(home, topdown=False, followlinks=False):
             for name in (*dirs, *files):
                 item = Path(current) / name
-                if item.is_symlink():
+                if item.is_symlink() and not _is_allowed_codex_arg0_symlink(item, home):
                     return False, "symlink_detected"
                 if item.name.lower() == "history.jsonl" or (item.name.lower().startswith("mcp") and item.name.lower().endswith(".json")):
                     return False, "forbidden_file"

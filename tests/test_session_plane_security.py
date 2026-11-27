@@ -68,6 +68,36 @@ def test_symlink_and_forbidden_files_fail_closed(tmp_path: Path) -> None:
     assert verify_zc_slot_home(home, base_root=root) == (False, "forbidden_file")
 
 
+def test_codex_arg0_runtime_symlinks_allowed_and_abuse_rejected(tmp_path: Path) -> None:
+    root = tmp_path / "slots"
+    home = allocate_zc_slot_home("slot-arg0", base_root=root)
+    codex_bin = tmp_path / "codex_bin"
+    codex_bin.write_text("#!/bin/sh\n", encoding="utf-8")
+    arg0 = home / ".codex" / "tmp" / "arg0-macos" / "codex-arg0ABC"
+    arg0.mkdir(parents=True)
+    (arg0 / "applypatch").symlink_to(codex_bin)
+    (arg0 / "apply_patch").symlink_to(codex_bin)
+    assert verify_zc_slot_home(home, base_root=root) == (True, "ok")
+    # Злоупотребления fail-closed.
+    (arg0 / "evil").symlink_to(codex_bin)
+    assert verify_zc_slot_home(home, base_root=root) == (False, "symlink_detected")
+    (arg0 / "evil").unlink()
+    (arg0 / "applypatch").unlink()
+    outside_dir = tmp_path / "outside"
+    outside_dir.mkdir()
+    (arg0 / "applypatch").symlink_to(outside_dir, target_is_directory=True)
+    assert verify_zc_slot_home(home, base_root=root) == (False, "symlink_detected")
+    (arg0 / "applypatch").unlink()
+    (arg0 / "applypatch").symlink_to(codex_bin)
+    (home / ".codex" / "applypatch").symlink_to(codex_bin)
+    assert verify_zc_slot_home(home, base_root=root) == (False, "symlink_detected")
+    (home / ".codex" / "applypatch").unlink()
+    assert verify_zc_slot_home(home, base_root=root) == (True, "ok")
+    cleanup_zc_slot_home(home, base_root=root)
+    assert not home.exists()
+    assert codex_bin.is_file() and outside_dir.is_dir()
+
+
 def test_flags_default_false_and_dynamic_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     cfg = tmp_path / "dynamic_config.json"
     env = {"BRIDGE_SESSION_PLANE_ENABLED": "true"}
