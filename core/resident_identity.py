@@ -11,6 +11,7 @@ from typing import Any, cast
 
 from core.chat_key import SOURCES_SESSION_ID, resolve_chat_key
 from core.resident_canonical import _fail_if
+from core.session_plane.zc_env_guard import is_zero_canon_keyed_resident_enabled
 from core.subbridge_zero_canon import is_zero_canon_profile
 from core.zero_canon_fs import read_gigarc_bool, resolve_hub_dynamic_config
 
@@ -122,6 +123,23 @@ def _pck_scoped_id(inputs: IdentityInputs, principal: str, raw_pck: str) -> str:
     return hmac.new(inputs.secret, payload, hashlib.sha256).hexdigest()[:32]
 
 
+def _scoped_zc_id(inputs: IdentityInputs, principal: str, chat_id: str) -> str:
+    """Изолированный `zc_v1`-ключ слота: 0 пересечений со `standard` и другими `chat_id`/профилями."""
+    parts = ["zc_v1", inputs.scope, principal, inputs.subagent_id, inputs.review_profile, chat_id]
+    payload = json.dumps(parts, separators=(",", ":"), ensure_ascii=True).encode("ascii")
+    return hmac.new(inputs.secret, payload, hashlib.sha256).hexdigest()[:32]
+
+
+def _zero_canon_identity(inputs: IdentityInputs, principal: str, conv: str, keyed: bool) -> ResidentIdentity:
+    """Keyed Zero-Canon (kill-switch ON, валидный chat_id) либо 100% legacy эфемерная идентичность."""
+    if keyed and is_zero_canon_keyed_resident_enabled():
+        return ResidentIdentity(
+            principal, conv, False, "", inputs.turn_id, inputs.scope, inputs.subagent_id,
+            _scoped_zc_id(inputs, principal, conv), "zero_canon_keyed",
+        )
+    return _ephemeral_identity(inputs, principal, conv, "zero_canon_ephemeral")
+
+
 def _no_chat_identity(inputs: IdentityInputs, principal: str) -> ResidentIdentity:
     """Идентичность без валидного chat_id: эфемерная, либо `pck_v1` (opt-in, только с principal)."""
     raw_pck = inputs.request.get("prompt_cache_key")
@@ -150,7 +168,7 @@ def resolve_resident_identity(inputs: IdentityInputs) -> ResidentIdentity:
     chat_valid = all((not chat.invalid, chat.keyed, _valid_token(chat.value)))
     conv = chat.value if chat_valid else ""
     if is_zero_canon_profile(inputs.review_profile):
-        return _ephemeral_identity(inputs, principal, conv, "zero_canon_ephemeral")
+        return _zero_canon_identity(inputs, principal, conv, chat_valid and not inputs.force_ephemeral)
     if inputs.force_ephemeral:
         return _ephemeral_identity(inputs, principal, conv, "forced_ephemeral")
     if not chat_valid:

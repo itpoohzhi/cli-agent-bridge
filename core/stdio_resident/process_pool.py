@@ -4,12 +4,15 @@ from __future__ import annotations  # noqa: E402
 
 import asyncio  # noqa: E402
 import logging  # noqa: E402
+import os  # noqa: E402
 import threading  # noqa: E402
 import time  # noqa: E402
 import uuid  # noqa: E402
 from collections.abc import Callable, Iterable, Mapping  # noqa: E402
 from dataclasses import dataclass, field  # noqa: E402
+from pathlib import Path  # noqa: E402
 
+from core.session_plane.zc_env_guard import cleanup_zc_slot_home, is_zero_canon_keyed_resident_enabled  # noqa: E402
 from core.stdio_resident.config import StdioPoolConfig  # noqa: E402
 from core.stdio_resident.process_io import ResidentProcessHandle, StdioProcessTerminated  # noqa: E402
 from core.stdio_resident.process_reaper import (  # noqa: E402
@@ -52,6 +55,7 @@ class _SlotEntry:
     is_ephemeral: bool = False
     dead: bool = False
     rss_evict_pending: bool = False
+    zc_home_root: str | None = None
     lock: threading.RLock = field(default_factory=threading.RLock)
 
 
@@ -69,6 +73,27 @@ class ResidentProcessPool:
         self._stop_event: threading.Event = threading.Event()
         self._maint_thread: threading.Thread | None = None
         self._last_rss_check_mono: float | None = None
+        self._waiters: int = 0
+
+    def _wait_queue_limit(self) -> int:
+        """Лимит ожидающих `acquire`: `config.max_wait_queue` либо `2 * max_slots` под keyed-флагом; 0 — без лимита."""
+        explicit = int(getattr(self._config, "max_wait_queue", 0) or 0)
+        if explicit > 0:
+            return explicit
+        return 2 * self._config.max_slots if is_zero_canon_keyed_resident_enabled() else 0
+
+    def _wait_for_slot(self, wait_s: float, has_dead: bool) -> None:
+        """Ждёт освобождения слота под `_cv`; переполнение очереди ожидания → `slot_wait_queue_full`."""
+        limit = self._wait_queue_limit()
+        if limit and self._waiters >= limit:
+            raise SlotLeaseTimeoutError("slot_wait_queue_full")
+        self._waiters += 1
+        try:
+            woken = self._cv.wait(timeout=wait_s)
+        finally:
+            self._waiters -= 1
+        if not woken and not has_dead:
+            raise SlotLeaseTimeoutError("timed out waiting for a resident process slot")
 
     def acquire(
         self,
@@ -77,8 +102,12 @@ class ResidentProcessPool:
         cwd: str,
         env: Mapping[str, str] | None = None,
         is_ephemeral: bool = False,
+        zc_home_root: str | None = None,
     ) -> _SlotEntry:
-        """Lease a live affinity-matched process or create one within capacity."""
+        """Lease a live affinity-matched process or create one within capacity.
+
+        `zc_home_root` — keyed Zero-Canon HOME, чей срок жизни равен сроку жизни слота (чистится при teardown).
+        """
         deadline = time.monotonic() + self._config.lease_wait_s
         with self._cv:
             if self._closed:
@@ -95,14 +124,13 @@ class ResidentProcessPool:
                         self._lease(reusable)
                         return reusable
                 if self._try_make_room(affinity_key, is_ephemeral):
-                    return self._spawn_and_lease(affinity_key, argv_builder, cwd, env, is_ephemeral)
+                    return self._spawn_and_lease(affinity_key, argv_builder, cwd, env, is_ephemeral, zc_home_root)
                 remaining_s = deadline - time.monotonic()
                 if remaining_s <= 0.0:
                     raise SlotLeaseTimeoutError("timed out waiting for a resident process slot")
                 has_dead = any(e.dead for e in self._slots.values())
                 wait_s = min(remaining_s, 0.05) if has_dead else remaining_s
-                if not self._cv.wait(timeout=wait_s) and not has_dead:
-                    raise SlotLeaseTimeoutError("timed out waiting for a resident process slot")
+                self._wait_for_slot(wait_s, has_dead)
 
     def release(
         self,
@@ -378,6 +406,10 @@ class ResidentProcessPool:
         )
         if failed_entries:
             self._record_failed_entries(failed_entries, reason)
+        failed_ids = {id(e) for e in failed_entries}
+        for entry in entries:
+            if id(entry) not in failed_ids:
+                self._cleanup_zc_home(entry)
         return first_error
 
     def _record_failed_entries(self, failed_entries: list[_SlotEntry], reason: str) -> None:
@@ -476,12 +508,13 @@ class ResidentProcessPool:
     def _spawn_and_lease(
         self, affinity_key: SlotAffinityKey, argv_builder: Callable[[], list[str]],
         cwd: str, env: Mapping[str, str] | None, is_ephemeral: bool = False,
+        zc_home_root: str | None = None,
     ) -> _SlotEntry:
         handle = ResidentProcessHandle.spawn(argv_builder(), cwd=cwd, env=env)
         entry = _SlotEntry(
             slot_id=uuid.uuid4().hex, affinity_key=affinity_key, handle=handle,
             state=SlotState.SPAWNING, last_used_mono=time.monotonic(),
-            is_ephemeral=is_ephemeral,
+            is_ephemeral=is_ephemeral, zc_home_root=zc_home_root,
         )
         _ = self._transition(entry, SlotEvent.InitOk)
         self._slots[entry.slot_id] = entry
@@ -517,8 +550,40 @@ class ResidentProcessPool:
             with self._cv:
                 if terminated and getattr(entry.handle, "_pgid_dead", True):
                     _ = self._slots.pop(entry.slot_id, None)
+                    self._cleanup_zc_home(entry)
                 else:
                     entry.dead = True
+
+    def _cleanup_zc_home(self, entry: _SlotEntry) -> None:
+        """Удаляет keyed ZC HOME завершённого слота (если им не владеет другой живой слот): 0 зомби-каталогов."""
+        root = entry.zc_home_root
+        if not root:
+            return
+        with self._cv:
+            if any(o is not entry and o.zc_home_root == root for o in self._slots.values()):
+                return
+        self._remove_zc_home(root)
+
+    @staticmethod
+    def _remove_zc_home(root: str) -> None:
+        try:
+            cleanup_zc_slot_home(Path(root))
+            home = Path(root).parent
+            for parent in (home, home.parent):  # `<slot>/home` и `<slot>`: оба создаёт `allocate_zc_slot_home`
+                if parent.name == "home" or parent.name.startswith("zc-"):
+                    try:
+                        os.rmdir(parent)
+                    except FileNotFoundError:
+                        continue
+        except (OSError, ValueError):
+            _LOGGER.warning("zero-canon slot home cleanup failed: %s", root)
+
+    def discard_unbound_zc_home(self, root: str) -> None:
+        """Чистит keyed ZC HOME, если ни один слот пула им не владеет (спавн не состоялся)."""
+        with self._cv:
+            if any(e.zc_home_root == root for e in self._slots.values()):
+                return
+        self._remove_zc_home(root)
 
     @staticmethod
     def _transition(entry: _SlotEntry, event: SlotEvent) -> list[SlotEffect]:
