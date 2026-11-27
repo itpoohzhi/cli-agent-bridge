@@ -119,31 +119,40 @@ def _emit_refusal(
         status, headers, payload = build_pool_exhausted_error(
             pool[1], pool_label=pool[0]
         )
-        sink.start(status, list(headers))
-        sink.write(payload)
-        _record_failure(route, status, "pool_exhausted", len(payload))
+        try:
+            sink.start(status, list(headers))
+            sink.write(payload)
+        finally:
+            _record_failure(route, status, "pool_exhausted", len(payload))
         return
     err = last_error if isinstance(last_error, RouteRefusal) else quota_skipped[0][1]
     status = classify_route_failure(err).status_code
-    sink.start(err.status_code, list(err.response_headers))
-    sink.write(err.response_body)
-    _record_failure(route, status, "RouteRefusal", len(err.response_body))
+    try:
+        sink.start(err.status_code, list(err.response_headers))
+        sink.write(err.response_body)
+    finally:
+        _record_failure(route, status, "RouteRefusal", len(err.response_body))
 
 
 def _emit_all_routes_open(route: Any, cb_retry_after: int) -> None:
     sink = _make_sink(route)
-    sink.start(
-        503,
-        [("Content-Type", "application/json"), ("Retry-After", str(cb_retry_after))],
-    )
-    sink.write(ALL_ROUTES_OPEN_BODY)
-    _record_failure(
-        route,
-        503,
-        "all_routes_open",
-        len(ALL_ROUTES_OPEN_BODY),
-        f" retry_after={cb_retry_after}",
-    )
+    try:
+        sink.start(
+            503,
+            [
+                ("Content-Type", "application/json"),
+                ("Retry-After", str(cb_retry_after)),
+            ],
+        )
+        sink.write(ALL_ROUTES_OPEN_BODY)
+    finally:
+        _record_failure(
+            route,
+            503,
+            "all_routes_open",
+            len(ALL_ROUTES_OPEN_BODY),
+            f" retry_after={cb_retry_after}",
+        )
 
 
 def emit_route_failure(
@@ -159,7 +168,11 @@ def emit_route_failure(
     elif cb_retry_after is not None:
         _emit_all_routes_open(route, cb_retry_after)
     else:
-        route.reject(503, "route_unavailable", "no eligible transport is available")
+        try:
+            route.reject(503, "route_unavailable", "no eligible transport is available")
+        finally:
+            if not getattr(route.handler, "_req_recorded", False):
+                _record_failure(route, 503, "route_unavailable", 0)
 
 
 def _elapsed_ms(started: float) -> int:
@@ -183,14 +196,13 @@ def finalize_cli_serve(
         return
     status = classify_route_failure(exc).status_code
     in_failover = getattr(handler, "_transport_attempt", None) is not None
-    handler._response_status = status
     if not in_failover:
+        if getattr(handler, "_response_status", 0) == 0:
+            handler._response_status = status
         handler._record_telemetry(status_code=status, error_type="RouteRefusal")
     log_fn(
         f"done route=cli status={status} {handler._trace_log_fields()} elapsed_ms={_elapsed_ms(started)}"
     )
-    if in_failover:
-        handler._response_status = 0
 
 
 def finalize_passthrough_serve(

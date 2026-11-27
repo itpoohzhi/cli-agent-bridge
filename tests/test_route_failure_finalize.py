@@ -74,6 +74,34 @@ def test_cli_refusal_without_attempt_attr_records() -> None:
     assert handler.calls == [{"status_code": 503, "error_type": "RouteRefusal"}]
 
 
+def _finalize_refusal(handler: Any, log_fn: Any) -> None:
+    run_in_except(
+        RouteRefusal(429),
+        lambda: finalize_cli_serve(handler, rft.time.monotonic(), log_fn),
+    )
+
+
+@pytest.mark.parametrize(
+    ("attempt", "calls"),
+    [(object(), []), (None, [{"status_code": 429, "error_type": "RouteRefusal"}])],
+)
+def test_cli_refusal_keeps_prior_200(attempt: Any, calls: list[Any]) -> None:
+    handler = make_handler(attempt=attempt, status=200)
+    _finalize_refusal(handler, [].append)
+    assert handler._response_status == 200 and handler.calls == calls
+
+
+def test_cli_failover_log_error_leaves_status_clean() -> None:
+    handler = make_handler(attempt=object(), status=0)
+
+    def boom(_line: str) -> None:
+        raise BrokenPipeError("log")
+
+    with pytest.raises(BrokenPipeError):
+        _finalize_refusal(handler, boom)
+    assert handler._response_status == 0 and handler.calls == []
+
+
 @pytest.mark.parametrize("gone", [False, True])
 def test_cli_normal_exit(gone: bool) -> None:
     handler, logs = make_handler(status=200), []
@@ -122,10 +150,13 @@ def test_passthrough_refusal_inside_failover_skips_done() -> None:
     )
 
 
-def test_passthrough_refusal_outside_failover_records() -> None:
-    handler, host, sink = make_passthrough(None)
+@pytest.mark.parametrize("exc", [RouteRefusal(429), ValueError("x")])
+def test_passthrough_outside_failover_or_non_refusal_records(exc: Exception) -> None:
+    handler, host, sink = make_passthrough(
+        None if isinstance(exc, RouteRefusal) else object()
+    )
     run_in_except(
-        RouteRefusal(429),
+        exc,
         lambda: finalize_passthrough_serve(handler, host, sink, rft.time.monotonic()),
     )
     assert handler.done == [429]
@@ -137,15 +168,6 @@ def test_passthrough_normal_200() -> None:
     finalize_passthrough_serve(handler, host, sink, rft.time.monotonic())
     assert handler.done == [200]
     assert host.logs[0].startswith("done route=passthrough status=200 ")
-
-
-def test_passthrough_non_refusal_exception_records() -> None:
-    handler, host, sink = make_passthrough(object())
-    run_in_except(
-        ValueError("x"),
-        lambda: finalize_passthrough_serve(handler, host, sink, rft.time.monotonic()),
-    )
-    assert handler.done == [429]
 
 
 # ---- finalize_routes_exit ------------------------------------------------------
@@ -188,15 +210,13 @@ def test_exit_refusal_exception_does_not_record() -> None:
     assert res.released == [1] and route.recs == []
 
 
-def test_exit_client_gone_records() -> None:
+@pytest.mark.parametrize("refusal", [False, True])
+def test_exit_client_gone_records_even_on_refusal(refusal: bool) -> None:
     route, res = make_exit(gone=True)
-    finalize_routes_exit(route, res)
-    assert route.recs == [{"client_gone": True}]
-
-
-def test_exit_refusal_with_client_gone_records_499() -> None:
-    route, res = make_exit(gone=True)
-    run_in_except(RouteRefusal(429), lambda: finalize_routes_exit(route, res))
+    if refusal:
+        run_in_except(RouteRefusal(429), lambda: finalize_routes_exit(route, res))
+    else:
+        finalize_routes_exit(route, res)
     assert route.recs == [{"client_gone": True}]
 
 
@@ -259,12 +279,9 @@ def test_exit_release_error_still_records_once() -> None:
     assert route.recs == [{"client_gone": True}]
 
 
-def test_call_missing_method_returns_none() -> None:
+def test_finalize_routes_exit_minimal_handler_defaults() -> None:
     assert _call(SimpleNamespace(), "nonexistent") is None
     assert _trace_fields(SimpleNamespace()) == ""
-
-
-def test_finalize_routes_exit_minimal_handler_defaults() -> None:
     recs: list[dict[str, Any]] = []
     handler = SimpleNamespace(
         _record_telemetry=lambda **kw: recs.append(kw), connection=object()

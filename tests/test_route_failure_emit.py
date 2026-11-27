@@ -15,14 +15,21 @@ from core.route_failure_telemetry import ALL_ROUTES_OPEN_BODY, emit_route_failur
 class Wire:
     """Записывает wire-ответ sink'а."""
 
-    def __init__(self) -> None:
+    def __init__(self, fail: tuple[str, Exception] | None = None) -> None:
         self.started: list[tuple[int, list[tuple[str, str]]]] = []
         self.body: list[bytes] = []
+        self.fail = fail
+
+    def _maybe_fail(self, op: str) -> None:
+        if self.fail is not None and self.fail[0] == op:
+            raise self.fail[1]
 
     def start(self, status: int, headers: list[tuple[str, str]]) -> None:
+        self._maybe_fail("start")
         self.started.append((status, headers))
 
     def write(self, payload: bytes) -> None:
+        self._maybe_fail("write")
         self.body.append(payload)
 
 
@@ -154,14 +161,54 @@ def test_emit_pool_ignores_refusals_without_pool() -> None:
     assert wire.body == [b"a"]
 
 
-def test_emit_else_rejects() -> None:
+ELSE_ARGS = (503, "route_unavailable", "no eligible transport is available")
+ELSE_LOG = (
+    "route_failure status=503 reason=route_unavailable model=muse-ember-1.0 trace=abc"
+)
+
+
+def test_emit_else_rejects_and_records_when_reject_does_not_record() -> None:
     wire = Wire()
     route = make_route(wire)
     emit_route_failure(route, RuntimeError("x"), [], [], None)
     assert route.calls == [
-        ("reject", (503, "route_unavailable", "no eligible transport is available"))
+        ("reject", ELSE_ARGS),
+        ("meta", {"model": "muse-ember-1.0"}),
+        ("note", 0),
+        ("record", {"status_code": 503, "error_type": "route_unavailable"}),
     ]
-    assert wire.started == [] and route.logs == []
+    assert route.handler._response_status == 503
+    assert route.logs == [ELSE_LOG]
+    assert wire.started == []
+
+
+def test_emit_else_no_double_record_when_reject_recorded() -> None:
+    route = make_route(Wire())
+
+    def reject(*a: Any) -> None:
+        route.calls.append(("reject", a))
+        route.handler._req_recorded = True
+
+    route.reject = reject
+    emit_route_failure(route, RuntimeError("x"), [], [], None)
+    assert route.calls == [("reject", ELSE_ARGS)]
+    assert route.logs == []
+
+
+def test_emit_else_reject_raises_still_records() -> None:
+    route = make_route(Wire())
+
+    def reject(*_a: Any) -> None:
+        raise OSError("broken")
+
+    route.reject = reject
+    with pytest.raises(OSError, match="broken"):
+        emit_route_failure(route, RuntimeError("x"), [], [], None)
+    assert route.calls[-1] == (
+        "record",
+        {"status_code": 503, "error_type": "route_unavailable"},
+    )
+    assert route.logs == [ELSE_LOG]
 
 
 def test_emit_minimal_namespace_no_attribute_error() -> None:
@@ -196,3 +243,41 @@ def test_emit_no_sync_duckdb(monkeypatch: pytest.MonkeyPatch) -> None:
     emit_route_failure(make_route(wire), None, [], [], 3)
     emit_route_failure(make_route(wire), RouteRefusal(429, (), b"x"), [], [], None)
     assert len(wire.started) == 2
+
+
+# ---- F-001: телеметрия при I/O-сбое sink -------------------------------------------
+
+FO = RouteFailover(statuses=frozenset({429}), pool="pool-a", pool_label="Pool A")
+POOL = [
+    ("s1", RouteRefusal(429, (), b"a"), FO),
+    ("s2", RouteRefusal(429, (), b"b"), FO),
+]
+POOL_STATUS = build_pool_exhausted_error(
+    [(s, e) for s, e, _ in POOL], pool_label="Pool A"
+)[0]
+SINK_CASES = [  # (last_error, refusals, cb_retry_after, status, error_type)
+    (None, [], 90, 503, "all_routes_open"),
+    (RouteRefusal(429, (), b"x"), [], None, 429, "RouteRefusal"),
+    (POOL[-1][1], POOL, None, POOL_STATUS, "pool_exhausted"),
+]
+
+
+@pytest.mark.parametrize(
+    ("op", "exc"),
+    [
+        ("start", BrokenPipeError("pipe")),
+        ("write", OSError("io")),
+        ("write", ConnectionResetError("reset")),
+    ],
+)
+@pytest.mark.parametrize(("err", "refusals", "cb", "status", "etype"), SINK_CASES)
+def test_sink_failure_still_records_once(
+    op: str, exc: Exception, err: Any, refusals: Any, cb: Any, status: int, etype: str
+) -> None:
+    route = make_route(Wire(fail=(op, exc)))
+    with pytest.raises(type(exc)):
+        emit_route_failure(route, err, refusals, [], cb)
+    rec = [c for c in route.calls if c[0] == "record"]
+    assert rec == [("record", {"status_code": status, "error_type": etype})]
+    assert route.handler._response_status == status
+    assert len(route.logs) == 1 and f"reason={etype}" in route.logs[0]
