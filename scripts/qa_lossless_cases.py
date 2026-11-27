@@ -23,10 +23,10 @@ from core.lossless_chunker import iter_ndjson_frames  # noqa: E402
 from core.lossless_contracts import DEFAULT_SAFE_FRAME_BYTES, LosslessLimits  # noqa: E402
 from core.lossless_fsm import TERMINAL_STATES, EventKind, SessionEvent, SessionSnapshot, step  # noqa: E402
 from core.lossless_gate import GateAction, evaluate_delivery_gate  # noqa: E402
-from muse_runtime.context_pruner import _prune_messages  # noqa: E402
-from muse_runtime.lossless_policy import evaluate_muse_prompt_policy  # noqa: E402
-from muse_runtime.prompt_builder import _assemble_prompt  # noqa: E402
-from muse_runtime.token_budget import _estimate_tokens  # noqa: E402
+from muse_runtime.context_pruner import _prune_messages  # noqa: E402  # pyright: ignore[reportMissingImports]
+from muse_runtime.lossless_policy import evaluate_muse_prompt_policy  # noqa: E402  # pyright: ignore[reportMissingImports]
+from muse_runtime.prompt_builder import _assemble_prompt  # noqa: E402  # pyright: ignore[reportMissingImports]
+from muse_runtime.token_budget import _estimate_tokens  # noqa: E402  # pyright: ignore[reportMissingImports]
 
 
 def _case_agy_350kib_lossless() -> dict[str, Any]:
