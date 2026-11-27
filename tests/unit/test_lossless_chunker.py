@@ -24,6 +24,7 @@ from core.lossless_contracts import (
     DEFAULT_SAFE_FRAME_BYTES,
     HARD_FRAME_CLAMP_BYTES,
     MIN_FRAME_BYTES,
+    LosslessLimits,
     RefuseStatusMode,
     build_loss_receipt,
     resolve_lossless_limits,
@@ -46,6 +47,11 @@ def test_bnd001_zero_io_imports_in_core_lossless_modules() -> None:
 
 
 def test_resolve_lossless_limits_defaults_all_safe_off() -> None:
+    direct = LosslessLimits()
+    assert direct.lossless_enabled is False
+    assert direct.muse_lossless_enabled is False
+    assert direct.muse_refuse_status_mode is RefuseStatusMode.LEGACY_502
+
     limits = resolve_lossless_limits({})
     assert limits.lossless_enabled is False
     assert limits.muse_lossless_enabled is False
