@@ -503,7 +503,8 @@ class CodexAppServerV2Driver(StreamJsonDriver):
 
     @override
     def perform_turn_teardown(self, handle: Any, turn_context: Any, timeout_s: float = 2.0) -> bool:
-        _ = (turn_context, timeout_s)
+        _ = timeout_s
+        keep_warm_zc = bool(isinstance(turn_context, Mapping) and turn_context.get("keyed_zero_canon"))
         bound = self._lookup_handle_state(handle)
         slot = bound if bound is not None else self._ctx()
         self._tls.ctx = slot
@@ -515,6 +516,14 @@ class CodexAppServerV2Driver(StreamJsonDriver):
         if bound is None:
             # Release identity reference for bare non-weakref handles so GC can reclaim and no id() alias matches.
             slot.bound_handle = None
-        if was_zero_canon:
+        if was_zero_canon and not keep_warm_zc:
             self._release_handle_state(handle)
+        elif was_zero_canon:
+            self._reset_thread_for_warm_reuse(slot)
         return True
+
+    def _reset_thread_for_warm_reuse(self, slot: _V2SlotState) -> None:
+        """Keyed Zero-Canon: FSM-состояние слота живёт дальше (без повторного `initialize`/респавна), тред — сбрасывается."""
+        phase = ProtocolPhase.INITIALIZED if slot.handshake_acked else slot.state.phase
+        if slot.state.phase is not ProtocolPhase.FAILED:
+            slot.state = replace(slot.state, phase=phase, thread_id=None, turn_id=None, pending_request_id=None)

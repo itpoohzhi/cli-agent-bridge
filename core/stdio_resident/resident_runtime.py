@@ -23,6 +23,7 @@ from core.resident_identity import ResidentAuthError as ResidentAuthError
 from core.resident_identity import ResidentRequestError as ResidentRequestError
 from core.p12_hub_cancel_seam import bind_resident_slot_pgid
 from core.resident_turn_envelope import ResidentTurnEnvelope
+from core.session_plane.zc_env_guard import is_zero_canon_keyed_resident_enabled
 from core.stdio_resident.config import StdioPoolConfig
 from core.stdio_resident.process_pool import ResidentProcessPool, SlotLeaseTimeoutError
 from core.stdio_resident.protocol_driver import DecodedChunk
@@ -37,13 +38,19 @@ from core.stdio_resident.runtime_types import (
 )
 from core.stdio_resident.runtime_wire import cancel_driver_turn, prepare_runtime_spec, stream_driver_turn, teardown_driver_turn
 from core.stdio_resident.types import SlotAffinityKey, SlotBinding
-from core.stdio_resident.zero_canon_router import zero_canon_isolation
+from core.stdio_resident.zero_canon_router import ZeroCanonIsolation, zero_canon_isolation
+from core.subbridge_zero_canon import is_zero_canon_profile
 
 _LOGGER = logging.getLogger(__name__)
 
 
 def _binding_of(item: Any) -> SlotBinding | None:
     return SlotBinding(item.slot_id, item.generation) if item else None
+
+
+def _is_keyed_zc(envelope: ResidentTurnEnvelope) -> bool:
+    """Keyed Zero-Canon: ZC-профиль + неэфемерная идентичность + kill-switch ON (иначе 100% legacy)."""
+    return all((is_zero_canon_profile(envelope.review_profile), not envelope.identity.ephemeral, is_zero_canon_keyed_resident_enabled()))
 
 
 def _resolve_driver_method(driver: Any) -> Any:
@@ -78,23 +85,42 @@ class ResidentBridgeRuntime:
         cancelled = bool(options.cancel_event.is_set()) if options.cancel_event else False
         _fail_if(cancelled, ResidentCancelledError("resident turn cancelled"))
         _fail_if(all((not str(envelope.identity.principal_hash or "").strip(), bool(options.require_auth))), ResidentAuthError(401, "auth_required"))
-        with self._admit_turn(envelope) as (current, session_key), zero_canon_isolation(self._driver, current.review_profile) as iso:
-            committed, plan, affinity_key, eph = self._plan_and_reset_stale(current, session_key)
-            argv, cwd, spawn_env = prepare_runtime_spec(self._driver, current, options.argv_builder(), iso)
-            sandbox = tempfile.mkdtemp(prefix="turn-")
-            os.chmod(sandbox, 0o700)
-            turn_ctx = {**dict(options.extra_turn_context if options.extra_turn_context else {}), "turn_sandbox": sandbox, "cwd": cwd, "review_profile": current.review_profile, "zero_canon_root": iso.root}
-            opts = replace(options, extra_turn_context=turn_ctx)
-            try:
-                slot, plan = self._acquire_checked_slot(current, committed, affinity_key, (any((eph, bool(iso.active))), argv, cwd, spawn_env))
-                bind_resident_slot_pgid(slot.handle, turn_ctx)
-                runnable = bool(current.rpc.runnable) if current.rpc else False
-                state = _TurnState(current, opts, session_key, slot, plan, any((eph, bool(iso.active), not runnable)))
-                yield from self._stream_and_commit_turn(state)
-            finally:
-                if isinstance(options.extra_turn_context, dict) and "_committed_slot" in turn_ctx:
-                    options.extra_turn_context["_committed_slot"] = turn_ctx["_committed_slot"]
-                shutil.rmtree(sandbox, ignore_errors=True)
+        with self._admit_turn(envelope) as (current, session_key), zero_canon_isolation(
+            self._driver, current.review_profile, keyed_slot_id=session_key, persist=_is_keyed_zc(current)
+        ) as iso:
+            yield from self._run_isolated_turn(current, session_key, iso, options)
+
+    def _run_isolated_turn(
+        self, current: ResidentTurnEnvelope, session_key: str, iso: ZeroCanonIsolation, options: ResidentTurnOptions
+    ) -> Iterator[DecodedChunk]:
+        keyed_zc = bool(iso.persist)
+        committed, plan, affinity_key, eph = self._plan_and_reset_stale(current, session_key)
+        argv, cwd, spawn_env = prepare_runtime_spec(self._driver, current, options.argv_builder(), iso)
+        sandbox = tempfile.mkdtemp(prefix="turn-")
+        os.chmod(sandbox, 0o700)
+        turn_ctx = {**dict(options.extra_turn_context if options.extra_turn_context else {}), "turn_sandbox": sandbox, "cwd": cwd, "review_profile": current.review_profile, "zero_canon_root": iso.root, "keyed_zero_canon": keyed_zc}
+        opts = replace(options, extra_turn_context=turn_ctx)
+        slot_eph = eph or (bool(iso.active) and not keyed_zc)
+        slot: Any = None
+        try:
+            zc_root = iso.root if keyed_zc else None
+            slot, plan = self._acquire_checked_slot(current, committed, affinity_key, (slot_eph, argv, cwd, spawn_env), zc_root)
+            turn_ctx["new_thread"] = bool(plan.logical_context_reset)
+            bind_resident_slot_pgid(slot.handle, turn_ctx)
+            runnable = bool(current.rpc.runnable) if current.rpc else False
+            state = _TurnState(current, opts, session_key, slot, plan, any((slot_eph, not runnable)))
+            yield from self._stream_and_commit_turn(state)
+        finally:
+            if isinstance(options.extra_turn_context, dict) and "_committed_slot" in turn_ctx:
+                options.extra_turn_context["_committed_slot"] = turn_ctx["_committed_slot"]
+            shutil.rmtree(sandbox, ignore_errors=True)
+            if keyed_zc and slot is None and iso.root:
+                self._discard_unbound_zc_home(iso.root)
+
+    def _discard_unbound_zc_home(self, root: str) -> None:
+        discard = getattr(self._pool, "discard_unbound_zc_home", None)
+        if callable(discard):
+            discard(root)
 
     @contextmanager
     def _admit_turn(self, envelope: ResidentTurnEnvelope) -> Iterator[tuple[ResidentTurnEnvelope, str]]:
@@ -155,13 +181,14 @@ class ResidentBridgeRuntime:
         committed: Any,
         affinity_key: SlotAffinityKey,
         spawn_cfg: tuple[bool, list[str], str, dict[str, str] | None],
+        zc_home_root: str | None = None,
     ) -> tuple[Any, Any]:
         ephemeral, argv, cwd, spawn_env = spawn_cfg
         runnable = bool(envelope.rpc.runnable) if envelope.rpc else False
         non_committable = any((ephemeral, not runnable))
         chosen: tuple[Any, Any] | None = None
         for attempt in range(2):
-            slot = self._acquire_slot(affinity_key, non_committable, (argv, cwd, spawn_env))
+            slot = self._acquire_slot(affinity_key, non_committable, (argv, cwd, spawn_env), zc_home_root)
             plan = plan_history_transition(committed, envelope, SlotBinding(slot.slot_id, slot.handle.generation))
             if all((plan.requires_slot_reset, bool(slot.handle.generation))):
                 self._pool.release(slot.slot_id, cancel=True, lease_id=slot.lease_id)
@@ -176,12 +203,14 @@ class ResidentBridgeRuntime:
         _fail_if(not chosen, PreDispatchResidentError())
         return cast(tuple[Any, Any], chosen)
 
-    def _acquire_slot(self, affinity_key: SlotAffinityKey, non_committable: bool, spec: tuple[list[str], str, dict[str, str] | None]) -> Any:
+    def _acquire_slot(self, affinity_key: SlotAffinityKey, non_committable: bool, spec: tuple[list[str], str, dict[str, str] | None], zc_home_root: str | None = None) -> Any:
         argv, cwd, spawn_env = spec
+        extra: dict[str, Any] = {"zc_home_root": zc_home_root} if zc_home_root else {}
         try:
-            return self._pool.acquire(affinity_key, lambda: list(argv), cwd, spawn_env, is_ephemeral=non_committable)
+            return self._pool.acquire(affinity_key, lambda: list(argv), cwd, spawn_env, is_ephemeral=non_committable, **extra)
         except SlotLeaseTimeoutError as exc:
-            raise PreDispatchResidentError("slot_lease_timeout", 503) from exc
+            full = "slot_wait_queue_full" in str(exc)
+            raise PreDispatchResidentError("slot_wait_queue_full" if full else "slot_lease_timeout", 503) from exc
 
     def _stream_and_commit_turn(self, state: _TurnState) -> Iterator[DecodedChunk]:
         parts: list[str] = []

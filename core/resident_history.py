@@ -11,7 +11,10 @@ from typing import cast
 from core.backend_routing_models import TranscriptItem
 from core.resident_canonical import _fail_if
 from core.resident_turn_envelope import ResidentTurnEnvelope, is_warm_delta_integrity_enabled
+from core.session_plane.capabilities import effective_capabilities
+from core.session_plane.zc_env_guard import is_zero_canon_keyed_resident_enabled
 from core.stdio_resident.types import SlotBinding
+from core.subbridge_zero_canon import is_zero_canon_profile
 from core.tool_emulation import _render_message
 
 
@@ -41,6 +44,7 @@ class HistoryPlan:
     next_state: CommittedSessionState | None
     ephemeral_slot: bool
     reason: str
+    logical_context_reset: bool = False
 
 
 _TOOL_CALL_OPEN = "<tool_call>"
@@ -196,6 +200,25 @@ def _plan(action: str, prompt: str, next_state: CommittedSessionState | None, fl
     return HistoryPlan(action, prompt, reset, next_state, ephemeral, reason)
 
 
+def _process_headers(state: CommittedSessionState) -> tuple[str, ...]:
+    """Process-level поля: их смена требует нового OS-процесса (thread-level `system_digest`/`tool_fingerprint` — нет)."""
+    return (state.principal_hash, state.backend_id, state.env_digest, state.model, state.effort, state.cwd_norm, state.review_profile)
+
+
+def _logical_reset_allowed(envelope: ResidentTurnEnvelope) -> bool:
+    """Keyed Zero-Canon + драйвер умеет чистый `thread/start` на тёплом PID (kill-switch OFF → всегда False)."""
+    if envelope.identity.ephemeral or not is_zero_canon_profile(envelope.review_profile):
+        return False
+    if not is_zero_canon_keyed_resident_enabled():
+        return False
+    proto = str(getattr(envelope, "protocol", "") or envelope.backend_id)
+    return effective_capabilities(proto).supports_logical_context_reset
+
+
+def _logical_reset_plan(envelope: ResidentTurnEnvelope, next_base: CommittedSessionState, reason: str) -> HistoryPlan:
+    return HistoryPlan("rebase", envelope.full_prompt, False, next_base, False, reason, True)
+
+
 def _committed_rebase_reason(
     committed: CommittedSessionState | None,
     envelope: ResidentTurnEnvelope,
@@ -238,7 +261,11 @@ def _plan_warm(committed: CommittedSessionState | None, envelope: ResidentTurnEn
         delta_items = envelope.rpc.items[count:] if envelope.rpc else ()
         extends = all((bool(known), len(incoming) > count, incoming[:count] == known))
         has_assistant = any(not bool({item.role} - {"assistant"}) for item in delta_items)
-        if all((extends, not has_assistant)):
+        if _logical_reset_allowed(envelope):
+            # Zero-Canon: каждый ход — чистый thread/start на тёплом PID; delta в новый тред потерял бы контекст.
+            reason = "history_extended_fresh_thread" if all((extends, not has_assistant)) else "history_diverged_logical_reset"
+            result = _logical_reset_plan(envelope, next_base, reason)
+        elif all((extends, not has_assistant)):
             result = _plan("delta", render_delta_prompt(delta_items), next_base, (False, False, "history_extended"))
         else:
             result = _plan("rebase", envelope.full_prompt, next_base, (True, False, "history_diverged"))
@@ -254,7 +281,10 @@ def plan_history_transition(
     if not result:
         next_base = _base_state(envelope)
         rebase_reason = _committed_rebase_reason(committed, envelope, next_base)
-        if rebase_reason:
+        thread_only = bool(committed) and _process_headers(cast(CommittedSessionState, committed)) == _process_headers(next_base)
+        if rebase_reason == "header_changed" and thread_only and _logical_reset_allowed(envelope):
+            result = _logical_reset_plan(envelope, next_base, "history_diverged_logical_reset")
+        elif rebase_reason:
             result = _plan("rebase", envelope.full_prompt, next_base, (True, False, rebase_reason))
         elif not bool(getattr(slot_bound, "generation", 0)):
             action = "rebase" if committed else "cold_bootstrap"
