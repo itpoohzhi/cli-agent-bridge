@@ -3,14 +3,21 @@
 from __future__ import annotations
 
 import json
+import os
+import zlib
 from collections.abc import Callable, Mapping
-from typing import Protocol
+from typing import Final, Protocol
 
 from core.route_attempts import RouteRefusal
+from core.runtime_env import env_bool
 from core.stdio_resident.sse_error_bridge import sanitize_log_text
 from core.stdio_resident.turn_error_sse import ResidentTurnError
 
 _JSON_HEADERS: tuple[tuple[str, str], ...] = (("Content-Type", "application/json"),)
+PRECOMMIT_CODE_LOG_ENV: Final[str] = "BRIDGE_RESIDENT_PRECOMMIT_CODE_LOG_ENABLED"
+SINGLE_ROUTE_KEEPALIVE_ENV: Final[str] = "BRIDGE_RESIDENT_SINGLE_ROUTE_KEEPALIVE_ENABLED"
+DRAIN_REFUSAL_ENV: Final[str] = "BRIDGE_RESIDENT_DRAIN_REFUSAL_ENABLED"
+_DRAIN_BODY: Final[bytes] = b'{"error":{"type":"service_unavailable","code":"bridge_draining","message":"bridge is draining"}}'
 
 
 class _FailureLease(Protocol):
@@ -60,11 +67,49 @@ def cli_resident_refusal(exc: ResidentTurnError) -> RouteRefusal:
     )
 
 
-def should_defer_sse_headers(handler: object, ctx: Mapping[str, object]) -> bool:
+def _is_single_route(ctx: Mapping[str, object]) -> bool:
+    routes = ctx.get("routes")
+    if isinstance(routes, (list, tuple, set, frozenset)):
+        return len(routes) == 1
+    return ctx.get("route_count") == 1
+
+
+def should_defer_sse_headers(
+    handler: object, ctx: Mapping[str, object], *, environ: Mapping[str, str] | None = None
+) -> bool:
     """Откладывает SSE-заголовки только для свежей pre-commit routed CLI-попытки."""
     if bool(ctx.get("attached_existing")):
         return False
-    return is_precommit(handler, live_sent=0)
+    if not is_precommit(handler, live_sent=0):
+        return False
+    env = os.environ if environ is None else environ
+    if _is_single_route(ctx) and env_bool(env, (SINGLE_ROUTE_KEEPALIVE_ENV,), False):
+        return False
+    return True
+
+
+def check_precommit_drain_refusal(
+    *, draining: bool = False, request_id: str | None = None, environ: Mapping[str, str] | None = None
+) -> None:
+    """Inert D4 drain DI: emits 503 bridge_draining + deterministic Retry-After >= 1 only when draining and flag enabled."""
+    if not draining:
+        return
+    env = os.environ if environ is None else environ
+    if not env_bool(env, (DRAIN_REFUSAL_ENV,), False):
+        return
+    retry_after = 1 + (zlib.crc32((request_id or "").encode("utf-8")) % 5)
+    raise RouteRefusal(
+        status_code=503,
+        response_headers=(*_JSON_HEADERS, ("Retry-After", str(retry_after))),
+        response_body=_DRAIN_BODY,
+    )
+
+
+def _log_precommit_refusal(exc: ResidentTurnError, log_fn: Callable[[str], None] | None) -> None:
+    if log_fn is None or not env_bool(os.environ, (PRECOMMIT_CODE_LOG_ENV,), True):
+        return
+    safe_err = sanitize_log_text(exc.response.message, extra_code=exc.response.code)
+    log_fn(f"resident_precommit_refusal status={exc.status} code={exc.response.code} err={safe_err!r}")
 
 
 def handle_json_resident_error(
@@ -75,6 +120,7 @@ def handle_json_resident_error(
 ) -> None:
     """Pre-commit отдаёт RouteRefusal роутеру; post-commit логирует и отвечает клиенту."""
     if is_precommit(handler, live_sent=0):
+        _log_precommit_refusal(exc, log_fn)
         lease.record_failure(exc)
         raise cli_resident_refusal(exc) from exc
     safe_err = sanitize_log_text(exc.response.message, extra_code=exc.response.code)
@@ -90,10 +136,12 @@ def maybe_raise_sse_precommit_refusal(
     lease: _FailureLease,
     exc: BaseException,
     live_sent: int,
+    log_fn: Callable[[str], None] | None = None,
 ) -> None:
     """Бросает RouteRefusal для pre-commit ResidentTurnError в SSE; иначе возвращает None."""
     if isinstance(exc, ResidentTurnError) and is_precommit(
         handler, live_sent=live_sent
     ):
+        _log_precommit_refusal(exc, log_fn)
         lease.record_failure(exc)
         raise cli_resident_refusal(exc) from exc

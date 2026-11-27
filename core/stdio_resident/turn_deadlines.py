@@ -8,7 +8,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Final
 
-from core.runtime_env import env_bool
+from core.runtime_env import ConfigError, env_bool
 from core.stdio_resident.config import StdioPoolConfig
 from core.timeout_ladder import (
     FLAG_TIMEOUT_LADDER,
@@ -155,32 +155,72 @@ def _pick_ladder_override(
     return None
 
 
+def _parse_strict_total_timeout(ctx: Mapping[str, Any], cfg: object) -> float | None:
+    for source, raw in (("ctx", ctx.get("turn_total_timeout_s")), ("cfg", getattr(cfg, "turn_total_timeout_s", None))):
+        if raw is None:
+            continue
+        parsed = _parse_pos_float(raw)
+        if parsed is None:
+            raise ConfigError(f"invalid turn_total_timeout_s in {source}: {raw!r}")
+        return parsed
+    return None
+
+
+def _pick_legacy_idle_timeout(ctx: Mapping[str, Any], cfg: object, env: Mapping[str, str]) -> float | None:
+    if (val := _parse_pos_float(ctx.get("turn_idle_timeout_s"))) is not None:
+        return val
+    if (val := _parse_pos_float(ctx.get("idle_timeout_s"))) is not None:
+        return val
+    cfg_turn_idle = _parse_pos_float(getattr(cfg, "turn_idle_timeout_s", None))
+    if cfg_turn_idle is not None and cfg_turn_idle != _DEFAULT_POOL_TURN_IDLE_S:
+        return cfg_turn_idle
+    if (val := _parse_pos_float(getattr(cfg, "idle_timeout_s", None))) is not None:
+        return val
+    if (val := _parse_pos_float(env.get("BRIDGE_STDIO_TURN_IDLE_TIMEOUT_S"))) is not None:
+        return val
+    return cfg_turn_idle
+
+
 def _resolve_deadlines(
     cfg: object, ctx: Mapping[str, Any], now: float, *, environ: Mapping[str, str] | None = None
 ) -> _TurnDeadlines:
     env = os.environ if environ is None else environ
+    explicit_total = _parse_strict_total_timeout(ctx, cfg)
     ladder = _load_timeout_ladder(env)
     if not ladder.enabled:
-        idle_s = _pick_timeout(ctx, cfg, ("idle_timeout_s", "turn_idle_timeout_s"), "BRIDGE_STDIO_TURN_IDLE_TIMEOUT_S", env)
+        idle_s = _pick_legacy_idle_timeout(ctx, cfg, env)
         idle_val = DEFAULT_TURN_IDLE_TIMEOUT_S if idle_s is None else idle_s
         first_raw = _pick_timeout(ctx, cfg, ("first_progress_timeout_s", "turn_first_progress_timeout_s"), "BRIDGE_STDIO_FIRST_PROGRESS_TIMEOUT_S", env)
-        first_val = min(DEFAULT_FIRST_PROGRESS_TIMEOUT_S if first_raw is None else first_raw, idle_val)
+        first_base = DEFAULT_FIRST_PROGRESS_TIMEOUT_S if first_raw is None else first_raw
         cap_raw = _pick_timeout(ctx, cfg, ("safety_cap_s", "turn_safety_cap_s"), "BRIDGE_STDIO_SAFETY_CAP_S", env)
-        legacy_total = _parse_pos_float(getattr(cfg, "turn_total_timeout_s", None)) or DEFAULT_SAFETY_CAP_S
-        cap_val = max(DEFAULT_SAFETY_CAP_S, idle_val, legacy_total) if cap_raw is None else cap_raw
+        if cap_raw is not None:
+            cap_val = min(cap_raw, explicit_total) if explicit_total is not None else cap_raw
+        elif explicit_total is not None and explicit_total != _DEFAULT_POOL_TURN_TOTAL_S:
+            cap_val = explicit_total
+        else:
+            cap_val = max(DEFAULT_SAFETY_CAP_S, idle_val, first_base)
+        first_val = min(first_base, cap_val)
+        eff_idle = min(idle_val, cap_val)
         safety_dl = now + cap_val
-        return _TurnDeadlines(idle_val, safety_dl, min(safety_dl, now + first_val), min(safety_dl, now + idle_val))
+        return _TurnDeadlines(eff_idle, safety_dl, min(safety_dl, now + first_val), min(safety_dl, now + eff_idle))
 
     idle_ov = _pick_ladder_override(ctx, cfg, ("turn_idle_timeout_s",), "BRIDGE_STDIO_TURN_IDLE_TIMEOUT_S", env, _DEFAULT_POOL_TURN_IDLE_S)
+    ctx_turn_idle = _parse_pos_float(ctx.get("turn_idle_timeout_s"))
     ctx_idle = _parse_pos_float(ctx.get("idle_timeout_s"))
-    idle_val = ctx_idle if ctx_idle is not None else (ladder.effective_idle_s if idle_ov is None else idle_ov)
+    if ctx_turn_idle is not None:
+        idle_val = ctx_turn_idle
+    elif ctx_idle is not None:
+        idle_val = ctx_idle
+    elif idle_ov is not None:
+        idle_val = idle_ov
+    else:
+        idle_val = ladder.effective_idle_s
     first_ov = _pick_ladder_override(ctx, cfg, ("first_progress_timeout_s", "turn_first_progress_timeout_s"), "BRIDGE_STDIO_FIRST_PROGRESS_TIMEOUT_S", env)
     first_val = ladder.effective_first_event_s if first_ov is None else first_ov
     cap_ov = _pick_ladder_override(ctx, cfg, ("safety_cap_s", "turn_safety_cap_s"), "BRIDGE_STDIO_SAFETY_CAP_S", env)
     if cap_ov is None:
-        cfg_total = _parse_pos_float(getattr(cfg, "turn_total_timeout_s", None))
-        if cfg_total is not None and cfg_total != _DEFAULT_POOL_TURN_TOTAL_S:
-            cap_val = max(cfg_total, first_val, idle_val)
+        if explicit_total is not None and explicit_total != _DEFAULT_POOL_TURN_TOTAL_S:
+            cap_val = min(ladder.safety_cap_s, explicit_total)
         else:
             cap_val = max(ladder.safety_cap_s, first_val, idle_val)
     else:

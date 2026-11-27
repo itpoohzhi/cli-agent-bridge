@@ -36,7 +36,7 @@ from core.stdio_resident.runtime_types import (
     _LockEntry,
     _TurnState,
 )
-from core.stdio_resident.runtime_wire import cancel_driver_turn, prepare_runtime_spec, stream_driver_turn, teardown_driver_turn
+from core.stdio_resident.runtime_wire import build_turn_deadlines, cancel_driver_turn, prepare_runtime_spec, stream_driver_turn, teardown_driver_turn
 from core.stdio_resident.types import SlotAffinityKey, SlotBinding
 from core.stdio_resident.zero_canon_router import ZeroCanonIsolation, zero_canon_isolation
 from core.subbridge_zero_canon import is_zero_canon_profile
@@ -285,15 +285,15 @@ class ResidentBridgeRuntime:
                 _LOGGER.exception("resident history cleanup failed")
 
     def _driver_chunks(self, state: _TurnState) -> Iterator[DecodedChunk]:
-        hs_s = float(getattr(self._config, "handshake_timeout_s", 10.0))
-        idle_s = float(getattr(self._config, "idle_timeout_s", 30.0))
+        extra = state.options.extra_turn_context
         ctx: dict[str, Any] = {
             "plan": state.plan,
             "history_plan": state.plan,
             "cancel_event": state.options.cancel_event,
-            "extra_turn_context": state.options.extra_turn_context,
+            "extra_turn_context": extra,
             "prompt": state.plan.prompt_to_send,
-            "timeouts": (hs_s, idle_s),
+            "timeouts": (float(getattr(self._config, "handshake_timeout_s", 10.0)), float(getattr(self._config, "idle_timeout_s", 30.0))),
+            "deadlines": build_turn_deadlines(self._config, extra if extra else {}),
             "mcp_config": self._config,
         }
 

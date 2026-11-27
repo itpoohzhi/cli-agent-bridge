@@ -8,14 +8,25 @@ DuckDB I/O на горячем пути нет. Врезка в монолиты
 from __future__ import annotations
 
 import contextlib
+import contextvars
+import json
+import re
 import sys
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from typing import Any
 
+from core.codex_zero_canon_policy import ERROR_TAXONOMY
 from core.route_attempts import RouteFailover, RouteRefusal, build_pool_exhausted_error
 from core.telemetry_hooks import known_model
+
+_SAFE_CODE_RE = re.compile(r"^[a-z0-9_]{1,64}$")
+_CODE_SCAN_RE = re.compile(rb'"code"\s*:\s*"([^"\\]{1,64})"')
+_CODE_KEY_RE = re.compile(rb'"code"\s*:')
+_FAILURE_LEDGER: contextvars.ContextVar[set[tuple[int, int]] | None] = contextvars.ContextVar(
+    "_route_failure_ledger", default=None
+)
 
 ALLOWED_REFUSAL_STATUSES: frozenset[int] = frozenset({402, 408, 429, 502, 503, 504})
 CLOSED_ERROR_TYPES: frozenset[str] = frozenset(
@@ -89,10 +100,45 @@ def _trace_fields(handler: Any) -> str:
     return fields if isinstance(fields, str) else ""
 
 
-def _record_failure(
-    route: Any, status: int, error_type: str, nbytes: int, extra: str = ""
-) -> None:
+@contextlib.contextmanager
+def route_failure_request_scope() -> Iterator[None]:
+    """Per-request ContextVar dedupe scope without mutating route or handler."""
+    token = _FAILURE_LEDGER.set(set())
+    try:
+        yield
+    finally:
+        _FAILURE_LEDGER.reset(token)
+
+
+def extract_safe_refusal_code(body: bytes | bytearray | str | None) -> str | None:
+    """Bounded <=512B scan for refusal code with strict AND allowlist."""
+    if not body:
+        return None
+    raw = body.encode("utf-8", errors="ignore")[:512] if isinstance(body, str) else bytes(body[:512])
+    candidate, has_code_key = None, bool(_CODE_KEY_RE.search(raw))
+    try:
+        parsed = json.loads(raw)
+        if isinstance(parsed, dict):
+            err_obj = parsed.get("error")
+            val = err_obj.get("code") if isinstance(err_obj, dict) else parsed.get("code")
+            if isinstance(val, str):
+                candidate, has_code_key = val, True
+    except Exception:
+        if m := _CODE_SCAN_RE.search(raw):
+            candidate = m.group(1).decode("ascii", errors="ignore")
+    if candidate is None:
+        return "unknown" if has_code_key else None
+    return candidate if (_SAFE_CODE_RE.fullmatch(candidate) and candidate in ERROR_TAXONOMY) else "unknown"
+
+
+def _record_failure(route: Any, status: int, error_type: str, nbytes: int, extra: str = "") -> None:
     """Фиксирует исход: статус, note, телеметрию и лог; отсутствующие методы пропускаются."""
+    ledger = _FAILURE_LEDGER.get()
+    if ledger is not None:
+        key = (id(route), id(route.handler))
+        if key in ledger:
+            return
+        ledger.add(key)
     handler, host = route.handler, route.host
     norm = _norm_model(getattr(route, "model_id", None))
     handler._response_status = status
@@ -127,32 +173,22 @@ def _emit_refusal(
         return
     err = last_error if isinstance(last_error, RouteRefusal) else quota_skipped[0][1]
     status = classify_route_failure(err).status_code
+    safe_code = extract_safe_refusal_code(err.response_body)
+    extra = f" code={safe_code}" if safe_code is not None else ""
     try:
         sink.start(err.status_code, list(err.response_headers))
         sink.write(err.response_body)
     finally:
-        _record_failure(route, status, "RouteRefusal", len(err.response_body))
+        _record_failure(route, status, "RouteRefusal", len(err.response_body), extra)
 
 
 def _emit_all_routes_open(route: Any, cb_retry_after: int) -> None:
     sink = _make_sink(route)
     try:
-        sink.start(
-            503,
-            [
-                ("Content-Type", "application/json"),
-                ("Retry-After", str(cb_retry_after)),
-            ],
-        )
+        sink.start(503, [("Content-Type", "application/json"), ("Retry-After", str(cb_retry_after))])
         sink.write(ALL_ROUTES_OPEN_BODY)
     finally:
-        _record_failure(
-            route,
-            503,
-            "all_routes_open",
-            len(ALL_ROUTES_OPEN_BODY),
-            f" retry_after={cb_retry_after}",
-        )
+        _record_failure(route, 503, "all_routes_open", len(ALL_ROUTES_OPEN_BODY), f" retry_after={cb_retry_after}")
 
 
 def emit_route_failure(

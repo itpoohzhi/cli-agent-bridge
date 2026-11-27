@@ -328,3 +328,41 @@ def test_record_useful_activity_kind_mapping() -> None:
     assert dl.next_timeout(100.0) == pytest.approx(600.0)
     dl.record_useful(200.0, ActivityKind.TOOL_CALLS)
     assert dl.next_timeout(200.0) == pytest.approx(600.0)
+
+
+def test_turn_total_300_clamps_first_progress_and_invalid_raises_config_error() -> None:
+    from core.runtime_env import ConfigError
+
+    cfg_300 = StdioPoolConfig(turn_total_timeout_s=300.0)
+    dl_off = _resolve_deadlines(cfg_300, {}, now=0.0, environ={})
+    assert dl_off.safety_deadline == pytest.approx(300.0)
+    assert dl_off.first_progress_deadline == pytest.approx(300.0)
+    assert dl_off.idle_deadline == pytest.approx(300.0)
+
+    dl_on = _resolve_deadlines(cfg_300, {}, now=0.0, environ={FLAG_TIMEOUT_LADDER: "true"})
+    assert dl_on.safety_deadline == pytest.approx(300.0)
+    assert dl_on.first_progress_deadline == pytest.approx(300.0)
+    assert dl_on.idle_deadline == pytest.approx(300.0)
+
+    for bad_val in (0.0, -5.0, float("nan"), "invalid"):
+        with pytest.raises(ConfigError):
+            _resolve_deadlines(StdioPoolConfig(), {"turn_total_timeout_s": bad_val}, now=0.0, environ={})
+
+
+def test_first_progress_601_720_721_boundaries_without_pool_idle_clamp() -> None:
+    dl = _resolve_deadlines(StdioPoolConfig(), {}, now=0.0, environ={})
+    assert dl.first_progress_deadline == pytest.approx(720.0)
+    assert dl.next_timeout(601.0) == pytest.approx(119.0)
+    with pytest.raises(TurnTimeoutError) as exc_720:
+        dl.next_timeout(720.0)
+    assert exc_720.value.code == "first_progress_timeout"
+    with pytest.raises(TurnTimeoutError) as exc_721:
+        dl.next_timeout(721.0)
+    assert exc_721.value.code == "first_progress_timeout"
+
+
+def test_turn_idle_timeout_priority_over_pool_idle_timeout() -> None:
+    cfg = StdioPoolConfig(turn_idle_timeout_s=450.0)
+    dl = _resolve_deadlines(cfg, {}, now=0.0, environ={})
+    assert dl.idle_s == pytest.approx(450.0)
+    assert dl.idle_deadline == pytest.approx(450.0)

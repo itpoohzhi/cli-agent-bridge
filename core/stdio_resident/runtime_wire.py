@@ -18,9 +18,11 @@ from core.stdio_resident.mcp_capture_server import McpLoopbackServer, TurnMcpSes
 from core.stdio_resident.mcp_tool_capture import McpToolCaptureSession, McpToolCaptureSpec
 from core.stdio_resident.process_io import TIMEOUT
 from core.stdio_resident.protocol_driver import DecodedChunk
-from core.stdio_resident.runtime_types import PreDispatchResidentError, ResidentStreamError
+from core.stdio_resident.runtime_types import PreDispatchResidentError, ResidentStreamError, TurnTimeoutError
 from core.stdio_resident.session_manager import _build_cancel_payload, _track_fsm_ids
 from core.stdio_resident.terminal_reconcile import TerminalTextReconciler, should_reconcile_protocol
+from core.stdio_resident.turn_deadlines import _TurnDeadlines, _resolve_deadlines
+from core.timeout_ladder import ActivityKind
 from core.tool_mode import ToolMode, resolve_tool_mode
 
 logger = logging.getLogger(__name__)
@@ -118,11 +120,32 @@ def _decode_tagged_line(driver: Any, handle: Any, tagged: Any, turn_ctx: dict[st
     return chunk, is_term, bool(chunk)
 
 
-def _read_decoded_step(driver: Any, handle: Any, idle_s: float, turn_ctx: dict[str, Any]) -> tuple[DecodedChunk | None, bool, bool]:
-    kind, tagged = _read_next(handle, idle_s)
-    _fail_if(kind == TIMEOUT, ResidentStreamError("resident_turn_timeout", code="turn_timeout"))
-    _fail_if(isinstance(tagged, type(None)), ResidentStreamError("resident process ended before the terminal marker", code="upstream_incomplete_stream"))
-    return _decode_tagged_line(driver, handle, tagged, turn_ctx)
+def build_turn_deadlines(cfg: object, ctx: Mapping[str, Any], *, now: float | None = None, environ: Mapping[str, str] | None = None) -> _TurnDeadlines:
+    return _resolve_deadlines(cfg, ctx, time.monotonic() if now is None else now, environ=environ)
+
+def _is_useful_chunk(chunk: DecodedChunk | None, is_term: bool) -> bool:
+    return is_term or (chunk is not None and bool(getattr(chunk, "text", "") or getattr(chunk, "reasoning_text", "") or getattr(chunk, "tool_calls", None)))
+
+
+def _read_decoded_step(
+    driver: Any, handle: Any, idle_or_dl: float | _TurnDeadlines, turn_ctx: dict[str, Any], *, now_fn: Callable[[], float] = time.monotonic
+) -> tuple[DecodedChunk | None, bool, bool]:
+    if not isinstance(idle_or_dl, _TurnDeadlines):
+        kind, tagged = _read_next(handle, idle_or_dl)
+        _fail_if(kind == TIMEOUT, TurnTimeoutError("resident_turn_timeout"))
+        _fail_if(isinstance(tagged, type(None)), ResidentStreamError("resident process ended before the terminal marker", code="upstream_incomplete_stream"))
+        return _decode_tagged_line(driver, handle, tagged, turn_ctx)
+    while True:
+        rem = idle_or_dl.next_timeout(now_fn())
+        kind, tagged = _read_next(handle, rem)
+        idle_or_dl.next_timeout(now_fn())
+        if kind == TIMEOUT:
+            continue
+        _fail_if(isinstance(tagged, type(None)), ResidentStreamError("resident process ended before the terminal marker", code="upstream_incomplete_stream"))
+        chunk, is_term, emit = _decode_tagged_line(driver, handle, tagged, turn_ctx)
+        if _is_useful_chunk(chunk, is_term):
+            idle_or_dl.record_useful(now_fn(), ActivityKind.CONTENT)
+            return chunk, is_term, emit
 
 
 def _build_turn_mcp_context(
@@ -188,33 +211,39 @@ def _finish_mcp_capture(
 
 
 def _stream_with_mcp(
-    driver: Any, handle: Any, turn_ctx: dict[str, Any], idle_s: float, srv: McpLoopbackServer
+    driver: Any, handle: Any, turn_ctx: dict[str, Any], idle_or_dl: float | _TurnDeadlines, srv: McpLoopbackServer, *, now_fn: Callable[[], float] = time.monotonic
 ) -> Iterator[DecodedChunk]:
-    last_activity, done = time.monotonic(), False
+    last_activity, done = now_fn(), False
     while not done and not srv.captured_event.is_set():
-        rem_idle = max(0.01, idle_s - (time.monotonic() - last_activity))
+        rem_idle = max(0.01, idle_or_dl.next_timeout(now_fn())) if isinstance(idle_or_dl, _TurnDeadlines) else max(0.01, idle_or_dl - (now_fn() - last_activity))
         kind, tagged = _read_next(handle, min(rem_idle, 0.05))
         if kind == TIMEOUT:
             if srv.captured_event.is_set():
                 break
-            _fail_if(time.monotonic() - last_activity >= idle_s, ResidentStreamError("resident_turn_timeout", code="turn_timeout"))
+            idle_or_dl.next_timeout(now_fn()) if isinstance(idle_or_dl, _TurnDeadlines) else _fail_if(now_fn() - last_activity >= idle_or_dl, TurnTimeoutError("resident_turn_timeout"))
             continue
         if tagged is None:
             if srv.captured_event.is_set():
                 break
             raise ResidentStreamError("resident process ended before the terminal marker", code="upstream_incomplete_stream")
-        last_activity = time.monotonic()
         chunk, done, emit = _decode_tagged_line(driver, handle, tagged, turn_ctx)
+        if isinstance(idle_or_dl, _TurnDeadlines):
+            if _is_useful_chunk(chunk, done):
+                idle_or_dl.record_useful(now_fn(), ActivityKind.CONTENT)
+        else:
+            last_activity = now_fn()
         if emit and not (done and srv.captured_event.is_set()):
             yield cast(DecodedChunk, chunk)
     if srv.captured_event.is_set():
         yield _finish_mcp_capture(driver, handle, turn_ctx, srv, cancel=not done)
 
 
-def _stream_plain(driver: Any, handle: Any, turn_ctx: dict[str, Any], idle_s: float) -> Iterator[DecodedChunk]:
+def _stream_plain(
+    driver: Any, handle: Any, turn_ctx: dict[str, Any], idle_or_dl: float | _TurnDeadlines, *, now_fn: Callable[[], float] = time.monotonic
+) -> Iterator[DecodedChunk]:
     done = False
     while not done:
-        chunk, done, emit = _read_decoded_step(driver, handle, idle_s, turn_ctx)
+        chunk, done, emit = _read_decoded_step(driver, handle, idle_or_dl, turn_ctx, now_fn=now_fn)
         if emit:
             yield cast(DecodedChunk, chunk)
 
@@ -249,12 +278,13 @@ def stream_driver_turn(
         raw_ctx = ctx.get("extra_turn_context")
         turn_ctx = cast(dict[str, Any], raw_ctx) if isinstance(raw_ctx, dict) else (dict(cast(Mapping[str, Any], raw_ctx)) if raw_ctx else {})
         timeouts = cast(tuple[float, float], ctx.get("timeouts", (30.0, 120.0)))
+        dl_or_idle: float | _TurnDeadlines = ctx["deadlines"] if isinstance(ctx.get("deadlines"), _TurnDeadlines) else timeouts[1]
         _send_turn_input(driver, handle, str(ctx["prompt"]), turn_ctx, timeouts[0])
         on_dispatched()
         if srv is not None:
-            yield from _reconciled_chunks(reconciler, _stream_with_mcp(driver, handle, turn_ctx, timeouts[1], srv))
+            yield from _reconciled_chunks(reconciler, _stream_with_mcp(driver, handle, turn_ctx, dl_or_idle, srv))
         else:
-            yield from _reconciled_chunks(reconciler, _stream_plain(driver, handle, turn_ctx, timeouts[1]))
+            yield from _reconciled_chunks(reconciler, _stream_plain(driver, handle, turn_ctx, dl_or_idle))
 
 
 def cancel_driver_turn(driver: Any, handle: Any, turn_context: Mapping[str, object] | None) -> None:

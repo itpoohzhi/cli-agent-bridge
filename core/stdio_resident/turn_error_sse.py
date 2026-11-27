@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from typing import Final
 
 from core.codex_zero_canon_policy import (
@@ -14,12 +15,14 @@ from core.codex_zero_canon_policy import (
     classify_error,
 )
 from core.log_redaction import redact_log_text
-from core.runtime_env import positive_int
+from core.runtime_env import env_bool, positive_int
 from core.stdio_resident.process_pool import SlotLeaseTimeoutError
+from core.stdio_resident.runtime_types import BridgeDrainingError
 
 DONE_FRAME: Final[str] = "data: [DONE]\n\n"
 DEFAULT_ERROR_MAX_CHARS: Final[int] = 500
 ERROR_MAX_CHARS_ENV: Final[str] = "BRIDGE_STDIO_ERROR_MAX_CHARS"
+TURN_TIMEOUT_502_ENV: Final[str] = "BRIDGE_RESIDENT_TURN_TIMEOUT_502_ENABLED"
 
 _RATE_LIMIT_MARKERS: Final[tuple[str, ...]] = (
     "429",
@@ -76,6 +79,7 @@ class TurnErrorResponse:
     message: str
     sse: str
     body: dict[str, object]
+    headers: dict[str, str] = field(default_factory=dict)
 
 
 _STATUS_ERROR_TYPES: Final[dict[int, str]] = {
@@ -103,6 +107,8 @@ def _error_type_for(status: int, code: str) -> str:
 
 
 def _classify_typed_error(error: BaseException) -> tuple[int, str, str] | None:
+    if isinstance(error, BridgeDrainingError):
+        return 503, "service_unavailable", error.code
     if isinstance(error, ResidentTurnError):
         resp = error.response
         return resp.status, resp.error_type, resp.code
@@ -173,15 +179,27 @@ def _classify_message_text(lower: str) -> tuple[int, str, str]:
     return 502, "upstream_error", "resident_turn_failed"
 
 
-def classify_turn_error(error: BaseException) -> tuple[int, str, str]:
+def _apply_timeout_status_policy(
+    status: int, error_type: str, code: str, environ: Mapping[str, str] | None = None
+) -> tuple[int, str, str]:
+    if code == "bridge_draining" or status == 503:
+        return status, error_type, code
+    if status == 504 and env_bool(os.environ if environ is None else environ, (TURN_TIMEOUT_502_ENV,), False):
+        return 502, error_type, code
+    return status, error_type, code
+
+
+def classify_turn_error(
+    error: BaseException, *, environ: Mapping[str, str] | None = None
+) -> tuple[int, str, str]:
     """Возвращает `(status, error_type, code)` по семантике сбоя, не по имени агента."""
     typed = _classify_typed_error(error)
     if typed is not None:
-        return typed
+        return _apply_timeout_status_policy(*typed, environ=environ)
     lower = str(error).lower()
     if isinstance(error, TimeoutError):
-        return 504, "timeout_error", _resolve_timeout_code(lower)
-    return _classify_message_text(lower)
+        return _apply_timeout_status_policy(504, "timeout_error", _resolve_timeout_code(lower), environ=environ)
+    return _apply_timeout_status_policy(*_classify_message_text(lower), environ=environ)
 
 
 def sanitize_error_message(
