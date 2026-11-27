@@ -144,6 +144,20 @@ def test_block_list_system_content_triggers_anchor(flags):
     assert uuid.UUID(a).version == 5
 
 
+def test_exact_threshold_boundary(flags):
+    """Ровно MIN_SYSTEM_ANCHOR_CHARS включает якорь (>=), на 1 символ меньше — нет."""
+    flags(stable=True, anchor=True)
+    exact = "x" * MIN_SYSTEM_ANCHOR_CHARS
+    a = _affinity(_single(exact, "A?"))
+    b = _affinity(_single(exact, "B?"))
+    assert a == b
+    assert uuid.UUID(a).version == 5
+    below = "x" * (MIN_SYSTEM_ANCHOR_CHARS - 1)
+    c = _affinity(_single(below, "A?"))
+    d = _affinity(_single(below, "B?"))
+    assert c != d
+
+
 def test_top_level_system_string_triggers_anchor(flags):
     flags(stable=True, anchor=True)
     a = _affinity([{"role": "user", "content": "A?"}], system=LONG_SYS)

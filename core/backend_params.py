@@ -35,24 +35,32 @@ def _effort_map_ok(value: Any) -> bool:
     )
 
 
+def _valid_effort(params: Mapping[str, Any]) -> bool:
+    """`effort_field` из белого списка и корректный `effort_map`."""
+    return params.get("effort_field", _DEFAULT_EFFORT_FIELD) in _EFFORT_FIELDS and _effort_map_ok(
+        params.get("effort_map", {})
+    )
+
+
+def _valid_lists(params: Mapping[str, Any]) -> bool:
+    """`adaptive_whitelist`/`strip_always`: списки непустых строк; whitelist ⊆ GLOBAL_WHITELIST."""
+    if any(key in params and not _str_list(params[key]) for key in ("adaptive_whitelist", "strip_always")):
+        return False
+    return all(item in GLOBAL_WHITELIST for item in params.get("adaptive_whitelist", ()))
+
+
 def validate_backend_params(params: Any) -> str:
     """Причина отказа `backends.<id>.params` ('' — валидно; `None` — ключ не задан)."""
     if params is None:
         return ""
     if not isinstance(params, Mapping) or set(params) - BACKEND_PARAMS_KEYS:
         return BACKEND_PARAMS_INVALID
-    if params.get("effort_field", _DEFAULT_EFFORT_FIELD) not in _EFFORT_FIELDS:
-        return BACKEND_PARAMS_INVALID
-    if not _effort_map_ok(params.get("effort_map", {})):
-        return BACKEND_PARAMS_INVALID
-    for key in ("adaptive_whitelist", "strip_always"):
-        if key in params and not _str_list(params[key]):
-            return BACKEND_PARAMS_INVALID
-    if any(item not in GLOBAL_WHITELIST for item in params.get("adaptive_whitelist", ())):
-        return BACKEND_PARAMS_INVALID
-    if params.get("cache_control_strategy") not in _CACHE_STRATEGIES:
-        return BACKEND_PARAMS_INVALID
-    return ""
+    valid = (
+        _valid_effort(params)
+        and _valid_lists(params)
+        and params.get("cache_control_strategy") in _CACHE_STRATEGIES
+    )
+    return "" if valid else BACKEND_PARAMS_INVALID
 
 
 def _is_default(params: Any) -> bool:
