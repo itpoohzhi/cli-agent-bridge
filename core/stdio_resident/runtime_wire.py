@@ -145,7 +145,7 @@ def _read_decoded_step(
         chunk, is_term, emit = _decode_tagged_line(driver, handle, tagged, turn_ctx)
         if _is_useful_chunk(chunk, is_term):
             idle_or_dl.record_useful(now_fn(), ActivityKind.CONTENT)
-            return chunk, is_term, emit
+        return chunk, is_term, emit
 
 
 def _build_turn_mcp_context(
