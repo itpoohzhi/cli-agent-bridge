@@ -52,6 +52,12 @@ class PersistentWorkerSettings:
     pump_tick_s: float = 0.5
     persistent_drain_window_s: float = 0.10
     drain_window_s: float = 0.35
+    standby_enabled: bool = False
+    standby_max_slots: int = 1
+    standby_init_timeout_s: float = 30.0
+    standby_ttl_s: float = 300.0
+    fast_drain_enabled: bool = False
+    fast_drain_min_s: float = 0.015
 
 
 @dataclass(frozen=True)
@@ -95,6 +101,10 @@ class PersistentLease:
     pump_tick_s: float
     drain_window_s: float
     released: bool = False
+    prefetched_init_line: str = ""
+    fast_drain_enabled: bool = False
+    fast_drain_min_s: float = 0.015
+    standby_claimed: bool = False
 
 
 @dataclass(frozen=True)
@@ -177,6 +187,36 @@ def _read_drain_windows(config_path: Path | None) -> tuple[float, float, float]:
     return pump_tick_s, persistent_drain_s, drain_s
 
 
+def _read_standby_and_fast_drain(
+    config_path: Path | None,
+) -> tuple[bool, int, float, float, bool, float]:
+    st_en = read_bool_setting(
+        "BRIDGE_AGY_STANDBY_ENABLED", "AGY_BRIDGE_STANDBY_ENABLED",
+        False, config_path=config_path,
+    )
+    st_max = read_int_setting(
+        "persistent_standby_max_slots", "AGY_BRIDGE_STANDBY_MAX_SLOTS",
+        1, (1, 4), config_path=config_path,
+    )
+    st_init = read_float_setting(
+        "persistent_standby_init_timeout_s", "AGY_BRIDGE_STANDBY_INIT_TIMEOUT_S",
+        30.0, (5.0, 60.0), config_path=config_path,
+    )
+    st_ttl = read_float_setting(
+        "persistent_standby_ttl_s", "AGY_BRIDGE_STANDBY_TTL_S",
+        300.0, (30.0, 1800.0), config_path=config_path,
+    )
+    fd_en = read_bool_setting(
+        "BRIDGE_AGY_PERSISTENT_FAST_DRAIN_ENABLED", "AGY_BRIDGE_PERSISTENT_FAST_DRAIN_ENABLED",
+        False, config_path=config_path,
+    )
+    fd_min = read_float_setting(
+        "persistent_fast_drain_min_s", "AGY_BRIDGE_PERSISTENT_FAST_DRAIN_MIN_S",
+        0.015, (0.005, 0.10), config_path=config_path,
+    )
+    return st_en, st_max, st_init, st_ttl, fd_en, fd_min
+
+
 def persistent_worker_settings(
     *, config_path: Path | None = None
 ) -> PersistentWorkerSettings:
@@ -197,9 +237,13 @@ def persistent_worker_settings(
     )
     idle_s, ttl_s, max_rss_mb, max_turns = _read_lifecycle_bounds(config_path)
     pump_tick_s, persistent_drain_s, drain_s = _read_drain_windows(config_path)
+    st_en, st_max, st_init, st_ttl, fd_en, fd_min = _read_standby_and_fast_drain(config_path)
     return PersistentWorkerSettings(
         enabled=enabled, max_slots=max_slots, lease_wait_s=lease_wait_s,
         idle_timeout_s=idle_s, ttl_s=ttl_s, max_rss_mb=max_rss_mb,
         max_turns=max_turns, pump_tick_s=pump_tick_s,
         persistent_drain_window_s=persistent_drain_s, drain_window_s=drain_s,
+        standby_enabled=st_en, standby_max_slots=st_max,
+        standby_init_timeout_s=st_init, standby_ttl_s=st_ttl,
+        fast_drain_enabled=fd_en, fast_drain_min_s=fd_min,
     )

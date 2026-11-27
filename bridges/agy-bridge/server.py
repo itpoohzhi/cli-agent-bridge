@@ -4965,13 +4965,10 @@ class _TranscriptTail(InterruptionTailState):
         TURN_COMPLETE выдерживает полное окно DRAIN_WINDOW_S (exit=window).
         """
         started = time.monotonic()
-        deadline = (
-            self.drain_deadline if self.drain_deadline > 0 else started + DRAIN_WINDOW_S
-        )
-        deadline = min(deadline, started + DRAIN_MAX_S)
-        earliest = started + DRAIN_MIN_S
-        emitted_before = self.emitted
-        exit_kind = "window"
+        deadline = min(self.drain_deadline if self.drain_deadline > 0 else started + DRAIN_WINDOW_S, started + DRAIN_MAX_S)
+        earliest, emitted_before, exit_kind = started + DRAIN_MIN_S, self.emitted, "window"
+        fast_drain = bool(getattr(self, "fast_complete_drain", False))
+        fast_earliest = started + float(getattr(self, "fast_drain_min_s", 0.015))
         while True:
             if self.stop_event.is_set():
                 exit_kind = "stop"
@@ -4982,6 +4979,9 @@ class _TranscriptTail(InterruptionTailState):
             now = time.monotonic()
             if now >= earliest and self.end_marker:
                 exit_kind = "end_turn"
+                break
+            if fast_drain and now >= fast_earliest and self.final_planner and self._pending_steps() == 0:
+                exit_kind = "fast_complete"
                 break
             if now >= deadline:
                 break
