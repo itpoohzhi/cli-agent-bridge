@@ -10,6 +10,8 @@ import pytest
 import core.route_failure_telemetry as rft
 from core.route_attempts import RouteRefusal
 from core.route_failure_telemetry import (
+    _call,
+    _trace_fields,
     finalize_cli_serve,
     finalize_passthrough_serve,
     finalize_routes_exit,
@@ -255,3 +257,21 @@ def test_exit_release_error_still_records_once() -> None:
     with pytest.raises(RuntimeError, match="release failed"):
         finalize_routes_exit(route, res)
     assert route.recs == [{"client_gone": True}]
+
+
+def test_call_missing_method_returns_none() -> None:
+    assert _call(SimpleNamespace(), "nonexistent") is None
+    assert _trace_fields(SimpleNamespace()) == ""
+
+
+def test_finalize_routes_exit_minimal_handler_defaults() -> None:
+    recs: list[dict[str, Any]] = []
+    handler = SimpleNamespace(
+        _record_telemetry=lambda **kw: recs.append(kw), connection=object()
+    )
+    route = SimpleNamespace(
+        handler=handler, host=SimpleNamespace(_client_gone=lambda _c: False)
+    )
+    res = SimpleNamespace(release_unused=lambda: None)
+    run_in_except(RuntimeError("x"), lambda: finalize_routes_exit(route, res))
+    assert recs == [{"client_gone": False}]
