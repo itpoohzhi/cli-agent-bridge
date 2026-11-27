@@ -159,11 +159,11 @@ def _pick_ladder_override(
 def _parse_strict_total_timeout(ctx: Mapping[str, Any], cfg: object) -> tuple[float | None, bool]:
     if (raw := ctx.get("turn_total_timeout_s")) is not None:
         if (parsed := _parse_pos_float(raw)) is None:
-            raise ConfigError(f"invalid turn_total_timeout_s in ctx: {raw!r}")
+            raise ConfigError("invalid turn_total_timeout_s in ctx")
         return parsed, True
     if (raw := getattr(cfg, "turn_total_timeout_s", None)) is not None:
         if (parsed := _parse_pos_float(raw)) is None:
-            raise ConfigError(f"invalid turn_total_timeout_s in cfg: {raw!r}")
+            raise ConfigError("invalid turn_total_timeout_s in cfg")
         return (None, False) if parsed == _DEFAULT_POOL_TURN_TOTAL_S else (parsed, False)
     return None, False
 
