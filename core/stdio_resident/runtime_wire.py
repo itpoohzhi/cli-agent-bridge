@@ -138,8 +138,8 @@ def _read_decoded_step(
     while True:
         rem = idle_or_dl.next_timeout(now_fn())
         kind, tagged = _read_next(handle, rem)
-        idle_or_dl.next_timeout(now_fn())
         if kind == TIMEOUT:
+            idle_or_dl.next_timeout(now_fn())
             continue
         _fail_if(isinstance(tagged, type(None)), ResidentStreamError("resident process ended before the terminal marker", code="upstream_incomplete_stream"))
         chunk, is_term, emit = _decode_tagged_line(driver, handle, tagged, turn_ctx)

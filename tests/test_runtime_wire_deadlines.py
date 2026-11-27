@@ -38,7 +38,7 @@ class _FakeClockHandle:
             self.now += timeout_s
             return TIMEOUT, None
         dt, kind, line = self._events[0]
-        if dt > timeout_s:
+        if dt >= timeout_s:
             self._events[0] = (dt - timeout_s, kind, line)
             self.now += timeout_s
             return TIMEOUT, None

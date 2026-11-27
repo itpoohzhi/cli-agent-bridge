@@ -10,6 +10,7 @@ from typing import Any, Final
 
 from core.runtime_env import ConfigError, env_bool
 from core.stdio_resident.config import StdioPoolConfig
+from core.stdio_resident.runtime_types import TurnTimeoutError as _BaseTurnTimeoutError
 from core.timeout_ladder import (
     FLAG_TIMEOUT_LADDER,
     ActivityKind,
@@ -39,15 +40,15 @@ _TIMEOUT_CODES: Final[dict[str, str]] = {
 }
 
 
-class TurnTimeoutError(TimeoutError):
+class TurnTimeoutError(_BaseTurnTimeoutError):
     """Typed timeout separating first-progress, idle, and safety cap."""
 
     http_status: int = 504
 
     def __init__(self, timeout_kind: str, message: str) -> None:
         self.timeout_kind: str = timeout_kind
-        self.code: str = _TIMEOUT_CODES.get(timeout_kind, "turn_timeout")
-        super().__init__(f"{self.code}: {message}")
+        code = _TIMEOUT_CODES.get(timeout_kind, "turn_timeout")
+        super().__init__(f"{code}: {message}", code=code)
 
 
 @dataclass(slots=True)
