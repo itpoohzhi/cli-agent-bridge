@@ -70,6 +70,7 @@ class PersistentWorkerSettings:
     fast_drain_enabled: bool = False
     fast_drain_min_s: float = 0.015
     fresh_rotate_enabled: bool = False
+    strict_cold_rotation: bool = True
 
 
 @dataclass(frozen=True)
@@ -85,6 +86,7 @@ class PersistentAcquireRequest:
     review_profile: str
     argv_builder: Callable[[], list[str]]
     env: Mapping[str, str]
+    resume_base_idx: int = 0
 
 
 @dataclass(frozen=True)
@@ -138,6 +140,7 @@ class RunSpawnContext:
     chat_key: str
     spawn_cold: Callable[[], subprocess.Popen[bytes]]
     on_cold_fail: Callable[[], None]
+    resume_base_idx: int = 0
 
 
 @dataclass(frozen=True)
@@ -250,6 +253,10 @@ def persistent_worker_settings(
     )
     idle_s, ttl_s, max_rss_mb, max_turns = _read_lifecycle_bounds(config_path)
     pump_tick_s, persistent_drain_s, drain_s = _read_drain_windows(config_path)
+    strict_cold = read_bool_setting(
+        "strict_cold_rotation", "AGY_BRIDGE_STRICT_COLD_ROTATION",
+        True, config_path=config_path,
+    )
     st_en, st_max, st_init, st_ttl, fd_en, fd_min = _read_standby_and_fast_drain(config_path)
     fresh_rotate_enabled = read_bool_setting(
         "BRIDGE_AGY_PERSISTENT_FRESH_ROTATE_ENABLED",
@@ -262,6 +269,7 @@ def persistent_worker_settings(
         idle_timeout_s=idle_s, ttl_s=ttl_s, max_rss_mb=max_rss_mb,
         max_turns=max_turns, pump_tick_s=pump_tick_s,
         persistent_drain_window_s=persistent_drain_s, drain_window_s=drain_s,
+        strict_cold_rotation=strict_cold,
         standby_enabled=st_en, standby_max_slots=st_max,
         standby_init_timeout_s=st_init, standby_ttl_s=st_ttl,
         fast_drain_enabled=fd_en, fast_drain_min_s=fd_min,

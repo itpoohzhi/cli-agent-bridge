@@ -187,13 +187,14 @@ class TestAgyPersistentWorkerPool(unittest.TestCase):
         self.pool.shutdown()
         self.tmp.cleanup()
 
-    def _acquire(self, chat_key: str = "chat-1", cid: str = "", extra_env: dict[str, str] | None = None):
+    def _acquire(self, chat_key: str = "chat-1", cid: str = "", extra_env: dict[str, str] | None = None, resume_base_idx: int = 0):
         env = os.environ.copy()
         if extra_env:
             env.update(extra_env)
         req = PersistentAcquireRequest(
             chat_key=chat_key,
             cid=cid,
+            resume_base_idx=resume_base_idx,
             model="gemini-4-neon",
             effort="high",
             cwd=str(self.tmp_path),
@@ -244,7 +245,7 @@ class TestAgyPersistentWorkerPool(unittest.TestCase):
         self._release(lease1, success=True, cid=cid)
 
         # Turn 2 arrives with only cid (no chat_key) -> must reuse same PID via cid LRU!
-        lease2 = self._acquire(chat_key="", cid=cid)
+        lease2 = self._acquire(chat_key="", cid=cid, resume_base_idx=1)
         assert lease2 is not None
         self.assertTrue(lease2.reused)
         self.assertEqual(lease2.handle.pid, pid1)
@@ -270,7 +271,7 @@ class TestAgyPersistentWorkerPool(unittest.TestCase):
         cid = "cid-rot"
         pids = []
         for idx in range(1, 5):
-            lease = self._acquire(chat_key="rot-chat", cid=cid if idx > 1 else "", extra_env={"FAKE_AGY_CID": cid})
+            lease = self._acquire(chat_key="rot-chat", cid=cid if idx > 1 else "", extra_env={"FAKE_AGY_CID": cid}, resume_base_idx=idx - 1)
             assert lease is not None
             pid, _, _ = self._run_turn_on_lease(lease, f"t-{idx}")
             pids.append(pid)
@@ -335,6 +336,13 @@ class TestAgyPersistentWorkerPool(unittest.TestCase):
         self.assertEqual(snap["slots"], 0)
 
 
+def _anchored_plan(srv, resumed: bool):
+    """AD-002: resume-ход несёт якорь base_idx=1 (srv.Run не принимает resume_base_idx — он из plan)."""
+    plan = srv._TurnPlan()
+    plan.base_idx = 1 if resumed else 0
+    return plan
+
+
 class TestRunPersistentIntegration(unittest.TestCase):
     def test_run_end_to_end_reuses_worker_when_enabled(self) -> None:
         srv = _load_agy_server()
@@ -359,6 +367,7 @@ class TestRunPersistentIntegration(unittest.TestCase):
                     mock.patch.object(srv, "DYNAMIC_CONFIG_PATH", dyn_cfg),
                     mock.patch.object(srv, "_launcher", return_value=str(launcher)),
                     mock.patch.object(srv, "_launch_env", return_value=os.environ.copy()),
+                    mock.patch.object(srv, "_prespawn_plan", lambda _c, resumed, *_a, **_k: _anchored_plan(srv, resumed)),
                 ):
                     run1 = srv.Run(
                         "ping-1",
@@ -385,16 +394,8 @@ class TestRunPersistentIntegration(unittest.TestCase):
                     self.assertIn("turn=1", done1[1])
 
                     # Turn 2 with cid from turn 1 -> must reuse exact same PID and spawn_ms == 0!
-                    run2 = srv.Run(
-                        "ping-2",
-                        "gemini-4-neon",
-                        "high",
-                        "req",
-                        str(td_path),
-                        "t2",
-                        conversation_id="cid-persistent-001",
-                        chat_key="hermes-chat-1",
-                    )
+                    run2 = srv.Run("ping-2", "gemini-4-neon", "high", "req", str(td_path), "t2",
+                                   conversation_id="cid-persistent-001", chat_key="hermes-chat-1")
                     done2 = None
                     while True:
                         kind, payload = run2.q.get(timeout=5.0)
@@ -515,12 +516,14 @@ class TestRunPersistentIntegration(unittest.TestCase):
             )
             env = os.environ.copy()
             env["FAKE_AGY_MODE"] = "error_on_turn2"
+            env["FAKE_AGY_CID"] = "cid-persistent-err"  # AD-002: bound_cid == run_cid на turn 2
             srv._PERSISTENT_POOL.shutdown()
             try:
                 with (
                     mock.patch.object(srv, "DYNAMIC_CONFIG_PATH", dyn_cfg),
                     mock.patch.object(srv, "_launcher", return_value=str(launcher)),
                     mock.patch.object(srv, "_launch_env", return_value=env),
+                    mock.patch.object(srv, "_prespawn_plan", lambda _c, resumed, *_a, **_k: _anchored_plan(srv, resumed)),
                 ):
                     run1 = srv.Run("ok-1", "gemini-4-neon", "high", "req", str(td_path), "e1", chat_key="err-chat")
                     while True:
@@ -531,16 +534,8 @@ class TestRunPersistentIntegration(unittest.TestCase):
                     pid1 = run1.proc.pid
                     run1.close()
 
-                    run2 = srv.Run(
-                        "fail-2",
-                        "gemini-4-neon",
-                        "high",
-                        "req",
-                        str(td_path),
-                        "e2",
-                        conversation_id="cid-persistent-err",
-                        chat_key="err-chat",
-                    )
+                    run2 = srv.Run("fail-2", "gemini-4-neon", "high", "req", str(td_path), "e2",
+                                   conversation_id="cid-persistent-err", chat_key="err-chat")
                     done2 = None
                     while True:
                         kind, payload = run2.q.get(timeout=5.0)

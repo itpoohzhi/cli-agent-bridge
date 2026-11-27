@@ -15,6 +15,7 @@ from typing import IO, cast
 
 from core.stdio_resident.process_io import EOF as _STDIO_EOF, LINE as _STDIO_LINE, TIMEOUT as _STDIO_TIMEOUT
 
+from .loss_contract_config import worker_bounds
 from .persistent_fresh_rotate import acquire_with_fresh_guard
 from .persistent_worker_adapter import AgyPersistentWorkerPool, StdioWriteError
 from .persistent_worker_config import (
@@ -51,7 +52,8 @@ def start_run_process(run: object, ctx: RunSpawnContext) -> float:
         ("_persistent_resolved_cid", run_cid),
     ):
         setattr(run, k, v)
-    pw_cfg = persistent_worker_settings(config_path=ctx.config_path)
+    cfg_path = ctx.config_path
+    pw_cfg = worker_bounds(persistent_worker_settings(config_path=cfg_path), config_path=cfg_path)
     pool = cast(AgyPersistentWorkerPool, ctx.pool)
     if not pw_cfg.enabled:
         pool.reconcile_disabled()
@@ -59,14 +61,13 @@ def start_run_process(run: object, ctx: RunSpawnContext) -> float:
     try:
         lease: PersistentLease | None = None
         if pw_cfg.enabled and ctx.add_dir is None:
-            digest = compute_env_digest(
-                ctx.cli_mode, ctx.zero_canon, str(ctx.launch_env.get("HOME") or ""), ctx.settings_arg, launch_env=ctx.launch_env
-            )
+            home = str(ctx.launch_env.get("HOME") or "")
+            digest = compute_env_digest(ctx.cli_mode, ctx.zero_canon, home, ctx.settings_arg, launch_env=ctx.launch_env)
             req = PersistentAcquireRequest(
                 chat_key=ctx.chat_key, cid=run_cid, model=ctx.model, effort=ctx.effort,
                 cwd=ctx.work_dir, env_digest=digest,
                 review_profile="zero-canon" if ctx.zero_canon else "standard",
-                argv_builder=lambda: list(ctx.cmd), env=ctx.launch_env,
+                argv_builder=lambda: list(ctx.cmd), env=ctx.launch_env, resume_base_idx=ctx.resume_base_idx,
             )
             lease = acquire_with_fresh_guard(pool, req, pw_cfg)
         if lease is not None:

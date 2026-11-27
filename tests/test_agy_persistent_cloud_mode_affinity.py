@@ -155,6 +155,7 @@ class TestCloudModeAffinity(unittest.TestCase):
             chat_key=chat_key,
             spawn_cold=lambda: self._cold_forbidden(env),
             on_cold_fail=lambda: None,
+            resume_base_idx=1 if cid else 0,
         )
         start_run_process(run, ctx)
         self.assertIsNotNone(run._persistent_lease)

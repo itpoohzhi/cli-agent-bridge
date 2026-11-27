@@ -6,13 +6,14 @@ import json
 import re
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+
+from core.prompt_truncation_notice import (
+    MIDDLE_PRUNED_MARKER as DEFAULT_MIDDLE_PRUNED_MARKER,
+)
+from .atomic_group_overflow import build_overflow_items, shrink_atomic
 from .history_overflow_policy import OverflowSpec, shrink_overflow_parts
 from .history_user_classifier import is_synthetic_user_block
 
-DEFAULT_MIDDLE_PRUNED_MARKER = (
-    "\n[... часть содержимого сообщения опущена мостом для соблюдения лимита"
-    " контекста agy ...]\n"
-)
 _TOOL_REF_RE = re.compile(r"\[tool (?:call|result) ([^\]]+)\]")
 DEFAULT_INPUT_GUARD_BYTES = 4 * 1024 * 1024
 
@@ -66,6 +67,7 @@ class CompactionConfig:
     tail_min_groups: int = 1
     middle_pruned_marker: str = DEFAULT_MIDDLE_PRUNED_MARKER
     separator: str = "\n\n"
+    atomic_groups: bool = False
 @dataclass(frozen=True, slots=True)
 class CompactionResult:
     """Итог компакции: промпт, его размер, хэш префикса и счётчики."""
@@ -77,6 +79,7 @@ class CompactionResult:
     kept_count: int
     digested_count: int
     dropped_count: int
+    digested_positions: tuple[int, ...] = ()
 
 def _joined(blocks: Sequence[PromptBlock], separator: str) -> str:
     return separator.join(block.rendered for block in blocks)
@@ -196,7 +199,7 @@ def _layout(
     sep_bytes = json_text_bytes(config.separator)
     extra = _digest_budget(config) + 2 * sep_bytes if rest else 0
     min_tail = min(max(config.tail_min_groups, 0), len(rest))
-    selected = set(rest[-min_tail:]) if min_tail > 0 else set()
+    selected: set[tuple[PromptBlock, ...]] = set(rest[-min_tail:]) if min_tail > 0 else set()
     if carrier is not None:
         selected.update(rest[rest.index(carrier):])
     used = json_text_bytes(anchor_text) + extra
@@ -234,20 +237,16 @@ def _demotion_candidate(layout: _Layout) -> tuple[PromptBlock, ...] | None:
 def _demote(layout: _Layout, group: tuple[PromptBlock, ...]) -> _Layout:
     drop = layout.carrier is not None and group[0].index > layout.carrier[0].index
     middle = layout.middle if drop else (*layout.middle, group)
-    return _Layout(
-        layout.anchor,
-        middle,
-        tuple(item for item in layout.tail if item != group),
-        layout.carrier,
-    )
+    tail = tuple(item for item in layout.tail if item != group)
+    return _Layout(layout.anchor, middle, tail, layout.carrier)
 def _overflow_role(block: PromptBlock, carrier: tuple[PromptBlock, ...] | None) -> str:
-    if (
-        block.role == "user"
-        and block not in (carrier or ())
-        and is_synthetic_user_block(block.rendered)
-    ):
-        return "synthetic"
-    return block.role
+    synthetic = block.role == "user" and block not in (carrier or ())
+    return "synthetic" if synthetic and is_synthetic_user_block(block.rendered) else block.role
+def _legacy_items(layout: _Layout, digest: str) -> list[tuple[str, str]]:
+    def part(b: PromptBlock) -> tuple[str, str]:
+        return _overflow_role(b, layout.carrier), b.rendered
+    mid = [("digest", digest)] if digest else []
+    return [*map(part, _flatten(layout.anchor)), *mid, *map(part, _flatten(layout.tail))]
 def _shrink_to_limit(layout: _Layout, config: CompactionConfig) -> tuple[str, _Layout]:
     budget = _digest_budget(config)
     if json_text_bytes(_assemble(layout, config, "")) > config.limit_bytes:
@@ -263,21 +262,20 @@ def _shrink_to_limit(layout: _Layout, config: CompactionConfig) -> tuple[str, _L
         if candidate := _demotion_candidate(current):
             current = _demote(current, candidate)
             continue
-        items = [
-            (_overflow_role(b, current.carrier), b.rendered)
-            for b in _flatten(current.anchor)
-        ]
-        if digest:
-            items.append(("digest", digest))
-        items += [
-            (_overflow_role(b, current.carrier), b.rendered)
-            for b in _flatten(current.tail)
-        ]
         spec = OverflowSpec(
             max(config.limit_bytes, 0), config.separator, marker,
             json_text_bytes, middle_prune_text,
         )
-        return shrink_overflow_parts(items, spec), current
+        if config.atomic_groups:
+            items = build_overflow_items(current.anchor, digest, current.tail, current.carrier)
+            return shrink_atomic(items, spec).prompt, current
+        return shrink_overflow_parts(_legacy_items(current, digest), spec), current
+def _digested_blocks(final: _Layout, prompt: str) -> tuple[PromptBlock, ...]:
+    """Блоки, свёрнутые в digest; carrier учитывается, если его текст потерян."""
+    moved = _flatten(final.middle)
+    if final.carrier and len(final.tail) > 1 and any(b.rendered not in prompt for b in final.carrier):
+        moved += final.carrier
+    return moved
 def compact_prompt_blocks(
     blocks: Sequence[PromptBlock], config: CompactionConfig
 ) -> CompactionResult:
@@ -285,16 +283,14 @@ def compact_prompt_blocks(
     prefix_hash = anchor_prefix_sha256(blocks, config.separator)
     full = _joined(blocks, config.separator)
     if json_text_bytes(full) <= config.limit_bytes:
-        prompt, kept, digested = full, len(blocks), 0
+        prompt, kept, moved = full, len(blocks), ()
     else:
         layout = _layout(_group_blocks(blocks), config)
         prompt, final = _shrink_to_limit(layout, config)
-        kept = len(_flatten(final.anchor)) + len(_flatten(final.tail))
-        digested = len(_flatten(final.middle))
-        if final.carrier and len(final.tail) > 1 and any(b.rendered not in prompt for b in final.carrier):
-            carrier_n = len(final.carrier)
-            kept, digested = kept - carrier_n, digested + carrier_n
+        moved = _digested_blocks(final, prompt)
+        kept = len(blocks) - len(moved)
+    positions = tuple(b.index for b in moved)
     size = json_text_bytes(prompt)
     return CompactionResult(
-        prompt, size, config.limit_bytes, prefix_hash, "compact", kept, digested, 0
+        prompt, size, config.limit_bytes, prefix_hash, "compact", kept, len(positions), 0, positions
     )

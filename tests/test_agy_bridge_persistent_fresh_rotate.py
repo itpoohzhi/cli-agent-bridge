@@ -103,7 +103,8 @@ class _Base(unittest.TestCase):
         script = self.tmp / "fake_agy.py"
         script.write_text(_FAKE, encoding="utf-8")
         self.argv = [sys.executable, "-I", str(script)]
-        self.cfg = _PWC.PersistentWorkerSettings(True, 4, 5.0)
+        # fresh_rotate tests the non-strict reacquire guard; strict_cold_rotation=True is covered in test_agy_cold_rotation_red.py
+        self.cfg = _PWC.PersistentWorkerSettings(True, 4, 5.0, strict_cold_rotation=False)
         self.pool = self.new_pool()
 
     def new_pool(self) -> Any:
@@ -276,7 +277,7 @@ class FreshRotateTests(_Base):
     def test_run_turn31_cold_fresh_rotate_zero_replay_and_b03_collector(self) -> None:
         cp = self.tmp / "dynamic_config.json"
         cp.write_text(
-            '{"BRIDGE_AGY_PERSISTENT_WORKER_ENABLED": true, '
+            '{"BRIDGE_AGY_PERSISTENT_WORKER_ENABLED": true, "strict_cold_rotation": false, '
             '"BRIDGE_AGY_PERSISTENT_FRESH_ROTATE_ENABLED": true}',
             encoding="utf-8",
         )

@@ -219,17 +219,17 @@ def test_red_repro_tool_pair_not_split_under_compaction(
 # name -> (sha256 UTF-8 промпта, длина UTF-8 в байтах, атрибут маркера модуля).
 _GOLDEN = {
     "canary_drop": (
-        "9c8e61af733fac5f998deefd07ad2321bf6230dca7442831bc6f1df61345de01",
-        96018,
+        "fbbba9c767e58a814c83c48d5a1bafb43c1a8ec56ba74dda148200ff709d1662",
+        96169,
         "HISTORY_PRUNED_MARKER",
     ),
     "huge_user": (
-        "d04c7dc760a71a22f80a646590c29310d8619477c918682e736c70e92b8131bc",
+        "9e257ceb7eb93aaf27d861f5ba543523722e333423e90c0a7e52bb87d39b0400",
         98208,
         "MIDDLE_PRUNED_MARKER",
     ),
     "huge_tool": (
-        "94257c06bfeb620546ad8a40b7c510489e9402772e0745f0193bfa3d55f75d7e",
+        "796090c6648efd6e96777f62fafa2e15a5ebef6b1c2d54c6e357787fd5219867",
         85437,
         "MIDDLE_PRUNED_MARKER",
     ),
@@ -405,5 +405,5 @@ def test_notice_reprune_keeps_anchor_and_stable_prefix_hash(
     ]
     assert "[truncation-notice]" in prompt and anchor in prompt
     assert len(hashes) >= 2 and len(set(hashes)) == 1
-    assert max(budgets) - min(budgets) == 276
+    assert max(budgets) - min(budgets) == 343
     assert srv._ndjson_bytes(prompt) <= limit

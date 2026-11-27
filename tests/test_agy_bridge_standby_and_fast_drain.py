@@ -114,6 +114,7 @@ class TestStandbyAndFastDrain(unittest.TestCase):
                     chat_key=chat_key, cid=cid, model="gemini-4-neon", effort="high",
                     cwd=str(td_path), env_digest=env_digest, review_profile=review_profile,
                     argv_builder=lambda: list(argv), env=os.environ.copy(),
+                    resume_base_idx=1 if cid else 0,
                 )
 
             try:
@@ -243,6 +244,7 @@ class TestStandbyAndFastDrain(unittest.TestCase):
                     chat_key=chat_key, cid=cid, model="gemini-4-neon", effort="high",
                     cwd=str(td_path), env_digest=env_digest, review_profile="standard",
                     argv_builder=lambda: list(argv), env=os.environ.copy(),
+                    resume_base_idx=1 if cid else 0,
                 )
 
             try:
