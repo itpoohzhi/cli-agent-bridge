@@ -156,13 +156,14 @@ def _pick_ladder_override(
 
 
 def _parse_strict_total_timeout(ctx: Mapping[str, Any], cfg: object) -> float | None:
-    for source, raw in (("ctx", ctx.get("turn_total_timeout_s")), ("cfg", getattr(cfg, "turn_total_timeout_s", None))):
-        if raw is None:
-            continue
-        parsed = _parse_pos_float(raw)
-        if parsed is None:
-            raise ConfigError(f"invalid turn_total_timeout_s in {source}: {raw!r}")
+    if (raw := ctx.get("turn_total_timeout_s")) is not None:
+        if (parsed := _parse_pos_float(raw)) is None:
+            raise ConfigError(f"invalid turn_total_timeout_s in ctx: {raw!r}")
         return parsed
+    if (raw := getattr(cfg, "turn_total_timeout_s", None)) is not None:
+        if (parsed := _parse_pos_float(raw)) is None:
+            raise ConfigError(f"invalid turn_total_timeout_s in cfg: {raw!r}")
+        return None if parsed == _DEFAULT_POOL_TURN_TOTAL_S else parsed
     return None
 
 
@@ -195,7 +196,7 @@ def _resolve_deadlines(
         cap_raw = _pick_timeout(ctx, cfg, ("safety_cap_s", "turn_safety_cap_s"), "BRIDGE_STDIO_SAFETY_CAP_S", env)
         if cap_raw is not None:
             cap_val = min(cap_raw, explicit_total) if explicit_total is not None else cap_raw
-        elif explicit_total is not None and explicit_total != _DEFAULT_POOL_TURN_TOTAL_S:
+        elif explicit_total is not None:
             cap_val = explicit_total
         else:
             cap_val = max(DEFAULT_SAFETY_CAP_S, idle_val, first_base)
@@ -219,7 +220,7 @@ def _resolve_deadlines(
     first_val = ladder.effective_first_event_s if first_ov is None else first_ov
     cap_ov = _pick_ladder_override(ctx, cfg, ("safety_cap_s", "turn_safety_cap_s"), "BRIDGE_STDIO_SAFETY_CAP_S", env)
     if cap_ov is None:
-        if explicit_total is not None and explicit_total != _DEFAULT_POOL_TURN_TOTAL_S:
+        if explicit_total is not None:
             cap_val = min(ladder.safety_cap_s, explicit_total)
         else:
             cap_val = max(ladder.safety_cap_s, first_val, idle_val)

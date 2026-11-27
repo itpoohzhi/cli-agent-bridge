@@ -366,3 +366,18 @@ def test_turn_idle_timeout_priority_over_pool_idle_timeout() -> None:
     dl = _resolve_deadlines(cfg, {}, now=0.0, environ={})
     assert dl.idle_s == pytest.approx(450.0)
     assert dl.idle_deadline == pytest.approx(450.0)
+
+
+def test_explicit_ctx_total_equal_to_pool_default_caps_idle_and_cap_raw_not_truncated() -> None:
+    d = StdioPoolConfig.turn_total_timeout_s
+    dl = _resolve_deadlines(
+        StdioPoolConfig(),
+        {"turn_total_timeout_s": d, "turn_idle_timeout_s": 2.0 * d},
+        now=0.0,
+        environ={},
+    )
+    assert dl.safety_deadline == pytest.approx(d)
+    assert dl.idle_s == pytest.approx(d)
+
+    dl_cap = _resolve_deadlines(StdioPoolConfig(), {"safety_cap_s": 2.0 * d}, now=0.0, environ={})
+    assert dl_cap.safety_deadline == pytest.approx(2.0 * d)

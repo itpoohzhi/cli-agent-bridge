@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import zlib
 from collections.abc import Callable, Mapping
 from typing import Final, Protocol
@@ -18,6 +19,7 @@ PRECOMMIT_CODE_LOG_ENV: Final[str] = "BRIDGE_RESIDENT_PRECOMMIT_CODE_LOG_ENABLED
 SINGLE_ROUTE_KEEPALIVE_ENV: Final[str] = "BRIDGE_RESIDENT_SINGLE_ROUTE_KEEPALIVE_ENABLED"
 DRAIN_REFUSAL_ENV: Final[str] = "BRIDGE_RESIDENT_DRAIN_REFUSAL_ENABLED"
 _DRAIN_BODY: Final[bytes] = b'{"error":{"type":"service_unavailable","code":"bridge_draining","message":"bridge is draining"}}'
+_SAFE_CODE_RE: Final[re.Pattern[str]] = re.compile(r"^[a-z0-9_]{1,64}$")
 
 
 class _FailureLease(Protocol):
@@ -105,11 +107,18 @@ def check_precommit_drain_refusal(
     )
 
 
-def _log_precommit_refusal(exc: ResidentTurnError, log_fn: Callable[[str], None] | None) -> None:
-    if log_fn is None or not env_bool(os.environ, (PRECOMMIT_CODE_LOG_ENV,), True):
+def _log_precommit_refusal(
+    exc: ResidentTurnError,
+    log_fn: Callable[[str], None] | None,
+    *,
+    environ: Mapping[str, str] | None = None,
+) -> None:
+    if log_fn is None or not env_bool(os.environ if environ is None else environ, (PRECOMMIT_CODE_LOG_ENV,), True):
         return
-    safe_err = sanitize_log_text(exc.response.message, extra_code=exc.response.code)
-    log_fn(f"resident_precommit_refusal status={exc.status} code={exc.response.code} err={safe_err!r}")
+    raw_code = exc.response.code or ""
+    safe_code = raw_code if _SAFE_CODE_RE.fullmatch(raw_code) else "unknown"
+    safe_err = sanitize_log_text(exc.response.message, extra_code=safe_code)
+    log_fn(f"resident_precommit_refusal status={exc.status} code={safe_code} err={safe_err!r}")
 
 
 def handle_json_resident_error(

@@ -114,16 +114,18 @@ def extract_safe_refusal_code(body: bytes | bytearray | str | None) -> str | Non
     """Bounded <=512B scan for refusal code with strict AND allowlist."""
     if not body:
         return None
-    raw = body.encode("utf-8", errors="ignore")[:512] if isinstance(body, str) else bytes(body[:512])
-    candidate, has_code_key = None, bool(_CODE_KEY_RE.search(raw))
+    raw = body[:512].encode("utf-8", errors="ignore")[:512] if isinstance(body, str) else bytes(body[:512])
+    candidate, has_code_key = None, False
     try:
         parsed = json.loads(raw)
         if isinstance(parsed, dict):
             err_obj = parsed.get("error")
+            has_code_key = ("code" in err_obj) if isinstance(err_obj, dict) else ("code" in parsed)
             val = err_obj.get("code") if isinstance(err_obj, dict) else parsed.get("code")
             if isinstance(val, str):
-                candidate, has_code_key = val, True
+                candidate = val
     except Exception:
+        has_code_key = bool(_CODE_KEY_RE.search(raw))
         if m := _CODE_SCAN_RE.search(raw):
             candidate = m.group(1).decode("ascii", errors="ignore")
     if candidate is None:
