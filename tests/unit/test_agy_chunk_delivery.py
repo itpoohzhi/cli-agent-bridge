@@ -245,16 +245,16 @@ def test_apply_failure_effects_teardown_and_http_status_guards() -> None:
     assert len(teardowns) == 1 and any("event=teardown" in m for m in logs)
 
 
-def test_pre_cancelled_chunked_delivery_skips_ack_wait() -> None:
+def test_closed_stdin_chunked_delivery_skips_ack_wait() -> None:
     guard = ProcessAdmissionGuard(max_concurrency=4, max_queue=2, kill_grace_s=0.2)
     limits = LosslessLimits(lossless_enabled=True, safe_frame_bytes=DEFAULT_SAFE_FRAME_BYTES, max_chunks=16)
-    cancel_ev = threading.Event()
-    cancel_ev.set()
-    opts = ChunkDeliveryOptions(0.3, "t5", lambda _m: None, hooks=DeliveryHooks(cancel_event=cancel_ev))
+    opts = ChunkDeliveryOptions(0.3, "t5", lambda _m: None, hooks=DeliveryHooks())
     with guard.slot():
         proc = guard.spawn_isolated([sys.executable, "-c", SLEEP_WITH_GRANDCHILD_STUB])
+        assert proc.stdin is not None
+        proc.stdin.close()
         res = deliver_chunked_prompt(proc, "а" * 120_000, limits, guard, options=opts)
     assert res.ok is False
-    assert res.state is SessionState.CANCELLED
-    assert res.reason == "client_cancelled"
+    assert res.state is SessionState.FAILED
+    assert res.reason == "stdin_write_failed"
     assert guard.snapshot().active_pgids == ()
