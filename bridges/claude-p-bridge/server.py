@@ -382,9 +382,7 @@ class Run:
         self.cmd = cmd
         self.img_dir = img_dir
         _log(f"exec model={model} effort={effort} prompt_bytes={len(prompt.encode())} {tag}")
-        child_env = os.environ.copy()
-        child_env["HOME"] = str(_prepare_claude_home())
-        child_env["BRIDGE_ZERO_CANON"] = "1"
+        child_env = {**os.environ, "HOME": str(_prepare_claude_home()), "BRIDGE_ZERO_CANON": "1"}
         child_env.pop("CLAUDE_P_BRIDGE_KEY", None)
 
         self.proc = spawn_registered(
@@ -398,7 +396,8 @@ class Run:
         self._closed = threading.Event()
         self.err_box = []
         threading.Thread(target=self._feed, args=(prompt,), daemon=True).start()
-        threading.Thread(target=self._drain_stderr, daemon=True).start()
+        self._stderr_thread = threading.Thread(target=self._drain_stderr, daemon=True)
+        self._stderr_thread.start()
         threading.Thread(target=self._pump, daemon=True).start()
 
     def _feed(self, prompt: str) -> None:
@@ -460,7 +459,7 @@ class Run:
         except Exception as exc:  # noqa: BLE001 - читатель не должен умирать молча
             self._enqueue(("pump_error", repr(exc)))
             return
-        time.sleep(STDERR_DRAIN_S)  # дать стоку stderr дозавершиться
+        self._stderr_thread.join(timeout=STDERR_DRAIN_S)  # дать стоку stderr дозавершиться
         self._enqueue(("done", rc))
 
     def close(self) -> None:
@@ -620,7 +619,8 @@ class _Execution:
             self.normalizer.finish()  # Битый хвост — ошибка, result-fallback нет.
             if self.gone:
                 return self.state("client_gone", 1)
-            time.sleep(STDERR_DRAIN_S)
+            if (err_t := getattr(self.run, "_stderr_thread", None)) is not None:
+                err_t.join(timeout=STDERR_DRAIN_S)
             return self.state("done", payload, "".join(self.run.err_box))
         if self.gone:
             return self.state("client_gone", 1)

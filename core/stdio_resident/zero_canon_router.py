@@ -19,7 +19,7 @@ from core.session_plane.zc_env_guard import (
     is_zero_canon_keyed_resident_enabled,
     verify_zc_slot_home,
 )
-from core.stdio_resident.bridge_proxy_payload import BridgeProxyOptions
+from core.stdio_resident.bridge_proxy_payload import BridgeProxyOptions as BridgeProxyOptions
 from core.stdio_resident.proxy_policy import (
     NoRedirectHandler as _NoRedirectHandler,  # noqa: F401
     ensure_loopback_url as _validate_loopback_bridge_url,
@@ -210,46 +210,27 @@ def zero_canon_isolation(
             shutil.rmtree(root, ignore_errors=True)
 
 
-def _proxy_opts(
-    *, usage_enabled: bool = True, timeout_s: float | None = None, proxy_options: BridgeProxyOptions | None = None
-) -> ProxyBridgeOptions:
+def _proxy_opts(**kw: Any) -> ProxyBridgeOptions:
     return ProxyBridgeOptions(
-        validate_url_fn=_validate_loopback_bridge_url,
-        resolve_timeout_fn=_resolve_proxy_timeout_s,
-        opener_factory=urllib.request.build_opener,
-        timeout_s=timeout_s,
-        usage_enabled=usage_enabled,
-        proxy_options=proxy_options,
+        validate_url_fn=_validate_loopback_bridge_url, resolve_timeout_fn=_resolve_proxy_timeout_s,
+        opener_factory=urllib.request.build_opener, timeout_s=kw.get("timeout_s"),
+        usage_enabled=bool(kw.get("usage_enabled", True)),
+        proxy_options=kw.get("proxy_options"), sse_writer=kw.get("sse_writer"),
     )
 
 
 def proxy_zero_canon_bridge_turn_result(
-    base_url: str,
-    model: str,
-    prompt: str,
-    headers: Mapping[str, str] | None = None,
-    **kwargs: Any,
+    base_url: str, model: str, prompt: str, headers: Mapping[str, str] | None = None, **kwargs: Any,
 ) -> RoutedTurnResult:
     """Перенаправляет Zero-Canon Claude-ход на локальный `:9881` с сохранением TurnUsage."""
-    opts = _proxy_opts(
-        timeout_s=kwargs.get("timeout_s"),
-        proxy_options=kwargs.get("proxy_options"),
-    )
-    return _proxy_result_impl(base_url, model, prompt, headers, opts)
+    return _proxy_result_impl(base_url, model, prompt, headers, _proxy_opts(**kwargs))
 
 
 def proxy_zero_canon_bridge_turn(
-    base_url: str,
-    model: str,
-    prompt: str,
-    headers: Mapping[str, str] | None = None,
-    *,
-    timeout_s: float | None = None,
+    base_url: str, model: str, prompt: str, headers: Mapping[str, str] | None = None, *, timeout_s: float | None = None,
 ) -> tuple[str, str]:
     """Legacy-обёртка над `proxy_zero_canon_bridge_turn_result` (возвращает `(text, reasoning)`)."""
-    res = proxy_zero_canon_bridge_turn_result(
-        base_url, model, prompt, headers, timeout_s=timeout_s
-    )
+    res = proxy_zero_canon_bridge_turn_result(base_url, model, prompt, headers, timeout_s=timeout_s)
     return res.text, res.reasoning
 
 
@@ -257,18 +238,10 @@ _DEFAULT_PROXY_TURN = proxy_zero_canon_bridge_turn
 
 
 def _bridge_proxy_compat(
-    base_url: str,
-    model: str,
-    prompt: str,
-    headers: Mapping[str, str] | None = None,
-    **kwargs: Any,
+    base_url: str, model: str, prompt: str, headers: Mapping[str, str] | None = None, **kwargs: Any,
 ) -> RoutedTurnResult:
     if proxy_zero_canon_bridge_turn is _DEFAULT_PROXY_TURN:
-        opts = _proxy_opts(
-            usage_enabled=bool(kwargs.get("usage_enabled", True)),
-            proxy_options=kwargs.get("proxy_options"),
-        )
-        return _proxy_result_impl(base_url, model, prompt, headers, opts)
+        return _proxy_result_impl(base_url, model, prompt, headers, _proxy_opts(**kwargs))
     content, thought = proxy_zero_canon_bridge_turn(base_url, model, prompt, headers)
     return RoutedTurnResult(content, thought, None)
 
