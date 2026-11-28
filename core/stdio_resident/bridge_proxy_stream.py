@@ -6,7 +6,7 @@ from __future__ import annotations
 import inspect
 import os
 from collections.abc import Callable, Mapping
-from typing import Any
+from typing import Any, cast
 
 from core.stdio_resident.bridge_proxy_sse import (
     SseParsedEvent,
@@ -40,16 +40,19 @@ def bridge_stream_chunk_bytes(environ: Mapping[str, str] | None = None) -> int:
 
 
 def is_sse_response(resp: Any) -> bool:
-    """Проверяет Content-Type ответа на `text/event-stream`."""
+    """Проверяет Content-Type ответа на `text/event-stream` (регистронезависимо)."""
     headers = getattr(resp, "headers", None)
     getter = getattr(headers, "get", None)
-    ctype = str(getter("Content-Type", "") or "") if callable(getter) else ""
+    ctype = str(getter("Content-Type", "") or getter("content-type", "") or "") if callable(getter) else ""
+    if not ctype and isinstance(headers, Mapping):
+        hdr_map = cast(Mapping[object, object], headers)
+        ctype = next((str(v or "") for k, v in hdr_map.items() if str(k).lower() == "content-type"), "")
     return "text/event-stream" in ctype.lower()
 
 
 def looks_like_sse(text: str) -> bool:
-    """Fallback-эвристика: тело начинается с SSE-кадра (`data:` или `:`)."""
-    return text.lstrip().startswith(("data:", ":"))
+    """Fallback-эвристика: тело начинается с SSE-кадра (`data:`, `:`, `event:`, `id:`, `retry:`)."""
+    return text.lstrip().startswith(("data:", ":", "event:", "id:", "retry:"))
 
 
 def accepts_sse_writer(fn: Callable[..., Any]) -> bool:
@@ -70,9 +73,10 @@ class BridgeRelayTracker:
         self._writer: Callable[[str, str], Any] | None = sse_writer
 
     def relay(self, kind: str, value: str) -> Any:
+        out = self._writer(kind, value) if self._writer is not None else None
         self.streamed.add(kind)
         self.live_sent += 1
-        return self._writer(kind, value) if self._writer is not None else None
+        return out
 
     def build_extra(
         self, proxy_options: Any, bridge_proxy_fn: Callable[..., Any]
@@ -91,6 +95,37 @@ def emit_result_once(
         _ = sse_writer("content", text)
     if reasoning:
         _ = sse_writer("reasoning_content", reasoning)
+
+
+def _merge_tool_call_deltas(
+    acc: list[dict[str, Any]], deltas: tuple[dict[str, Any], ...]
+) -> None:
+    """Склеивает инкрементальные `delta.tool_calls` по `index` (паритет stream/non-stream)."""
+    by_idx = {c["index"]: c for c in acc if isinstance(c.get("index"), int)}
+    for raw in deltas:
+        idx = raw.get("index")
+        if not isinstance(idx, int) or idx not in by_idx:
+            fn = raw.get("function")
+            fn_copy: dict[str, Any] = dict(cast(dict[str, Any], fn)) if isinstance(fn, dict) else {}
+            entry: dict[str, Any] = {**raw, "function": fn_copy} if isinstance(fn, dict) else dict(raw)
+            acc.append(entry)
+            if isinstance(idx, int):
+                by_idx[idx] = entry
+            continue
+        target = by_idx[idx]
+        for key in ("id", "type"):
+            if raw.get(key):
+                target[key] = raw[key]
+        fn_delta = raw.get("function")
+        if isinstance(fn_delta, dict):
+            delta_map = cast(dict[str, Any], fn_delta)
+            fn_acc = target.setdefault("function", {})
+            if isinstance(fn_acc, dict):
+                acc_map = cast(dict[str, Any], fn_acc)
+                if delta_map.get("name"):
+                    acc_map["name"] = str(acc_map.get("name") or "") + str(delta_map["name"])
+                if delta_map.get("arguments"):
+                    acc_map["arguments"] = str(acc_map.get("arguments") or "") + str(delta_map["arguments"])
 
 
 class _SseSink:
@@ -122,7 +157,8 @@ class _SseSink:
                 self.reasoning.append(ev.reasoning)
                 if self._writer is not None:
                     _ = self._writer("reasoning_content", ev.reasoning)
-            self.tool_calls.extend(ev.tool_calls)
+            if ev.tool_calls:
+                _merge_tool_call_deltas(self.tool_calls, ev.tool_calls)
 
     def finalize(self) -> tuple[str, str, TurnUsage | None, tuple[dict[str, Any], ...]]:
         usage = (self.usage_sink[-1] if self.usage_sink else None) if self._usage_enabled else None

@@ -183,6 +183,49 @@ def test_p0_2_bridge_error_after_chunk_returns_200(monkeypatch: pytest.MonkeyPat
     assert all("[⚠️ Ошибка шлюза" not in value for _, value in seen)
 
 
+def test_p0_2_streamed_tool_calls_merge_fragments_by_index(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("BRIDGE_ZC_CLAUDE_STREAM_ENABLED", "1")
+    payload = (
+        b'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"read_file","arguments":""}}]}}]}\n\n'
+        b'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\\"path\\":\\""}}]}}]}\n\n'
+        b'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"a.py\\"}"}}]}}]}\n\n'
+        b"data: [DONE]\n\n"
+    )
+    requests: list[Any] = []
+    monkeypatch.setattr(
+        "urllib.request.build_opener",
+        lambda *_a: _Opener(_JsonResp(payload, "text/event-stream"), requests),
+    )
+    res = proxy_turn_result(_URL, "claude-sonnet", "ping", sse_writer=lambda _k, _v: None)
+    assert len(res.tool_calls) == 1
+    assert res.tool_calls[0]["id"] == "call_1"
+    assert res.tool_calls[0]["function"]["name"] == "read_file"
+    assert json.loads(res.tool_calls[0]["function"]["arguments"]) == {"path": "a.py"}
+
+
+def test_p0_2_writer_error_on_first_delta_keeps_live_sent_zero(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("BRIDGE_ZC_CLAUDE_STREAM_ENABLED", "1")
+    payload = b'data: {"choices":[{"delta":{"content":"hi"}}]}\n\ndata: [DONE]\n\n'
+    requests: list[Any] = []
+    monkeypatch.setattr(
+        "urllib.request.build_opener",
+        lambda *_a: _Opener(_JsonResp(payload, "text/event-stream"), requests),
+    )
+
+    def broken_writer(_k: str, _v: str) -> None:
+        raise BrokenPipeError("client disconnected")
+
+    with pytest.raises(rtr.ResidentTurnError) as exc_info:
+        rtr.execute_routed_turn_result(
+            lambda _req: iter([]),
+            _bridge_route(),
+            {"prompt": "p"},
+            broken_writer,
+            RoutedExecOptions(bridge_proxy_fn=proxy_turn_result),
+        )
+    assert exc_info.value.response.status == 502
+
+
 def test_p0_2_route_does_not_duplicate_streamed_parts(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("BRIDGE_ZC_CLAUDE_STREAM_ENABLED", "1")
     payload = (
