@@ -108,13 +108,13 @@ class ClaudeStandbyAdapter:
     def dispose(self, handle: ClaudeWarmHandle) -> None:
         try:
             _ = terminate_process_group(handle.proc, handle.pgid, handle.start_time, cancel_grace_s=2.0)
+        finally:
             for stream in (handle.proc.stdin, handle.proc.stdout, handle.proc.stderr):
                 try:
                     if stream is not None:
                         stream.close()
                 except (OSError, ValueError):
                     pass
-        finally:
             if handle.zc_home_root:
                 shutil.rmtree(handle.zc_home_root, ignore_errors=True)
     def rss_mb(self, handle: ClaudeWarmHandle) -> float:

@@ -104,11 +104,9 @@ class DemandStandbyPool:
             cur = self._slots.get(slot_id)
             if cur is None or (cur.state, cur.epoch) != (S.CLAIMED, rec.epoch):
                 return
-            retire = self._draining or not keep
-            if retire:
+            if self._draining or not keep:
                 self._slots[slot_id] = replace(cur, session_key=None)
-            ps, acts = fsm.plan_turn_done(self._state(), slot_id, self._limits(), self._clock(),
-                                          self._total_rss(exclude=slot_id if retire else ""))
+            ps, acts = fsm.plan_turn_done(self._state(), slot_id, self._limits(), self._clock(), self._total_rss())
             doomed = self._commit(ps, acts)
         self._finish(doomed, acts)
     def _evict_dead_ready(self, ready: list[tuple[str, int, Handle]]) -> list[Doomed]:
@@ -211,7 +209,7 @@ class DemandStandbyPool:
             prev = self._slots.get(sid)
             if prev is None or prev.epoch != epoch or not fsm.can_claim_slot(prev, profile, session_key):
                 return None
-            bud = PoolBudget(self._lim, self._clock(), self._total_rss(exclude="" if alive else sid))
+            bud = PoolBudget(self._limits(), self._clock(), self._total_rss())
             ps, acts = fsm.plan_claim_result(self._state(), ClaimAttempt(sid, profile, alive, session_key), bud)
             doomed = self._commit(ps, acts)
             cur = self._slots.get(sid)
@@ -263,23 +261,22 @@ class DemandStandbyPool:
         if doomed and not self._submit(self._dispose_many, doomed):
             self._dispose_many(doomed)
     def _dispose_many(self, doomed: list[Doomed]) -> None:
-        follow: list[PoolAction] = []
-        extra: list[Doomed] = []
         for sid, ep, (adapter, handle) in doomed:
             try:
                 adapter.dispose(handle)
             except Exception as exc:
                 _log.warning("dispose failed err=%s", type(exc).__name__)
+            extra: list[Doomed] = []
+            acts: tuple[PoolAction, ...] = ()
             with self._lock:
                 self._stats["disposes"] += 1
                 if sid:
                     self._disposing.discard(sid)
-                    bud = PoolBudget(self._lim, self._clock(), self._total_rss(exclude=sid))
+                    bud = PoolBudget(self._limits(), self._clock(), self._total_rss(exclude=sid))
                     ps, acts = fsm.plan_dispose_done(self._state(), sid, ep, bud)
-                    extra.extend(self._commit(ps, acts))
-                    follow.extend(acts)
-        if extra or follow:
-            self._finish(extra, tuple(follow))
+                    extra = self._commit(ps, acts)
+            if extra or acts:
+                self._finish(extra, acts)
     @staticmethod
     def _safe_alive(adapter: StandbyAdapter, handle: WarmSlotHandle) -> bool:
         try:

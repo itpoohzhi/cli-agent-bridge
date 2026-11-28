@@ -139,7 +139,8 @@ class CodexStandbyAdapter:
         except Exception:
             with suppress(Exception):
                 _ = terminate_process_group(warm.handle.proc, warm.pgid or warm.handle.pid, "", cancel_grace_s=0.0)
-        _rm_zc_home(warm.zc_home_root)
+        finally:
+            _rm_zc_home(warm.zc_home_root)
 
     def rss_mb(self, handle: WarmSlotHandle) -> float:
         warm = _warm(handle)

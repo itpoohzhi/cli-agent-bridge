@@ -177,6 +177,16 @@ def test_turn_done_zero_canon_disposes_and_replenishes_including_at_global_cap()
     assert kinds(acts1) == [A.KILL, A.CLEANUP_HOME] and ps1.pending_profiles == (ZC,)
     ps2, acts2 = fsm.plan_dispose_done(ps1, "z", 1, PoolBudget(lim1, 151.0, 0.0))
     assert kinds(acts2) == [A.REPLENISH] and acts2[0].profile == ZC
+    # Multi-DISPOSING RSS deferral (global_max_slots=2, cap=500): closing slot A while B still DISPOSING keeps pending ZC until B closes
+    lim2 = replace(LIM, global_max_slots=2, max_total_rss_mb=500)
+    st2 = PoolState(
+        slots=(SlotRecord("a", STD, S.DISPOSING, 1, 0.0, 300.0), SlotRecord("b", OTHER, S.DISPOSING, 2, 0.0, 500.0)),
+        profile_last_demand=((ZC, 100.0),), epoch_seq=5, pending_profiles=(ZC,),
+    )
+    st_after_a, acts_a = fsm.plan_dispose_done(st2, "a", 1, PoolBudget(lim2, 110.0, 500.0))
+    assert acts_a == () and st_after_a.pending_profiles == (ZC,)
+    st_after_b, acts_b = fsm.plan_dispose_done(st_after_a, "b", 2, PoolBudget(lim2, 111.0, 0.0))
+    assert kinds(acts_b) == [A.REPLENISH] and acts_b[0].profile == ZC and st_after_b.pending_profiles == ()
 def test_turn_done_zero_canon_no_replenish_after_ttl() -> None:
     start = pool(rec("z", ZC, S.CLAIMED), demand=((ZC, 100.0),))
     ps, acts = fsm.plan_turn_done(start, "z", LIM, 100.0 + LIM.sliding_ttl_s + 1, 0.0)

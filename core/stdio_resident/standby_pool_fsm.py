@@ -210,20 +210,16 @@ def plan_turn_done(ps: PoolState, slot_id: str, limits: StandbyLimits, now_mono:
     ps, spawn = _try_spawn(ps, rec.profile, PoolBudget(limits, now_mono, total_rss_mb), ActionKind.REPLENISH)
     return ps, acts + spawn
 def _drain_pending(ps: PoolState, budget: PoolBudget) -> Plan:
-    demand = dict(ps.profile_last_demand)
-    rem: list[ProfileKey] = []
+    demand, pending = dict(ps.profile_last_demand), ps.pending_profiles
+    ps = replace(ps, pending_profiles=())
     acts: list[PoolAction] = []
-    for prof in ps.pending_profiles:
+    for prof in pending:
         last = demand.get(prof)
         if last is None or budget.now_mono - last > budget.limits.sliding_ttl_s:
             continue
-        ps2, spawned = _try_spawn(ps, prof, budget, ActionKind.REPLENISH)
-        if spawned:
-            ps = ps2
-            acts.extend(spawned)
-        elif sum(s.state in _OCCUPYING for s in ps.slots) >= budget.limits.global_max_slots:
-            rem.append(prof)
-    return replace(ps, pending_profiles=tuple(rem)), tuple(acts)
+        ps, spawned = _try_spawn(ps, prof, budget, ActionKind.REPLENISH)
+        acts.extend(spawned)
+    return ps, tuple(acts)
 def plan_dispose_done(ps: PoolState, slot_id: str, epoch: int, budget: PoolBudget | None = None) -> Plan:
     """DISPOSING -> CLOSED и запуск отложенного SPAWN/REPLENISH из `pending_profiles` без overshoot cap."""
     rec = _find(ps, slot_id)
