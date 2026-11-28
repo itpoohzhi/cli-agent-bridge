@@ -12,16 +12,10 @@ from types import SimpleNamespace
 import pytest
 
 from core.stdio_resident.claude_standby_adapter import (
-    ClaudeRunRequest,
-    ClaudeStandbyAdapter,
-    ClaudeWarmHandle,
-    acquire_claude_run_proc,
-    encode_claude_stdin_prompt,
+    ClaudeRunRequest, ClaudeStandbyAdapter, ClaudeWarmHandle, acquire_claude_run_proc, encode_claude_stdin_prompt,
 )
 from core.stdio_resident.codex_standby_adapter import (
-    CodexStandbyAdapter,
-    CodexWarmHandle,
-    maybe_run_codex_standby_hook,
+    CodexStandbyAdapter, CodexWarmHandle, maybe_run_codex_standby_hook,
 )
 from core.stdio_resident.demand_standby_pool import DemandStandbyPool
 from core.stdio_resident.process_reaper import is_pgid_alive as _pgid_alive
@@ -266,5 +260,40 @@ def test_profile_exact_match_and_redaction(caplog: pytest.LogCaptureFixture) -> 
             assert pool.claim(ProfileKey("b1", "m1", "low", "zero-canon", "digest-safe-1234", "zc")) is None
         logs = "\n".join(r.getMessage() for r in caplog.records)
         assert "digest-safe-" in logs and "HOST_SECRET_CANARY" not in logs
+    finally:
+        pool.drain_and_shutdown()
+
+
+def test_dispose_exception_preserves_zc_cleanup_and_keeps_live_slot_in_rss(tmp_path: Path) -> None:
+    zc_dir = tmp_path / "zc-claude-err"
+    zc_dir.mkdir(mode=0o700)
+    fake_proc = SimpleNamespace(pid=999999, stdin=SimpleNamespace(close=lambda: (_ for _ in ()).throw(RuntimeError("reentrant"))),
+                                stdout=None, stderr=None, poll=lambda: 0, wait=lambda timeout=0: 0)
+    ClaudeStandbyAdapter().dispose(ClaudeWarmHandle(fake_proc, ProfileKey("claude-p", "m1", "low", "zero-canon", "d", "zc"), str(zc_dir), str(zc_dir)))  # type: ignore[arg-type]
+    assert not zc_dir.exists()
+    state = {"alive": True, "calls": 0}
+    def _disp(_h: object) -> None:
+        state["calls"] += 1
+        if state["calls"] == 1:
+            raise RuntimeError("kill failed")
+        state["alive"] = False
+    ad = SimpleNamespace(spawn_warm=lambda p, *, timeout_s: SimpleNamespace(profile=p), is_alive=lambda _h: state["alive"],
+                         claim=lambda h: h, dispose=_disp, rss_mb=lambda _h: 500.0)
+    cfg = {"BRIDGE_DEMAND_STANDBY_ENABLED": "1", "BRIDGE_DEMAND_STANDBY_GLOBAL_MAX_SLOTS": "1", "BRIDGE_DEMAND_STANDBY_MAX_TOTAL_RSS_MB": "500"}
+    pool = DemandStandbyPool({"b1": ad}, config_provider=lambda: (cfg, {}))  # type: ignore[dict-item]
+    try:
+        p = ProfileKey("b1", "m1", "high", "zero-canon", "d", "zc")
+        pool.submit_demand(p)
+        _wait_ready(pool, 1)
+        cl = pool.claim(p)
+        assert cl is not None
+        pool.release_claimed(cl.slot_id, success=True)
+        end = time.monotonic() + 2.0
+        while time.monotonic() < end and state["calls"] < 1:
+            time.sleep(0.01)
+        time.sleep(0.05)
+        assert pool.snapshot()["slots"] == 1 and pool.snapshot()["total_rss_mb"] == 500.0 and pool.snapshot()["ready"] == 0
+        assert pool.reap_once() >= 1
+        _wait_ready(pool, 1)
     finally:
         pool.drain_and_shutdown()

@@ -220,7 +220,7 @@ class DemandStandbyPool:
     def _spawn(self, action: PoolAction) -> None:
         adapter, handle, rss = self._adapters[action.profile.backend_id], cast("WarmSlotHandle | None", None), 0.0
         try:
-            handle = adapter.spawn_warm(action.profile, timeout_s=self._lim.warmup_timeout_s)
+            handle = adapter.spawn_warm(action.profile, timeout_s=self._limits().warmup_timeout_s)
             rss = adapter.rss_mb(handle)
         except Exception as exc:
             _log.warning("spawn_warm failed env=%s err=%s", action.profile.env_digest[:12], type(exc).__name__)
@@ -235,7 +235,7 @@ class DemandStandbyPool:
             owned = orphan is not None and cur0 is not None and cur0.state is S.WARMING and cur0.epoch == action.epoch
             if owned and orphan is not None:
                 self._handles[action.slot_id], orphan = (adapter, orphan), None
-            rep = WarmupReport(owned, rss, float(self._lim.max_total_rss_mb))
+            rep = WarmupReport(owned, rss, float(self._limits().max_total_rss_mb))
             ps, acts = fsm.plan_warmup_complete(self._state(), action.slot_id, action.epoch, rep)
             doomed = self._commit(ps, acts)
         self._dispose_many(doomed)
@@ -260,21 +260,26 @@ class DemandStandbyPool:
     def _dispose_bg(self, doomed: list[Doomed]) -> None:
         if doomed and not self._submit(self._dispose_many, doomed):
             self._dispose_many(doomed)
+    def _finalize_disposed(self, sid: str, ep: int, entry: Handle, dead: bool) -> tuple[list[Doomed], tuple[PoolAction, ...]]:
+        with self._lock:
+            self._stats["disposes"] += 1
+            if not sid:
+                return [], ()
+            self._disposing.discard(sid)
+            if not dead:
+                self._handles[sid] = entry
+                return [], ()
+            bud = PoolBudget(self._limits(), self._clock(), self._total_rss(exclude=sid))
+            ps, acts = fsm.plan_dispose_done(self._state(), sid, ep, bud)
+            return self._commit(ps, acts), acts
     def _dispose_many(self, doomed: list[Doomed]) -> None:
-        for sid, ep, (adapter, handle) in doomed:
+        for sid, ep, entry in doomed:
+            adapter, handle = entry
             try:
                 adapter.dispose(handle)
             except Exception as exc:
                 _log.warning("dispose failed err=%s", type(exc).__name__)
-            extra: list[Doomed] = []
-            acts: tuple[PoolAction, ...] = ()
-            with self._lock:
-                self._stats["disposes"] += 1
-                if sid:
-                    self._disposing.discard(sid)
-                    bud = PoolBudget(self._limits(), self._clock(), self._total_rss(exclude=sid))
-                    ps, acts = fsm.plan_dispose_done(self._state(), sid, ep, bud)
-                    extra = self._commit(ps, acts)
+            extra, acts = self._finalize_disposed(sid, ep, entry, not self._safe_alive(adapter, handle))
             if extra or acts:
                 self._finish(extra, acts)
     @staticmethod
