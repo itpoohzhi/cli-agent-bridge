@@ -281,8 +281,8 @@ def test_c3_concurrent_rss_cap_and_zero_canon_cap1() -> None:
         assert pool.snapshot()["ready"] == 1 and pool.snapshot()["slots"] == 1 and len(ad.disposed) == 1
     finally:
         pool.drain_and_shutdown()
-    ad1 = _FakeAdapter(rss_mb=50.0)
-    env1 = _cfg(BRIDGE_DEMAND_STANDBY_GLOBAL_MAX_SLOTS="1")
+    ad1 = _FakeAdapter(rss_mb=500.0)
+    env1 = _cfg(BRIDGE_DEMAND_STANDBY_GLOBAL_MAX_SLOTS="1", BRIDGE_DEMAND_STANDBY_MAX_TOTAL_RSS_MB="500")
     pool1 = DemandStandbyPool({"fake": ad1}, config_provider=lambda: (env1, {}))
     try:
         p = _prof("zc1", "zero-canon")
@@ -292,6 +292,6 @@ def test_c3_concurrent_rss_cap_and_zero_canon_cap1() -> None:
         assert cl is not None
         pool1.release_claimed(cl.slot_id, success=True)
         _wait_ready(pool1, 1)
-        assert len(ad1.disposed) == 1 and pool1.snapshot()["slots"] == 1
+        assert len(ad1.disposed) == 1 and len(ad1.spawned) == 2 and pool1.snapshot()["slots"] == 1
     finally:
         pool1.drain_and_shutdown()

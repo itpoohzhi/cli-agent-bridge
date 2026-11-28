@@ -104,9 +104,11 @@ class DemandStandbyPool:
             cur = self._slots.get(slot_id)
             if cur is None or (cur.state, cur.epoch) != (S.CLAIMED, rec.epoch):
                 return
-            if self._draining or not keep:
+            retire = self._draining or not keep
+            if retire:
                 self._slots[slot_id] = replace(cur, session_key=None)
-            ps, acts = fsm.plan_turn_done(self._state(), slot_id, self._limits(), self._clock(), self._total_rss())
+            ps, acts = fsm.plan_turn_done(self._state(), slot_id, self._limits(), self._clock(),
+                                          self._total_rss(exclude=slot_id if retire else ""))
             doomed = self._commit(ps, acts)
         self._finish(doomed, acts)
     def _evict_dead_ready(self, ready: list[tuple[str, int, Handle]]) -> list[Doomed]:
@@ -146,8 +148,8 @@ class DemandStandbyPool:
     def _state(self) -> PoolState:
         return PoolState(tuple(self._slots.values()), tuple(self._demand.items()),
                          self._epoch_seq, self._draining, self._pending)
-    def _total_rss(self) -> float:
-        return sum(s.rss_mb for s in self._slots.values() if s.state is not S.CLOSED)
+    def _total_rss(self, exclude: str = "") -> float:
+        return sum(s.rss_mb for s in self._slots.values() if s.state is not S.CLOSED and s.slot_id != exclude)
     def _prune(self) -> list[Doomed]:
         doomed: list[Doomed] = []
         for i, s in list(self._slots.items()):
@@ -209,7 +211,7 @@ class DemandStandbyPool:
             prev = self._slots.get(sid)
             if prev is None or prev.epoch != epoch or not fsm.can_claim_slot(prev, profile, session_key):
                 return None
-            bud = PoolBudget(self._lim, self._clock(), self._total_rss())
+            bud = PoolBudget(self._lim, self._clock(), self._total_rss(exclude="" if alive else sid))
             ps, acts = fsm.plan_claim_result(self._state(), ClaimAttempt(sid, profile, alive, session_key), bud)
             doomed = self._commit(ps, acts)
             cur = self._slots.get(sid)
@@ -262,6 +264,7 @@ class DemandStandbyPool:
             self._dispose_many(doomed)
     def _dispose_many(self, doomed: list[Doomed]) -> None:
         follow: list[PoolAction] = []
+        extra: list[Doomed] = []
         for sid, ep, (adapter, handle) in doomed:
             try:
                 adapter.dispose(handle)
@@ -271,12 +274,12 @@ class DemandStandbyPool:
                 self._stats["disposes"] += 1
                 if sid:
                     self._disposing.discard(sid)
-                    bud = PoolBudget(self._lim, self._clock(), self._total_rss())
+                    bud = PoolBudget(self._lim, self._clock(), self._total_rss(exclude=sid))
                     ps, acts = fsm.plan_dispose_done(self._state(), sid, ep, bud)
-                    _ = self._commit(ps, acts)
+                    extra.extend(self._commit(ps, acts))
                     follow.extend(acts)
-        if follow:
-            self._finish([], tuple(follow))
+        if extra or follow:
+            self._finish(extra, tuple(follow))
     @staticmethod
     def _safe_alive(adapter: StandbyAdapter, handle: WarmSlotHandle) -> bool:
         try:

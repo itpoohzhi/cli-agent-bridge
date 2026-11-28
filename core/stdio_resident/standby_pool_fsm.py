@@ -149,14 +149,16 @@ def _evict_for_cap(ps: PoolState, profile: ProfileKey, kind: ActionKind) -> Plan
     demand = dict(ps.profile_last_demand)
     victim = min((s for s in ps.slots if s.state is S.READY and s.profile != profile), key=lambda s: (demand.get(s.profile, s.created_mono), s.created_mono), default=None)
     return _dispose(ps_q, (victim,), E.REAP_TICK, "lru-evict") if victim is not None else (ps_q, ())
+def _queue(ps: PoolState, profile: ProfileKey) -> PoolState:
+    return ps if profile in ps.pending_profiles else replace(ps, pending_profiles=ps.pending_profiles + (profile,))
 def _can_spawn(ps: PoolState, profile: ProfileKey, bud: PoolBudget) -> bool:
-    lim, rss = bud.limits, _valid_rss(bud.total_rss_mb)
-    if not lim.enabled or ps.draining or rss is None or rss >= lim.max_total_rss_mb:
-        return False
-    return sum(_counts_for_profile(s, profile) for s in ps.slots) < lim.max_slots_per_profile
+    lim = bud.limits
+    return lim.enabled and not ps.draining and _valid_rss(bud.total_rss_mb) is not None and sum(_counts_for_profile(s, profile) for s in ps.slots) < lim.max_slots_per_profile
 def _try_spawn(ps: PoolState, profile: ProfileKey, bud: PoolBudget, kind: ActionKind) -> Plan:
     if not _can_spawn(ps, profile, bud):
         return ps, ()
+    if bud.total_rss_mb >= bud.limits.max_total_rss_mb:
+        return (_queue(ps, profile), ()) if any(s.state is S.DISPOSING for s in ps.slots) else (ps, ())
     if sum(s.state in _OCCUPYING for s in ps.slots) >= bud.limits.global_max_slots:
         return _evict_for_cap(ps, profile, kind)
     epoch = ps.epoch_seq + 1
