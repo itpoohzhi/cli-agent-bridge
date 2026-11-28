@@ -49,6 +49,21 @@ def _warm(handle: WarmSlotHandle) -> CodexWarmHandle:
     return handle
 
 
+_ZC_ENV_EXACT = frozenset({
+    "PATH", "HOME", "USER", "LOGNAME", "TERM", "LANG", "TZ", "TMPDIR",
+    "HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY", "https_proxy", "http_proxy", "no_proxy",
+    "NODE_EXTRA_CA_CERTS", "SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "CODEX_HOME",
+})
+_ZC_ENV_PREFIXES = ("LC_", "CODEX_")
+
+
+def _filter_zc_env(raw: Mapping[str, str]) -> dict[str, str]:
+    return {
+        k: v for k, v in raw.items()
+        if (k in _ZC_ENV_EXACT or k.startswith(_ZC_ENV_PREFIXES)) and not k.endswith(("_BRIDGE_KEY", "_SERVICE_KEY"))
+    }
+
+
 def _rm_zc_home(root: str) -> None:
     if root and os.path.basename(os.path.normpath(root)).startswith(_ZC_PREFIX):
         shutil.rmtree(root, ignore_errors=True)
@@ -82,7 +97,7 @@ class CodexStandbyAdapter:
         root = tempfile.mkdtemp(prefix=_ZC_PREFIX)
         try:
             os.chmod(root, 0o700)
-            env = driver.build_zero_canon_env(base_env, root)
+            env = driver.build_zero_canon_env(_filter_zc_env(base_env), root)
             return env, resolve_zero_canon_cwd(driver, root), root
         except BaseException:
             _rm_zc_home(root)

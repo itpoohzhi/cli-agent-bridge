@@ -57,6 +57,16 @@ def _default_argv(claude_bin: str, profile: ProfileKey) -> list[str]:
     return [*argv, "--permission-mode", "bypassPermissions"]
 
 
+_ZC_ENV_EXACT = frozenset({
+    "PATH", "HOME", "USER", "LOGNAME", "TERM", "LANG", "TZ", "TMPDIR", "HTTPS_PROXY", "HTTP_PROXY",
+    "NO_PROXY", "https_proxy", "http_proxy", "no_proxy", "NODE_EXTRA_CA_CERTS", "SSL_CERT_FILE", "REQUESTS_CA_BUNDLE",
+})
+_ZC_ENV_PREFIXES = ("LC_", "ANTHROPIC_", "CLAUDE_CODE_")
+
+def _filter_zc_env(raw: Mapping[str, str]) -> dict[str, str]:
+    return {k: v for k, v in raw.items()
+            if (k in _ZC_ENV_EXACT or k.startswith(_ZC_ENV_PREFIXES)) and not k.endswith(("_BRIDGE_KEY", "_SERVICE_KEY"))}
+
 def _host_env() -> Mapping[str, str]:
     return {k: v for k, v in os.environ.items() if k != "CLAUDE_P_BRIDGE_KEY"}
 
@@ -86,7 +96,7 @@ class ClaudeStandbyAdapter:
         try:
             if profile.is_zero_canon:
                 root, cwd = _make_private_dirs()
-                env = self._driver.build_zero_canon_env(env, root)
+                env = self._driver.build_zero_canon_env(_filter_zc_env(env), root)
             proc = subprocess.Popen(self._argv(profile), cwd=cwd or None, env=env, stdin=subprocess.PIPE,
                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
         except (OSError, ValueError) as exc:
