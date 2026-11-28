@@ -24,6 +24,7 @@ from core.resident_identity import ResidentRequestError as ResidentRequestError
 from core.p12_hub_cancel_seam import bind_resident_slot_pgid
 from core.resident_turn_envelope import ResidentTurnEnvelope
 from core.session_plane.zc_env_guard import is_zero_canon_keyed_resident_enabled
+from core.stdio_resident.codex_standby_adapter import maybe_run_codex_standby_hook
 from core.stdio_resident.config import StdioPoolConfig
 from core.stdio_resident.process_pool import ResidentProcessPool, SlotLeaseTimeoutError
 from core.stdio_resident.protocol_driver import DecodedChunk
@@ -94,6 +95,7 @@ class ResidentBridgeRuntime:
         self, current: ResidentTurnEnvelope, session_key: str, iso: ZeroCanonIsolation, options: ResidentTurnOptions
     ) -> Iterator[DecodedChunk]:
         keyed_zc = bool(iso.persist)
+        maybe_run_codex_standby_hook(self._driver, current, iso, options)
         committed, plan, affinity_key, eph = self._plan_and_reset_stale(current, session_key)
         argv, cwd, spawn_env = prepare_runtime_spec(self._driver, current, options.argv_builder(), iso)
         sandbox = tempfile.mkdtemp(prefix="turn-")
@@ -103,12 +105,10 @@ class ResidentBridgeRuntime:
         slot_eph = eph or (bool(iso.active) and not keyed_zc)
         slot: Any = None
         try:
-            zc_root = iso.root if keyed_zc else None
-            slot, plan = self._acquire_checked_slot(current, committed, affinity_key, (slot_eph, argv, cwd, spawn_env), zc_root)
+            slot, plan = self._acquire_checked_slot(current, committed, affinity_key, (slot_eph, argv, cwd, spawn_env), iso.root if keyed_zc else None)
             turn_ctx["new_thread"] = bool(plan.logical_context_reset)
             bind_resident_slot_pgid(slot.handle, turn_ctx)
-            runnable = bool(current.rpc.runnable) if current.rpc else False
-            state = _TurnState(current, opts, session_key, slot, plan, any((slot_eph, not runnable)))
+            state = _TurnState(current, opts, session_key, slot, plan, any((slot_eph, not getattr(current.rpc, "runnable", False))))
             yield from self._stream_and_commit_turn(state)
         finally:
             if isinstance(options.extra_turn_context, dict) and "_committed_slot" in turn_ctx:
