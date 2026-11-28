@@ -229,6 +229,7 @@ def test_watchdog_touch_extends_window() -> None:
 
 def test_watchdog_stop_prevents_fire() -> None:
     fired = threading.Event()
+    FinalTurnIdleWatchdog(0.05, fired.set).stop()
     watchdog = FinalTurnIdleWatchdog(0.05, fired.set)
     watchdog.start()
     watchdog.stop()

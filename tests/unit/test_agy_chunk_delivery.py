@@ -18,7 +18,11 @@ AGY_DIR = Path(__file__).resolve().parents[2] / "bridges" / "agy-bridge"
 if str(AGY_DIR) not in sys.path:
     sys.path.insert(0, str(AGY_DIR))
 
-from agy_runtime.chunk_delivery_adapter import deliver_chunked_prompt  # noqa: E402
+from agy_runtime.chunk_delivery_adapter import (  # noqa: E402
+    _DeliveryContext,
+    _apply_failure_effects,
+    deliver_chunked_prompt,
+)
 from agy_runtime.lossless_streaming_delivery import (  # noqa: E402
     FinalTurnContext,
     LosslessDeliveryChannel,
@@ -31,7 +35,7 @@ from agy_runtime.process_admission_guard import (  # noqa: E402
 )
 from core.lossless_contracts import DEFAULT_SAFE_FRAME_BYTES, LosslessLimits  # noqa: E402
 from core.lossless_delivery_policy import ChunkDeliveryOptions, DeliveryHooks  # noqa: E402
-from core.lossless_fsm import SessionState  # noqa: E402
+from core.lossless_fsm import EffectKind, SessionEffect, SessionState  # noqa: E402
 
 ECHO_STREAM_STUB = """
 import hashlib, json, sys
@@ -138,11 +142,7 @@ def test_chunked_delivery_350kib_cyrillic_emoji_byte_exact_without_pipe_deadlock
         try:
             ch = LosslessDeliveryChannel()
             opts = ChunkDeliveryOptions(
-                chunk_ack_timeout_s=10.0,
-                request_id="t1",
-                log_fn=lambda _m: None,
-                epoch=1,
-                hooks=DeliveryHooks(on_snapshot=ch.record_snapshot),
+                10.0, "t1", lambda _m: None, epoch=1, hooks=DeliveryHooks(on_snapshot=ch.record_snapshot)
             )
             res = deliver_chunked_prompt(proc, payload, limits, guard, options=opts)
             run = SimpleNamespace(proc=proc, _lossless_result=None)
@@ -173,10 +173,7 @@ def test_mid_chunk_cancel_performs_shielded_pgid_teardown_zero_orphans() -> None
         cancel_ev.set()
 
     opts = ChunkDeliveryOptions(
-        chunk_ack_timeout_s=5.0,
-        request_id="t2",
-        log_fn=lambda _m: None,
-        epoch=2,
+        5.0, "t2", lambda _m: None, epoch=2,
         hooks=DeliveryHooks(cancel_event=cancel_ev, on_line=_cancel_after_first_ack),
     )
     with guard.slot():
@@ -197,11 +194,7 @@ def test_stale_epoch_ack_terminates_session_and_cleans_pgid() -> None:
     limits = LosslessLimits(lossless_enabled=True, safe_frame_bytes=DEFAULT_SAFE_FRAME_BYTES, max_chunks=16)
     ch = LosslessDeliveryChannel()
     opts = ChunkDeliveryOptions(
-        chunk_ack_timeout_s=5.0,
-        request_id="t3",
-        log_fn=lambda _m: None,
-        epoch=1,
-        hooks=DeliveryHooks(on_snapshot=ch.record_snapshot),
+        5.0, "t3", lambda _m: None, epoch=1, hooks=DeliveryHooks(on_snapshot=ch.record_snapshot)
     )
     with guard.slot():
         proc = guard.spawn_isolated([sys.executable, "-c", STALE_EPOCH_STUB])
@@ -233,4 +226,35 @@ def test_stale_epoch_synthetic_ack_terminates_in_adapter() -> None:
     assert res.state is SessionState.EPOCH_MISMATCH
     assert res.http_status == 409
     assert not is_pgid_alive(pgid)
+    assert guard.snapshot().active_pgids == ()
+
+
+def test_apply_failure_effects_teardown_and_http_status_guards() -> None:
+    teardowns: list[object] = []
+    logs: list[str] = []
+    guard = SimpleNamespace(teardown_process=teardowns.append)
+    proc = SimpleNamespace(stdin=None, stdout=None)
+    opts = ChunkDeliveryOptions(1.0, "r1", logs.append)
+    ctx = _DeliveryContext(b"x", LosslessLimits(), guard, proc, [], opts, None)
+    eff = SessionEffect(EffectKind.EMIT_LOSS_RECEIPT, http_status=0)
+    assert _apply_failure_effects(ctx, (eff,), "io_error") == 400
+    assert teardowns == []
+    assert _apply_failure_effects(ctx, (), "chunk_limit_exceeded") == 400
+    assert teardowns == [] and logs == []
+    assert _apply_failure_effects(ctx, (), "ack_reader_stuck") == 400
+    assert len(teardowns) == 1 and any("event=teardown" in m for m in logs)
+
+
+def test_pre_cancelled_chunked_delivery_skips_ack_wait() -> None:
+    guard = ProcessAdmissionGuard(max_concurrency=4, max_queue=2, kill_grace_s=0.2)
+    limits = LosslessLimits(lossless_enabled=True, safe_frame_bytes=DEFAULT_SAFE_FRAME_BYTES, max_chunks=16)
+    cancel_ev = threading.Event()
+    cancel_ev.set()
+    opts = ChunkDeliveryOptions(0.3, "t5", lambda _m: None, hooks=DeliveryHooks(cancel_event=cancel_ev))
+    with guard.slot():
+        proc = guard.spawn_isolated([sys.executable, "-c", SLEEP_WITH_GRANDCHILD_STUB])
+        res = deliver_chunked_prompt(proc, "а" * 120_000, limits, guard, options=opts)
+    assert res.ok is False
+    assert res.state is SessionState.CANCELLED
+    assert res.reason == "client_cancelled"
     assert guard.snapshot().active_pgids == ()
