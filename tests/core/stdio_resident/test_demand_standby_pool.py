@@ -191,6 +191,7 @@ def test_caps_lru_rss() -> None:
         while time.monotonic() < end and len(ad.disposed) < 1:
             time.sleep(0.01)
         assert len(ad.disposed) >= 1 and ad.disposed[0].profile == p1
+        _wait_ready(pool, 2)
         # RSS cap blocks additional spawns
         env["BRIDGE_DEMAND_STANDBY_MAX_TOTAL_RSS_MB"] = "100"
         before = len(ad.spawned)

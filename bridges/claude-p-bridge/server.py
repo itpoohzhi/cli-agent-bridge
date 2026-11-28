@@ -388,7 +388,7 @@ class Run:
         child_env["BRIDGE_ZERO_CANON"] = "1"
         child_env.pop("CLAUDE_P_BRIDGE_KEY", None)
 
-        self.proc, _, self._release = acquire_claude_run_proc(ClaudeRunRequest(model, effort, img_dir, opts.get("session_plan")), lambda: spawn_registered(
+        self.proc, _, self._release = acquire_claude_run_proc(ClaudeRunRequest(model, effort, img_dir, opts.get("session_plan"), cmd, child_env), lambda: spawn_registered(
             cmd, cwd=str(img_dir if img_dir is not None else WORKSPACE), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=subprocess.PIPE, start_new_session=True, env=child_env))
         with _active_lock:
@@ -470,13 +470,13 @@ class Run:
         with _active_lock:
             _active.pop(self.proc.pid, None)
         cast(Any, spawn_registered).unregister(self.proc)
-        self._release()
         for stream in (self.proc.stdin, self.proc.stdout, self.proc.stderr):
             try:
                 if stream is not None:
                     stream.close()
             except OSError:
                 pass
+        self._release()
 
 
 def _client_gone(sock: socket.socket) -> bool:

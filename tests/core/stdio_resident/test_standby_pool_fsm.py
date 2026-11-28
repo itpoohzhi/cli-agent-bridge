@@ -10,13 +10,7 @@ import pytest
 
 from core.stdio_resident import standby_pool_fsm as fsm
 from core.stdio_resident.standby_pool_fsm import (
-    ActionKind as A,
-    PoolEventKind as E,
-    PoolState,
-    ProfileKey,
-    SlotLifecycleState as S,
-    SlotRecord,
-    StandbyLimits,
+    ActionKind as A, PoolEventKind as E, PoolState, ProfileKey, SlotLifecycleState as S, SlotRecord, StandbyLimits,
 )
 
 ZC = ProfileKey("codex", "m1", "high", "zero-canon", "d1", "repo")
@@ -139,16 +133,20 @@ def test_demand_rss_cap_blocks_spawn() -> None:
     ps, acts = fsm.plan_demand(PoolState(), STD, LIM, 1.0, float(LIM.max_total_rss_mb))
     assert acts == () and ps.slots == ()
 
-def test_demand_global_cap_evicts_lru_idle_profile_then_spawns() -> None:
+def test_demand_global_cap_evicts_lru_idle_profile_without_overshoot() -> None:
     lim = replace(LIM, global_max_slots=2)
-    p_old = replace(STD, model="old")
-    p_new = replace(STD, model="new")
+    p_old, p_new = replace(STD, model="old"), replace(STD, model="new")
     start = pool(rec("o", p_old, S.READY, 1), rec("n", p_new, S.READY, 2),
                  demand=((p_old, 5.0), (p_new, 20.0)))
     ps, acts = fsm.plan_demand(start, STD, lim, 30.0, 0.0)
-    assert kinds(acts) == [A.KILL, A.CLEANUP_HOME, A.SPAWN]
-    assert {a.slot_id for a in acts[:2]} == {"o"}
+    assert kinds(acts) == [A.KILL, A.CLEANUP_HOME] and {a.slot_id for a in acts} == {"o"}
     assert states(ps)["o"] is S.DISPOSING and states(ps)["n"] is S.READY
+    # Once victim finishes disposal -> CLOSED -> reap -> next demand spawns without global_max_slots overshoot
+    ps = fsm.plan_dispose_done(ps, "o", 1)
+    assert states(ps)["o"] is S.CLOSED
+    ps, _ = fsm.plan_reap_tick(ps, lim, 31.0)
+    ps, acts2 = fsm.plan_demand(ps, STD, lim, 31.0, 0.0)
+    assert kinds(acts2) == [A.SPAWN] and len(ps.slots) == 2
 
 def test_demand_global_cap_without_idle_victim_does_nothing() -> None:
     lim = replace(LIM, global_max_slots=1)
@@ -158,20 +156,29 @@ def test_demand_global_cap_without_idle_victim_does_nothing() -> None:
 # ---- plan_warmup_complete ----
 
 def test_warmup_ok_commits_ready_with_rss() -> None:
-    ps, acts = fsm.plan_warmup_complete(pool(rec("s", STD, S.WARMING)), "s", 1, True, 77.5)
+    ps, acts = fsm.plan_warmup_complete(pool(rec("s", STD, S.WARMING)), "s", 1, fsm.WarmupReport(True, 77.5, 1024.0))
     assert acts == () and ps.slots[0].state is S.READY and ps.slots[0].rss_mb == 77.5
 
-@pytest.mark.parametrize("epoch,ok,draining", [(9, True, False), (1, True, True), (1, False, False)])
-def test_warmup_stale_drain_or_failed_kills_without_ready(epoch: int, ok: bool, draining: bool) -> None:
+def test_warmup_rss_overshoot_disposes_slot() -> None:
+    start = pool(rec("s", STD, S.WARMING))
+    ps, acts = fsm.plan_warmup_complete(start, "s", 1, fsm.WarmupReport(True, 2048.0, 1024.0))
+    assert kinds(acts) == [A.KILL, A.CLEANUP_HOME] and states(ps)["s"] is S.DISPOSING
+
+def test_warmup_stale_epoch_is_noop_never_kills_live_slot() -> None:
+    live = pool(rec("s", STD, S.CLAIMED, epoch=2))
+    assert fsm.plan_warmup_complete(live, "s", 1, fsm.WarmupReport(True, 10.0, 1024.0)) == (live, ())
+
+@pytest.mark.parametrize("ok,draining", [(True, True), (False, False)])
+def test_warmup_drain_or_failed_kills_without_ready(ok: bool, draining: bool) -> None:
     start = pool(rec("s", STD, S.WARMING), draining=draining)
-    ps, acts = fsm.plan_warmup_complete(start, "s", epoch, ok, 1.0)
+    ps, acts = fsm.plan_warmup_complete(start, "s", 1, fsm.WarmupReport(ok, 1.0, 1024.0))
     assert kinds(acts) == [A.KILL, A.CLEANUP_HOME]
     assert S.READY not in states(ps).values()
 
 def test_warmup_unknown_or_duplicate_is_noop() -> None:
     start = pool(rec("s", STD, S.DISPOSING))
-    assert fsm.plan_warmup_complete(start, "zzz", 1, True, 1.0) == (start, ())
-    assert fsm.plan_warmup_complete(start, "s", 1, True, 1.0) == (start, ())
+    assert fsm.plan_warmup_complete(start, "zzz", 1, fsm.WarmupReport(True, 1.0, 1024.0)) == (start, ())
+    assert fsm.plan_warmup_complete(start, "s", 1, fsm.WarmupReport(True, 1.0, 1024.0)) == (start, ())
 
 # ---- plan_claim_result ----
 
@@ -180,10 +187,15 @@ def test_claim_dead_slot_kills_cleans_and_replenishes() -> None:
     assert kinds(acts) == [A.KILL, A.CLEANUP_HOME, A.REPLENISH]
     assert states(ps)["s"] is S.DISPOSING and acts[2].slot_id != "s"
 
-def test_claim_alive_slot_marks_claimed_and_replenishes() -> None:
+def test_claim_alive_slot_binds_key_without_overshoot_and_stateless_replenishes() -> None:
     ps, acts = fsm.plan_claim_result(pool(rec("s", STD, S.READY)), "s", True, fsm.PoolBudget(LIM, 10.0, 0.0))
     assert kinds(acts) == [A.REPLENISH]
     assert states(ps)["s"] is S.CLAIMED and states(ps)[acts[0].slot_id] is S.WARMING
+    # Standard + session_key binds key in FSM and skips duplicate REPLENISH (preserving max_slots_per_profile=1)
+    ps2, acts2 = fsm.plan_claim_result(pool(rec("s", STD, S.READY)), "s", True, fsm.PoolBudget(LIM, 10.0, 0.0), "sess-1")
+    assert acts2 == () and ps2.slots[0].state is S.CLAIMED and ps2.slots[0].session_key == "sess-1"
+    ps3, acts3 = fsm.plan_turn_done(ps2, "s", LIM, 11.0, 0.0)
+    assert acts3 == () and len(ps3.slots) == 1 and ps3.slots[0].state is S.READY and ps3.slots[0].session_key == "sess-1"
 
 def test_claim_alive_no_replenish_when_limits_block() -> None:
     lim = replace(LIM, global_max_slots=1)
@@ -233,9 +245,13 @@ def test_reap_closes_expired_ready_and_hung_warming_only() -> None:
     assert got["fresh"] is S.READY and got["boot"] is S.WARMING and got["busy"] is S.CLAIMED
     assert STD not in dict(ps.profile_last_demand) and OTHER in dict(ps.profile_last_demand)
 
-def test_reap_sweeps_disposing_without_new_actions() -> None:
+def test_reap_sweeps_closed_and_retains_disposing() -> None:
     ps, acts = fsm.plan_reap_tick(pool(rec("d", STD, S.DISPOSING), rec("c", STD, S.CLOSED)), LIM, 1.0)
-    assert acts == () and ps.slots == ()
+    assert acts == () and states(ps) == {"d": S.DISPOSING}
+    ps2 = fsm.plan_dispose_done(ps, "d", 1)
+    assert states(ps2) == {"d": S.CLOSED}
+    ps3, acts3 = fsm.plan_reap_tick(ps2, LIM, 2.0)
+    assert acts3 == () and ps3.slots == ()
 
 def test_drain_kills_all_live_slots_and_sets_flag() -> None:
     start = pool(rec("a", STD, S.READY), rec("b", ZC, S.CLAIMED), rec("c", OTHER, S.WARMING),

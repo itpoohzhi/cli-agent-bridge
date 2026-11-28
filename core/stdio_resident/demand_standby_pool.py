@@ -15,18 +15,15 @@ from typing import cast, final
 from core.stdio_resident import standby_pool_fsm as fsm
 from core.stdio_resident.standby_pool_fsm import (
     ActionKind, PoolAction, PoolBudget, PoolState, ProfileKey, SlotRecord, StandbyAdapter, StandbyLimits,
-    WarmSlotHandle,
+    WarmSlotHandle, WarmupReport,
 )
 from core.zero_canon_fs import resolve_hub_dynamic_config
 
 _log = logging.getLogger(__name__)
-S = fsm.SlotLifecycleState
-_GONE = frozenset((S.DISPOSING, S.CLOSED))
-_SPAWNS = (ActionKind.SPAWN, ActionKind.REPLENISH)
-_DYN_SECTION = "demand_standby"
+S, _SPAWNS, _DYN_SECTION = fsm.SlotLifecycleState, (ActionKind.SPAWN, ActionKind.REPLENISH), "demand_standby"
 Handle = tuple[StandbyAdapter, WarmSlotHandle]
+Doomed = tuple[str, int, Handle]
 ConfigProvider = Callable[[], tuple[Mapping[str, object], Mapping[str, object]]]
-
 def load_dynamic_config(environ: Mapping[str, str] | None = None) -> Mapping[str, object]:
     try:
         parsed = cast("object", json.loads(resolve_hub_dynamic_config(environ).read_text(encoding="utf-8")))
@@ -37,7 +34,6 @@ def load_dynamic_config(environ: Mapping[str, str] | None = None) -> Mapping[str
     raw = cast("Mapping[str, object]", parsed)
     sec = raw.get(_DYN_SECTION)
     return cast("Mapping[str, object]", sec) if isinstance(sec, dict) else raw
-
 @dataclass(frozen=True, slots=True)
 class ClaimedSlot:
     slot_id: str
@@ -45,24 +41,22 @@ class ClaimedSlot:
     handle: WarmSlotHandle
     payload: object
     epoch: int
-
 @final
 class DemandStandbyPool:
     def __init__(self, adapters: Mapping[str, StandbyAdapter], *, config_provider: ConfigProvider | None = None,
                  clock: Callable[[], float] | None = None, max_workers: int | None = None) -> None:
         self._adapters, self._clock, self._max_workers = dict(adapters), clock or time.monotonic, max_workers
         self._config = config_provider or (lambda: (os.environ, load_dynamic_config()))
-        self._lock = threading.RLock()
+        self._lock, self._stop = threading.RLock(), threading.Event()
         self._slots: dict[str, SlotRecord] = {}
         self._handles: dict[str, Handle] = {}
+        self._disposing: set[str] = set()
         self._demand: dict[ProfileKey, float] = {}
         self._epoch_seq, self._draining, self._lim = 0, False, StandbyLimits()
         self._executor: ThreadPoolExecutor | None = None
         self._reaper: threading.Thread | None = None
         self._futures: set[Future[object]] = set()
-        self._stop = threading.Event()
         self._stats = {"hits": 0, "misses": 0, "evictions": 0, "disposes": 0}
-
     def snapshot(self) -> dict[str, object]:
         lim = self._limits()
         with self._lock:
@@ -70,7 +64,6 @@ class DemandStandbyPool:
             return {"slots": len(self._slots), "ready": by[S.READY], "warming": by[S.WARMING],
                     "claimed": by[S.CLAIMED], "profiles": len({s.profile for s in self._slots.values()}),
                     "total_rss_mb": self._total_rss(), "enabled": lim.enabled, **self._stats}
-
     def submit_demand(self, profile: ProfileKey) -> None:
         lim = self._gate(profile)
         if lim is None:
@@ -78,8 +71,12 @@ class DemandStandbyPool:
         with self._lock:
             ps, acts = fsm.plan_demand(self._state(), profile, lim, self._clock(), self._total_rss())
             doomed = self._commit(ps, acts)
+        if doomed and not any(a.kind in _SPAWNS for a in acts):
+            self._dispose_many(doomed)
+            with self._lock:
+                ps, acts = fsm.plan_demand(self._state(), profile, lim, self._clock(), self._total_rss())
+                doomed = self._commit(ps, acts)
         self._finish(doomed, acts)
-
     def claim(self, profile: ProfileKey, *, session_key: str | None = None) -> ClaimedSlot | None:
         lim = self._gate(profile)
         if lim is None:
@@ -101,7 +98,6 @@ class DemandStandbyPool:
             self.release_claimed(sid, success=False)
             return None
         return ClaimedSlot(sid, won.profile, handle, payload, won.epoch)
-
     def release_claimed(self, slot_id: str, *, success: bool = True) -> None:
         with self._lock:
             rec, entry = self._slots.get(slot_id), self._handles.get(slot_id)
@@ -117,15 +113,13 @@ class DemandStandbyPool:
             ps, acts = fsm.plan_turn_done(self._state(), slot_id, self._limits(), self._clock(), self._total_rss())
             doomed = self._commit(ps, acts)
         self._finish(doomed, acts)
-
-    def _evict_dead_ready(self, ready: list[tuple[str, int, Handle]]) -> list[Handle]:
+    def _evict_dead_ready(self, ready: list[tuple[str, int, Handle]]) -> list[Doomed]:
         dead = {i: ep for i, ep, (ad, h) in ready if not self._safe_alive(ad, h)}
         with self._lock:
             for i, ep in dead.items():
                 if (s := self._slots.get(i)) is not None and (s.state, s.epoch) == (S.READY, ep):
                     self._slots[i] = replace(s, state=S.DISPOSING)
             return self._prune()
-
     def reap_once(self) -> int:
         lim, now = self._limits(), self._clock()
         with self._lock:
@@ -135,7 +129,6 @@ class DemandStandbyPool:
         late = self._evict_dead_ready(ready)
         self._dispose_many(late)
         return len(doomed) + len(late)
-
     def drain_and_shutdown(self, timeout_s: float = 5.0) -> int:
         """Гасит ВСЕ слоты (WARMING/READY/CLAIMED), останавливает reaper/executor; возвращает число убитых handle."""
         with self._lock:
@@ -150,37 +143,37 @@ class DemandStandbyPool:
         self._dispose_many(doomed)
         _ = wait(list(self._futures), timeout=timeout_s)
         return len(doomed)
-
     def _limits(self) -> StandbyLimits:
         env, dyn = self._config()
         self._lim = fsm.parse_limits(env, dyn)
         return self._lim
-
     def _state(self) -> PoolState:
         return PoolState(tuple(self._slots.values()), tuple(self._demand.items()), self._epoch_seq, self._draining)
-
     def _total_rss(self) -> float:
-        return sum(s.rss_mb for s in self._slots.values() if s.state not in _GONE)
-
-    def _prune(self) -> list[Handle]:
-        gone = [i for i, s in self._slots.items() if s.state in _GONE]
-        for i in gone:
-            del self._slots[i]
-        return [h for i in gone if (h := self._handles.pop(i, None)) is not None]
-
-    def _commit(self, ps: PoolState, acts: tuple[PoolAction, ...]) -> list[Handle]:
-        self._slots = {s.slot_id: s for s in ps.slots}
-        self._demand = dict(ps.profile_last_demand)
+        return sum(s.rss_mb for s in self._slots.values() if s.state is not S.CLOSED)
+    def _prune(self) -> list[Doomed]:
+        doomed: list[Doomed] = []
+        for i, s in list(self._slots.items()):
+            if s.state is S.CLOSED:
+                del self._slots[i]
+                _ = self._handles.pop(i, None)
+            elif s.state is S.DISPOSING and i not in self._disposing:
+                if (h := self._handles.pop(i, None)) is not None:
+                    self._disposing.add(i)
+                    doomed.append((i, s.epoch, h))
+                else:
+                    del self._slots[i]
+        return doomed
+    def _commit(self, ps: PoolState, acts: tuple[PoolAction, ...]) -> list[Doomed]:
+        self._slots, self._demand = {s.slot_id: s for s in ps.slots}, dict(ps.profile_last_demand)
         self._epoch_seq, self._draining = ps.epoch_seq, ps.draining
         self._stats["evictions"] += sum(a.kind is ActionKind.KILL and a.reason == "lru-evict" for a in acts)
         return self._prune()
-
-    def _mark_idle(self) -> list[Handle]:
+    def _mark_idle(self) -> list[Doomed]:
         for i, s in list(self._slots.items()):
             if s.state in (S.WARMING, S.READY):
                 self._slots[i] = replace(s, state=S.DISPOSING)
         return self._prune()
-
     def _gate(self, profile: ProfileKey) -> StandbyLimits | None:
         lim = self._limits()
         if not lim.enabled:
@@ -192,23 +185,20 @@ class DemandStandbyPool:
             return None
         self._ensure_started(lim)
         return lim
-
     def _ensure_started(self, lim: StandbyLimits) -> None:
         with self._lock:
             if self._draining or self._executor is not None:
                 return
-            workers = self._max_workers or max(2, lim.global_max_slots)
-            self._executor = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="standby-pool")
+            self._executor = ThreadPoolExecutor(max_workers=self._max_workers or max(2, lim.global_max_slots),
+                                                thread_name_prefix="standby-pool")
             self._reaper = threading.Thread(target=self._reap_loop, name="standby-reaper", daemon=True)
             self._reaper.start()
-
     def _reap_loop(self) -> None:
         while not self._stop.wait(self._lim.reap_interval_s):
             try:
                 _ = self.reap_once()
             except Exception:
                 _log.exception("standby reap failed")
-
     def _pick(self, profile: ProfileKey, session_key: str | None) -> tuple[str, int, Handle] | None:
         with self._lock:
             self._demand[profile] = self._clock()
@@ -216,49 +206,43 @@ class DemandStandbyPool:
                      if fsm.can_claim_slot(s, profile, session_key) and s.slot_id in self._handles]
             ready.sort(key=lambda s: s.session_key is None)
             return (ready[0].slot_id, ready[0].epoch, self._handles[ready[0].slot_id]) if ready else None
-
     def _commit_claim(self, sid: str, epoch: int, alive: bool, lim: StandbyLimits,
                       session_key: str | None) -> SlotRecord | None:
         with self._lock:
             cur = self._slots.get(sid)
             if cur is None or cur.state is not S.READY or cur.epoch != epoch:
                 return None
-            ps, acts = fsm.plan_claim_result(self._state(), sid, alive, PoolBudget(lim, self._clock(), self._total_rss()))
+            bud = PoolBudget(lim, self._clock(), self._total_rss())
+            ps, acts = fsm.plan_claim_result(self._state(), sid, alive, bud, session_key)
             doomed = self._commit(ps, acts)
             self._stats["hits" if alive else "misses"] += 1
-            if alive:
-                cur = self._slots[sid] = replace(self._slots[sid], session_key=session_key)
+            cur = self._slots.get(sid)
         self._finish(doomed, acts)
         return cur if alive else None
-
     def _spawn(self, action: PoolAction) -> None:
-        adapter = self._adapters[action.profile.backend_id]
-        handle: WarmSlotHandle | None = None
-        rss = 0.0
+        adapter, handle, rss = self._adapters[action.profile.backend_id], cast("WarmSlotHandle | None", None), 0.0
         try:
             handle = adapter.spawn_warm(action.profile, timeout_s=self._lim.warmup_timeout_s)
             rss = adapter.rss_mb(handle)
         except Exception as exc:
             _log.warning("spawn_warm failed env=%s err=%s", action.profile.env_digest[:12], type(exc).__name__)
             if handle is not None:
-                self._dispose_many([(adapter, handle)])
+                self._dispose_many([("", 0, (adapter, handle))])
             handle = None
         self._complete(action, handle, rss)
-
     def _complete(self, action: PoolAction, handle: WarmSlotHandle | None, rss: float) -> None:
         adapter = self._adapters[action.profile.backend_id]
         with self._lock:
-            ok = handle is not None and self._total_rss() + rss <= self._lim.max_total_rss_mb
-            ps, acts = fsm.plan_warmup_complete(self._state(), action.slot_id, action.epoch, ok, rss)
+            rep = WarmupReport(handle is not None, rss, float(self._lim.max_total_rss_mb))
+            ps, acts = fsm.plan_warmup_complete(self._state(), action.slot_id, action.epoch, rep)
             doomed = self._commit(ps, acts)
             cur = self._slots.get(action.slot_id)
-            kept = ok and cur is not None and cur.epoch == action.epoch and cur.state is S.READY
+            kept = handle is not None and cur is not None and cur.epoch == action.epoch and cur.state is S.READY
             if kept and handle is not None:
                 self._handles[action.slot_id] = (adapter, handle)
         self._dispose_many(doomed)
         if handle is not None and not kept:
-            self._dispose_many([(adapter, handle)])
-
+            self._dispose_many([("", 0, (adapter, handle))])
     def _submit(self, fn: Callable[..., object], *args: object) -> bool:
         with self._lock:
             if self._executor is None or self._draining:
@@ -270,26 +254,26 @@ class DemandStandbyPool:
             self._futures.add(fut)
         fut.add_done_callback(self._futures.discard)
         return True
-
-    def _finish(self, doomed: list[Handle], acts: tuple[PoolAction, ...]) -> None:
+    def _finish(self, doomed: list[Doomed], acts: tuple[PoolAction, ...]) -> None:
         self._dispose_bg(doomed)
         for a in acts:
             if a.kind in _SPAWNS and not self._submit(self._spawn, a):
                 self._complete(a, None, 0.0)
-
-    def _dispose_bg(self, doomed: list[Handle]) -> None:
+    def _dispose_bg(self, doomed: list[Doomed]) -> None:
         if doomed and not self._submit(self._dispose_many, doomed):
             self._dispose_many(doomed)
-
-    def _dispose_many(self, doomed: list[Handle]) -> None:
-        for adapter, handle in doomed:
+    def _dispose_many(self, doomed: list[Doomed]) -> None:
+        for sid, ep, (adapter, handle) in doomed:
             try:
                 adapter.dispose(handle)
             except Exception as exc:
                 _log.warning("dispose failed err=%s", type(exc).__name__)
             with self._lock:
                 self._stats["disposes"] += 1
-
+                if sid:
+                    self._disposing.discard(sid)
+                    ps = fsm.plan_dispose_done(self._state(), sid, ep)
+                    self._slots = {k.slot_id: k for k in ps.slots if k.state is not S.CLOSED}
     @staticmethod
     def _safe_alive(adapter: StandbyAdapter, handle: WarmSlotHandle) -> bool:
         try:

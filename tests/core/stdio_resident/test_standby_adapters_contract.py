@@ -220,9 +220,19 @@ def test_live_handshake() -> None:
 def test_kill_switch_parity(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("BRIDGE_DEMAND_STANDBY_ENABLED", "0")
     sentinel = SimpleNamespace(pid=42)
-    proc, warm, rel = acquire_claude_run_proc(ClaudeRunRequest("m1", "high"), lambda: sentinel)  # type: ignore[arg-type,return-value]
+    req_a = ClaudeRunRequest("m1", "high", cmd=["claude", "--model", "m1"], child_env={"HOME": "/a"})
+    req_b = ClaudeRunRequest("m1", "high", cmd=["claude", "--model", "m1", "--strict"], child_env={"HOME": "/b"})
+    proc, warm, rel = acquire_claude_run_proc(req_a, lambda: sentinel)  # type: ignore[arg-type,return-value]
     assert proc is sentinel and warm is False
     rel()
+    rel()  # idempotent double close
+    from core.stdio_resident.claude_standby_adapter import _once, _req_digest
+    assert _req_digest(req_a) != _req_digest(req_b)
+    calls: list[int] = []
+    guarded = _once(lambda: calls.append(1))
+    guarded()
+    guarded()
+    assert calls == [1]
     # Codex hook returns immediately without raising or creating pool when disabled
     maybe_run_codex_standby_hook(object(), SimpleNamespace(), SimpleNamespace(active=True), SimpleNamespace())  # type: ignore[arg-type]
 
