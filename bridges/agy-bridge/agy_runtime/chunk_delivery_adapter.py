@@ -1,30 +1,35 @@
-"""Sequential stream-json chunk delivery adapter with concurrent stdout draining and PGID teardown."""
+"""Sequential stream-json chunk delivery adapter with Phase A ACK draining."""
 
 from __future__ import annotations
 
-import json
 import queue
 import subprocess
 import threading
-from collections.abc import Callable
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, replace
+from typing import IO, Any, Protocol
 
 from core.lossless_chunker import ChunkLimitExceededError, iter_ndjson_frames
-from core.lossless_contracts import (
-    LosslessLimits,
-    LossReceipt,
-    build_loss_receipt,
+from core.lossless_contracts import LosslessLimits, LossReceipt, build_loss_receipt
+from core.lossless_delivery_policy import (
+    ChunkDeliveryOptions, format_lossless_event, parse_ack_event as parse_ack_event,
 )
-from core.lossless_fsm import (
-    EffectKind,
-    EventKind,
-    SessionEvent,
-    SessionSnapshot,
-    SessionState,
-    step,
-)
+from core.lossless_fsm import EffectKind, EventKind, SessionEvent, SessionSnapshot, SessionState, step
 
 from .process_admission_guard import ProcessAdmissionGuard
+
+_parse_ack_event = parse_ack_event
+_ACK_LOG = {"timeout": "chunk_ack_timeout", "eof": "chunk_ack_eof"}
+
+
+class CancelFlag(Protocol):
+    def is_set(self) -> bool:
+        ...
+
+
+def _is_cancelled(cancel: CancelFlag | None) -> bool:
+    res = cancel.is_set() if cancel else False
+    return res
 
 
 @dataclass(frozen=True)
@@ -42,121 +47,78 @@ class ChunkDeliveryResult:
     reason: str = ""
 
 
-def _parse_ack_event(raw_line: str) -> tuple[bool, int | None]:
-    """Recognize terminal per-turn stream-json event (type/event == result)."""
-    try:
-        obj = json.loads(raw_line)
-    except ValueError:
-        return False, None
-    if not isinstance(obj, dict):
-        return False, None
-    kind = str(obj.get("type") or obj.get("event") or "").strip().lower()
-    if kind != "result":
-        return False, None
-    raw_epoch = obj.get("epoch")
-    epoch = raw_epoch if isinstance(raw_epoch, int) and not isinstance(raw_epoch, bool) else None
-    return True, epoch
+class _AckReader:
+    """Bounded stdout reader draining exactly K = N - 1 Phase A ACK lines."""
 
+    def __init__(self, stdout: IO[bytes] | None, expected_acks: int) -> None:
+        self._stdout = stdout
+        self._expected_acks = expected_acks
+        self._queue: queue.Queue[str | None] = queue.Queue()
+        self._thread: threading.Thread | None = None
+        if expected_acks:
+            self._thread = threading.Thread(target=self._pump, name="agy-chunk-ack", daemon=True)
+            self._thread.start()
 
-def _start_stdout_reader(
-    proc: subprocess.Popen[bytes],
-    out_queue: queue.Queue[str | None],
-) -> threading.Thread:
-    """Drain stdout concurrently on a background thread to prevent macOS 16-64 KiB pipe deadlock."""
-
-    def _pump() -> None:
-        stdout = proc.stdout
-        if stdout is None:
-            out_queue.put(None)
-            return
+    def _pump(self) -> None:
+        acks, stdout = 0, self._stdout
         try:
-            while True:
+            while stdout is not None and acks < self._expected_acks:
                 raw = stdout.readline()
                 if not raw:
                     break
-                out_queue.put(raw.decode("utf-8", errors="replace").strip())
+                line = raw.decode("utf-8", errors="replace").strip()
+                self._queue.put(line)
+                acks += int(parse_ack_event(line)[0])
         except (OSError, ValueError):
             pass
         finally:
-            out_queue.put(None)
+            self._queue.put(None)
 
-    thread = threading.Thread(target=_pump, name="agy-chunk-stdout", daemon=True)
-    thread.start()
-    return thread
+    def _pop_line(self, deadline: float, cancel: CancelFlag | None) -> tuple[str, str | None]:
+        res: tuple[str, str | None] = ("timeout", None)
+        while (rem := deadline - time.monotonic()) > 0:
+            if _is_cancelled(cancel):
+                res = ("cancelled", None)
+                break
+            try:
+                line = self._queue.get(timeout=min(0.05, rem))
+            except queue.Empty:
+                continue
+            if line is None:
+                res = ("eof", None)
+                break
+            if line:
+                res = ("line", line)
+                break
+        return res
 
-
-def _wait_for_turn_ack(
-    out_queue: queue.Queue[str | None],
-    collected: list[str],
-    *,
-    timeout_s: float,
-    cancel_event: threading.Event | None,
-    on_line: Callable[[str], None] | None,
-) -> tuple[str, int | None]:
-    """Wait for a single turn's result line while honouring cancellation without busy-wait."""
-    step_s = 0.05
-    waited = 0.0
-    while waited < timeout_s:
-        if cancel_event is not None and cancel_event.is_set():
-            return "cancelled", None
-        try:
-            line = out_queue.get(timeout=min(step_s, max(0.01, timeout_s - waited)))
-        except queue.Empty:
-            waited += step_s
-            continue
-        if line is None:
-            return "eof", None
-        if line:
+    def wait_ack(self, collected: list[str], options: ChunkDeliveryOptions) -> tuple[str, int | None]:
+        """Wait for one ACK line while buffering lines and notifying on_line."""
+        hooks = options.hooks
+        cancel, on_line = (hooks.cancel_event, hooks.on_line) if hooks else (None, None)
+        deadline = time.monotonic() + options.chunk_ack_timeout_s
+        res: tuple[str, int | None] = ("timeout", None)
+        while True:
+            status, line = self._pop_line(deadline, cancel)
+            if line is None:
+                res = (status, None)
+                break
             collected.append(line)
-            if on_line is not None:
+            if on_line:
                 on_line(line)
-            is_ack, ev_epoch = _parse_ack_event(line)
+            is_ack, ev_epoch = parse_ack_event(line)
             if is_ack:
-                return "ack", ev_epoch
-    return "timeout", None
+                res = ("ack", ev_epoch)
+                break
+        return res
 
-
-def _finalize_failure(
-    snap: SessionSnapshot,
-    kind: EventKind,
-    *,
-    epoch: int,
-    seq: int,
-    reason: str,
-    raw_bytes: bytes,
-    limits: LosslessLimits,
-    guard: ProcessAdmissionGuard,
-    proc: subprocess.Popen[bytes],
-    collected: list[str],
-    salt: bytes | None,
-) -> ChunkDeliveryResult:
-    snap, effects = step(snap, SessionEvent(kind=kind, epoch=epoch, seq=seq, reason=reason))
-    http_status = 400
-    for eff in effects:
-        if eff.kind is EffectKind.TEARDOWN_PGID:
-            guard.teardown_process(proc)
-        elif eff.kind is EffectKind.EMIT_LOSS_RECEIPT and eff.http_status:
-            http_status = eff.http_status
-    receipt = build_loss_receipt(
-        reason=reason,
-        http_status=http_status,
-        prompt_raw=raw_bytes,
-        delivered_bytes=0,
-        chunk_count=snap.acked_chunks,
-        chunk_index=seq,
-        digest_mode=limits.digest_mode,
-        salt=salt,
-    )
-    return ChunkDeliveryResult(
-        ok=False,
-        state=snap.state,
-        chunks_delivered=snap.acked_chunks,
-        anchor_committed=False,
-        stdout_lines=tuple(collected),
-        http_status=http_status,
-        receipt=receipt,
-        reason=reason,
-    )
+    def join(self, timeout_s: float) -> bool:
+        """Join the ACK reader thread up to timeout_s and report completion."""
+        alive = False
+        if self._thread:
+            self._thread.join(timeout=timeout_s)
+            alive = self._thread.is_alive()
+        return not alive
 
 
 @dataclass(frozen=True)
@@ -165,110 +127,164 @@ class _DeliveryContext:
     limits: LosslessLimits
     guard: ProcessAdmissionGuard
     proc: subprocess.Popen[bytes]
-    out_queue: queue.Queue[str | None]
     collected: list[str]
-    epoch: int
-    frame_timeout_s: float
-    cancel_event: threading.Event | None
-    on_line: Callable[[str], None] | None
-    salt: bytes | None
+    options: ChunkDeliveryOptions
+    reader: _AckReader | None
 
 
-def _deliver_single_frame(
-    snap: SessionSnapshot,
-    frame: object,
-    ctx: _DeliveryContext,
+def _fsm_step(
+    snap: SessionSnapshot, event: SessionEvent, options: ChunkDeliveryOptions
+) -> tuple[SessionSnapshot, tuple[Any, ...]]:
+    nxt, effects = step(snap, event)
+    cb = options.hooks.on_snapshot if options.hooks else None
+    if cb:
+        cb(nxt)
+    return nxt, tuple(effects)
+
+
+def _io_err(epoch: int, seq: int, reason: str) -> SessionEvent:
+    return SessionEvent(EventKind.IO_ERROR, epoch=epoch, seq=seq, reason=reason)
+
+
+def _apply_failure_effects(ctx: _DeliveryContext, effects: tuple[Any, ...], reason: str) -> int:
+    http_status, torndown = 400, False
+    for eff in effects:
+        if eff.kind is EffectKind.TEARDOWN_PGID:
+            ctx.guard.teardown_process(ctx.proc)
+            torndown = True
+        elif eff.kind is EffectKind.EMIT_LOSS_RECEIPT and eff.http_status:
+            http_status = eff.http_status
+    if reason == "ack_reader_stuck" and not torndown:
+        ctx.guard.teardown_process(ctx.proc)
+        torndown = True
+    if torndown:
+        ev = format_lossless_event("teardown", {"req_id": ctx.options.request_id, "reason": reason})
+        ctx.options.log_fn(ev)
+    return http_status
+
+
+def _finalize_failure(ctx: _DeliveryContext, snap: SessionSnapshot, event: SessionEvent) -> ChunkDeliveryResult:
+    """Step FSM on failure event, apply teardown effects, and build receipt."""
+    snap, effects = _fsm_step(snap, event, ctx.options)
+    reason = event.reason
+    http_status = _apply_failure_effects(ctx, effects, reason)
+    salt = ctx.options.hooks.salt if ctx.options.hooks else None
+    receipt = build_loss_receipt(
+        reason=reason, http_status=http_status, prompt_raw=ctx.raw_bytes, delivered_bytes=0,
+        chunk_count=snap.acked_chunks, chunk_index=event.seq, digest_mode=ctx.limits.digest_mode, salt=salt,
+    )
+    return ChunkDeliveryResult(
+        ok=False, state=snap.state, chunks_delivered=snap.acked_chunks, anchor_committed=False,
+        stdout_lines=tuple(ctx.collected), http_status=http_status, receipt=receipt, reason=reason,
+    )
+
+
+def _write_frame(
+    ctx: _DeliveryContext, snap: SessionSnapshot, frame: object
 ) -> tuple[SessionSnapshot, ChunkDeliveryResult | None]:
-    idx = int(getattr(frame, "index"))
-    f_epoch = int(getattr(frame, "epoch"))
+    """Emit SEND_CHUNK and write one NDJSON frame to proc.stdin."""
+    idx, f_epoch = int(getattr(frame, "index")), int(getattr(frame, "epoch"))
     is_syn = bool(getattr(frame, "is_synthetic"))
     ndjson: bytes = getattr(frame, "ndjson_bytes")
+    ep = ctx.options.epoch
+    cancel = ctx.options.hooks.cancel_event if ctx.options.hooks else None
+    err: ChunkDeliveryResult | None = None
+    if _is_cancelled(cancel):
+        err = _finalize_failure(ctx, snap, SessionEvent(EventKind.CANCEL, epoch=ep, seq=idx, reason="client_cancelled"))
+    else:
+        send_ev = SessionEvent(EventKind.SEND_CHUNK, epoch=f_epoch, seq=idx, is_synthetic=is_syn)
+        snap, _ = _fsm_step(snap, send_ev, ctx.options)
+        stdin = ctx.proc.stdin
+        if snap.is_terminal:
+            err = _finalize_failure(ctx, snap, _io_err(ep, idx, "stdin_unavailable"))
+        elif not stdin:
+            err = _finalize_failure(ctx, snap, _io_err(ep, idx, "stdin_unavailable"))
+        else:
+            try:
+                stdin.write(ndjson)
+                stdin.flush()
+            except (BrokenPipeError, OSError, ValueError):
+                err = _finalize_failure(ctx, snap, _io_err(ep, idx, "stdin_write_failed"))
+    return snap, err
 
-    def _fail(kind: EventKind, reason: str, ev_epoch: int | None = None) -> ChunkDeliveryResult:
-        return _finalize_failure(
-            snap, kind, epoch=ctx.epoch if ev_epoch is None else ev_epoch, seq=idx, reason=reason,
-            raw_bytes=ctx.raw_bytes, limits=ctx.limits, guard=ctx.guard,
-            proc=ctx.proc, collected=ctx.collected, salt=ctx.salt,
-        )
 
-    if ctx.cancel_event is not None and ctx.cancel_event.is_set():
-        return snap, _fail(EventKind.CANCEL, "client_cancelled")
-    snap, _ = step(snap, SessionEvent(EventKind.SEND_CHUNK, epoch=f_epoch, seq=idx, is_synthetic=is_syn))
-    stdin = ctx.proc.stdin
-    if snap.is_terminal or stdin is None:
-        return snap, _fail(EventKind.IO_ERROR, "stdin_unavailable")
-    try:
-        stdin.write(ndjson)
-        stdin.flush()
-    except (BrokenPipeError, OSError, ValueError):
-        return snap, _fail(EventKind.IO_ERROR, "stdin_write_failed")
+def _deliver_synthetic(
+    ctx: _DeliveryContext, snap: SessionSnapshot, frame: object
+) -> tuple[SessionSnapshot, ChunkDeliveryResult | None]:
+    """Write a synthetic frame and wait for its Phase A ACK."""
+    snap, err = _write_frame(ctx, snap, frame)
+    if not err and ctx.reader:
+        idx, ep = int(getattr(frame, "index")), ctx.options.epoch
+        status, ack_epoch = ctx.reader.wait_ack(ctx.collected, ctx.options)
+        if status == "ack":
+            if isinstance(ack_epoch, int) and ack_epoch != ep:
+                mismatch_ev = SessionEvent(EventKind.EPOCH_MISMATCH, epoch=ack_epoch, seq=idx, reason="epoch_mismatch")
+                err = _finalize_failure(ctx, snap, mismatch_ev)
+            else:
+                ack_ev = SessionEvent(EventKind.ACK_OK, epoch=ep, seq=idx, is_synthetic=True)
+                snap, _ = _fsm_step(snap, ack_ev, ctx.options)
+        elif status == "cancelled":
+            err = _finalize_failure(ctx, snap, SessionEvent(EventKind.CANCEL, epoch=ep, seq=idx, reason="client_cancelled"))
+        else:
+            log_ev = _ACK_LOG.get(status)
+            if log_ev:
+                ctx.options.log_fn(format_lossless_event(log_ev, {"req_id": ctx.options.request_id, "seq": idx}))
+            err = _finalize_failure(ctx, snap, _io_err(ep, idx, f"chunk_ack_{status}"))
+    return snap, err
 
-    status, ack_epoch = _wait_for_turn_ack(
-        ctx.out_queue, ctx.collected, timeout_s=ctx.frame_timeout_s,
-        cancel_event=ctx.cancel_event, on_line=ctx.on_line,
+
+def _execute_delivery(ctx: _DeliveryContext, snap: SessionSnapshot, frames: list[object]) -> ChunkDeliveryResult:
+    """Drain K = N - 1 synthetic ACKs via _AckReader, then send final frame N."""
+    opts, k = ctx.options, len(frames) - 1
+    opts.log_fn(format_lossless_event("delivery_start", {"req_id": opts.request_id, "chunks": len(frames), "epoch": opts.epoch}))
+    reader = _AckReader(ctx.proc.stdout, k) if k else None
+    run_ctx = replace(ctx, reader=reader)
+    err: ChunkDeliveryResult | None = None
+    for frame in frames[:-1]:
+        snap, err = _deliver_synthetic(run_ctx, snap, frame)
+        if err:
+            break
+    if not err and reader:
+        if not reader.join(opts.chunk_ack_timeout_s):
+            idx = int(getattr(frames[-1], "index"))
+            err = _finalize_failure(run_ctx, snap, _io_err(opts.epoch, idx, "ack_reader_stuck"))
+    if not err:
+        snap, err = _write_frame(run_ctx, snap, frames[-1])
+    res = err if err else ChunkDeliveryResult(
+        ok=True, state=snap.state, chunks_delivered=snap.acked_chunks, anchor_committed=False,
+        stdout_lines=tuple(ctx.collected), final_turn_lines=(), http_status=200, reason="",
     )
-    if status == "cancelled":
-        return snap, _fail(EventKind.CANCEL, "client_cancelled")
-    if status != "ack":
-        return snap, _fail(EventKind.IO_ERROR, f"chunk_ack_{status}")
-    if ack_epoch is not None and ack_epoch != ctx.epoch:
-        return snap, _fail(EventKind.EPOCH_MISMATCH, "epoch_mismatch", ev_epoch=ack_epoch)
-    ack_kind = EventKind.ACK_OK if is_syn else EventKind.ACK_FINAL
-    snap, _ = step(snap, SessionEvent(ack_kind, epoch=ctx.epoch, seq=idx, is_synthetic=is_syn))
-    return snap, None
+    return res
+
+
+def _close_stdin(proc: subprocess.Popen[bytes]) -> None:
+    if proc.stdin:
+        try:
+            proc.stdin.close()
+        except (OSError, ValueError):
+            pass
+
+
+def _default_options(limits: LosslessLimits) -> ChunkDeliveryOptions:
+    return ChunkDeliveryOptions(chunk_ack_timeout_s=limits.chunk_ack_timeout_s, request_id="unknown", log_fn=lambda _m: None)
 
 
 def deliver_chunked_prompt(
-    proc: subprocess.Popen[bytes],
-    prompt_text: str,
-    limits: LosslessLimits,
-    guard: ProcessAdmissionGuard,
-    *,
-    epoch: int = 1,
-    frame_timeout_s: float = 15.0,
-    cancel_event: threading.Event | None = None,
-    on_line: Callable[[str], None] | None = None,
-    salt: bytes | None = None,
+    proc: subprocess.Popen[bytes], prompt_text: str, limits: LosslessLimits,
+    guard: ProcessAdmissionGuard, *, options: ChunkDeliveryOptions | None = None,
 ) -> ChunkDeliveryResult:
-    """Deliver prompt_text as sequential NDJSON frames in one stream-json session."""
+    """Deliver prompt_text as NDJSON frames; Phase A drains K = N - 1 ACKs."""
+    opts = options if options else _default_options(limits)
     raw_bytes = prompt_text.encode("utf-8")
-    snap = SessionSnapshot(state=SessionState.INIT, active_epoch=epoch, max_chunks=limits.max_chunks)
-    out_queue: queue.Queue[str | None] = queue.Queue()
-    reader = _start_stdout_reader(proc, out_queue)
-    collected: list[str] = []
-    ctx = _DeliveryContext(
-        raw_bytes, limits, guard, proc, out_queue, collected,
-        epoch, frame_timeout_s, cancel_event, on_line, salt,
-    )
+    snap = SessionSnapshot(state=SessionState.INIT, active_epoch=opts.epoch, max_chunks=limits.max_chunks)
+    ctx = _DeliveryContext(raw_bytes, limits, guard, proc, [], opts, None)
     try:
-        final_start_idx = 0
-        for frame in iter_ndjson_frames(
-            prompt_text, safe_frame_bytes=limits.safe_frame_bytes, max_chunks=limits.max_chunks, epoch=epoch,
-        ):
-            if not getattr(frame, "is_synthetic", True):
-                final_start_idx = len(collected)
-            snap, failure = _deliver_single_frame(snap, frame, ctx)
-            if failure is not None:
-                return failure
+        frames = list(iter_ndjson_frames(
+            prompt_text, safe_frame_bytes=limits.safe_frame_bytes, max_chunks=limits.max_chunks, epoch=opts.epoch,
+        ))
+        return _execute_delivery(ctx, snap, frames)
     except ChunkLimitExceededError:
-        return _finalize_failure(
-            snap, EventKind.OVERFLOW, epoch=epoch, seq=snap.expected_seq, reason="chunk_limit_exceeded",
-            raw_bytes=raw_bytes, limits=limits, guard=guard, proc=proc, collected=collected, salt=salt,
-        )
+        ev = SessionEvent(EventKind.OVERFLOW, epoch=opts.epoch, seq=snap.expected_seq, reason="chunk_limit_exceeded")
+        return _finalize_failure(ctx, snap, ev)
     finally:
-        if proc.stdin is not None:
-            try:
-                proc.stdin.close()
-            except OSError:
-                pass
-        reader.join(timeout=1.0)
-    return ChunkDeliveryResult(
-        ok=snap.state is SessionState.COMPLETED,
-        state=snap.state,
-        chunks_delivered=snap.acked_chunks,
-        anchor_committed=snap.anchor_committed,
-        stdout_lines=tuple(collected),
-        final_turn_lines=tuple(collected[final_start_idx:]),
-        http_status=200 if snap.state is SessionState.COMPLETED else 400,
-        reason=snap.terminal_reason,
-    )
+        _close_stdin(proc)

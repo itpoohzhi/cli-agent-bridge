@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import os
-import subprocess
 import threading
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
@@ -13,17 +12,17 @@ from pathlib import Path
 from typing import Any
 
 from core.lossless_chunker import ChunkLimitExceededError, iter_ndjson_frames
-from core.lossless_contracts import (
-    LosslessLimits,
-    LossReceipt,
-    build_loss_receipt,
-    resolve_lossless_limits,
-)
+from core.lossless_contracts import LosslessLimits, LossReceipt, build_loss_receipt, resolve_lossless_limits
+from core.lossless_delivery_policy import lossless_owns_process
 from core.lossless_gate import GateAction, evaluate_delivery_gate
 
 from .chunk_delivery_adapter import ChunkDeliveryResult, deliver_chunked_prompt
 from .input_guard_policy import ClientCompactionRequired
 from .loss_receipt_context import send_client_compaction_required
+from .lossless_streaming_delivery import (
+    build_delivery_options, build_final_turn_context, finalize_delivery_exception,
+    get_or_create_channel, stream_final_turn,
+)
 from .process_admission_guard import AdmissionOverloadError, ProcessAdmissionGuard
 
 _GUARD_LOCK = threading.Lock()
@@ -216,42 +215,38 @@ def feed_run_stdin_or_lossless(run: Any, legacy_feed_fn: Callable[[Any], None]) 
     """Dispatch Run._feed_stdin to sequential chunk_delivery_adapter when multi-chunk lossless is active."""
     if not bool(getattr(run, "_lossless_chunked", False)):
         legacy_feed_fn(run)
-        return
-    done: threading.Event = getattr(run, "_lossless_done")
-    try:
-        cancel_ev = getattr(run, "_stop_watch", None)
-        res = deliver_chunked_prompt(
-            getattr(run, "proc"), getattr(run, "_lossless_prompt"),
-            getattr(run, "_lossless_limits"), getattr(run, "_lossless_guard"),
-            epoch=int(getattr(run, "_lossless_epoch", 1)),
-            cancel_event=cancel_ev if isinstance(cancel_ev, threading.Event) else None,
-        )
-        setattr(run, "_lossless_result", res)
-    finally:
-        done.set()
+    else:
+        raw_limits = getattr(run, "_lossless_limits", None)
+        limits = raw_limits if isinstance(raw_limits, LosslessLimits) else LosslessLimits()
+        guard = getattr(run, "_lossless_guard")
+        channel = get_or_create_channel(run)
+        opts = build_delivery_options(run, limits)
+        res: ChunkDeliveryResult | None = None
+        try:
+            res = deliver_chunked_prompt(
+                getattr(run, "proc"), getattr(run, "_lossless_prompt"), limits, guard, options=opts,
+            )
+        except Exception as exc:
+            res = finalize_delivery_exception(run, exc)
+        finally:
+            channel.publish(res, run=run)
 
 
 def iter_run_stdout_or_lossless(
-    run: Any,
-    legacy_iter_fn: Callable[[Any], Iterator[str]],
-    *,
-    wait_timeout_s: float | None = None,
+    run: Any, legacy_iter_fn: Callable[[Any], Iterator[str]], *, wait_timeout_s: float | None = None,
 ) -> Iterator[str]:
     """Yield all stdout lines of the final turn in lossless mode with bounded wait (synthetic ACKs filtered)."""
     if not bool(getattr(run, "_lossless_chunked", False)):
         yield from legacy_iter_fn(run)
-        return
-    limits: LosslessLimits | None = getattr(run, "_lossless_limits", None)
-    timeout = wait_timeout_s if wait_timeout_s is not None else ((limits.max_chunks if limits else 16) * 15.0 + 5.0)
-    done: threading.Event = getattr(run, "_lossless_done")
-    if not done.wait(timeout=max(0.05, timeout)):
-        release_run_lossless_resources(run)
-        return
-    res: ChunkDeliveryResult | None = getattr(run, "_lossless_result", None)
-    if res is None:
-        return
-    lines = res.final_turn_lines if res.final_turn_lines else res.stdout_lines[-1:]
-    yield from lines
+    else:
+        raw_limits = getattr(run, "_lossless_limits", None)
+        limits = raw_limits if isinstance(raw_limits, LosslessLimits) else LosslessLimits()
+        guard = getattr(run, "_lossless_guard")
+        ctx = build_final_turn_context(run, guard, limits)
+        yield from stream_final_turn(run, legacy_iter_fn, ctx, wait_timeout_s=wait_timeout_s)
+        res: ChunkDeliveryResult | None = getattr(run, "_lossless_result", None)
+        if getattr(res, "reason", "") == "ack_phase_timeout":
+            release_run_lossless_resources(run)
 
 
 def run_with_lossless_cleanup(run: Any, init_fn: Callable[[], None]) -> None:
@@ -265,15 +260,20 @@ def run_with_lossless_cleanup(run: Any, init_fn: Callable[[], None]) -> None:
 
 def release_run_lossless_resources(run: Any) -> None:
     """Idempotently teardown PGID (if active) and release ProcessAdmissionGuard slot on Run.close."""
-    if not bool(getattr(run, "_lossless_slot_held", False)):
-        return
-    setattr(run, "_lossless_slot_held", False)
-    guard: ProcessAdmissionGuard | None = getattr(run, "_lossless_guard", None)
-    proc = getattr(run, "proc", None)
-    if guard is not None:
-        if isinstance(proc, subprocess.Popen):
-            guard.teardown_process(proc)
-        guard.release()
+    with _GUARD_LOCK:
+        was_held = bool(getattr(run, "_lossless_slot_held", False))
+        if was_held:
+            setattr(run, "_lossless_slot_held", False)
+    if was_held:
+        guard: ProcessAdmissionGuard | None = getattr(run, "_lossless_guard", None)
+        if guard:
+            pers = bool(getattr(run, "_persistent_mode", False))
+            lease = bool(getattr(run, "_persistent_lease", None))
+            if lossless_owns_process(slot_held=was_held, persistent_mode=pers, has_lease=lease):
+                proc = getattr(run, "proc", None)
+                if proc:
+                    guard.teardown_process(proc)
+            guard.release()
 
 
 def send_rejection_response(handler: Any, error: Exception) -> None:

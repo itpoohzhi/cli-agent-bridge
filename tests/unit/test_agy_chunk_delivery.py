@@ -8,7 +8,9 @@ import os
 import sys
 import threading
 import time
+from collections.abc import Iterator
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -16,14 +18,24 @@ AGY_DIR = Path(__file__).resolve().parents[2] / "bridges" / "agy-bridge"
 if str(AGY_DIR) not in sys.path:
     sys.path.insert(0, str(AGY_DIR))
 
-from agy_runtime.chunk_delivery_adapter import deliver_chunked_prompt  # noqa: E402
+from agy_runtime.chunk_delivery_adapter import (  # noqa: E402
+    _DeliveryContext,
+    _apply_failure_effects,
+    deliver_chunked_prompt,
+)
+from agy_runtime.lossless_streaming_delivery import (  # noqa: E402
+    FinalTurnContext,
+    LosslessDeliveryChannel,
+    stream_final_turn,
+)
 from agy_runtime.process_admission_guard import (  # noqa: E402
     AdmissionOverloadError,
     ProcessAdmissionGuard,
     is_pgid_alive,
 )
 from core.lossless_contracts import DEFAULT_SAFE_FRAME_BYTES, LosslessLimits  # noqa: E402
-from core.lossless_fsm import SessionState  # noqa: E402
+from core.lossless_delivery_policy import ChunkDeliveryOptions, DeliveryHooks  # noqa: E402
+from core.lossless_fsm import EffectKind, SessionEffect, SessionState  # noqa: E402
 
 ECHO_STREAM_STUB = """
 import hashlib, json, sys
@@ -107,6 +119,16 @@ def test_qa002_admission_4_active_2_queued_and_7th_gets_fast_429() -> None:
     assert guard.snapshot().queued == 0
 
 
+def _iter_proc_stdout(run: object) -> Iterator[str]:
+    proc = getattr(run, "proc")
+    assert proc is not None and proc.stdout is not None
+    while True:
+        raw = proc.stdout.readline()
+        if not raw:
+            break
+        yield raw.decode("utf-8", errors="replace") if isinstance(raw, bytes) else raw
+
+
 def test_chunked_delivery_350kib_cyrillic_emoji_byte_exact_without_pipe_deadlock() -> None:
     markers = [f"MK_{i:02d}" for i in range(1, 13)]
     block = 'Кириллица "quoted"\nline\\slash 🚀🧪 — ' * 55
@@ -118,16 +140,25 @@ def test_chunked_delivery_350kib_cyrillic_emoji_byte_exact_without_pipe_deadlock
     with guard.slot():
         proc = guard.spawn_isolated([sys.executable, "-c", ECHO_STREAM_STUB])
         try:
-            res = deliver_chunked_prompt(proc, payload, limits, guard, epoch=1, frame_timeout_s=10.0)
+            ch = LosslessDeliveryChannel()
+            opts = ChunkDeliveryOptions(
+                10.0, "t1", lambda _m: None, epoch=1, hooks=DeliveryHooks(on_snapshot=ch.record_snapshot)
+            )
+            res = deliver_chunked_prompt(proc, payload, limits, guard, options=opts)
+            run = SimpleNamespace(proc=proc, _lossless_result=None)
+            ch.publish(res, run=run)
+            ctx = FinalTurnContext(ch, guard, limits, opts, max(1, res.chunks_delivered + 1))
+            final_lines = list(stream_final_turn(run, _iter_proc_stdout, ctx))
         finally:
             guard.teardown_process(proc)
 
-    assert res.ok is True
-    assert res.state is SessionState.COMPLETED
-    assert res.anchor_committed is True
-    assert res.chunks_delivered >= 4
-    last_ev = json.loads(res.stdout_lines[-1])
-    assert last_ev["chunks"] == res.chunks_delivered
+    final_res = run._lossless_result
+    assert final_res is not None and final_res.ok is True
+    assert final_res.state is SessionState.COMPLETED
+    assert final_res.anchor_committed is True
+    assert final_res.chunks_delivered >= 4
+    last_ev = json.loads(final_lines[-1])
+    assert last_ev["chunks"] == final_res.chunks_delivered
     assert last_ev["sha256"] == expected_sha
     assert guard.snapshot().active_pgids == ()
 
@@ -141,19 +172,14 @@ def test_mid_chunk_cancel_performs_shielded_pgid_teardown_zero_orphans() -> None
     def _cancel_after_first_ack(_line: str) -> None:
         cancel_ev.set()
 
+    opts = ChunkDeliveryOptions(
+        5.0, "t2", lambda _m: None, epoch=2,
+        hooks=DeliveryHooks(cancel_event=cancel_ev, on_line=_cancel_after_first_ack),
+    )
     with guard.slot():
         proc = guard.spawn_isolated([sys.executable, "-c", SLEEP_WITH_GRANDCHILD_STUB])
         pgid = os.getpgid(proc.pid)
-        res = deliver_chunked_prompt(
-            proc,
-            payload,
-            limits,
-            guard,
-            epoch=2,
-            frame_timeout_s=5.0,
-            cancel_event=cancel_ev,
-            on_line=_cancel_after_first_ack,
-        )
+        res = deliver_chunked_prompt(proc, payload, limits, guard, options=opts)
 
     assert res.ok is False
     assert res.state is SessionState.CANCELLED
@@ -166,13 +192,69 @@ def test_mid_chunk_cancel_performs_shielded_pgid_teardown_zero_orphans() -> None
 def test_stale_epoch_ack_terminates_session_and_cleans_pgid() -> None:
     guard = ProcessAdmissionGuard(max_concurrency=4, max_queue=2, kill_grace_s=0.2)
     limits = LosslessLimits(lossless_enabled=True, safe_frame_bytes=DEFAULT_SAFE_FRAME_BYTES, max_chunks=16)
+    ch = LosslessDeliveryChannel()
+    opts = ChunkDeliveryOptions(
+        5.0, "t3", lambda _m: None, epoch=1, hooks=DeliveryHooks(on_snapshot=ch.record_snapshot)
+    )
     with guard.slot():
         proc = guard.spawn_isolated([sys.executable, "-c", STALE_EPOCH_STUB])
         pgid = os.getpgid(proc.pid)
-        res = deliver_chunked_prompt(proc, "hello", limits, guard, epoch=1, frame_timeout_s=5.0)
+        res = deliver_chunked_prompt(proc, "hello", limits, guard, options=opts)
+        run = SimpleNamespace(proc=proc, _lossless_result=None)
+        ch.publish(res, run=run)
+        ctx = FinalTurnContext(ch, guard, limits, opts, max(1, res.chunks_delivered + 1))
+        list(stream_final_turn(run, _iter_proc_stdout, ctx))
+
+    final_res = run._lossless_result
+    assert final_res is not None and final_res.ok is False
+    assert final_res.state is SessionState.EPOCH_MISMATCH
+    assert final_res.http_status == 409
+    assert not is_pgid_alive(pgid)
+    assert guard.snapshot().active_pgids == ()
+
+
+def test_stale_epoch_synthetic_ack_terminates_in_adapter() -> None:
+    guard = ProcessAdmissionGuard(max_concurrency=4, max_queue=2, kill_grace_s=0.2)
+    limits = LosslessLimits(lossless_enabled=True, safe_frame_bytes=DEFAULT_SAFE_FRAME_BYTES, max_chunks=16)
+    opts = ChunkDeliveryOptions(chunk_ack_timeout_s=5.0, request_id="t4", log_fn=lambda _m: None, epoch=1)
+    with guard.slot():
+        proc = guard.spawn_isolated([sys.executable, "-c", STALE_EPOCH_STUB])
+        pgid = os.getpgid(proc.pid)
+        res = deliver_chunked_prompt(proc, "а" * 120_000, limits, guard, options=opts)
 
     assert res.ok is False
     assert res.state is SessionState.EPOCH_MISMATCH
     assert res.http_status == 409
     assert not is_pgid_alive(pgid)
+    assert guard.snapshot().active_pgids == ()
+
+
+def test_apply_failure_effects_teardown_and_http_status_guards() -> None:
+    teardowns: list[object] = []
+    logs: list[str] = []
+    guard = SimpleNamespace(teardown_process=teardowns.append)
+    proc = SimpleNamespace(stdin=None, stdout=None)
+    opts = ChunkDeliveryOptions(1.0, "r1", logs.append)
+    ctx = _DeliveryContext(b"x", LosslessLimits(), guard, proc, [], opts, None)
+    eff = SessionEffect(EffectKind.EMIT_LOSS_RECEIPT, http_status=0)
+    assert _apply_failure_effects(ctx, (eff,), "io_error") == 400
+    assert teardowns == []
+    assert _apply_failure_effects(ctx, (), "chunk_limit_exceeded") == 400
+    assert teardowns == [] and logs == []
+    assert _apply_failure_effects(ctx, (), "ack_reader_stuck") == 400
+    assert len(teardowns) == 1 and any("event=teardown" in m for m in logs)
+
+
+def test_closed_stdin_chunked_delivery_skips_ack_wait() -> None:
+    guard = ProcessAdmissionGuard(max_concurrency=4, max_queue=2, kill_grace_s=0.2)
+    limits = LosslessLimits(lossless_enabled=True, safe_frame_bytes=DEFAULT_SAFE_FRAME_BYTES, max_chunks=16)
+    opts = ChunkDeliveryOptions(0.3, "t5", lambda _m: None, hooks=DeliveryHooks())
+    with guard.slot():
+        proc = guard.spawn_isolated([sys.executable, "-c", SLEEP_WITH_GRANDCHILD_STUB])
+        assert proc.stdin is not None
+        proc.stdin.close()
+        res = deliver_chunked_prompt(proc, "а" * 120_000, limits, guard, options=opts)
+    assert res.ok is False
+    assert res.state is SessionState.FAILED
+    assert res.reason == "stdin_write_failed"
     assert guard.snapshot().active_pgids == ()
