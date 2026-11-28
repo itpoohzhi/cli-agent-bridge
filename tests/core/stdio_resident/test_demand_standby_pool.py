@@ -96,18 +96,13 @@ def _prof(model: str = "m1", rp: str = "zero-canon") -> ProfileKey:
 
 def _cfg(**overrides: object) -> dict[str, object]:
     base: dict[str, object] = {
-        "BRIDGE_DEMAND_STANDBY_ENABLED": "1",
-        "BRIDGE_DEMAND_STANDBY_SLIDING_TTL_S": "30",
-        "BRIDGE_DEMAND_STANDBY_MAX_SLOTS_PER_PROFILE": "1",
-        "BRIDGE_DEMAND_STANDBY_GLOBAL_MAX_SLOTS": "3",
-        "BRIDGE_DEMAND_STANDBY_MAX_TOTAL_RSS_MB": "500",
-        "BRIDGE_DEMAND_STANDBY_WARMUP_TIMEOUT_S": "10",
+        "BRIDGE_DEMAND_STANDBY_ENABLED": "1", "BRIDGE_DEMAND_STANDBY_SLIDING_TTL_S": "30",
+        "BRIDGE_DEMAND_STANDBY_MAX_SLOTS_PER_PROFILE": "1", "BRIDGE_DEMAND_STANDBY_GLOBAL_MAX_SLOTS": "3",
+        "BRIDGE_DEMAND_STANDBY_MAX_TOTAL_RSS_MB": "500", "BRIDGE_DEMAND_STANDBY_WARMUP_TIMEOUT_S": "10",
         "BRIDGE_DEMAND_STANDBY_REAP_INTERVAL_S": "60",
     }
     base.update(overrides)
     return base
-
-
 def _wait_ready(pool: DemandStandbyPool, count: int = 1, timeout_s: float = 3.0) -> None:
     end = time.monotonic() + timeout_s
     while time.monotonic() < end:
@@ -115,16 +110,13 @@ def _wait_ready(pool: DemandStandbyPool, count: int = 1, timeout_s: float = 3.0)
             return
         time.sleep(0.01)
     raise AssertionError(f"ready<{count}: {pool.snapshot()}")
-
-
 def test_cold_start_zero_slots() -> None:
     ad = _FakeAdapter()
     env = _cfg()
     pool = DemandStandbyPool({"fake": ad}, config_provider=lambda: (env, {}))
     try:
         snap = pool.snapshot()
-        assert snap["slots"] == 0 and snap["ready"] == 0 and snap["enabled"] is True
-        assert ad.spawned == []
+        assert snap["slots"] == 0 and snap["ready"] == 0 and snap["enabled"] is True and ad.spawned == []
     finally:
         pool.drain_and_shutdown()
 
@@ -274,5 +266,32 @@ def test_epoch_fencing_concurrent_claim() -> None:
     time.sleep(0.05)
     gate.set()
     drainer.join(timeout=4.0)
-    assert pool2.snapshot()["slots"] == 0
-    assert len(ad2.spawned) == 1 and len(ad2.disposed) == 1
+    assert pool2.snapshot()["slots"] == 0 and len(ad2.spawned) == 1 and len(ad2.disposed) == 1
+
+def test_c3_concurrent_rss_cap_and_zero_canon_cap1() -> None:
+    ad = _FakeAdapter(rss_mb=600.0)
+    env = _cfg(BRIDGE_DEMAND_STANDBY_GLOBAL_MAX_SLOTS="2", BRIDGE_DEMAND_STANDBY_MAX_TOTAL_RSS_MB="1024")
+    pool = DemandStandbyPool({"fake": ad}, config_provider=lambda: (env, {}))
+    try:
+        pool.submit_demand(_prof("r1"))
+        pool.submit_demand(_prof("r2"))
+        end = time.monotonic() + 2.0
+        while time.monotonic() < end and (len(ad.spawned) < 2 or pool.snapshot()["warming"] != 0):
+            time.sleep(0.01)
+        assert pool.snapshot()["ready"] == 1 and pool.snapshot()["slots"] == 1 and len(ad.disposed) == 1
+    finally:
+        pool.drain_and_shutdown()
+    ad1 = _FakeAdapter(rss_mb=50.0)
+    env1 = _cfg(BRIDGE_DEMAND_STANDBY_GLOBAL_MAX_SLOTS="1")
+    pool1 = DemandStandbyPool({"fake": ad1}, config_provider=lambda: (env1, {}))
+    try:
+        p = _prof("zc1", "zero-canon")
+        pool1.submit_demand(p)
+        _wait_ready(pool1, 1)
+        cl = pool1.claim(p)
+        assert cl is not None
+        pool1.release_claimed(cl.slot_id, success=True)
+        _wait_ready(pool1, 1)
+        assert len(ad1.disposed) == 1 and pool1.snapshot()["slots"] == 1
+    finally:
+        pool1.drain_and_shutdown()

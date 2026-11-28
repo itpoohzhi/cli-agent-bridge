@@ -31,39 +31,30 @@ class StandbyLimits:
     max_total_rss_mb: int = 1024
     warmup_timeout_s: float = 30.0
     reap_interval_s: float = 5.0
-def _to_bool(value: object) -> bool | None:
-    if isinstance(value, bool):
-        return value
-    t = value.strip().lower() if isinstance(value, str) else ""
+def _to_bool(v: object) -> bool | None:
+    if isinstance(v, bool):
+        return v
+    t = v.strip().lower() if isinstance(v, str) else ""
     return True if t in ("1", "true", "yes", "on") else False if t in ("0", "false", "no", "off") else None
-def _to_pos_float(value: object) -> float | None:
-    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
-        return None
+def _to_pos_float(v: object) -> float | None:
     try:
-        n = float(value)
+        n = float(v) if not isinstance(v, bool) and isinstance(v, (int, float, str)) else math.nan
     except ValueError:
         return None
     return n if math.isfinite(n) and n > 0 else None
-def _to_pos_int(value: object) -> int | None:
-    n = _to_pos_float(value)
-    return int(n) if n is not None and n >= 1 else None
-def _pick(env: Mapping[str, object] | None, dyn: Mapping[str, object] | None, name: str,
-          conv: Callable[[object], _T | None], default: _T) -> _T:
-    for src, key in ((env, _PFX + name.upper()), (dyn, name)):
-        if src is not None and key in src and (parsed := conv(src[key])) is not None:
-            return parsed
+def _to_pos_int(v: object) -> int | None:
+    return int(n) if (n := _to_pos_float(v)) is not None and n >= 1 else None
+def _pick(e: Mapping[str, object] | None, y: Mapping[str, object] | None, name: str, conv: Callable[[object], _T | None], default: _T) -> _T:
+    for src, key in ((e, _PFX + name.upper()), (y, name)):
+        if src is not None and key in src and (p := conv(src[key])) is not None:
+            return p
     return default
-def parse_limits(env_mapping: Mapping[str, object] | None,
-                 dyn_mapping: Mapping[str, object] | None = None) -> StandbyLimits:
+def parse_limits(env_mapping: Mapping[str, object] | None, dyn_mapping: Mapping[str, object] | None = None) -> StandbyLimits:
     """env > dyn > default; невалидные значения (мусор/NaN/inf/<=0) игнорируются."""
     d, e, y = StandbyLimits(), env_mapping, dyn_mapping
     glob = _pick(e, y, "global_max_slots", _to_pos_int, d.global_max_slots)
-    per = _pick(e, y, "max_slots_per_profile", _to_pos_int, d.max_slots_per_profile)
-    return StandbyLimits(
-        _pick(e, y, "enabled", _to_bool, d.enabled), _pick(e, y, "sliding_ttl_s", _to_pos_float, d.sliding_ttl_s),
-        min(per, glob), glob, _pick(e, y, "max_total_rss_mb", _to_pos_int, d.max_total_rss_mb),
-        _pick(e, y, "warmup_timeout_s", _to_pos_float, d.warmup_timeout_s),
-        _pick(e, y, "reap_interval_s", _to_pos_float, d.reap_interval_s))
+    per = min(_pick(e, y, "max_slots_per_profile", _to_pos_int, d.max_slots_per_profile), glob)
+    return StandbyLimits(_pick(e, y, "enabled", _to_bool, d.enabled), _pick(e, y, "sliding_ttl_s", _to_pos_float, d.sliding_ttl_s), per, glob, _pick(e, y, "max_total_rss_mb", _to_pos_int, d.max_total_rss_mb), _pick(e, y, "warmup_timeout_s", _to_pos_float, d.warmup_timeout_s), _pick(e, y, "reap_interval_s", _to_pos_float, d.reap_interval_s))
 class WarmSlotHandle(Protocol): ...
 class StandbyAdapter(Protocol):
     def spawn_warm(self, profile: ProfileKey, *, timeout_s: float) -> WarmSlotHandle: ...
@@ -79,14 +70,11 @@ class PoolEventKind(Enum):
 class ActionKind(Enum):
     SPAWN, KILL, CLEANUP_HOME, REPLENISH = "spawn", "kill", "cleanup_home", "replenish"
 S, E = SlotLifecycleState, PoolEventKind
-_LIVE = frozenset((S.WARMING, S.READY, S.CLAIMED))
+_LIVE, _STANDBY = frozenset((S.WARMING, S.READY, S.CLAIMED)), frozenset((S.WARMING, S.READY))
 _OCCUPYING = frozenset((S.WARMING, S.READY, S.CLAIMED, S.DISPOSING))
-_STANDBY = frozenset((S.WARMING, S.READY))
 _TO_DISPOSING = frozenset((E.SLOT_DEAD, E.REAP_TICK, E.DRAIN))
-_SIMPLE_TRANS = {
-    (S.WARMING, E.WARMUP_OK): S.READY, (S.WARMING, E.WARMUP_FAILED): S.DISPOSING,
-    (S.READY, E.CLAIM): S.CLAIMED, (S.DISPOSING, E.SLOT_DEAD): S.CLOSED,
-}
+_SIMPLE_TRANS = {(S.WARMING, E.WARMUP_OK): S.READY, (S.WARMING, E.WARMUP_FAILED): S.DISPOSING,
+                 (S.READY, E.CLAIM): S.CLAIMED, (S.DISPOSING, E.SLOT_DEAD): S.CLOSED}
 @dataclass(frozen=True, slots=True)
 class PoolAction:
     kind: ActionKind
@@ -110,6 +98,7 @@ class PoolState:
     profile_last_demand: tuple[tuple[ProfileKey, float], ...] = ()
     epoch_seq: int = 0
     draining: bool = False
+    pending_profiles: tuple[ProfileKey, ...] = ()
 @dataclass(frozen=True, slots=True)
 class PoolBudget:
     limits: StandbyLimits
@@ -119,10 +108,16 @@ class PoolBudget:
 class WarmupReport:
     ok: bool
     rss_mb: float
-    max_total_rss_mb: float = 1024.0
+    max_total_rss_mb: float
+    external_rss_mb: float = 0.0
+@dataclass(frozen=True, slots=True)
+class ClaimAttempt:
+    slot_id: str
+    profile: ProfileKey
+    alive: bool
+    session_key: str | None = None
 Plan = tuple[PoolState, tuple[PoolAction, ...]]
-def transition_slot(state: SlotLifecycleState, event: PoolEventKind, *, is_zero_canon: bool,
-                    has_session_key: bool = False) -> SlotLifecycleState:
+def transition_slot(state: SlotLifecycleState, event: PoolEventKind, *, is_zero_canon: bool, has_session_key: bool = False) -> SlotLifecycleState:
     """AD-003/F-022: `CLAIMED -> READY` только для standard + session_key."""
     if (nxt := _SIMPLE_TRANS.get((state, event))) is not None:
         return nxt
@@ -139,63 +134,63 @@ def _touch(ps: PoolState, profile: ProfileKey, now: float) -> PoolState:
     return replace(ps, profile_last_demand=tuple(i for i in ps.profile_last_demand if i[0] != profile) + ((profile, now),))
 def _kill(rec: SlotRecord, epoch: int, reason: str) -> tuple[PoolAction, ...]:
     return tuple(PoolAction(k, rec.slot_id, rec.profile, epoch, reason) for k in (ActionKind.KILL, ActionKind.CLEANUP_HOME))
+def _valid_rss(val: float) -> float | None:
+    return val if math.isfinite(val) and val >= 0.0 else None
+def _counts_for_profile(s: SlotRecord, profile: ProfileKey) -> bool:
+    return s.profile == profile and (s.state in _STANDBY or (s.state is S.CLAIMED and not s.profile.is_zero_canon and s.session_key is not None))
 def _dispose(ps: PoolState, recs: Iterable[SlotRecord], event: PoolEventKind, reason: str) -> Plan:
     ids = {r.slot_id: r for r in recs}
-    moved = tuple(replace(s, state=transition_slot(s.state, event, is_zero_canon=s.profile.is_zero_canon,
-                                                   has_session_key=s.session_key is not None))
-                  if s.slot_id in ids else s for s in ps.slots)
+    moved = tuple(replace(s, state=transition_slot(s.state, event, is_zero_canon=s.profile.is_zero_canon, has_session_key=s.session_key is not None)) if s.slot_id in ids else s for s in ps.slots)
     return replace(ps, slots=moved), tuple(a for r in ids.values() for a in _kill(r, r.epoch, reason))
-def _evict_for_cap(ps: PoolState, profile: ProfileKey, kind: ActionKind) -> Plan | None:
-    if kind is not ActionKind.SPAWN:
-        return None
+def _evict_for_cap(ps: PoolState, profile: ProfileKey, kind: ActionKind) -> Plan:
+    ps_q = ps if profile in ps.pending_profiles else replace(ps, pending_profiles=ps.pending_profiles + (profile,))
+    if kind is not ActionKind.SPAWN or any(s.state is S.DISPOSING for s in ps.slots):
+        return ps_q, ()
     demand = dict(ps.profile_last_demand)
-    idle = [s for s in ps.slots if s.state is S.READY and s.profile != profile]
-    victim = min(idle, key=lambda s: (demand.get(s.profile, s.created_mono), s.created_mono), default=None)
-    return _dispose(ps, (victim,), E.REAP_TICK, "lru-evict") if victim is not None else None
+    victim = min((s for s in ps.slots if s.state is S.READY and s.profile != profile), key=lambda s: (demand.get(s.profile, s.created_mono), s.created_mono), default=None)
+    return _dispose(ps_q, (victim,), E.REAP_TICK, "lru-evict") if victim is not None else (ps_q, ())
+def _can_spawn(ps: PoolState, profile: ProfileKey, bud: PoolBudget) -> bool:
+    lim, rss = bud.limits, _valid_rss(bud.total_rss_mb)
+    if not lim.enabled or ps.draining or rss is None or rss >= lim.max_total_rss_mb:
+        return False
+    return sum(_counts_for_profile(s, profile) for s in ps.slots) < lim.max_slots_per_profile
 def _try_spawn(ps: PoolState, profile: ProfileKey, bud: PoolBudget, kind: ActionKind) -> Plan:
-    lim = bud.limits
-    blocked = not lim.enabled or ps.draining or bud.total_rss_mb >= lim.max_total_rss_mb
-    if blocked or sum(s.profile == profile and s.state in _STANDBY for s in ps.slots) >= lim.max_slots_per_profile:
+    if not _can_spawn(ps, profile, bud):
         return ps, ()
-    if sum(s.state in _OCCUPYING for s in ps.slots) >= lim.global_max_slots:
-        evicted = _evict_for_cap(ps, profile, kind)
-        return evicted if evicted is not None else (ps, ())
+    if sum(s.state in _OCCUPYING for s in ps.slots) >= bud.limits.global_max_slots:
+        return _evict_for_cap(ps, profile, kind)
     epoch = ps.epoch_seq + 1
     rec = SlotRecord(f"slot-{epoch}", profile, S.WARMING, epoch, bud.now_mono)
-    return replace(ps, slots=ps.slots + (rec,), epoch_seq=epoch), (PoolAction(kind, rec.slot_id, profile, epoch, "demand"),)
+    rem = tuple(p for p in ps.pending_profiles if p != profile)
+    return replace(ps, slots=ps.slots + (rec,), epoch_seq=epoch, pending_profiles=rem), (PoolAction(kind, rec.slot_id, profile, epoch, "demand"),)
 def plan_demand(ps: PoolState, profile: ProfileKey, limits: StandbyLimits, now_mono: float, total_rss_mb: float) -> Plan:
     return _try_spawn(_touch(ps, profile, now_mono), profile, PoolBudget(limits, now_mono, total_rss_mb), ActionKind.SPAWN)
 def _warmup_fail_reason(ps: PoolState, slot_id: str, report: WarmupReport) -> str | None:
-    if ps.draining:
-        return "draining"
-    if not report.ok:
-        return "warmup-failed"
-    other_rss = sum(s.rss_mb for s in ps.slots if s.state in _OCCUPYING and s.slot_id != slot_id)
-    return "rss-cap" if other_rss + report.rss_mb > report.max_total_rss_mb else None
+    if ps.draining or not report.ok:
+        return "draining" if ps.draining else "warmup-failed"
+    rss, ext = _valid_rss(report.rss_mb), _valid_rss(report.external_rss_mb)
+    if rss is None or ext is None:
+        return "rss-invalid"
+    other = sum(s.rss_mb for s in ps.slots if s.state in _OCCUPYING and s.slot_id != slot_id)
+    return "rss-cap" if other + ext + rss > report.max_total_rss_mb else None
 def plan_warmup_complete(ps: PoolState, slot_id: str, epoch: int, report: WarmupReport) -> Plan:
-    """No-op на stale epoch/не-WARMING (не убивает живой слот); проверяет фактический RSS cap."""
+    """No-op на stale epoch/не-WARMING; проверяет конечность и фактический RSS cap."""
     rec = _find(ps, slot_id)
     if rec is None or rec.state is not S.WARMING or epoch != rec.epoch:
         return ps, ()
-    reason = _warmup_fail_reason(ps, slot_id, report)
-    if reason is not None:
+    if (reason := _warmup_fail_reason(ps, slot_id, report)) is not None:
         return _dispose(ps, (rec,), E.DRAIN if ps.draining else E.WARMUP_FAILED, reason)
     nxt = transition_slot(rec.state, E.WARMUP_OK, is_zero_canon=rec.profile.is_zero_canon)
     return _put(ps, replace(rec, state=nxt, rss_mb=report.rss_mb)), ()
-def plan_claim_result(ps: PoolState, slot_id: str, alive: bool, budget: PoolBudget,
-                      session_key: str | None = None) -> Plan:
-    """Биндит `session_key` в FSM; REPLENISH только для уходящих слотов (без overshoot max_slots_per_profile)."""
-    rec = _find(ps, slot_id)
-    if rec is None or not can_claim_slot(rec, rec.profile, session_key):
+def plan_claim_result(ps: PoolState, attempt: ClaimAttempt, budget: PoolBudget) -> Plan:
+    """Проверяет `can_claim_slot` по `attempt.profile`, биндит `session_key` и не пробивает per-profile cap."""
+    rec = _find(ps, attempt.slot_id)
+    if rec is None or not can_claim_slot(rec, attempt.profile, attempt.session_key):
         return ps, ()
-    bound = None if rec.profile.is_zero_canon else session_key
-    if alive:
-        nxt = transition_slot(rec.state, E.CLAIM, is_zero_canon=rec.profile.is_zero_canon)
-        ps, acts = _put(ps, replace(rec, state=nxt, session_key=bound)), ()
-    else:
-        ps, acts = _dispose(ps, (rec,), E.SLOT_DEAD, "claim-dead")
+    bound = None if rec.profile.is_zero_canon else attempt.session_key
+    ps, acts = (_put(ps, replace(rec, state=transition_slot(rec.state, E.CLAIM, is_zero_canon=rec.profile.is_zero_canon), session_key=bound)), ()) if attempt.alive else _dispose(ps, (rec,), E.SLOT_DEAD, "claim-dead")
     ps = _touch(ps, rec.profile, budget.now_mono)
-    if alive and bound is not None:
+    if attempt.alive and bound is not None:
         return ps, acts
     ps, spawn = _try_spawn(ps, rec.profile, budget, ActionKind.REPLENISH)
     return ps, acts + spawn
@@ -212,23 +207,41 @@ def plan_turn_done(ps: PoolState, slot_id: str, limits: StandbyLimits, now_mono:
         return ps, acts
     ps, spawn = _try_spawn(ps, rec.profile, PoolBudget(limits, now_mono, total_rss_mb), ActionKind.REPLENISH)
     return ps, acts + spawn
-def plan_dispose_done(ps: PoolState, slot_id: str, epoch: int) -> PoolState:
-    """Подтверждение завершения dispose: DISPOSING -> CLOSED (до этого слот удерживается в учете)."""
+def _drain_pending(ps: PoolState, budget: PoolBudget) -> Plan:
+    demand = dict(ps.profile_last_demand)
+    rem: list[ProfileKey] = []
+    acts: list[PoolAction] = []
+    for prof in ps.pending_profiles:
+        last = demand.get(prof)
+        if last is None or budget.now_mono - last > budget.limits.sliding_ttl_s:
+            continue
+        ps2, spawned = _try_spawn(ps, prof, budget, ActionKind.REPLENISH)
+        if spawned:
+            ps = ps2
+            acts.extend(spawned)
+        elif sum(s.state in _OCCUPYING for s in ps.slots) >= budget.limits.global_max_slots:
+            rem.append(prof)
+    return replace(ps, pending_profiles=tuple(rem)), tuple(acts)
+def plan_dispose_done(ps: PoolState, slot_id: str, epoch: int, budget: PoolBudget | None = None) -> Plan:
+    """DISPOSING -> CLOSED и запуск отложенного SPAWN/REPLENISH из `pending_profiles` без overshoot cap."""
     rec = _find(ps, slot_id)
     if rec is None or rec.state is not S.DISPOSING or rec.epoch != epoch:
-        return ps
-    return _put(ps, replace(rec, state=transition_slot(rec.state, E.SLOT_DEAD, is_zero_canon=rec.profile.is_zero_canon)))
+        return ps, ()
+    ps = _put(ps, replace(rec, state=transition_slot(rec.state, E.SLOT_DEAD, is_zero_canon=rec.profile.is_zero_canon)))
+    return _drain_pending(ps, budget) if budget is not None and not ps.draining and ps.pending_profiles else (ps, ())
+def _is_stale(s: SlotRecord, demand: Mapping[ProfileKey, float], lim: StandbyLimits, now: float) -> bool:
+    return ((s.state is S.READY and now - demand.get(s.profile, s.created_mono) > lim.sliding_ttl_s)
+            or (s.state is S.WARMING and now - s.created_mono > lim.warmup_timeout_s))
 def plan_reap_tick(ps: PoolState, limits: StandbyLimits, now_mono: float) -> Plan:
     demand = dict(ps.profile_last_demand)
     kept = tuple(s for s in ps.slots if s.state in _OCCUPYING)
-    stale = tuple(s for s in kept
-                  if (s.state is S.READY and now_mono - demand.get(s.profile, s.created_mono) > limits.sliding_ttl_s)
-                  or (s.state is S.WARMING and now_mono - s.created_mono > limits.warmup_timeout_s))
+    stale = tuple(s for s in kept if _is_stale(s, demand, limits, now_mono))
     fresh = tuple(i for i in ps.profile_last_demand if now_mono - i[1] <= limits.sliding_ttl_s)
-    return _dispose(replace(ps, slots=kept, profile_last_demand=fresh), stale, E.REAP_TICK, "reap")
+    pend = tuple(p for p in ps.pending_profiles if p in {k for k, _ in fresh})
+    return _dispose(replace(ps, slots=kept, profile_last_demand=fresh, pending_profiles=pend), stale, E.REAP_TICK, "reap")
 def plan_drain(ps: PoolState) -> Plan:
     ps, acts = _dispose(ps, (s for s in ps.slots if s.state in _LIVE), E.DRAIN, "drain")
-    return replace(ps, draining=True), acts
+    return replace(ps, draining=True, pending_profiles=()), acts
 def compute_env_digest(env_items: Mapping[str, str], allowlist: Iterable[str]) -> str:
     pairs = "".join(f"{len(k)}:{k}={len(env_items[k])}:{env_items[k]};" for k in sorted(set(allowlist)) if k in env_items)
     return hashlib.sha256(pairs.encode()).hexdigest()
