@@ -60,7 +60,7 @@ def start_run_process(run: object, ctx: RunSpawnContext) -> float:
     t0 = time.monotonic()
     try:
         lease: PersistentLease | None = None
-        if pw_cfg.enabled and ctx.add_dir is None:
+        if pw_cfg.enabled and ctx.add_dir is None and not getattr(run, "_lossless_chunked", False):
             home = str(ctx.launch_env.get("HOME") or "")
             digest = compute_env_digest(ctx.cli_mode, ctx.zero_canon, home, ctx.settings_arg, launch_env=ctx.launch_env)
             req = PersistentAcquireRequest(

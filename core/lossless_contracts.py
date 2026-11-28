@@ -10,6 +10,12 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Final
 
+from core.lossless_delivery_policy import (
+    DEFAULT_CHUNK_ACK_TIMEOUT_S,
+    DEFAULT_FINAL_TURN_IDLE_TIMEOUT_S,
+    resolve_delivery_timeouts,
+)
+
 DEFAULT_SAFE_FRAME_BYTES: Final[int] = 90112
 HARD_FRAME_CLAMP_BYTES: Final[int] = 98304
 MIN_FRAME_BYTES: Final[int] = 16384
@@ -66,6 +72,8 @@ class LosslessLimits:
     muse_lossless_enabled: bool = False
     muse_refuse_status_mode: RefuseStatusMode = RefuseStatusMode.LEGACY_502
     digest_mode: str = DEFAULT_DIGEST_MODE
+    chunk_ack_timeout_s: float = DEFAULT_CHUNK_ACK_TIMEOUT_S
+    final_turn_idle_timeout_s: float = DEFAULT_FINAL_TURN_IDLE_TIMEOUT_S
 
 
 @dataclass(frozen=True)
@@ -185,21 +193,28 @@ def _parse_digest_mode(raw: object) -> str:
     return DEFAULT_DIGEST_MODE
 
 
+def _resolve_capacity_limits(
+    env: Mapping[str, str], dynamic_cfg: Mapping[str, object] | None
+) -> tuple[int, int, int, int, int, float, float]:
+    """Resolve frame, admission, queue, and process grace limits."""
+    clamp = _parse_int(_pick_raw(env, dynamic_cfg, "AGY_BRIDGE_HARD_FRAME_CLAMP_BYTES", "hard_frame_clamp_bytes"), HARD_FRAME_CLAMP_BYTES, (MIN_FRAME_BYTES, HARD_FRAME_CLAMP_BYTES))
+    safe_frame = _parse_int(_pick_raw(env, dynamic_cfg, "AGY_BRIDGE_SAFE_FRAME_BYTES", "safe_frame_bytes"), DEFAULT_SAFE_FRAME_BYTES, (MIN_FRAME_BYTES, clamp))
+    max_chunks = _parse_int(_pick_raw(env, dynamic_cfg, "AGY_BRIDGE_LOSSLESS_MAX_CHUNKS", "lossless_max_chunks"), DEFAULT_MAX_CHUNKS, (MIN_CHUNKS, MAX_CHUNKS))
+    concurrency = _parse_int(_pick_raw(env, dynamic_cfg, "AGY_BRIDGE_LOSSLESS_MAX_CONCURRENCY", "lossless_max_concurrency"), DEFAULT_MAX_CONCURRENCY, (1, 16))
+    queue = _parse_int(_pick_raw(env, dynamic_cfg, "AGY_BRIDGE_LOSSLESS_MAX_QUEUE", "lossless_max_queue"), DEFAULT_MAX_QUEUE, (0, 16))
+    queue_wait = _parse_float(_pick_raw(env, dynamic_cfg, "AGY_BRIDGE_LOSSLESS_QUEUE_WAIT_S", "lossless_queue_wait_s"), DEFAULT_QUEUE_WAIT_S, (0.1, 60.0))
+    kill_grace = _parse_float(_pick_raw(env, dynamic_cfg, "AGY_BRIDGE_LOSSLESS_KILL_GRACE_S", "lossless_kill_grace_s"), DEFAULT_KILL_GRACE_S, (0.05, 10.0))
+    return clamp, safe_frame, max_chunks, concurrency, queue, queue_wait, kill_grace
+
+
 def resolve_lossless_limits(
-    env: Mapping[str, str],
-    dynamic_cfg: Mapping[str, object] | None = None,
+    env: Mapping[str, str], dynamic_cfg: Mapping[str, object] | None = None
 ) -> LosslessLimits:
     """Resolve LosslessLimits with strict priority: env > dynamic_cfg > safe default."""
-    clamp = _parse_int(
-        _pick_raw(env, dynamic_cfg, "AGY_BRIDGE_HARD_FRAME_CLAMP_BYTES", "hard_frame_clamp_bytes"),
-        HARD_FRAME_CLAMP_BYTES,
-        (MIN_FRAME_BYTES, HARD_FRAME_CLAMP_BYTES),
+    clamp, safe_frame, max_chunks, concurrency, queue, queue_wait, kill_grace = (
+        _resolve_capacity_limits(env, dynamic_cfg)
     )
-    safe_frame = _parse_int(
-        _pick_raw(env, dynamic_cfg, "AGY_BRIDGE_SAFE_FRAME_BYTES", "safe_frame_bytes"),
-        DEFAULT_SAFE_FRAME_BYTES,
-        (MIN_FRAME_BYTES, clamp),
-    )
+    timeouts = resolve_delivery_timeouts(env, dynamic_cfg)
     return LosslessLimits(
         lossless_enabled=_parse_bool(
             _pick_raw(env, dynamic_cfg, "AGY_BRIDGE_LOSSLESS_ENABLED", "lossless_delivery_enabled"),
@@ -207,31 +222,11 @@ def resolve_lossless_limits(
         ),
         safe_frame_bytes=safe_frame,
         hard_frame_clamp_bytes=clamp,
-        max_chunks=_parse_int(
-            _pick_raw(env, dynamic_cfg, "AGY_BRIDGE_LOSSLESS_MAX_CHUNKS", "lossless_max_chunks"),
-            DEFAULT_MAX_CHUNKS,
-            (MIN_CHUNKS, MAX_CHUNKS),
-        ),
-        max_concurrency=_parse_int(
-            _pick_raw(env, dynamic_cfg, "AGY_BRIDGE_LOSSLESS_MAX_CONCURRENCY", "lossless_max_concurrency"),
-            DEFAULT_MAX_CONCURRENCY,
-            (1, 16),
-        ),
-        max_queue=_parse_int(
-            _pick_raw(env, dynamic_cfg, "AGY_BRIDGE_LOSSLESS_MAX_QUEUE", "lossless_max_queue"),
-            DEFAULT_MAX_QUEUE,
-            (0, 16),
-        ),
-        queue_wait_s=_parse_float(
-            _pick_raw(env, dynamic_cfg, "AGY_BRIDGE_LOSSLESS_QUEUE_WAIT_S", "lossless_queue_wait_s"),
-            DEFAULT_QUEUE_WAIT_S,
-            (0.1, 60.0),
-        ),
-        kill_grace_s=_parse_float(
-            _pick_raw(env, dynamic_cfg, "AGY_BRIDGE_LOSSLESS_KILL_GRACE_S", "lossless_kill_grace_s"),
-            DEFAULT_KILL_GRACE_S,
-            (0.05, 10.0),
-        ),
+        max_chunks=max_chunks,
+        max_concurrency=concurrency,
+        max_queue=queue,
+        queue_wait_s=queue_wait,
+        kill_grace_s=kill_grace,
         muse_lossless_enabled=_parse_bool(
             _pick_raw(env, dynamic_cfg, "MUSE_BRIDGE_LOSSLESS_ENABLED", "muse_lossless_enabled"),
             False,
@@ -242,6 +237,8 @@ def resolve_lossless_limits(
         digest_mode=_parse_digest_mode(
             _pick_raw(env, dynamic_cfg, "BRIDGE_LOSS_RECEIPT_DIGEST_MODE", "loss_receipt_digest_mode")
         ),
+        chunk_ack_timeout_s=timeouts.chunk_ack_timeout_s,
+        final_turn_idle_timeout_s=timeouts.final_turn_idle_timeout_s,
     )
 
 
