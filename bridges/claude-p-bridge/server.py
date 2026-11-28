@@ -50,6 +50,7 @@ from core.claude_zero_canon import (  # noqa: E402
     CLAUDE_PRESERVED_CA_FILES, build_claude_zero_canon_env, build_claude_zero_canon_flags,
     filter_claude_settings, filter_claude_state, serialize_claude_json,
 )
+from core.stdio_resident.claude_standby_adapter import ClaudeRunRequest, acquire_claude_run_proc  # noqa: E402
 from core.proc_groups import live_proc_groups, spawn_registered as _spawn_registered  # noqa: E402
 from core.recovery_flags import read_diagnostic_redact_margin_chars, read_diagnostic_window_chars, read_post_call_cutoff_enabled  # noqa: E402
 from core.subbridge_lifecycle import SubbridgeHooks, SubbridgeLifecycle  # noqa: E402
@@ -387,11 +388,9 @@ class Run:
         child_env["BRIDGE_ZERO_CANON"] = "1"
         child_env.pop("CLAUDE_P_BRIDGE_KEY", None)
 
-        self.proc = spawn_registered(
-            cmd, cwd=str(img_dir if img_dir is not None else WORKSPACE),
-            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            start_new_session=True, env=child_env,
-        )
+        self.proc, _, self._release = acquire_claude_run_proc(ClaudeRunRequest(model, effort, img_dir, opts.get("session_plan")), lambda: spawn_registered(
+            cmd, cwd=str(img_dir if img_dir is not None else WORKSPACE), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, start_new_session=True, env=child_env))
         with _active_lock:
             _active[self.proc.pid] = self.proc
         self.q = queue.Queue(maxsize=QUEUE_MAXSIZE)
@@ -471,6 +470,7 @@ class Run:
         with _active_lock:
             _active.pop(self.proc.pid, None)
         cast(Any, spawn_registered).unregister(self.proc)
+        self._release()
         for stream in (self.proc.stdin, self.proc.stdout, self.proc.stderr):
             try:
                 if stream is not None:
