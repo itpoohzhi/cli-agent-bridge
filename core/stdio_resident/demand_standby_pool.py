@@ -229,14 +229,13 @@ class DemandStandbyPool:
             handle = None
         self._complete(action, handle, rss)
     def _complete(self, action: PoolAction, handle: WarmSlotHandle | None, rss: float) -> None:
-        adapter, orphan = self._adapters[action.profile.backend_id], handle
+        adapter, orphan, max_rss = self._adapters[action.profile.backend_id], handle, float(self._limits().max_total_rss_mb)
         with self._lock:
             cur0 = self._slots.get(action.slot_id)
             owned = orphan is not None and cur0 is not None and cur0.state is S.WARMING and cur0.epoch == action.epoch
             if owned and orphan is not None:
                 self._handles[action.slot_id], orphan = (adapter, orphan), None
-            rep = WarmupReport(owned, rss, float(self._limits().max_total_rss_mb))
-            ps, acts = fsm.plan_warmup_complete(self._state(), action.slot_id, action.epoch, rep)
+            ps, acts = fsm.plan_warmup_complete(self._state(), action.slot_id, action.epoch, WarmupReport(owned, rss, max_rss))
             doomed = self._commit(ps, acts)
         self._dispose_many(doomed)
         if orphan is not None:
@@ -261,16 +260,21 @@ class DemandStandbyPool:
         if doomed and not self._submit(self._dispose_many, doomed):
             self._dispose_many(doomed)
     def _finalize_disposed(self, sid: str, ep: int, entry: Handle, dead: bool) -> tuple[list[Doomed], tuple[PoolAction, ...]]:
+        lim = self._limits() if (sid and dead) else self._lim
         with self._lock:
-            self._stats["disposes"] += 1
+            if dead:
+                self._stats["disposes"] += 1
             if not sid:
+                if not dead:
+                    _log.warning("orphan dispose left process alive")
                 return [], ()
             self._disposing.discard(sid)
             if not dead:
-                self._handles[sid] = entry
+                cur = self._slots.get(sid)
+                if cur is not None and (cur.state, cur.epoch) == (S.DISPOSING, ep):
+                    self._handles[sid] = entry
                 return [], ()
-            bud = PoolBudget(self._limits(), self._clock(), self._total_rss(exclude=sid))
-            ps, acts = fsm.plan_dispose_done(self._state(), sid, ep, bud)
+            ps, acts = fsm.plan_dispose_done(self._state(), sid, ep, PoolBudget(lim, self._clock(), self._total_rss(exclude=sid)))
             return self._commit(ps, acts), acts
     def _dispose_many(self, doomed: list[Doomed]) -> None:
         for sid, ep, entry in doomed:
@@ -279,12 +283,18 @@ class DemandStandbyPool:
                 adapter.dispose(handle)
             except Exception as exc:
                 _log.warning("dispose failed err=%s", type(exc).__name__)
-            extra, acts = self._finalize_disposed(sid, ep, entry, not self._safe_alive(adapter, handle))
+            extra, acts = self._finalize_disposed(sid, ep, entry, self._safe_dead(adapter, handle))
             if extra or acts:
                 self._finish(extra, acts)
     @staticmethod
     def _safe_alive(adapter: StandbyAdapter, handle: WarmSlotHandle) -> bool:
         try:
             return bool(adapter.is_alive(handle))
+        except Exception:
+            return False
+    @staticmethod
+    def _safe_dead(adapter: StandbyAdapter, handle: WarmSlotHandle) -> bool:
+        try:
+            return not bool(adapter.is_alive(handle))
         except Exception:
             return False

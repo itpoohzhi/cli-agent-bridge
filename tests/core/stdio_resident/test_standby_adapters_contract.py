@@ -29,10 +29,7 @@ if str(AGY_DIR) not in sys.path:
 from agy_runtime.persistent_standby_pool import AgyStandbyManager  # noqa: E402
 from agy_runtime.persistent_worker_adapter import AgyPersistentWorkerPool  # noqa: E402
 from agy_runtime.persistent_worker_config import (  # noqa: E402
-    PersistentAcquireRequest,
-    PersistentReleaseParams,
-    compute_env_digest,
-    persistent_worker_settings,
+    PersistentAcquireRequest, PersistentReleaseParams, compute_env_digest, persistent_worker_settings,
 )
 
 _FAKE_CLAUDE = """
@@ -271,13 +268,17 @@ def test_dispose_exception_preserves_zc_cleanup_and_keeps_live_slot_in_rss(tmp_p
                                 stdout=None, stderr=None, poll=lambda: 0, wait=lambda timeout=0: 0)
     ClaudeStandbyAdapter().dispose(ClaudeWarmHandle(fake_proc, ProfileKey("claude-p", "m1", "low", "zero-canon", "d", "zc"), str(zc_dir), str(zc_dir)))  # type: ignore[arg-type]
     assert not zc_dir.exists()
-    state = {"alive": True, "calls": 0}
+    state = {"alive": True, "calls": 0, "probe_err": True}
+    def _alive(_h: object) -> bool:
+        if state["calls"] == 1 and state["probe_err"]:
+            raise RuntimeError("liveness probe failed")
+        return bool(state["alive"])
     def _disp(_h: object) -> None:
         state["calls"] += 1
         if state["calls"] == 1:
             raise RuntimeError("kill failed")
         state["alive"] = False
-    ad = SimpleNamespace(spawn_warm=lambda p, *, timeout_s: SimpleNamespace(profile=p), is_alive=lambda _h: state["alive"],
+    ad = SimpleNamespace(spawn_warm=lambda p, *, timeout_s: SimpleNamespace(profile=p), is_alive=_alive,
                          claim=lambda h: h, dispose=_disp, rss_mb=lambda _h: 500.0)
     cfg = {"BRIDGE_DEMAND_STANDBY_ENABLED": "1", "BRIDGE_DEMAND_STANDBY_GLOBAL_MAX_SLOTS": "1", "BRIDGE_DEMAND_STANDBY_MAX_TOTAL_RSS_MB": "500"}
     pool = DemandStandbyPool({"b1": ad}, config_provider=lambda: (cfg, {}))  # type: ignore[dict-item]
