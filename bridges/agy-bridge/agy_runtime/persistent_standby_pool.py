@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import collections
+import contextlib
 import hashlib
 import json
 import logging
+import os
 import threading
 import time
 import uuid
@@ -14,45 +16,38 @@ from dataclasses import dataclass
 from typing import cast, final
 
 from core.stdio_resident.process_io import EOF, LINE, ResidentProcessHandle, StdioIoError
-from core.stdio_resident.process_pool import (
-    PoolClosedError,
-    ResidentProcessPool,
-    SlotLeaseTimeoutError,
-)
+from core.stdio_resident.process_pool import PoolClosedError, ResidentProcessPool, SlotLeaseTimeoutError
+from core.stdio_resident.process_reaper import extract_handle_pgid, get_pgid_rss_bytes, is_pgid_alive
+from core.stdio_resident.standby_pool_fsm import ProfileKey, StandbyLimits, WarmSlotHandle, parse_limits
 from core.stdio_resident.types import SlotAffinityKey
 
 from .persistent_worker_config import PersistentWorkerSettings
 
-__all__ = [
-    "AgyStandbyManager",
-    "StandbyProfileKey",
-    "StandbyReadySlot",
-    "standby_argv_digest",
-]
+__all__ = ["AgyStandbyAdapter", "AgyStandbyManager", "StandbyProfileKey", "StandbyReadySlot",
+           "demand_limits", "standby_argv_digest"]
 
 _LOGGER = logging.getLogger(__name__)
-_OWNER_HASH = "agy-bridge"
-_BACKEND_ID = "agy-bridge"
+_OWNER_HASH = _BACKEND_ID = "agy-bridge"
 _STANDBY_PREFIX = "__standby__:"
 _FORBIDDEN_ARGS = ("--add-dir", "--resume")
-_PREWARM_ERRORS = (
-    SlotLeaseTimeoutError, PoolClosedError, OSError, StdioIoError, RuntimeError,
-)
+_PREWARM_ERRORS = (SlotLeaseTimeoutError, PoolClosedError, OSError, StdioIoError, RuntimeError)
+
+
+def demand_limits() -> StandbyLimits:
+    """Лимиты demand-standby из os.environ (BRIDGE_DEMAND_STANDBY_*); по умолчанию OFF."""
+    return parse_limits(os.environ, None)
 
 
 def standby_argv_digest(argv: Sequence[str]) -> str | None:
     """Хеш launch-argv для изоляции профилей; None если argv содержит --add-dir или --resume."""
-    for arg in argv:
-        for bad in _FORBIDDEN_ARGS:
-            if arg == bad or arg.startswith(f"{bad}="):
-                return None
+    if any(arg == bad or arg.startswith(f"{bad}=") for arg in argv for bad in _FORBIDDEN_ARGS):
+        return None
     return hashlib.sha256("\0".join(argv).encode("utf-8")).hexdigest()[:16]
 
 
 @dataclass(frozen=True)
 class StandbyProfileKey:
     """Точный профиль совместимости для выдачи прогретого standby-воркера на turn 0."""
-
     model: str
     effort: str
     cwd: str
@@ -64,7 +59,6 @@ class StandbyProfileKey:
 @dataclass(frozen=True)
 class StandbyReadySlot:
     """Прогретый слот ResidentProcessPool, уже отдавший событие `init`."""
-
     standby_chat_key: str
     slot_id: str
     generation: int
@@ -72,6 +66,7 @@ class StandbyReadySlot:
     cid: str
     created_mono: float
     pool_id: int
+    pgid: int = 0
 
 
 def _parse_init_line(line: str) -> tuple[bool, str]:
@@ -79,50 +74,41 @@ def _parse_init_line(line: str) -> tuple[bool, str]:
         raw = cast(object, json.loads(line))
     except ValueError:
         return False, ""
-    if not isinstance(raw, dict):
-        return False, ""
-    ev = cast(dict[str, object], raw)
-    if (ev.get("event") or ev.get("type")) != "init":
-        return False, ""
-    return True, str(ev.get("conversation_id") or ev.get("session_id") or "")
+    ev = cast(dict[str, object], raw) if isinstance(raw, dict) else {}
+    is_init = (ev.get("event") or ev.get("type")) == "init"
+    return is_init, str(ev.get("conversation_id") or ev.get("session_id") or "") if is_init else ""
 
 
 @final
 class AgyStandbyManager:
-    """Ограниченный фоновый прогрев standby-слотов внутри существующего ResidentProcessPool."""
+    """Ограниченный фоновый прогрев standby-слотов; sliding TTL при BRIDGE_DEMAND_STANDBY_ENABLED=1."""
 
     def __init__(self) -> None:
         self._lock: threading.Lock = threading.Lock()
         self._epoch: int = 0
-        self._prewarm_seq: int = 0
         self._ready: collections.OrderedDict[StandbyProfileKey, StandbyReadySlot] = collections.OrderedDict()
-        self._inflight: dict[StandbyProfileKey, int] = {}
+        self._inflight: set[StandbyProfileKey] = set()
+        self._demand: dict[StandbyProfileKey, float] = {}
         self._chat_alias: collections.OrderedDict[str, str] = collections.OrderedDict()
-        self._standby_hits: int = 0
-        self._standby_prewarms: int = 0
+        self._standby_hits = self._standby_prewarms = 0
 
     def resolve_alias(self, chat_key: str) -> str:
         with self._lock:
-            target = self._chat_alias.get(chat_key)
-            if target is not None:
+            if (target := self._chat_alias.get(chat_key)) is not None:
                 self._chat_alias.move_to_end(chat_key)
-                return target
-            return chat_key
+            return target or chat_key
 
     def bind_alias(self, chat_key: str, standby_chat_key: str, max_slots: int) -> None:
-        if not chat_key or not standby_chat_key:
-            return
-        with self._lock:
-            cap = max(16, max_slots * 8)
-            self._chat_alias[chat_key] = standby_chat_key
-            self._chat_alias.move_to_end(chat_key)
-            while len(self._chat_alias) > cap:
-                _ = self._chat_alias.popitem(last=False)
+        if chat_key and standby_chat_key:
+            with self._lock:
+                self._chat_alias[chat_key] = standby_chat_key
+                self._chat_alias.move_to_end(chat_key)
+                while len(self._chat_alias) > max(16, max_slots * 8):
+                    _ = self._chat_alias.popitem(last=False)
 
     def drop_alias(self, chat_key: str) -> None:
-        if chat_key:
-            with self._lock:
-                _ = self._chat_alias.pop(chat_key, None)
+        with self._lock:
+            _ = self._chat_alias.pop(chat_key, None)
 
     def has_alias(self, chat_key: str) -> bool:
         with self._lock:
@@ -130,12 +116,9 @@ class AgyStandbyManager:
 
     @staticmethod
     def _close_idle_slots(pool: ResidentProcessPool | None, slots: Sequence[StandbyReadySlot]) -> None:
-        if pool is None or not slots:
+        if pool is None:
             return
-        pid_key = id(pool)
-        for slot in slots:
-            if slot.pool_id != pid_key:
-                continue
+        for slot in (s for s in slots if s.pool_id == id(pool)):
             try:
                 _ = pool.close_if_idle(slot.slot_id, slot.generation)
             except _PREWARM_ERRORS as exc:
@@ -144,31 +127,41 @@ class AgyStandbyManager:
     def close_slot(self, pool: ResidentProcessPool, slot: StandbyReadySlot) -> None:
         self._close_idle_slots(pool, (slot,))
 
-    def _prune_expired_locked(self, now: float, pool_id: int, ttl_s: float) -> list[StandbyReadySlot]:
+    @staticmethod
+    def _policy(cfg: PersistentWorkerSettings) -> tuple[bool, bool, float, int, float]:
+        lim = demand_limits()
+        on = lim.enabled
+        cap = min(lim.global_max_slots if on else cfg.standby_max_slots, max(0, cfg.max_slots - 2))
+        return (on, cfg.enabled and (cfg.standby_enabled or on), lim.sliding_ttl_s if on else cfg.standby_ttl_s,
+                cap, lim.warmup_timeout_s if on else cfg.standby_init_timeout_s)
+
+    def _prune_expired_locked(self, now: float, pool_id: int, ttl_s: float, sliding: bool) -> list[StandbyReadySlot]:
+        """Протухшие слоты: sliding TTL от последнего спроса профиля (REQ-002) либо legacy created_mono."""
         expired: list[StandbyReadySlot] = []
         for pkey, slot in list(self._ready.items()):
-            if slot.pool_id != pool_id or (now - slot.created_mono) > ttl_s:
+            ref = self._demand.get(pkey, slot.created_mono) if sliding else slot.created_mono
+            if slot.pool_id != pool_id or (now - ref) > ttl_s:
                 _ = self._ready.pop(pkey, None)
                 expired.append(slot)
+        self._demand = {k: v for k, v in self._demand.items() if now - v <= ttl_s}
         return expired
 
     @staticmethod
-    def _affinity_for(chat_key: str, profile_key: StandbyProfileKey) -> SlotAffinityKey:
-        return SlotAffinityKey(
-            owner_hash=_OWNER_HASH, chat_key=chat_key, backend_id=_BACKEND_ID,
-            model=profile_key.model, effort=profile_key.effort, cwd_norm=profile_key.cwd,
-            env_digest=profile_key.env_digest, review_profile=profile_key.review_profile,
-        )
+    def _affinity_for(chat_key: str, pk: StandbyProfileKey) -> SlotAffinityKey:
+        return SlotAffinityKey(_OWNER_HASH, chat_key, _BACKEND_ID, pk.model, pk.effort, pk.cwd,
+                               env_digest=pk.env_digest, review_profile=pk.review_profile)
 
-    def claim_ready(
-        self, profile_key: StandbyProfileKey, pool: ResidentProcessPool, cfg: PersistentWorkerSettings
-    ) -> StandbyReadySlot | None:
-        """Забрать живой standby-слот для turn 0 с глобальной вычисткой протухших записей."""
-        if not (cfg.enabled and cfg.standby_enabled) or profile_key.review_profile == "zero-canon":
+    def claim_ready(self, profile_key: StandbyProfileKey, pool: ResidentProcessPool,
+                    cfg: PersistentWorkerSettings) -> StandbyReadySlot | None:
+        """Забрать живой standby-слот для turn 0; спрос профиля продлевает его sliding TTL."""
+        on, active, ttl_s, _cap, _init_s = self._policy(cfg)
+        if not active or (profile_key.review_profile == "zero-canon" and not on):
             return None
         now = time.monotonic()
         with self._lock:
-            expired = self._prune_expired_locked(now, id(pool), cfg.standby_ttl_s)
+            expired = self._prune_expired_locked(now, id(pool), ttl_s, on)
+            if on:
+                self._demand[profile_key] = now
             slot = self._ready.pop(profile_key, None)
         self._close_idle_slots(pool, expired)
         if slot is None:
@@ -182,113 +175,91 @@ class AgyStandbyManager:
         return slot
 
     def schedule_prewarm(
-        self, profile_key: StandbyProfileKey, pool: ResidentProcessPool,
-        argv_builder: Callable[[], list[str]], cwd: str, env: Mapping[str, str],
-        cfg: PersistentWorkerSettings,
+        self, profile_key: StandbyProfileKey, pool: ResidentProcessPool, argv_builder: Callable[[], list[str]],
+        cwd: str, env: Mapping[str, str], cfg: PersistentWorkerSettings,
     ) -> None:
-        """Запустить фоновый прогрев standby-слота после глобальной вычистки протухших записей."""
-        if not (cfg.enabled and cfg.standby_enabled) or profile_key.review_profile == "zero-canon":
-            return
-        cap = min(cfg.standby_max_slots, max(0, cfg.max_slots - 2))
-        if cap <= 0:
+        """Фоновый прогрев standby-слота; спрос профиля продлевает sliding TTL."""
+        on, active, ttl_s, cap, init_s = self._policy(cfg)
+        if not active or cap <= 0 or (profile_key.review_profile == "zero-canon" and not on):
             return
         now = time.monotonic()
         with self._lock:
-            expired = self._prune_expired_locked(now, id(pool), cfg.standby_ttl_s)
-            start_token: int | None = None
+            expired = self._prune_expired_locked(now, id(pool), ttl_s, on)
+            if on:
+                self._demand[profile_key] = now
             epoch = self._epoch
-            if (
-                profile_key not in self._ready
-                and profile_key not in self._inflight
-                and (len(self._ready) + len(self._inflight)) < cap
-            ):
-                self._prewarm_seq += 1
-                start_token = self._prewarm_seq
-                self._inflight[profile_key] = start_token
+            start = profile_key not in {*self._ready, *self._inflight} and len(self._ready) + len(self._inflight) < cap
+            if start:
+                self._inflight.add(profile_key)
                 self._standby_prewarms += 1
         self._close_idle_slots(pool, expired)
-        if start_token is None:
-            return
-        t = threading.Thread(
-            target=self._run_prewarm,
-            args=(epoch, start_token, profile_key, pool, argv_builder, cwd, dict(env), cfg.standby_init_timeout_s),
-            name="agy-standby-prewarm", daemon=True,
-        )
-        t.start()
+        if start:
+            spec: _SpawnSpec = (profile_key, argv_builder, cwd, dict(env))
+            threading.Thread(
+                target=self._run_prewarm, args=(epoch, pool, spec, init_s),
+                name="agy-standby-prewarm", daemon=True,
+            ).start()
 
-    def _run_prewarm(
-        self, epoch: int, token: int, profile_key: StandbyProfileKey, pool: ResidentProcessPool,
-        argv_builder: Callable[[], list[str]], cwd: str, env: dict[str, str], init_timeout_s: float,
-    ) -> None:
-        standby_chat_key = f"{_STANDBY_PREFIX}{uuid.uuid4().hex[:12]}"
-        affinity = self._affinity_for(standby_chat_key, profile_key)
+    def _stale(self, epoch: int | None) -> bool:
+        return epoch is not None and self._epoch != epoch
+
+    def warm(self, pool: ResidentProcessPool, spec: _SpawnSpec, init_timeout_s: float,
+             epoch: int | None = None) -> StandbyReadySlot | None:
+        """Синхронно прогреть слот до `init`; None при сбое или устаревшей эпохе (слот снесён)."""
+        profile_key, argv_builder, cwd, env = spec
+        key = f"{_STANDBY_PREFIX}{uuid.uuid4().hex[:12]}"
         entry = None
-        released = False
         try:
-            entry = pool.acquire(affinity, argv_builder=argv_builder, cwd=cwd, env=env, is_ephemeral=False)
+            entry = pool.acquire(self._affinity_for(key, profile_key), argv_builder=argv_builder, cwd=cwd,
+                                 env=dict(env), is_ephemeral=False)
             init_line, cid = self._await_init(entry.handle, init_timeout_s, epoch)
-            with self._lock:
-                still_valid = self._epoch == epoch
-            if not init_line or not still_valid:
-                released = True
-                _ = pool.release(entry.slot_id, success=False, cancel=True, lease_id=entry.lease_id)
-                return
-            released = True
-            kept = pool.release(entry.slot_id, success=True, cancel=False, lease_id=entry.lease_id)
-            if not kept:
-                return
-            slot = StandbyReadySlot(
-                standby_chat_key=standby_chat_key, slot_id=entry.slot_id,
-                generation=entry.handle.generation, init_line=init_line, cid=cid,
-                created_mono=time.monotonic(), pool_id=id(pool),
-            )
-            stale: list[StandbyReadySlot] = []
-            with self._lock:
-                if self._epoch == epoch:
-                    self._ready[profile_key] = slot
-                    self._ready.move_to_end(profile_key)
-                else:
-                    stale.append(slot)
-            self._close_idle_slots(pool, stale)
+            ok = bool(init_line) and not self._stale(epoch)
+            leased, entry = entry, None
+            kept = pool.release(leased.slot_id, success=ok, cancel=not ok, lease_id=leased.lease_id)
+            return StandbyReadySlot(key, leased.slot_id, leased.handle.generation, init_line, cid, time.monotonic(),
+                                    id(pool), extract_handle_pgid(leased.handle)) if ok and kept else None
         except _PREWARM_ERRORS as exc:
             _LOGGER.debug("standby prewarm skipped/failed: %s", exc)
+            return None
         finally:
-            if entry is not None and not released:
-                try:
+            if entry is not None:
+                with contextlib.suppress(BaseException):
                     _ = pool.release(entry.slot_id, success=False, cancel=True, lease_id=entry.lease_id)
-                except BaseException:  # noqa: BLE001
-                    pass
-            with self._lock:
-                if self._inflight.get(profile_key) == token:
-                    _ = self._inflight.pop(profile_key, None)
 
-    def _await_init(
-        self, handle: ResidentProcessHandle, timeout_s: float, epoch: int
-    ) -> tuple[str, str]:
-        deadline = time.monotonic() + max(0.5, timeout_s)
-        while time.monotonic() < deadline:
+    def _run_prewarm(self, epoch: int, pool: ResidentProcessPool, spec: _SpawnSpec, init_s: float) -> None:
+        profile_key = spec[0]
+        try:
+            if (slot := self.warm(pool, spec, init_s, epoch)) is not None:
+                with self._lock:
+                    fresh = self._epoch == epoch
+                    if fresh:
+                        self._ready[profile_key] = slot
+                        self._ready.move_to_end(profile_key)
+                if not fresh:
+                    self._close_idle_slots(pool, (slot,))
+        finally:
             with self._lock:
-                if self._epoch != epoch:
-                    return "", ""
+                self._inflight.discard(profile_key)
+
+    def _await_init(self, handle: ResidentProcessHandle, timeout_s: float, epoch: int | None) -> tuple[str, str]:
+        deadline = time.monotonic() + max(0.5, timeout_s)
+        while time.monotonic() < deadline and not self._stale(epoch):
             kind, tagged = handle.read_stdout_line_outcome(timeout_s=min(0.25, max(0.05, deadline - time.monotonic())))
             if kind == LINE and tagged is not None:
-                if line := tagged.line.strip():
-                    is_init, cid = _parse_init_line(line)
-                    if is_init:
-                        return line, cid
+                if (line := tagged.line.strip()) and (init := _parse_init_line(line))[0]:
+                    return line, init[1]
             elif kind == EOF or not handle.is_alive():
-                return "", ""
+                break
         return "", ""
 
     def clear(self, *, drop_aliases: bool = True, pool: ResidentProcessPool | None = None) -> None:
         """Сбросить все готовые standby-записи, отменить in-flight прогревы и закрыть idle standby."""
-        evicted: list[StandbyReadySlot] = []
         with self._lock:
             if self._ready or self._inflight:
                 self._epoch += 1
-            if self._ready:
-                evicted = list(self._ready.values())
-                self._ready.clear()
+            evicted = list(self._ready.values())
+            self._ready.clear()
+            self._demand.clear()
             if drop_aliases:
                 self._chat_alias.clear()
         self._close_idle_slots(pool, evicted)
@@ -296,3 +267,30 @@ class AgyStandbyManager:
     def stats(self) -> tuple[int, int, int]:
         with self._lock:
             return len(self._ready), self._standby_hits, self._standby_prewarms
+
+_SpawnSpec = tuple[StandbyProfileKey, Callable[[], list[str]], str, Mapping[str, str]]
+
+@final
+class AgyStandbyAdapter:
+    """Тонкий транслятор `StandbyAdapter` (VER-012) поверх AgyStandbyManager; RSS — по всей PGID-группе."""
+
+    def __init__(self, manager: AgyStandbyManager, pool: ResidentProcessPool,
+                 spec_of: Callable[[ProfileKey], _SpawnSpec]) -> None:
+        self._manager, self._pool, self._spec_of = manager, pool, spec_of
+
+    def spawn_warm(self, profile: ProfileKey, *, timeout_s: float) -> WarmSlotHandle:
+        if (slot := self._manager.warm(self._pool, self._spec_of(profile), timeout_s)) is None:
+            raise RuntimeError("standby warmup failed")
+        return slot
+
+    def is_alive(self, handle: WarmSlotHandle) -> bool:
+        return is_pgid_alive(cast(StandbyReadySlot, handle).pgid)
+
+    def claim(self, handle: WarmSlotHandle) -> object:
+        return handle
+
+    def dispose(self, handle: WarmSlotHandle) -> None:
+        self._manager.close_slot(self._pool, cast(StandbyReadySlot, handle))
+
+    def rss_mb(self, handle: WarmSlotHandle) -> float:
+        return (get_pgid_rss_bytes(cast(StandbyReadySlot, handle).pgid) or 0) / (1024 * 1024)
