@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-# Чистая сборка тела и заголовков loopback Zero-Canon proxy (allowlist, stream=false).
+# Чистая сборка тела и заголовков loopback Zero-Canon proxy (allowlist, stream по запросу).
 
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass
+from typing import cast
 
 from core.chat_key import SRC_HEADER_CHAT_ID, resolve_chat_key  # pyright: ignore[reportUnknownVariableType]
 from core.native_turn_context import NativeTurnPayload
@@ -38,19 +39,29 @@ def _optional_fields(options: BridgeProxyOptions) -> dict[str, object]:
 
 
 def build_bridge_proxy_body(
-    model: str, prompt: str, options: BridgeProxyOptions | None = None
+    model: str,
+    prompt: str,
+    options: BridgeProxyOptions | None = None,
+    *,
+    stream: bool = False,
 ) -> dict[str, object]:
-    """Тело `/chat/completions`: allowlist полей, всегда `stream=False`."""
+    """Тело `/chat/completions`: allowlist полей; `stream=False` по умолчанию (обратная совместимость)."""
     opts = options if options else BridgeProxyOptions()
     native = opts.native_payload
     messages = native.to_messages_list() if native else []
     rendered = messages if messages else [{"role": "user", "content": prompt}]
-    return {
+    body = {
         "model": model,
         "messages": rendered,
-        "stream": False,
+        "stream": bool(stream),
         **_optional_fields(opts),
     }
+    if stream:
+        existing = body.get("stream_options")
+        stream_options = dict(cast(dict[str, object], existing)) if isinstance(existing, dict) else {}
+        stream_options["include_usage"] = True
+        body["stream_options"] = stream_options
+    return body
 
 
 def _valid_chat_id(chat_id: str | None) -> str | None:

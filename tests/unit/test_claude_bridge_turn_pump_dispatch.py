@@ -74,7 +74,7 @@ def test_dispatch_done_reports_exit_code_and_stderr(
         "err": "warn tail",
         "tool_calls": [],
     }
-    assert clock.sleeps == [0.0]
+    assert clock.sleeps == []
 
 
 def test_dispatch_done_after_client_gone_is_not_an_error(

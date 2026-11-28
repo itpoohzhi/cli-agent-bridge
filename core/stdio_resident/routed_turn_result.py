@@ -10,16 +10,17 @@ from dataclasses import dataclass, replace
 from typing import Any, cast
 
 from core.stdio_resident.bridge_proxy_payload import (
-    BridgeProxyOptions,
-    build_bridge_proxy_body,
-    build_bridge_proxy_headers,
+    BridgeProxyOptions, build_bridge_proxy_body, build_bridge_proxy_headers,
+)
+from core.stdio_resident.bridge_proxy_stream import (
+    STREAM_CHUNK_ENV as STREAM_CHUNK_ENV, STREAM_ENABLED_ENV as STREAM_ENABLED_ENV,
+    BridgeRelayTracker, bridge_stream_chunk_bytes as bridge_stream_chunk_bytes,
+    bridge_stream_enabled as bridge_stream_enabled, consume_sse_blob, consume_sse_stream,
+    emit_result_once, is_sse_response, looks_like_sse,
 )
 from core.stdio_resident.proxy_policy import NoRedirectHandler
 from core.stdio_resident.turn_error_sse import (
-    DONE_FRAME,
-    ResidentTurnError,
-    TurnErrorResponse,
-    build_turn_error,
+    DONE_FRAME, ResidentTurnError, TurnErrorResponse, build_turn_error,
 )
 from core.subbridge_zero_canon import is_zero_canon_profile
 from core.turn_usage import TurnUsage
@@ -48,6 +49,7 @@ class ProxyBridgeOptions:
     timeout_s: float | None = None
     usage_enabled: bool = True
     proxy_options: BridgeProxyOptions | None = None
+    sse_writer: Callable[[str, str], Any] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,23 +82,27 @@ def _parse_proxy_response(parsed: object, usage_enabled: bool) -> RoutedTurnResu
 
 
 def proxy_zero_canon_bridge_turn_result(
-    base_url: str,
-    model: str,
-    prompt: str,
-    headers: Mapping[str, str] | None,
-    options: ProxyBridgeOptions,
+    base_url: str, model: str, prompt: str, headers: Mapping[str, str] | None, options: ProxyBridgeOptions,
 ) -> RoutedTurnResult:
-    """Proxy a Zero-Canon Claude turn to local :9881 and preserve OpenAI wire usage."""
+    """Proxy a Zero-Canon Claude turn to local :9881, streaming SSE deltas when enabled."""
     effective_timeout = options.resolve_timeout_fn(options.timeout_s)
     url = options.validate_url_fn(base_url) + "/chat/completions"
-    popts = options.proxy_options
-    body = json.dumps(build_bridge_proxy_body(model, prompt, popts), ensure_ascii=False).encode("utf-8")
+    popts, writer = options.proxy_options, options.sse_writer
+    streaming = writer is not None and bridge_stream_enabled()
+    body = json.dumps(build_bridge_proxy_body(model, prompt, popts, stream=streaming), ensure_ascii=False).encode("utf-8")
     req_headers = build_bridge_proxy_headers(headers, chat_id=popts.chat_id if popts else None)
     req = urllib.request.Request(url, data=body, headers=req_headers, method="POST")
     opener = options.opener_factory(urllib.request.ProxyHandler({}), NoRedirectHandler())
     with opener.open(req, timeout=effective_timeout) as resp:
-        parsed = json.loads(resp.read().decode("utf-8"))
-    return _parse_proxy_response(parsed, options.usage_enabled)
+        if streaming and is_sse_response(resp):
+            return RoutedTurnResult(*consume_sse_stream(resp, options.usage_enabled, writer))
+        raw = resp.read()
+    if streaming and looks_like_sse(raw.decode("utf-8", "replace")):
+        return RoutedTurnResult(*consume_sse_blob(raw, options.usage_enabled, writer))
+    result = _parse_proxy_response(json.loads(raw.decode("utf-8")), options.usage_enabled)
+    if writer is not None:
+        emit_result_once(result.text, result.reasoning, writer)
+    return result
 
 
 def build_routed_turn_error(exc: BaseException, live_sent: int) -> TurnErrorResponse:
@@ -110,9 +116,7 @@ def build_routed_turn_error(exc: BaseException, live_sent: int) -> TurnErrorResp
     return build_turn_error(exc, live_sent=live_sent)
 
 
-def _attach_error_usage(
-    err: TurnErrorResponse, usage: TurnUsage | None, live_sent: int
-) -> ResidentTurnError:
+def _attach_error_usage(err: TurnErrorResponse, usage: TurnUsage | None, live_sent: int) -> ResidentTurnError:
     resp = err
     if usage is not None and live_sent > 0:
         wire = cast(dict[str, Any] | None, positive_wire_usage(build_turn_wire_usage(usage)))
@@ -127,11 +131,7 @@ def _attach_error_usage(
 
 
 def _emit_part(
-    kind: str,
-    value: str,
-    parts: dict[str, list[str]],
-    sse_writer: Callable[[str, str], Any] | None,
-    live_sent: int,
+    kind: str, value: str, parts: dict[str, list[str]], sse_writer: Callable[[str, str], Any] | None, live_sent: int
 ) -> int:
     parts[kind].append(value)
     if sse_writer is not None:
@@ -140,32 +140,39 @@ def _emit_part(
     return live_sent
 
 
-def _run_bridge_route(
-    route: Any,
-    request: dict[str, Any],
+def _emit_unstreamed(
+    proxied: RoutedTurnResult,
+    tracker: BridgeRelayTracker,
+    parts: dict[str, list[str]],
     sse_writer: Callable[[str, str], Any] | None,
-    options: RoutedExecOptions,
+) -> None:
+    sent = tracker.live_sent
+    for field, value in (("content", proxied.text), ("reasoning_content", proxied.reasoning)):
+        if value and field not in tracker.streamed:
+            sent = _emit_part(field, value, parts, sse_writer, sent)
+    tracker.live_sent = sent
+
+
+def _run_bridge_route(
+    route: Any, request: dict[str, Any], sse_writer: Callable[[str, str], Any] | None, options: RoutedExecOptions
 ) -> RoutedTurnResult:
     parts: dict[str, list[str]] = {"content": [], "reasoning_content": []}
-    live_sent = 0
-    extra: dict[str, Any] = {"proxy_options": options.proxy_options} if options.proxy_options else {}
-    proxied = options.bridge_proxy_fn(
-        route.base_url,
-        str(request.get("model") or "default"),
-        str(request.get("prompt") or ""),
-        options.headers,
-        usage_enabled=options.usage_enabled,
-        **extra,
-    )
-    if proxied.text:
-        live_sent = _emit_part("content", proxied.text, parts, sse_writer, live_sent)
-    if proxied.reasoning:
-        live_sent = _emit_part("reasoning_content", proxied.reasoning, parts, sse_writer, live_sent)
-    return RoutedTurnResult(
-        "".join(parts["content"]), "".join(parts["reasoning_content"]),
-        proxied.usage if options.usage_enabled else None,
-        proxied.tool_calls,
-    )
+    tracker = BridgeRelayTracker(sse_writer)
+    extra = tracker.build_extra(options.proxy_options, options.bridge_proxy_fn)
+    model = str(request.get("model") or "default")
+    prompt = str(request.get("prompt") or "")
+    try:
+        proxied = options.bridge_proxy_fn(
+            route.base_url, model, prompt, options.headers, usage_enabled=options.usage_enabled, **extra
+        )
+    except ResidentTurnError:
+        raise
+    except Exception as exc:
+        err = build_routed_turn_error(exc, tracker.live_sent)
+        raise _attach_error_usage(err, None, tracker.live_sent) from exc
+    _emit_unstreamed(proxied, tracker, parts, sse_writer)
+    usage = proxied.usage if options.usage_enabled else None
+    return RoutedTurnResult(proxied.text, proxied.reasoning, usage, proxied.tool_calls)
 
 
 def _extract_chunk_usage(chunk: Mapping[str, Any], enabled: bool) -> TurnUsage | None:
@@ -174,30 +181,19 @@ def _extract_chunk_usage(chunk: Mapping[str, Any], enabled: bool) -> TurnUsage |
     return None
 
 
-def _pick_last_usage(
-    sink: list[TurnUsage], fallback: TurnUsage | None, enabled: bool
-) -> TurnUsage | None:
-    if not enabled:
-        return None
-    return sink[-1] if sink else fallback
+def _pick_last_usage(sink: list[TurnUsage], fallback: TurnUsage | None, enabled: bool) -> TurnUsage | None:
+    return (sink[-1] if sink else fallback) if enabled else None
 
 
-def _collect_delta_tool_calls(
-    delta: Mapping[str, Any], tool_calls_out: list[dict[str, Any]]
-) -> None:
+def _collect_delta_tool_calls(delta: Mapping[str, Any], tool_calls_out: list[dict[str, Any]]) -> None:
     raw_calls = delta.get("tool_calls")
     if isinstance(raw_calls, list):
-        tool_calls_out.extend(
-            cast(dict[str, Any], c) for c in cast(list[object], raw_calls) if isinstance(c, dict)
-        )
+        tool_calls_out.extend(cast(dict[str, Any], c) for c in cast(list[object], raw_calls) if isinstance(c, dict))
 
 
 def _consume_delta(
-    delta: Mapping[str, Any],
-    parts: dict[str, list[str]],
-    sse_writer: Callable[[str, str], Any] | None,
-    live_sent: int,
-    tool_calls_out: list[dict[str, Any]] | None = None,
+    delta: Mapping[str, Any], parts: dict[str, list[str]], sse_writer: Callable[[str, str], Any] | None,
+    live_sent: int, tool_calls_out: list[dict[str, Any]] | None = None,
 ) -> int:
     for field_name in ("content", "reasoning_content"):
         if isinstance(val := delta.get(field_name), str):
@@ -236,10 +232,10 @@ def execute_routed_turn_result(
             delta = chunk["choices"][0]["delta"]
             live_sent = _consume_delta(delta, parts, sse_writer, live_sent)
             _collect_delta_tool_calls(delta, tool_calls)
+    except ResidentTurnError:
+        raise
     except Exception as exc:
         last_u = _pick_last_usage(usage_sink, wire_fallback, options.usage_enabled)
         raise _attach_error_usage(build_routed_turn_error(exc, live_sent), last_u, live_sent) from exc
     final_u = _pick_last_usage(usage_sink, wire_fallback, options.usage_enabled)
-    return RoutedTurnResult(
-        "".join(parts["content"]), "".join(parts["reasoning_content"]), final_u, tuple(tool_calls)
-    )
+    return RoutedTurnResult("".join(parts["content"]), "".join(parts["reasoning_content"]), final_u, tuple(tool_calls))
